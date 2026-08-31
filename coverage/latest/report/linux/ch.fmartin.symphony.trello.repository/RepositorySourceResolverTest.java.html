@@ -1,0 +1,657 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepositorySourceResolverTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.repository</a> &gt; <span class="el_source">RepositorySourceResolverTest.java</span></div><h1>RepositorySourceResolverTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.repository;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_LINE_SEPARATOR;
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_NEXT_LINE;
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_PARAGRAPH_SEPARATOR;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.domain.Card;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L24">final class RepositorySourceResolverTest {</span>
+<span class="nc" id="L25">    private static final String LINE_SEPARATOR = Character.toString(UNICODE_LINE_SEPARATOR);</span>
+<span class="nc" id="L26">    private static final String PARAGRAPH_SEPARATOR = Character.toString(UNICODE_PARAGRAPH_SEPARATOR);</span>
+    private static final String NUL_IN_REPOSITORY_PATH = &quot;\u0000&quot;;
+
+<span class="nc" id="L29">    private final RepositorySourceResolver resolver = new RepositorySourceResolver();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @CsvSource({
+        &quot;Repository URL: https://github.example/team/project.git, https://github.example/team/project.git, github.example/team/project&quot;,
+        &quot;Repository URL: ssh://git@git.example/team/project.git, ssh://git@git.example/team/project.git, git.example/team/project&quot;,
+        &quot;Repository: deploy@git.example:team/project.git, deploy@git.example:team/project.git, git.example/team/project&quot;,
+        &quot;Repository URL: deploy@git.example:repo.git, deploy@git.example:repo.git, git.example/repo&quot;
+    })
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void selectsExplicitCredentialFreeRemote(String cardText, String remote, String identity) {
+        // given
+<span class="nc" id="L43">        Card card = cardWithDescription(cardText);</span>
+
+        // when
+<span class="nc" id="L46">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L49">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L50">        assertThat(selection.source().kind()).isEqualTo(RepositorySource.Kind.REMOTE);</span>
+<span class="nc" id="L51">        assertThat(selection.source().origin()).isEqualTo(RepositorySource.Origin.CARD);</span>
+<span class="nc" id="L52">        assertThat(selection.source().value()).isEqualTo(remote);</span>
+<span class="nc" id="L53">        assertThat(selection.source().identity().key()).isEqualTo(identity);</span>
+<span class="nc" id="L54">    }</span>
+
+    @Test
+    void preservesSafeUriPercentEncodingWithoutCreatingDelimitersOrSpaces() {
+        // given
+<span class="nc" id="L59">        String repository = &quot;https://github.example/team/%3Fquery%23fragment%20space%25percent%2Fslash.git&quot;;</span>
+<span class="nc" id="L60">        Card card = cardWithDescription(&quot;Repository URL: &quot; + repository);</span>
+
+        // when
+<span class="nc" id="L63">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L66">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L67">        assertThat(selection.source().value()).isEqualTo(repository);</span>
+<span class="nc" id="L68">        assertThat(selection.source().identity().repositoryPath())</span>
+<span class="nc" id="L69">                .isEqualTo(&quot;team/%3Fquery%23fragment%20space%25percent%2Fslash&quot;);</span>
+<span class="nc" id="L70">        assertThat(selection.source().value())</span>
+<span class="nc" id="L71">                .doesNotContain(&quot; &quot;)</span>
+<span class="nc" id="L72">                .doesNotContain(&quot;?&quot;)</span>
+<span class="nc" id="L73">                .doesNotContain(&quot;#&quot;);</span>
+<span class="nc" id="L74">    }</span>
+
+    @Test
+    void normalizesFileUriIntoLocalSource() {
+        // given
+<span class="nc" id="L79">        Path repository = tempDir.resolve(&quot;repo&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L80">        Card card = cardWithDescription(&quot;Repository: &quot; + repository.toUri());</span>
+
+        // when
+<span class="nc" id="L83">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L86">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L87">        assertThat(selection.source().kind()).isEqualTo(RepositorySource.Kind.LOCAL_PATH);</span>
+<span class="nc" id="L88">        assertThat(selection.source().path()).isEqualTo(repository);</span>
+<span class="nc" id="L89">    }</span>
+
+    @Test
+    void rejectsFileUriWhoseDecodedPathContainsControlCharacters() {
+        // given
+<span class="nc" id="L94">        Card card = cardWithDescription(&quot;Repository: file:///tmp/repo%0Ainjected.git&quot;);</span>
+
+        // when
+<span class="nc" id="L97">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L100">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L101">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_path_malformed&quot;);</span>
+<span class="nc" id="L102">    }</span>
+
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    @ValueSource(strings = {&quot;file:///tmp/repo.git?&quot;, &quot;file:///tmp/repo.git#&quot;})
+    void rejectsFileUriWithEmptyQueryOrFragmentMarker(String repositoryUrl) {
+        // given
+<span class="nc" id="L108">        Card card = cardWithDescription(&quot;Repository: &quot; + repositoryUrl);</span>
+
+        // when
+<span class="nc" id="L111">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L114">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L115">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_path_malformed&quot;);</span>
+<span class="nc" id="L116">    }</span>
+
+    @Test
+    void selectsExplicitLocalPathFromComment() {
+        // given
+<span class="nc" id="L121">        Path repository = tempDir.resolve(&quot;source checkout&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L122">        Card card = TestCards.cardWithText(</span>
+                &quot;card-1&quot;,
+                &quot;TRELLO-source&quot;,
+                &quot;Ready for Codex&quot;,
+                &quot;Implement feature&quot;,
+                &quot;No repository here&quot;,
+<span class="nc" id="L128">                List.of(comment(&quot;Repository path: &lt;&quot; + repository + &quot;&gt;&quot;)));</span>
+
+        // when
+<span class="nc" id="L131">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L134">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L135">        assertThat(selection.source().kind()).isEqualTo(RepositorySource.Kind.LOCAL_PATH);</span>
+<span class="nc" id="L136">        assertThat(selection.source().path()).isEqualTo(repository);</span>
+<span class="nc" id="L137">    }</span>
+
+    @Test
+    void selectsGenericWindowsDrivePathAsLocalSourceWithoutRealDrive() {
+        // given
+<span class="nc" id="L142">        Card card = cardWithDescription(&quot;Repository: C:/work/repo.git&quot;);</span>
+
+        // when
+<span class="nc" id="L145">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L148">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L149">        assertThat(selection.source().kind()).isEqualTo(RepositorySource.Kind.LOCAL_PATH);</span>
+<span class="nc" id="L150">        assertThat(selection.source().identity()).isNull();</span>
+<span class="nc" id="L151">    }</span>
+
+    @Test
+    void selectsNativeWindowsPathAsLocalSourceWithoutRealDrive() {
+        // given
+<span class="nc" id="L156">        Card card = cardWithDescription(&quot;Repository: C:\\work\\repo.git&quot;);</span>
+
+        // when
+<span class="nc" id="L159">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L162">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L163">        assertThat(selection.source().kind()).isEqualTo(RepositorySource.Kind.LOCAL_PATH);</span>
+<span class="nc" id="L164">        assertThat(selection.source().identity()).isNull();</span>
+<span class="nc" id="L165">    }</span>
+
+    @Test
+    void rejectsWindowsDrivePathWhenSourceIsUrlLabelled() {
+        // given
+<span class="nc" id="L170">        Card card = cardWithDescription(&quot;Repository URL: C:/work/repo.git&quot;);</span>
+
+        // when
+<span class="nc" id="L173">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L176">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L177">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_unsupported&quot;);</span>
+<span class="nc" id="L178">    }</span>
+
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    @ValueSource(
+            strings = {
+                &quot;See https://github.example/team/project.git for background.&quot;,
+                &quot;Update https://github.example/team/project/issues/123.&quot;,
+                &quot;Review https://github.example/team/project/pull/123.&quot;
+            })
+    void ignoresUnlabelledOrdinaryWebLinks(String description) {
+        // given
+<span class="nc" id="L189">        Card card = cardWithDescription(description);</span>
+
+        // when
+<span class="nc" id="L192">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L195">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.NONE);</span>
+<span class="nc" id="L196">    }</span>
+
+    @Test
+    void blankUrlLabelInTitleSuppressesWorkflowDefault() {
+        // given
+<span class="nc" id="L201">        Card card = cardWithText(&quot;Repository URL:&quot;, &quot;No source in description&quot;, List.of());</span>
+<span class="nc" id="L202">        var repository = new EffectiveConfig.RepositoryConfig(&quot;https://github.example/team/default.git&quot;, null);</span>
+
+        // when
+<span class="nc" id="L205">        RepositorySourceSelection selection = resolver.select(card, repository);</span>
+
+        // then
+<span class="nc" id="L208">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L209">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_missing&quot;);</span>
+<span class="nc" id="L210">    }</span>
+
+    @Test
+    void blankPathLabelInDescriptionSuppressesWorkflowDefault() {
+        // given
+<span class="nc" id="L215">        Card card = cardWithDescription(&quot;Repository path:&quot;);</span>
+<span class="nc" id="L216">        var repository = new EffectiveConfig.RepositoryConfig(&quot;https://github.example/team/default.git&quot;, null);</span>
+
+        // when
+<span class="nc" id="L219">        RepositorySourceSelection selection = resolver.select(card, repository);</span>
+
+        // then
+<span class="nc" id="L222">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L223">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_missing&quot;);</span>
+<span class="nc" id="L224">    }</span>
+
+    @Test
+    void blankLabelInCommentSuppressesWorkflowDefault() {
+        // given
+<span class="nc" id="L229">        Card card = cardWithText(&quot;Implement feature&quot;, &quot;No source in description&quot;, List.of(comment(&quot;Repo:&quot;)));</span>
+<span class="nc" id="L230">        var repository = new EffectiveConfig.RepositoryConfig(&quot;https://github.example/team/default.git&quot;, null);</span>
+
+        // when
+<span class="nc" id="L233">        RepositorySourceSelection selection = resolver.select(card, repository);</span>
+
+        // then
+<span class="nc" id="L236">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L237">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_missing&quot;);</span>
+<span class="nc" id="L238">    }</span>
+
+    @CsvSource({&quot;Repository URL:, plain prose&quot;, &quot;Repository URL:, https://github.example/team/project.git&quot;})
+    @ParameterizedTest(name = &quot;{0} then {1}&quot;)
+    void blankLabelDoesNotConsumeFollowingLine(String labelLine, String nextLine) {
+        // given
+<span class="nc" id="L244">        Card card = cardWithDescription(labelLine + &quot;\n&quot; + nextLine);</span>
+
+        // when
+<span class="nc" id="L247">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L250">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L251">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_missing&quot;);</span>
+<span class="nc" id="L252">    }</span>
+
+    @MethodSource(&quot;regexLineBreaks&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void recognizesRepositoryDeclarationsAfterRegexLineBreaks(String scenario, String lineBreak) {
+        // given
+<span class="nc" id="L258">        String expectedSource = &quot;https://github.example/team/project.git&quot;;</span>
+<span class="nc" id="L259">        String description = &quot;prefix&quot; + lineBreak + &quot;Repository URL: &quot; + expectedSource;</span>
+<span class="nc" id="L260">        Card card = cardWithDescription(description);</span>
+
+        // when
+<span class="nc" id="L263">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L266">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L267">        assertThat(selection.source().value()).isEqualTo(expectedSource);</span>
+<span class="nc" id="L268">    }</span>
+
+    private static Stream&lt;Arguments&gt; regexLineBreaks() {
+<span class="nc" id="L271">        return Stream.of(</span>
+<span class="nc" id="L272">                Arguments.of(&quot;next line&quot;, &quot;\n&quot;),</span>
+<span class="nc" id="L273">                Arguments.of(&quot;CRLF&quot;, &quot;\r\n&quot;),</span>
+<span class="nc" id="L274">                Arguments.of(&quot;NEL&quot;, UNICODE_NEXT_LINE),</span>
+<span class="nc" id="L275">                Arguments.of(&quot;line separator&quot;, LINE_SEPARATOR),</span>
+<span class="nc" id="L276">                Arguments.of(&quot;paragraph separator&quot;, PARAGRAPH_SEPARATOR));</span>
+    }
+
+    @Test
+    void labelAtEndOfTitleDoesNotConsumeFirstDescriptionLine() {
+        // given
+<span class="nc" id="L282">        Card card = cardWithText(&quot;Repository URL:&quot;, &quot;https://github.example/team/project.git&quot;, List.of());</span>
+
+        // when
+<span class="nc" id="L285">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L288">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L289">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_missing&quot;);</span>
+<span class="nc" id="L290">    }</span>
+
+    @Test
+    void labelAtEndOfDescriptionDoesNotConsumeFirstCommentLine() {
+        // given
+<span class="nc" id="L295">        Card card = cardWithText(</span>
+<span class="nc" id="L296">                &quot;Implement feature&quot;, &quot;Repository URL:&quot;, List.of(comment(&quot;https://github.example/team/project.git&quot;)));</span>
+
+        // when
+<span class="nc" id="L299">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L302">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L303">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_missing&quot;);</span>
+<span class="nc" id="L304">    }</span>
+
+    @Test
+    void acceptsEquivalentDeclarationsFromDifferentFields() {
+        // given
+<span class="nc" id="L309">        Card card = cardWithText(</span>
+                &quot;Repository URL: https://github.example/team/project.git&quot;,
+                &quot;Repository: https://github.example/team/project.git&quot;,
+<span class="nc" id="L312">                List.of(comment(&quot;Repo URL: https://github.example/team/project.git&quot;)));</span>
+
+        // when
+<span class="nc" id="L315">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L318">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L319">        assertThat(selection.source().value()).isEqualTo(&quot;https://github.example/team/project.git&quot;);</span>
+<span class="nc" id="L320">    }</span>
+
+    @Test
+    void acceptsEquivalentLocalPathDeclarationsWithNullRepositoryIdentities() {
+        // given
+<span class="nc" id="L325">        Path repository = tempDir.resolve(&quot;local checkout&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L326">        String declaration = &quot;Repository path: &lt;&quot; + repository + &quot;&gt;&quot;;</span>
+<span class="nc" id="L327">        Card card = cardWithText(declaration, declaration, List.of(comment(declaration)));</span>
+
+        // when
+<span class="nc" id="L330">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L333">        assertThat(selection)</span>
+<span class="nc" id="L334">                .isEqualTo(RepositorySourceSelection.selected(new RepositorySource(</span>
+                        RepositorySource.Kind.LOCAL_PATH,
+                        RepositorySource.Origin.CARD,
+<span class="nc" id="L337">                        repository.toString(),</span>
+                        null,
+                        repository)));
+<span class="nc" id="L340">    }</span>
+
+    @Test
+    void conflictingDeclarationsFailClosed() {
+        // given
+<span class="nc" id="L345">        Card card = cardWithText(</span>
+                &quot;Repository URL: https://github.example/team/project.git&quot;,
+                &quot;Repository URL: https://github.example/team/other.git&quot;,
+<span class="nc" id="L348">                List.of());</span>
+
+        // when
+<span class="nc" id="L351">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L354">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L355">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_conflict&quot;);</span>
+<span class="nc" id="L356">        assertThat(selection.problem().guidance()).doesNotContain(&quot;github.example&quot;);</span>
+<span class="nc" id="L357">    }</span>
+
+    @Test
+    void validPlusMalformedDeclarationsFailClosed() {
+        // given
+<span class="nc" id="L362">        Card card = cardWithText(</span>
+                &quot;Repository URL: https://github.example/team/project.git&quot;,
+                &quot;Repository URL: ftp://github.example/team/project.git&quot;,
+<span class="nc" id="L365">                List.of());</span>
+
+        // when
+<span class="nc" id="L368">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L371">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L372">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_source_conflict&quot;);</span>
+<span class="nc" id="L373">    }</span>
+
+    @Test
+    void explicitSourceSuppressesInvalidWorkflowDefault() {
+        // given
+<span class="nc" id="L378">        Card card = cardWithDescription(&quot;Repository URL: https://github.example/team/card.git&quot;);</span>
+<span class="nc" id="L379">        var repository = new EffectiveConfig.RepositoryConfig(</span>
+                &quot;https://token@example.invalid/team/default.git?access_token=secret&quot;, null);
+
+        // when
+<span class="nc" id="L383">        RepositorySourceSelection selection = resolver.select(card, repository);</span>
+
+        // then
+<span class="nc" id="L386">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L387">        assertThat(selection.source().value()).isEqualTo(&quot;https://github.example/team/card.git&quot;);</span>
+<span class="nc" id="L388">    }</span>
+
+    @Test
+    void invalidExplicitSourceSuppressesEveryWorkflowDefault() {
+        // given
+<span class="nc" id="L393">        Card card = cardWithDescription(&quot;Repository URL: ftp://example.invalid/team/project.git&quot;);</span>
+<span class="nc" id="L394">        var repository = new EffectiveConfig.RepositoryConfig(</span>
+<span class="nc" id="L395">                &quot;https://github.example/team/default.git&quot;, tempDir.resolve(&quot;repo&quot;));</span>
+
+        // when
+<span class="nc" id="L398">        RepositorySourceSelection selection = resolver.select(card, repository);</span>
+
+        // then
+<span class="nc" id="L401">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L402">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_unsupported&quot;);</span>
+<span class="nc" id="L403">    }</span>
+
+    @Test
+    void invalidExplicitSourceNeverFallsBackToWorkflowDefault() {
+        // given
+<span class="nc" id="L408">        Card card = cardWithDescription(&quot;Repository URL: ftp://example.invalid/team/project.git&quot;);</span>
+<span class="nc" id="L409">        var repository = new EffectiveConfig.RepositoryConfig(&quot;https://github.example/team/default.git&quot;, null);</span>
+
+        // when
+<span class="nc" id="L412">        RepositorySourceSelection selection = resolver.select(card, repository);</span>
+
+        // then
+<span class="nc" id="L415">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L416">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_unsupported&quot;);</span>
+<span class="nc" id="L417">    }</span>
+
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    @ValueSource(
+            strings = {
+                &quot;Repository URL: https://user:secret@example.invalid/team/project.git&quot;,
+                &quot;Repository URL: https://token@example.invalid/team/project.git&quot;,
+                &quot;Repository URL: https://example.invalid/team/project.git?access_token=secret&quot;,
+                &quot;Repository URL: https://example.invalid/team/project.git#secret&quot;,
+                &quot;Repository URL: ssh://git%3Asecret@example.invalid/team/project.git&quot;,
+                &quot;Repository URL: ssh://git:secret@example.invalid/team/project.git&quot;
+            })
+    void rejectsCredentialBearingRemoteWithoutEchoingSecret(String cardText) {
+        // given
+<span class="nc" id="L431">        Card card = cardWithDescription(cardText);</span>
+
+        // when
+<span class="nc" id="L434">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L437">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L438">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_credentials_unsupported&quot;);</span>
+<span class="nc" id="L439">        assertThat(selection.problem().guidance()).doesNotContain(&quot;secret&quot;).doesNotContain(&quot;access_token&quot;);</span>
+<span class="nc" id="L440">    }</span>
+
+    @CsvSource({
+        &quot;Repository URL: https://example.invalid/team/project.git?, repository_remote_credentials_unsupported&quot;,
+        &quot;Repository URL: https://example.invalid/team/project.git#, repository_remote_credentials_unsupported&quot;,
+        &quot;Repository URL: ssh://git@example.invalid/team/project.git?, repository_remote_malformed&quot;,
+        &quot;Repository URL: ssh://git@example.invalid/team/project.git#, repository_remote_malformed&quot;
+    })
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void rejectsRemoteUriWithEmptyQueryOrFragmentMarker(String cardText, String code) {
+        // given
+<span class="nc" id="L451">        Card card = cardWithDescription(cardText);</span>
+
+        // when
+<span class="nc" id="L454">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L457">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L458">        assertThat(selection.problem().code()).isEqualTo(code);</span>
+<span class="nc" id="L459">    }</span>
+
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    @ValueSource(
+            strings = {
+                &quot;Repository URL: https://example.invalid/team/repo%0D.git&quot;,
+                &quot;Repository URL: https://example.invalid/team/repo%0A.git&quot;,
+                &quot;Repository URL: https://example.invalid/team/repo%00.git&quot;,
+                &quot;Repository URL: https://example.invalid/team/repo%1F.git&quot;,
+                &quot;Repository URL: https://example.invalid/team/repo%7F.git&quot;
+            })
+    void rejectsEncodedUriControls(String cardText) {
+        // given
+<span class="nc" id="L472">        Card card = cardWithDescription(cardText);</span>
+
+        // when
+<span class="nc" id="L475">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L478">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L479">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_malformed&quot;);</span>
+<span class="nc" id="L480">    }</span>
+
+    @Test
+    void rejectsLiteralControlCharactersInLocalPath() {
+        // given
+<span class="nc" id="L485">        Card card = cardWithDescription(&quot;Repository path: /tmp/repo&quot; + NUL_IN_REPOSITORY_PATH + &quot;injected&quot;);</span>
+
+        // when
+<span class="nc" id="L488">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L491">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L492">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_path_malformed&quot;);</span>
+<span class="nc" id="L493">    }</span>
+
+    @MethodSource(&quot;unsafePromptLineCharacters&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void rejectsEveryIsoControlAndUnicodeLineSeparatorFromPromptLines(String scenario, int codePoint) {
+        // given
+<span class="nc" id="L499">        String value = &quot;before&quot; + Character.toString(codePoint) + &quot;after&quot;;</span>
+
+        // when
+<span class="nc" id="L502">        boolean safe = RepositorySourceText.safePromptLine(value);</span>
+
+        // then
+<span class="nc" id="L505">        assertThat(safe).as(scenario).isFalse();</span>
+<span class="nc" id="L506">    }</span>
+
+    private static Stream&lt;Arguments&gt; unsafePromptLineCharacters() {
+<span class="nc" id="L509">        return IntStream.concat(</span>
+<span class="nc" id="L510">                        IntStream.rangeClosed(0, 0x9F).filter(Character::isISOControl), IntStream.of(0x2028, 0x2029))</span>
+<span class="nc" id="L511">                .mapToObj(codePoint -&gt; Arguments.of(&quot;U+%04X&quot;.formatted(codePoint), codePoint));</span>
+    }
+
+    @MethodSource(&quot;invalidSetupRepositoryUrls&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void rejectsMalformedSetupRepositoryUrls(String scenario, String repositoryUrl) {
+        // given
+
+        // when
+<span class="nc" id="L520">        RepositorySourceSelection selection = resolver.selectWorkflowDefaultUrl(repositoryUrl);</span>
+
+        // then
+<span class="nc" id="L523">        assertThat(selection.status()).as(scenario).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L524">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_malformed&quot;);</span>
+<span class="nc" id="L525">    }</span>
+
+    private static Stream&lt;Arguments&gt; invalidSetupRepositoryUrls() {
+<span class="nc" id="L528">        return Stream.of(</span>
+<span class="nc" id="L529">                Arguments.of(</span>
+                        &quot;literal NEL in SCP path&quot;,
+                        &quot;git@example.invalid:team/repo&quot; + UNICODE_NEXT_LINE + &quot;injected.git&quot;),
+<span class="nc" id="L532">                Arguments.of(</span>
+                        &quot;percent-decoded NEL in HTTPS path&quot;, &quot;https://example.invalid/team/repo%C2%85injected.git&quot;),
+<span class="nc" id="L534">                Arguments.of(</span>
+                        &quot;percent-decoded line separator in HTTP path&quot;,
+                        &quot;http://example.invalid/team/repo%E2%80%A8injected.git&quot;),
+<span class="nc" id="L537">                Arguments.of(</span>
+                        &quot;percent-decoded paragraph separator in SSH path&quot;,
+                        &quot;ssh://git@example.invalid/team/repo%E2%80%A9injected.git&quot;),
+<span class="nc" id="L540">                Arguments.of(&quot;explicit empty HTTPS port&quot;, &quot;https://example.invalid:/team/project.git&quot;),</span>
+<span class="nc" id="L541">                Arguments.of(&quot;HTTP port zero&quot;, &quot;http://example.invalid:0/team/project.git&quot;),</span>
+<span class="nc" id="L542">                Arguments.of(&quot;HTTPS port above range&quot;, &quot;https://example.invalid:65536/team/project.git&quot;),</span>
+<span class="nc" id="L543">                Arguments.of(&quot;SSH port above range&quot;, &quot;ssh://git@example.invalid:99999/team/project.git&quot;),</span>
+<span class="nc" id="L544">                Arguments.of(&quot;HTTPS port above integer range&quot;, &quot;https://example.invalid:2147483648/team/project.git&quot;),</span>
+<span class="nc" id="L545">                Arguments.of(</span>
+                        &quot;SSH port far above integer range&quot;, &quot;ssh://git@example.invalid:999999999999/team/project.git&quot;));
+    }
+
+    @Test
+    void selectsWorkflowDefaultUrlWhenCardHasNoExplicitSource() {
+        // given
+<span class="nc" id="L552">        var repository = new EffectiveConfig.RepositoryConfig(&quot;https://github.example/team/default.git&quot;, null);</span>
+
+        // when
+<span class="nc" id="L555">        RepositorySourceSelection selection = resolver.select(cardWithDescription(&quot;No source&quot;), repository);</span>
+
+        // then
+<span class="nc" id="L558">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L559">        assertThat(selection.source().origin()).isEqualTo(RepositorySource.Origin.WORKFLOW_DEFAULT_URL);</span>
+<span class="nc" id="L560">        assertThat(selection.source().value()).isEqualTo(&quot;https://github.example/team/default.git&quot;);</span>
+<span class="nc" id="L561">    }</span>
+
+    @Test
+    void preservesTokenPunctuationCompatibilityForExistingWorkflowDefaults() {
+        // given
+<span class="nc" id="L566">        var repository = new EffectiveConfig.RepositoryConfig(&quot;&lt;https://github.example/team/default.git&gt;.&quot;, null);</span>
+
+        // when
+<span class="nc" id="L569">        RepositorySourceSelection selection = resolver.select(cardWithDescription(&quot;No source&quot;), repository);</span>
+
+        // then
+<span class="nc" id="L572">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L573">        assertThat(selection.source().value()).isEqualTo(&quot;https://github.example/team/default.git&quot;);</span>
+<span class="nc" id="L574">    }</span>
+
+    @Test
+    void rejectsBarePathWorkflowDefaultUrlInsteadOfConvertingItToLocalPath() {
+        // given
+<span class="nc" id="L579">        var repository = new EffectiveConfig.RepositoryConfig(&quot;relative/repo.git&quot;, null);</span>
+
+        // when
+<span class="nc" id="L582">        RepositorySourceSelection selection = resolver.select(cardWithDescription(&quot;No source&quot;), repository);</span>
+
+        // then
+<span class="nc" id="L585">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L586">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_unsupported&quot;);</span>
+<span class="nc" id="L587">    }</span>
+
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    @ValueSource(strings = {&quot;https://example.invalid/team/project.git?&quot;, &quot;https://example.invalid/team/project.git#&quot;})
+    void rejectsWorkflowDefaultUrlWithEmptyQueryOrFragmentMarkerAndSuppressesPath(String defaultUrl) {
+        // given
+<span class="nc" id="L593">        Path fallbackPath = tempDir.resolve(&quot;fallback&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L594">        var repository = new EffectiveConfig.RepositoryConfig(defaultUrl, fallbackPath);</span>
+
+        // when
+<span class="nc" id="L597">        RepositorySourceSelection selection = resolver.select(cardWithDescription(&quot;No source&quot;), repository);</span>
+
+        // then
+<span class="nc" id="L600">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L601">        assertThat(selection.problem().code()).isEqualTo(&quot;repository_remote_credentials_unsupported&quot;);</span>
+<span class="nc" id="L602">        assertThat(selection.source()).isNull();</span>
+<span class="nc" id="L603">    }</span>
+
+    @CsvSource({
+        &quot;Repository URL: https:example.invalid/team/repo.git, repository_remote_malformed&quot;,
+        &quot;Repository URL: ftp:example.invalid/team/repo.git, repository_remote_unsupported&quot;,
+        &quot;Repository URL: ftp://example.invalid/team/repo.git, repository_remote_unsupported&quot;,
+        &quot;Repository URL: https://example.invalid, repository_remote_malformed&quot;,
+        &quot;Repository URL: https://example.invalid/, repository_remote_malformed&quot;
+    })
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void rejectsMalformedAndUnsupportedUriLikeSources(String cardText, String code) {
+        // given
+<span class="nc" id="L615">        Card card = cardWithDescription(cardText);</span>
+
+        // when
+<span class="nc" id="L618">        RepositorySourceSelection selection = resolver.select(card, noDefault());</span>
+
+        // then
+<span class="nc" id="L621">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.INVALID_SELECTED);</span>
+<span class="nc" id="L622">        assertThat(selection.problem().code()).isEqualTo(code);</span>
+<span class="nc" id="L623">    }</span>
+
+    @Test
+    void selectsWorkflowDefaultPathWhenUrlIsAbsent() {
+        // given
+<span class="nc" id="L628">        Path repositoryPath = tempDir.resolve(&quot;repo&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L629">        var repository = new EffectiveConfig.RepositoryConfig(null, repositoryPath);</span>
+
+        // when
+<span class="nc" id="L632">        RepositorySourceSelection selection = resolver.select(cardWithDescription(&quot;No source&quot;), repository);</span>
+
+        // then
+<span class="nc" id="L635">        assertThat(selection.status()).isEqualTo(RepositorySourceSelection.Status.SELECTED);</span>
+<span class="nc" id="L636">        assertThat(selection.source().origin()).isEqualTo(RepositorySource.Origin.WORKFLOW_DEFAULT_PATH);</span>
+<span class="nc" id="L637">        assertThat(selection.source().path()).isEqualTo(repositoryPath);</span>
+<span class="nc" id="L638">    }</span>
+
+    private static Card cardWithText(String title, String description, List&lt;Card.Comment&gt; comments) {
+<span class="nc" id="L641">        return TestCards.cardWithText(&quot;card-1&quot;, &quot;TRELLO-source&quot;, &quot;Ready for Codex&quot;, title, description, comments);</span>
+    }
+
+    private static EffectiveConfig.RepositoryConfig noDefault() {
+<span class="nc" id="L645">        return new EffectiveConfig.RepositoryConfig(null, null);</span>
+    }
+
+    private static Card cardWithDescription(String description) {
+<span class="nc" id="L649">        return TestCards.cardWithText(</span>
+<span class="nc" id="L650">                &quot;card-1&quot;, &quot;TRELLO-source&quot;, &quot;Ready for Codex&quot;, &quot;Implement feature&quot;, description, List.of());</span>
+    }
+
+    private static Card.Comment comment(String text) {
+<span class="nc" id="L654">        return new Card.Comment(&quot;comment-1&quot;, text, &quot;maintainer&quot;, Instant.parse(&quot;2026-01-01T00:00:00Z&quot;));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

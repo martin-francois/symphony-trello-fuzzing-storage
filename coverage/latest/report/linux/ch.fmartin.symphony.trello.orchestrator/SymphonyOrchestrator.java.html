@@ -1,0 +1,2542 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestrator.java</span></div><h1>SymphonyOrchestrator.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+
+import ch.fmartin.symphony.trello.Sha3;
+import ch.fmartin.symphony.trello.agent.AgentEvent;
+import ch.fmartin.symphony.trello.agent.AgentEventListener;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.agent.CodexUsageWorkpadSection;
+import ch.fmartin.symphony.trello.agent.TrelloHandoffToolHandler;
+import ch.fmartin.symphony.trello.config.ConfigDefaults;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.StateNames;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.time.ApplicationClock;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.TrackerClient;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import ch.fmartin.symphony.trello.workflow.WorkflowException;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import com.google.common.collect.EvictingQueue;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.ClosedWatchServiceException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.StandardWatchEventKinds;
+import java.nio.file.WatchEvent;
+import java.nio.file.WatchKey;
+import java.nio.file.WatchService;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
+
+@ApplicationScoped
+public class SymphonyOrchestrator {
+<span class="nc" id="L71">    private static final Logger LOG = Logger.getLogger(SymphonyOrchestrator.class);</span>
+    private static final int IGNORED_WORKER_LIMIT = 1_000;
+    private static final long INITIAL_RETRY_BACKOFF_MILLIS = 10_000L;
+    private static final int MAX_RETRY_BACKOFF_SHIFT = 16;
+    private static final int RECENT_EVENT_LIMIT = 50;
+<span class="nc" id="L76">    private static final Duration IGNORED_WORKER_TTL = Duration.ofMinutes(30);</span>
+<span class="nc" id="L77">    private static final Duration CONTINUATION_DELAY = Duration.ofSeconds(1);</span>
+<span class="nc" id="L78">    private static final Duration USAGE_WORKPAD_CLEANUP_RETRY_DELAY = Duration.ofMinutes(1);</span>
+<span class="nc" id="L79">    private static final Duration USAGE_WORKPAD_CLEANUP_TTL = Duration.ofHours(1);</span>
+    private static final int USAGE_WORKPAD_CLEANUP_LIMIT = 100;
+    private static final String CODEX_USAGE_LIMIT_PAUSE = &quot;CODEX_USAGE_LIMIT&quot;;
+
+    private final WorkflowLoader workflowLoader;
+    private final ConfigResolver configResolver;
+    private final TrackerClient tracker;
+    private final AgentRunner agentRunner;
+    private final PromptRenderer prompts;
+    private final WorkspaceManager workspaces;
+    private final Clock clock;
+    private final Optional&lt;TrelloHandoffToolHandler&gt; usageWorkpads;
+<span class="nc" id="L91">    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();</span>
+<span class="nc" id="L92">    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();</span>
+
+    /// Serializes the long-running operations (start, stop, tick, worker exit, retry timers, agent
+    /// events) against each other, exactly like the previous synchronized methods did. Trello and
+    /// filesystem I/O may run while holding this lock, but never while holding the instance
+    /// monitor: status reads take only the monitor, so they must never queue behind a Trello
+    /// round-trip. Every write to reader-visible state happens under both locks; reads inside
+    /// operations need no monitor because all writers hold this lock. Exception: config and
+    /// workflowPath are volatile and written under this lock only, because the lock-free
+    /// local-status getters read each as one immutable reference and need no cross-field
+    /// consistency; workflow and workflowLastModified are confined to lock holders and have no
+    /// lock-free readers.
+<span class="nc" id="L104">    private final ReentrantLock operationLock = new ReentrantLock();</span>
+
+<span class="nc" id="L106">    private final Map&lt;RuntimeCardKey, RunningEntry&gt; running = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L107">    private final Map&lt;RuntimeCardKey, RetryEntry&gt; retryAttempts = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L108">    private final Set&lt;RuntimeCardKey&gt; claimed = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L109">    private final Set&lt;RuntimeCardKey&gt; completed = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L110">    private final LinkedHashMap&lt;String, Instant&gt; ignoredWorkers = new LinkedHashMap&lt;&gt;();</span>
+    // Bound each card's diagnostic history so long sessions cannot grow memory and API responses
+    // indefinitely; EvictingQueue retains the newest events in chronological order.
+<span class="nc" id="L113">    private final Map&lt;RuntimeCardKey, EvictingQueue&lt;CardDebugDetails.EventInfo&gt;&gt; recentEvents = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L114">    private final Map&lt;UsageWorkpadTarget, UsageWorkpadState&gt; usageWorkpadMessages = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L115">    private final LinkedHashMap&lt;UsageWorkpadTarget, UsageWorkpadCleanup&gt; pendingUsageWorkpadCleanup =</span>
+            new LinkedHashMap&lt;&gt;();
+<span class="nc" id="L117">    private final Map&lt;String, Object&gt; rateLimitsByCommand = new HashMap&lt;&gt;();</span>
+
+    private volatile EffectiveConfig config;
+    private WorkflowDefinition workflow;
+    private Instant workflowLastModified;
+    private ScheduledFuture&lt;?&gt; tickTimer;
+    private ScheduledFuture&lt;?&gt; dispatchPauseTimer;
+    private WatchService workflowWatchService;
+    private long endedRuntimeMillis;
+    private long totalInputTokens;
+    private long totalOutputTokens;
+    private long totalTokens;
+    private long retryGeneration;
+    private long dispatchPauseGeneration;
+<span class="nc" id="L131">    private final AtomicBoolean refreshRequested = new AtomicBoolean();</span>
+<span class="nc" id="L132">    private final AtomicBoolean workflowReloadRequested = new AtomicBoolean();</span>
+    private WorkflowProcessLock workflowProcessLock;
+    private boolean tickRunning;
+    private boolean started;
+    private DispatchPause dispatchPause;
+
+    /// Runs inside finishTickAndScheduleNext between refresh consumption and the next schedule,
+    /// the exact boundary where a concurrent refresh used to be overwritten by the interval
+    /// schedule. Tests use it to pin the boundary contract; production keeps the no-op.
+<span class="nc" id="L141">    Runnable tickCompletionHookForTests = () -&gt; {};</span>
+
+<span class="nc" id="L143">    Runnable dispatchPauseScheduleHookForTests = () -&gt; {};</span>
+<span class="nc" id="L144">    BiConsumer&lt;String, Long&gt; retryEntryRescheduleHookForTests = (ignoredCardId, ignoredGeneration) -&gt; {};</span>
+<span class="nc" id="L145">    Runnable retryTimerWaitingHookForTests = () -&gt; {};</span>
+<span class="nc" id="L146">    Runnable workerExitCompletionHookForTests = () -&gt; {};</span>
+<span class="nc" id="L147">    Runnable workerLaunchHookForTests = () -&gt; {};</span>
+<span class="nc" id="L148">    Runnable executorsStoppedHookForTests = () -&gt; {};</span>
+
+    @ConfigProperty(name = &quot;symphony.workflow.path&quot;)
+    volatile Path workflowPath;
+
+    public SymphonyOrchestrator(
+            WorkflowLoader workflowLoader,
+            ConfigResolver configResolver,
+            TrackerClient tracker,
+            AgentRunner agentRunner,
+            PromptRenderer prompts,
+            WorkspaceManager workspaces) {
+<span class="nc" id="L160">        this(</span>
+                workflowLoader,
+                configResolver,
+                tracker,
+                agentRunner,
+                prompts,
+                workspaces,
+<span class="nc" id="L167">                ApplicationClock.systemUtc(),</span>
+<span class="nc" id="L168">                Optional.empty());</span>
+<span class="nc" id="L169">    }</span>
+
+    @Inject
+    public SymphonyOrchestrator(
+            WorkflowLoader workflowLoader,
+            ConfigResolver configResolver,
+            TrackerClient tracker,
+            AgentRunner agentRunner,
+            PromptRenderer prompts,
+            WorkspaceManager workspaces,
+            Clock clock,
+            TrelloHandoffToolHandler usageWorkpads) {
+<span class="nc" id="L181">        this(</span>
+                workflowLoader,
+                configResolver,
+                tracker,
+                agentRunner,
+                prompts,
+                workspaces,
+                clock,
+<span class="nc" id="L189">                Optional.of(usageWorkpads));</span>
+<span class="nc" id="L190">    }</span>
+
+    private SymphonyOrchestrator(
+            WorkflowLoader workflowLoader,
+            ConfigResolver configResolver,
+            TrackerClient tracker,
+            AgentRunner agentRunner,
+            PromptRenderer prompts,
+            WorkspaceManager workspaces,
+            Clock clock,
+<span class="nc" id="L200">            Optional&lt;TrelloHandoffToolHandler&gt; usageWorkpads) {</span>
+<span class="nc" id="L201">        this.workflowLoader = workflowLoader;</span>
+<span class="nc" id="L202">        this.configResolver = configResolver;</span>
+<span class="nc" id="L203">        this.tracker = tracker;</span>
+<span class="nc" id="L204">        this.agentRunner = agentRunner;</span>
+<span class="nc" id="L205">        this.prompts = prompts;</span>
+<span class="nc" id="L206">        this.workspaces = workspaces;</span>
+<span class="nc" id="L207">        this.clock = clock;</span>
+<span class="nc" id="L208">        this.usageWorkpads = usageWorkpads;</span>
+<span class="nc" id="L209">    }</span>
+
+    public void start() {
+<span class="nc" id="L212">        operationLock.lock();</span>
+<span class="nc" id="L213">        boolean releaseLockOnFailure = false;</span>
+<span class="nc" id="L214">        boolean startupComplete = false;</span>
+        try {
+<span class="nc" id="L216">            synchronized (this) {</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if (started) {</span>
+<span class="nc" id="L218">                    return;</span>
+                }
+<span class="nc" id="L220">            }</span>
+<span class="nc" id="L221">            releaseLockOnFailure = true;</span>
+<span class="nc" id="L222">            reloadOrThrow();</span>
+<span class="nc" id="L223">            startWorkflowWatcher();</span>
+<span class="nc" id="L224">            startupTerminalWorkspaceCleanup();</span>
+<span class="nc" id="L225">            synchronized (this) {</span>
+<span class="nc" id="L226">                started = true;</span>
+<span class="nc" id="L227">                scheduleTick(Duration.ZERO);</span>
+<span class="nc" id="L228">            }</span>
+<span class="nc" id="L229">            startupComplete = true;</span>
+        } finally {
+            try {
+<span class="nc bnc" id="L232" title="All 4 branches missed.">                if (releaseLockOnFailure &amp;&amp; !startupComplete) {</span>
+<span class="nc" id="L233">                    releaseWorkflowProcessLock();</span>
+                }
+            } finally {
+<span class="nc" id="L236">                operationLock.unlock();</span>
+            }
+        }
+<span class="nc" id="L239">    }</span>
+
+    public void stop() {
+<span class="nc" id="L242">        operationLock.lock();</span>
+        try {
+<span class="nc" id="L244">            markStoppingAndCancelTick();</span>
+<span class="nc" id="L245">            stopWorkflowWatcher();</span>
+            List&lt;RunningEntry&gt; entries;
+            List&lt;RetryEntry&gt; retries;
+<span class="nc" id="L248">            synchronized (this) {</span>
+<span class="nc" id="L249">                entries = List.copyOf(running.values());</span>
+<span class="nc" id="L250">                retries = List.copyOf(retryAttempts.values());</span>
+<span class="nc" id="L251">                entries.forEach(entry -&gt;</span>
+<span class="nc" id="L252">                        ignoredWorkers.put(entry.workerIdentity, clock.instant().plus(IGNORED_WORKER_TTL)));</span>
+<span class="nc" id="L253">                entries.forEach(this::addRuntime);</span>
+<span class="nc" id="L254">                running.clear();</span>
+<span class="nc" id="L255">                retryAttempts.clear();</span>
+<span class="nc" id="L256">                claimed.clear();</span>
+<span class="nc" id="L257">                trimIgnoredWorkers();</span>
+<span class="nc" id="L258">                usageWorkpadMessages.forEach((target, state) -&gt; queueUsageWorkpadCleanup(target, state.ownerConfig()));</span>
+<span class="nc" id="L259">                usageWorkpadMessages.clear();</span>
+<span class="nc" id="L260">                dispatchPause = null;</span>
+<span class="nc" id="L261">            }</span>
+<span class="nc" id="L262">            retries.forEach(retry -&gt; retry.timer().cancel(false));</span>
+<span class="nc" id="L263">            entries.forEach(entry -&gt; {</span>
+<span class="nc" id="L264">                agentRunner.cancel(entry.workerIdentity);</span>
+<span class="nc" id="L265">                cancelWorkerTask(entry);</span>
+<span class="nc" id="L266">            });</span>
+<span class="nc" id="L267">            retryPendingUsageWorkpadCleanup(true);</span>
+<span class="nc" id="L268">            scheduler.shutdownNow();</span>
+<span class="nc" id="L269">            workers.shutdownNow();</span>
+<span class="nc" id="L270">            executorsStoppedHookForTests.run();</span>
+<span class="nc" id="L271">            releaseWorkflowProcessLock();</span>
+        } finally {
+<span class="nc" id="L273">            operationLock.unlock();</span>
+        }
+<span class="nc" id="L275">    }</span>
+
+    /// Marking not-started before anything else closes the refresh window: once this ran, a
+    /// concurrent requestRefresh() is a no-op and cannot schedule a tick against the scheduler
+    /// that stop is about to shut down.
+    private synchronized void markStoppingAndCancelTick() {
+<span class="nc" id="L281">        started = false;</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">        if (tickTimer != null) {</span>
+<span class="nc" id="L283">            tickTimer.cancel(false);</span>
+        }
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if (dispatchPauseTimer != null) {</span>
+<span class="nc" id="L286">            dispatchPauseTimer.cancel(false);</span>
+        }
+<span class="nc" id="L288">    }</span>
+
+    public void setWorkflowPath(Path workflowPath) {
+        // The operation lock serializes this with start(): a path change requested while startup
+        // is loading the workflow waits for the operation boundary and is then rejected.
+<span class="nc" id="L293">        operationLock.lock();</span>
+        try {
+<span class="nc" id="L295">            synchronized (this) {</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">                checkState(!started, &quot;Workflow path cannot be changed after orchestrator start&quot;);</span>
+<span class="nc" id="L297">                this.workflowPath = workflowPath;</span>
+<span class="nc" id="L298">            }</span>
+        } finally {
+<span class="nc" id="L300">            operationLock.unlock();</span>
+        }
+<span class="nc" id="L302">    }</span>
+
+    public synchronized boolean isStarted() {
+<span class="nc" id="L305">        return started;</span>
+    }
+
+    // Lock-free on purpose: local-status health probes call these and must never wait for an
+    // in-flight Trello poll. Both fields are volatile and the config value is immutable.
+    public Path selectedWorkflowPath() {
+<span class="nc" id="L311">        EffectiveConfig current = config;</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        Path selected = current == null ? workflowPath : current.workflowPath();</span>
+<span class="nc" id="L313">        return selected.toAbsolutePath().normalize();</span>
+    }
+
+    public String selectedBoardId() {
+<span class="nc" id="L317">        EffectiveConfig current = config;</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        return current == null ? null : current.tracker().resolvedBoardId();</span>
+    }
+
+    public String selectedConfiguredBoardId() {
+<span class="nc" id="L322">        EffectiveConfig current = config;</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        return current == null ? null : current.tracker().boardId();</span>
+    }
+
+    /// The configured card identifier prefix, or the documented default before configuration loads.
+    public String cardIdentifierPrefix() {
+<span class="nc" id="L328">        EffectiveConfig current = config;</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">        return current == null</span>
+<span class="nc" id="L330">                ? ConfigDefaults.DEFAULT_CARD_IDENTIFIER_PREFIX</span>
+<span class="nc" id="L331">                : current.tracker().cardIdentifierPrefix();</span>
+    }
+
+    public void requestRefresh() {
+<span class="nc" id="L335">        refreshRequested.set(true);</span>
+<span class="nc" id="L336">        scheduleRefreshIfStartedAndIdle();</span>
+<span class="nc" id="L337">    }</span>
+
+    /// The monitor makes this atomic with tick completion: it runs entirely before or entirely
+    /// after finishTickAndScheduleNext, so a refresh either gets consumed by the finishing tick or
+    /// replaces the interval schedule with a zero-delay tick, never the other way around. After
+    /// stop marked the orchestrator as not started, this is a no-op, so a late refresh cannot
+    /// schedule against the shut-down scheduler.
+    private synchronized void scheduleRefreshIfStartedAndIdle() {
+<span class="nc bnc" id="L345" title="All 4 branches missed.">        if (started &amp;&amp; !tickRunning) {</span>
+<span class="nc" id="L346">            scheduleTick(Duration.ZERO);</span>
+        }
+<span class="nc" id="L348">    }</span>
+
+    private boolean consumeRefreshRequest() {
+<span class="nc" id="L351">        return refreshRequested.getAndSet(false);</span>
+    }
+
+    public void tickNowForTests() {
+<span class="nc" id="L355">        tick();</span>
+<span class="nc" id="L356">    }</span>
+
+    void stopWorkflowWatcherForTests() {
+<span class="nc" id="L359">        stopWorkflowWatcher();</span>
+<span class="nc" id="L360">    }</span>
+
+    void retryNowForTests(String cardId) {
+        RetryEntry retry;
+<span class="nc" id="L364">        synchronized (this) {</span>
+<span class="nc" id="L365">            retry = retryAttempts.get(currentRuntimeKey(cardId));</span>
+<span class="nc" id="L366">        }</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">        if (retry != null) {</span>
+<span class="nc" id="L368">            onRetryTimer(runtimeKey(retry), retry.generation());</span>
+        }
+<span class="nc" id="L370">    }</span>
+
+    void retryNowForTests(String cardId, long generation) {
+<span class="nc" id="L373">        onRetryTimer(currentRuntimeKey(cardId), generation);</span>
+<span class="nc" id="L374">    }</span>
+
+    void dispatchPauseDeadlineNowForTests(Instant expectedUntil) {
+        DispatchPause pause;
+<span class="nc" id="L378">        synchronized (this) {</span>
+<span class="nc" id="L379">            pause = dispatchPause;</span>
+<span class="nc" id="L380">        }</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        if (pause != null) {</span>
+<span class="nc" id="L382">            onDispatchPauseDeadline(pause.command(), pause.generation(), expectedUntil);</span>
+        }
+<span class="nc" id="L384">    }</span>
+
+    void dispatchPauseDeadlineNowForTests(String expectedCommand, Instant expectedUntil) {
+        long generation;
+<span class="nc" id="L388">        synchronized (this) {</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">            generation = dispatchPause == null ? Long.MIN_VALUE : dispatchPause.generation();</span>
+<span class="nc" id="L390">        }</span>
+<span class="nc" id="L391">        onDispatchPauseDeadline(expectedCommand, generation, expectedUntil);</span>
+<span class="nc" id="L392">    }</span>
+
+    private void tick() {
+<span class="nc" id="L395">        operationLock.lock();</span>
+        try {
+<span class="nc bnc" id="L397" title="All 2 branches missed.">            if (!beginTick()) {</span>
+<span class="nc" id="L398">                return;</span>
+            }
+            try {
+<span class="nc" id="L401">                consumeRefreshRequest();</span>
+<span class="nc" id="L402">                reloadIfChanged();</span>
+<span class="nc" id="L403">                retryPendingUsageWorkpadCleanup(false);</span>
+<span class="nc" id="L404">                reconcileRunningCards();</span>
+<span class="nc" id="L405">                dispatchCandidates();</span>
+<span class="nc" id="L406">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L407">                LOG.errorf(&quot;tick outcome=skipped reason=%s&quot;, e.getMessage());</span>
+            } finally {
+<span class="nc" id="L409">                finishTickAndScheduleNext();</span>
+            }
+        } finally {
+<span class="nc" id="L412">            operationLock.unlock();</span>
+        }
+<span class="nc" id="L414">    }</span>
+
+    private synchronized boolean beginTick() {
+<span class="nc bnc" id="L417" title="All 2 branches missed.">        if (!started) {</span>
+<span class="nc" id="L418">            return false;</span>
+        }
+<span class="nc" id="L420">        tickRunning = true;</span>
+<span class="nc" id="L421">        return true;</span>
+    }
+
+    /// Tick completion is atomic: clearing tickRunning, consuming the refresh flag, and scheduling
+    /// the next tick happen under one monitor section. A concurrent requestRefresh() therefore
+    /// runs entirely before this (and is consumed here as the zero-delay schedule) or entirely
+    /// after it (and replaces the interval schedule), so a refresh at the completion boundary can
+    /// never be overwritten by the normal polling interval.
+    private synchronized void finishTickAndScheduleNext() {
+<span class="nc" id="L430">        tickRunning = false;</span>
+<span class="nc" id="L431">        boolean refreshRequestedDuringTick = consumeRefreshRequest();</span>
+<span class="nc" id="L432">        tickCompletionHookForTests.run();</span>
+<span class="nc" id="L433">        scheduleTick(</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                refreshRequestedDuringTick ? Duration.ZERO : config.polling().interval());</span>
+<span class="nc" id="L435">    }</span>
+
+    private void reloadOrThrow() {
+<span class="nc" id="L438">        workflow = workflowLoader.load(workflowPath);</span>
+<span class="nc" id="L439">        acquireWorkflowProcessLock(workflow.path());</span>
+<span class="nc" id="L440">        config = resolveBoardScope(configResolver.resolve(workflow));</span>
+<span class="nc" id="L441">        configResolver.validateForDispatch(config);</span>
+<span class="nc" id="L442">        workflowLastModified = lastModified(workflow.path());</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">        if (config.tracker().activeListIds().isEmpty()</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                &amp;&amp; workflow.config().get(&quot;tracker&quot;) instanceof Map&lt;?, ?&gt; trackerMap) {</span>
+<span class="nc bnc" id="L445" title="All 2 branches missed.">            if (!trackerMap.containsKey(&quot;active_states&quot;)) {</span>
+<span class="nc" id="L446">                LOG.warn(</span>
+                        &quot;tracker active selection uses starter defaults; configure active_states or active_list_ids for production&quot;);
+            }
+        }
+<span class="nc" id="L450">        LOG.infof(&quot;workflow=%s outcome=loaded&quot;, workflow.path());</span>
+<span class="nc" id="L451">    }</span>
+
+    private void acquireWorkflowProcessLock(Path selectedWorkflowPath) {
+<span class="nc bnc" id="L454" title="All 2 branches missed.">        if (workflowProcessLock == null) {</span>
+<span class="nc" id="L455">            workflowProcessLock = WorkflowProcessLock.acquire(selectedWorkflowPath);</span>
+        }
+<span class="nc" id="L457">    }</span>
+
+    private void releaseWorkflowProcessLock() {
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        if (workflowProcessLock == null) {</span>
+<span class="nc" id="L461">            return;</span>
+        }
+        try {
+<span class="nc" id="L464">            workflowProcessLock.close();</span>
+        } finally {
+<span class="nc" id="L466">            workflowProcessLock = null;</span>
+        }
+<span class="nc" id="L468">    }</span>
+
+    private EffectiveConfig resolveBoardScope(EffectiveConfig raw) {
+<span class="nc" id="L471">        String resolvedBoardId = tracker.resolveBoardId(raw);</span>
+<span class="nc" id="L472">        return raw.withResolvedBoardId(resolvedBoardId);</span>
+    }
+
+    private void reloadIfChanged() {
+<span class="nc" id="L476">        Instant modified = lastModified(config.workflowPath());</span>
+<span class="nc" id="L477">        boolean forced = workflowReloadRequested.getAndSet(false);</span>
+<span class="nc bnc" id="L478" title="All 6 branches missed.">        if (!forced &amp;&amp; workflowLastModified != null &amp;&amp; !modified.isAfter(workflowLastModified)) {</span>
+<span class="nc" id="L479">            return;</span>
+        }
+        try {
+<span class="nc" id="L482">            WorkflowDefinition nextWorkflow = workflowLoader.load(config.workflowPath());</span>
+<span class="nc" id="L483">            EffectiveConfig nextConfig = resolveBoardScope(configResolver.resolve(nextWorkflow));</span>
+<span class="nc" id="L484">            configResolver.validateForDispatch(nextConfig);</span>
+<span class="nc" id="L485">            applyValidReload(nextWorkflow, nextConfig, modified);</span>
+<span class="nc" id="L486">            LOG.infof(&quot;workflow=%s outcome=reloaded&quot;, nextWorkflow.path());</span>
+<span class="nc" id="L487">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L488">            LOG.errorf(&quot;workflow=%s outcome=reload_failed reason=%s&quot;, config.workflowPath(), e.getMessage());</span>
+<span class="nc" id="L489">        }</span>
+<span class="nc" id="L490">    }</span>
+
+    private void applyValidReload(WorkflowDefinition nextWorkflow, EffectiveConfig nextConfig, Instant modified) {
+<span class="nc" id="L493">        synchronized (this) {</span>
+<span class="nc" id="L494">            EffectiveConfig previousConfig = config;</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">            boolean commandChanged = !Objects.equals(</span>
+<span class="nc" id="L496">                    previousConfig.codex().command(), nextConfig.codex().command());</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">            boolean trackerTargetChanged = !TrackerTarget.from(previousConfig).equals(TrackerTarget.from(nextConfig));</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">            if (trackerTargetChanged) {</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">                rotateTrackerTarget(nextConfig, !commandChanged);</span>
+            }
+<span class="nc bnc" id="L501" title="All 2 branches missed.">            if (commandChanged) {</span>
+<span class="nc" id="L502">                rotateCodexCommandScope(previousConfig, nextConfig);</span>
+            }
+<span class="nc" id="L504">            refreshUsageOwnership(nextConfig);</span>
+<span class="nc" id="L505">            workflow = nextWorkflow;</span>
+<span class="nc" id="L506">            config = nextConfig;</span>
+<span class="nc" id="L507">            workflowLastModified = modified;</span>
+<span class="nc" id="L508">        }</span>
+<span class="nc" id="L509">    }</span>
+
+    /// Called with the state monitor held after reload rotations have detached prior ownership.
+    private void refreshUsageOwnership(EffectiveConfig nextConfig) {
+<span class="nc" id="L513">        TrackerTarget currentTarget = TrackerTarget.from(nextConfig);</span>
+<span class="nc" id="L514">        usageWorkpadMessages.replaceAll(</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">                (target, state) -&gt; target.trackerTarget().equals(currentTarget)</span>
+<span class="nc" id="L516">                        ? new UsageWorkpadState(nextConfig, state.message())</span>
+<span class="nc" id="L517">                        : state);</span>
+<span class="nc" id="L518">        pendingUsageWorkpadCleanup.replaceAll(</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">                (target, cleanup) -&gt; target.trackerTarget().equals(currentTarget)</span>
+<span class="nc" id="L520">                        ? new UsageWorkpadCleanup(nextConfig, cleanup.expiresAt(), cleanup.nextAttemptAt())</span>
+<span class="nc" id="L521">                        : cleanup);</span>
+<span class="nc" id="L522">    }</span>
+
+    /// Called with the state monitor held and the operation lock owned by the reload tick.
+    private void rotateTrackerTarget(EffectiveConfig nextConfig, boolean retainCommandPause) {
+<span class="nc" id="L526">        TrackerTarget nextTarget = TrackerTarget.from(nextConfig);</span>
+
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        for (Map.Entry&lt;UsageWorkpadTarget, UsageWorkpadState&gt; entry : List.copyOf(usageWorkpadMessages.entrySet())) {</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">            if (!entry.getKey().trackerTarget().equals(nextTarget)) {</span>
+<span class="nc" id="L530">                queueUsageWorkpadCleanup(entry.getKey(), entry.getValue().ownerConfig());</span>
+<span class="nc" id="L531">                usageWorkpadMessages.remove(entry.getKey());</span>
+            }
+<span class="nc" id="L533">        }</span>
+
+<span class="nc bnc" id="L535" title="All 2 branches missed.">        for (RetryEntry retry : List.copyOf(retryAttempts.values())) {</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">            if (!retry.trackerTarget().equals(nextTarget)) {</span>
+<span class="nc" id="L537">                RuntimeCardKey retryKey = runtimeKey(retry);</span>
+<span class="nc" id="L538">                RetryEntry current = retryAttempts.remove(retryKey);</span>
+<span class="nc bnc" id="L539" title="All 4 branches missed.">                if (current != null &amp;&amp; current.generation() == retry.generation()) {</span>
+<span class="nc" id="L540">                    current.timer().cancel(false);</span>
+<span class="nc" id="L541">                    claimed.remove(retryKey);</span>
+                }
+            }
+<span class="nc" id="L544">        }</span>
+
+<span class="nc bnc" id="L546" title="All 4 branches missed.">        if (retainCommandPause &amp;&amp; dispatchPause != null) {</span>
+<span class="nc" id="L547">            Optional&lt;UsageProbe&gt; retainedProbe = dispatchPause</span>
+<span class="nc" id="L548">                    .probe()</span>
+<span class="nc" id="L549">                    .filter(probe -&gt; probe.target().trackerTarget().equals(nextTarget));</span>
+<span class="nc" id="L550">            dispatchPause = new DispatchPause(</span>
+<span class="nc" id="L551">                    dispatchPause.command(),</span>
+<span class="nc" id="L552">                    dispatchPause.generation(),</span>
+<span class="nc" id="L553">                    dispatchPause.detectedAt(),</span>
+<span class="nc" id="L554">                    dispatchPause.until(),</span>
+                    retainedProbe);
+<span class="nc" id="L556">            scheduleDispatchPauseDeadline(dispatchPause);</span>
+        }
+<span class="nc" id="L558">    }</span>
+
+    /// Called with the state monitor held and the operation lock owned by the reload tick.
+    private void rotateCodexCommandScope(EffectiveConfig previousConfig, EffectiveConfig nextConfig) {
+<span class="nc" id="L562">        String previousCommand = previousConfig.codex().command();</span>
+<span class="nc bnc" id="L563" title="All 4 branches missed.">        if (dispatchPause != null &amp;&amp; Objects.equals(dispatchPause.command(), previousCommand)) {</span>
+<span class="nc" id="L564">            dispatchPause = null;</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">            if (dispatchPauseTimer != null) {</span>
+<span class="nc" id="L566">                dispatchPauseTimer.cancel(false);</span>
+<span class="nc" id="L567">                dispatchPauseTimer = null;</span>
+            }
+        }
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        for (Map.Entry&lt;UsageWorkpadTarget, UsageWorkpadState&gt; entry : usageWorkpadMessages.entrySet()) {</span>
+<span class="nc" id="L571">            queueUsageWorkpadCleanup(entry.getKey(), entry.getValue().ownerConfig());</span>
+<span class="nc" id="L572">        }</span>
+<span class="nc" id="L573">        usageWorkpadMessages.clear();</span>
+
+<span class="nc" id="L575">        Instant now = clock.instant();</span>
+<span class="nc" id="L576">        TrackerTarget nextTarget = TrackerTarget.from(nextConfig);</span>
+<span class="nc bnc" id="L577" title="All 2 branches missed.">        for (RetryEntry retry : List.copyOf(retryAttempts.values())) {</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">            if (Objects.equals(retry.codexCommand(), previousCommand)</span>
+<span class="nc bnc" id="L579" title="All 2 branches missed.">                    &amp;&amp; retry.trackerTarget().equals(nextTarget)) {</span>
+<span class="nc" id="L580">                rescheduleRetryForCommandChange(retry, nextConfig, now);</span>
+            }
+<span class="nc" id="L582">        }</span>
+<span class="nc" id="L583">    }</span>
+
+    private static Instant lastModified(Path path) {
+        try {
+<span class="nc" id="L587">            return Files.getLastModifiedTime(path).toInstant();</span>
+<span class="nc" id="L588">        } catch (IOException e) {</span>
+<span class="nc" id="L589">            return Instant.EPOCH;</span>
+        }
+    }
+
+    private void startWorkflowWatcher() {
+<span class="nc" id="L594">        stopWorkflowWatcher();</span>
+<span class="nc" id="L595">        Path parent = config.workflowPath().getParent();</span>
+<span class="nc bnc" id="L596" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L597">            return;</span>
+        }
+        try {
+<span class="nc" id="L600">            workflowWatchService = parent.getFileSystem().newWatchService();</span>
+<span class="nc" id="L601">            parent.register(</span>
+                    workflowWatchService,
+                    StandardWatchEventKinds.ENTRY_CREATE,
+                    StandardWatchEventKinds.ENTRY_MODIFY,
+                    StandardWatchEventKinds.ENTRY_DELETE);
+<span class="nc" id="L606">            Thread.ofVirtual().name(&quot;symphony-workflow-watch&quot;).start(this::watchWorkflowChanges);</span>
+<span class="nc" id="L607">        } catch (IOException e) {</span>
+<span class="nc" id="L608">            LOG.warnf(&quot;workflow=%s watcher=disabled reason=%s&quot;, config.workflowPath(), e.getMessage());</span>
+<span class="nc" id="L609">        }</span>
+<span class="nc" id="L610">    }</span>
+
+    private void stopWorkflowWatcher() {
+<span class="nc bnc" id="L613" title="All 2 branches missed.">        if (workflowWatchService != null) {</span>
+            try {
+<span class="nc" id="L615">                workflowWatchService.close();</span>
+<span class="nc" id="L616">            } catch (IOException e) {</span>
+<span class="nc" id="L617">                LOG.debugf(&quot;workflow_watcher outcome=close_failed reason=%s&quot;, e.getMessage());</span>
+<span class="nc" id="L618">            }</span>
+<span class="nc" id="L619">            workflowWatchService = null;</span>
+        }
+<span class="nc" id="L621">    }</span>
+
+    private void watchWorkflowChanges() {
+<span class="nc" id="L624">        Path fileName = config.workflowPath().getFileName();</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">        while (workflowWatchService != null) {</span>
+            try {
+<span class="nc" id="L627">                WatchKey key = workflowWatchService.take();</span>
+<span class="nc" id="L628">                boolean changed = false;</span>
+<span class="nc bnc" id="L629" title="All 2 branches missed.">                for (WatchEvent&lt;?&gt; event : key.pollEvents()) {</span>
+<span class="nc bnc" id="L630" title="All 4 branches missed.">                    if (event.context() instanceof Path changedPath &amp;&amp; changedPath.equals(fileName)) {</span>
+<span class="nc" id="L631">                        changed = true;</span>
+                    }
+<span class="nc" id="L633">                }</span>
+<span class="nc" id="L634">                key.reset();</span>
+<span class="nc bnc" id="L635" title="All 2 branches missed.">                if (changed) {</span>
+<span class="nc" id="L636">                    workflowReloadRequested.set(true);</span>
+<span class="nc" id="L637">                    requestRefresh();</span>
+                }
+<span class="nc" id="L639">            } catch (ClosedWatchServiceException e) {</span>
+<span class="nc" id="L640">                return;</span>
+<span class="nc" id="L641">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L642">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L643">                return;</span>
+<span class="nc" id="L644">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L645">                LOG.warnf(&quot;workflow_watcher outcome=failed reason=%s&quot;, e.getMessage());</span>
+<span class="nc" id="L646">                return;</span>
+<span class="nc" id="L647">            }</span>
+        }
+<span class="nc" id="L649">    }</span>
+
+    private void startupTerminalWorkspaceCleanup() {
+        try {
+<span class="nc" id="L653">            tracker.fetchTerminalCards(config)</span>
+<span class="nc" id="L654">                    .forEach(card -&gt; workspaces.removeForIdentifierIfPresent(card.identifier(), config));</span>
+<span class="nc" id="L655">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L656">            LOG.warnf(&quot;startup_cleanup outcome=failed reason=%s&quot;, e.getMessage());</span>
+<span class="nc" id="L657">        }</span>
+<span class="nc" id="L658">    }</span>
+
+    private void reconcileRunningCards() {
+<span class="nc" id="L661">        removeExpiredIgnoredWorkers();</span>
+<span class="nc" id="L662">        reconcileStalls();</span>
+<span class="nc bnc" id="L663" title="All 2 branches missed.">        if (running.isEmpty()) {</span>
+<span class="nc" id="L664">            return;</span>
+        }
+<span class="nc" id="L666">        Map&lt;EffectiveConfig, List&lt;RunningEntry&gt;&gt; entriesByLaunchConfig = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L667">        List.copyOf(running.values()).forEach(entry -&gt; entriesByLaunchConfig</span>
+<span class="nc" id="L668">                .computeIfAbsent(entry.launchConfig, ignored -&gt; new ArrayList&lt;&gt;())</span>
+<span class="nc" id="L669">                .add(entry));</span>
+<span class="nc" id="L670">        entriesByLaunchConfig.forEach((launchConfig, entries) -&gt; {</span>
+            Map&lt;String, CardLookupResult&gt; refreshed;
+            try {
+<span class="nc" id="L673">                refreshed = tracker.fetchCardStatesByIds(</span>
+                        launchConfig,
+<span class="nc" id="L675">                        entries.stream().map(entry -&gt; entry.cardId).toList());</span>
+<span class="nc" id="L676">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L677">                LOG.warnf(&quot;reconcile outcome=state_refresh_failed reason=%s&quot;, e.getMessage());</span>
+<span class="nc" id="L678">                return;</span>
+<span class="nc" id="L679">            }</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">            for (RunningEntry entry : entries) {</span>
+<span class="nc" id="L681">                RuntimeCardKey entryKey = runtimeKey(entry);</span>
+<span class="nc" id="L682">                String cardId = entry.cardId;</span>
+<span class="nc" id="L683">                CardLookupResult result = refreshed.get(cardId);</span>
+<span class="nc bnc" id="L684" title="All 2 branches missed.">                if (result instanceof CardLookupResult.Missing) {</span>
+<span class="nc" id="L685">                    terminateRunning(entryKey, true, true, &quot;card missing&quot;);</span>
+<span class="nc bnc" id="L686" title="All 2 branches missed.">                } else if (result instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L687">                    LOG.debugf(</span>
+<span class="nc" id="L688">                            &quot;card_id=%s reconcile outcome=partial_refresh_failed reason=%s&quot;, cardId, failed.message());</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                } else if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc" id="L690">                    Card card = found.card();</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">                    if (isOutOfBoardScope(card, launchConfig)) {</span>
+<span class="nc" id="L692">                        terminateRunning(entryKey, false, true, &quot;card moved out of board&quot;);</span>
+<span class="nc bnc" id="L693" title="All 2 branches missed.">                    } else if (TrelloClient.isTerminal(card, launchConfig)) {</span>
+<span class="nc" id="L694">                        terminateRunning(entryKey, true, true, &quot;card terminal&quot;);</span>
+<span class="nc bnc" id="L695" title="All 2 branches missed.">                    } else if (TrelloClient.isActive(card, launchConfig)) {</span>
+<span class="nc bnc" id="L696" title="All 2 branches missed.">                        if (hasRequiredLabels(card, launchConfig)) {</span>
+<span class="nc" id="L697">                            synchronized (this) {</span>
+<span class="nc bnc" id="L698" title="All 2 branches missed.">                                if (Objects.equals(running.get(entryKey), entry)) {</span>
+<span class="nc" id="L699">                                    entry.card = card;</span>
+                                }
+<span class="nc" id="L701">                            }</span>
+                        } else {
+<span class="nc" id="L703">                            terminateRunning(</span>
+                                    entryKey, false, false, &quot;card is active but not currently dispatch-eligible&quot;);
+                        }
+                    } else {
+<span class="nc" id="L707">                        terminateRunning(entryKey, false, true, &quot;card no longer active&quot;);</span>
+                    }
+                }
+<span class="nc" id="L710">            }</span>
+<span class="nc" id="L711">        });</span>
+<span class="nc" id="L712">    }</span>
+
+    private void reconcileStalls() {
+<span class="nc" id="L715">        Instant now = clock.instant();</span>
+<span class="nc" id="L716">        List&lt;RuntimeCardKey&gt; stalled = running.values().stream()</span>
+<span class="nc" id="L717">                .filter(entry -&gt; entry.launchConfig.codex().stallTimeout().isPositive())</span>
+<span class="nc" id="L718">                .filter(entry -&gt; Duration.between(entry.lastEventAt, now)</span>
+<span class="nc bnc" id="L719" title="All 2 branches missed.">                                .compareTo(entry.launchConfig.codex().stallTimeout())</span>
+                        &gt; 0)
+<span class="nc" id="L721">                .map(SymphonyOrchestrator::runtimeKey)</span>
+<span class="nc" id="L722">                .toList();</span>
+<span class="nc" id="L723">        stalled.forEach(cardKey -&gt; terminateRunning(cardKey, false, false, &quot;stalled&quot;));</span>
+<span class="nc" id="L724">    }</span>
+
+    private void terminateRunning(
+            RuntimeCardKey cardKey, boolean cleanupWorkspace, boolean suppressRetry, String reason) {
+        RunningEntry entry;
+        boolean usageProbe;
+<span class="nc" id="L730">        synchronized (this) {</span>
+<span class="nc" id="L731">            entry = running.remove(cardKey);</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">            if (entry == null) {</span>
+<span class="nc" id="L733">                return;</span>
+            }
+<span class="nc" id="L735">            usageProbe = isBoundUsageProbe(entry.launchTarget, entry.cardId, entry.workerIdentity);</span>
+<span class="nc" id="L736">            ignoredWorkers.put(entry.workerIdentity, clock.instant().plus(IGNORED_WORKER_TTL));</span>
+<span class="nc" id="L737">            trimIgnoredWorkers();</span>
+<span class="nc" id="L738">            addRuntime(entry);</span>
+<span class="nc bnc" id="L739" title="All 2 branches missed.">            if (suppressRetry) {</span>
+<span class="nc" id="L740">                claimed.remove(cardKey);</span>
+            }
+<span class="nc" id="L742">        }</span>
+<span class="nc bnc" id="L743" title="All 2 branches missed.">        if (usageProbe) {</span>
+            try {
+<span class="nc" id="L745">                agentRunner.cancel(entry.workerIdentity);</span>
+<span class="nc" id="L746">                cancelWorkerTask(entry);</span>
+<span class="nc bnc" id="L747" title="All 2 branches missed.">                if (cleanupWorkspace) {</span>
+<span class="nc" id="L748">                    workspaces.removeForIdentifierIfPresent(entry.identifier(), entry.launchConfig);</span>
+                }
+<span class="nc bnc" id="L750" title="All 2 branches missed.">                if (!suppressRetry) {</span>
+<span class="nc" id="L751">                    releaseCurrentFromDispatch(entry.launchConfig, entry.card, entry.dispatchSource, reason);</span>
+                }
+            } finally {
+<span class="nc bnc" id="L754" title="All 2 branches missed.">                if (suppressRetry) {</span>
+<span class="nc" id="L755">                    retireUsageProbeWithoutResult(usageWorkpadTarget(entry.launchConfig, entry.cardId));</span>
+                } else {
+<span class="nc" id="L757">                    rearmUsageProbeWithoutResult(</span>
+<span class="nc" id="L758">                            usageWorkpadTarget(entry.launchConfig, entry.cardId),</span>
+<span class="nc" id="L759">                            nextAttempt(entry.retryAttempt),</span>
+<span class="nc" id="L760">                            entry.identifier(),</span>
+<span class="nc" id="L761">                            entry.card.cardUrl(),</span>
+                            reason);
+                }
+<span class="nc" id="L764">            }</span>
+        } else {
+<span class="nc" id="L766">            agentRunner.cancel(entry.workerIdentity);</span>
+<span class="nc" id="L767">            cancelWorkerTask(entry);</span>
+<span class="nc bnc" id="L768" title="All 2 branches missed.">            if (cleanupWorkspace) {</span>
+<span class="nc" id="L769">                workspaces.removeForIdentifierIfPresent(entry.identifier(), entry.launchConfig);</span>
+            }
+<span class="nc bnc" id="L771" title="All 2 branches missed.">            if (!suppressRetry) {</span>
+<span class="nc" id="L772">                releaseCurrentFromDispatch(entry.launchConfig, entry.card, entry.dispatchSource, reason);</span>
+<span class="nc bnc" id="L773" title="All 2 branches missed.">                if (isCurrentTrackerTarget(entry.launchTarget)) {</span>
+<span class="nc" id="L774">                    scheduleRetry(</span>
+                            entry.cardId,
+<span class="nc" id="L776">                            nextAttempt(entry.retryAttempt),</span>
+<span class="nc" id="L777">                            entry.identifier(),</span>
+<span class="nc" id="L778">                            entry.card.cardUrl(),</span>
+                            reason,
+                            false);
+                } else {
+<span class="nc" id="L782">                    removeClaim(cardKey);</span>
+                }
+            }
+        }
+<span class="nc" id="L786">        LOG.infof(</span>
+<span class="nc" id="L787">                &quot;card_id=%s card_identifier=%s outcome=terminated reason=%s&quot;, entry.cardId, entry.identifier(), reason);</span>
+<span class="nc" id="L788">    }</span>
+
+    private void dispatchCandidates() {
+<span class="nc bnc" id="L791" title="All 2 branches missed.">        if (isDispatchPaused()) {</span>
+<span class="nc" id="L792">            return;</span>
+        }
+<span class="nc" id="L794">        configResolver.validateForDispatch(config);</span>
+<span class="nc" id="L795">        List&lt;Card&gt; fetchedCandidates = tracker.fetchCandidateCards(config);</span>
+<span class="nc" id="L796">        List&lt;Card&gt; candidates = fetchedCandidates.stream()</span>
+<span class="nc" id="L797">                .sorted(TrelloClient.dispatchComparator(config, prerequisitePriorityOverrides(fetchedCandidates)))</span>
+<span class="nc" id="L798">                .toList();</span>
+<span class="nc" id="L799">        Set&lt;String&gt; releasedCards = releaseIdleInProgressOverflow(candidates);</span>
+<span class="nc" id="L800">        DispatchBudget budget = DispatchBudget.from(config, running.values());</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        for (Card card : candidates) {</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">            if (releasedCards.contains(card.id())) {</span>
+<span class="nc" id="L803">                continue;</span>
+            }
+<span class="nc bnc" id="L805" title="All 2 branches missed.">            if (!budget.hasAnySlot()) {</span>
+<span class="nc" id="L806">                break;</span>
+            }
+<span class="nc bnc" id="L808" title="All 2 branches missed.">            if (!canDispatch(card, budget)) {</span>
+<span class="nc" id="L809">                continue;</span>
+            }
+
+<span class="nc" id="L812">            refreshForDispatch(card, budget)</span>
+<span class="nc" id="L813">                    .flatMap(refreshed -&gt; dispatch(refreshed, null))</span>
+<span class="nc" id="L814">                    .ifPresent(budget::reserve);</span>
+<span class="nc" id="L815">        }</span>
+<span class="nc" id="L816">    }</span>
+
+    private synchronized boolean isDispatchPaused() {
+<span class="nc bnc" id="L819" title="All 2 branches missed.">        return dispatchPause != null</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">                &amp;&amp; Objects.equals(dispatchPause.command(), config.codex().command());</span>
+    }
+
+    private Optional&lt;Card&gt; dispatch(Card card, Integer attempt) {
+<span class="nc" id="L824">        EffectiveConfig launchConfig = config;</span>
+<span class="nc" id="L825">        RuntimeCardKey launchKey = runtimeKey(launchConfig, card.id());</span>
+<span class="nc" id="L826">        reconcileStaleUsageWorkpad(card);</span>
+        RetryEntry retry;
+<span class="nc" id="L828">        synchronized (this) {</span>
+<span class="nc" id="L829">            claimed.add(launchKey);</span>
+<span class="nc" id="L830">            retry = retryAttempts.remove(launchKey);</span>
+<span class="nc" id="L831">        }</span>
+<span class="nc bnc" id="L832" title="All 2 branches missed.">        if (retry != null) {</span>
+<span class="nc" id="L833">            retry.timer().cancel(false);</span>
+        }
+        Card dispatchCard;
+        try {
+<span class="nc" id="L837">            dispatchCard = tracker.prepareForDispatch(launchConfig, card);</span>
+<span class="nc" id="L838">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L839">            synchronized (this) {</span>
+<span class="nc" id="L840">                claimed.remove(launchKey);</span>
+<span class="nc" id="L841">            }</span>
+<span class="nc" id="L842">            releaseCurrentFromDispatch(card, card, &quot;prepare for dispatch failed&quot;);</span>
+<span class="nc" id="L843">            scheduleRetry(card.id(), nextAttempt(attempt), card.identifier(), card.cardUrl(), e.getMessage(), false);</span>
+<span class="nc" id="L844">            return Optional.empty();</span>
+<span class="nc" id="L845">        }</span>
+<span class="nc" id="L846">        String workerIdentity = UUID.randomUUID().toString();</span>
+<span class="nc" id="L847">        var entry = new RunningEntry(dispatchCard, card, workerIdentity, attempt, clock.instant(), launchConfig);</span>
+<span class="nc" id="L848">        RuntimeCardKey runningKey = runtimeKey(entry);</span>
+<span class="nc" id="L849">        synchronized (this) {</span>
+<span class="nc bnc" id="L850" title="All 2 branches missed.">            if (!runningKey.equals(launchKey)) {</span>
+<span class="nc" id="L851">                claimed.remove(launchKey);</span>
+<span class="nc" id="L852">                claimed.add(runningKey);</span>
+            }
+<span class="nc" id="L854">            running.put(runningKey, entry);</span>
+<span class="nc" id="L855">        }</span>
+        String prompt;
+        try {
+<span class="nc" id="L858">            prompt = prompts.render(workflow.promptTemplate(), dispatchCard, attempt);</span>
+<span class="nc" id="L859">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L860">            synchronized (this) {</span>
+<span class="nc" id="L861">                running.remove(runningKey);</span>
+<span class="nc" id="L862">            }</span>
+<span class="nc" id="L863">            releaseFromDispatch(dispatchCard, card, &quot;prompt render failed&quot;);</span>
+<span class="nc" id="L864">            scheduleRetry(</span>
+<span class="nc" id="L865">                    dispatchCard.id(),</span>
+<span class="nc" id="L866">                    nextAttempt(attempt),</span>
+<span class="nc" id="L867">                    dispatchCard.identifier(),</span>
+<span class="nc" id="L868">                    dispatchCard.cardUrl(),</span>
+<span class="nc" id="L869">                    e.getMessage(),</span>
+                    false);
+<span class="nc" id="L871">            return Optional.empty();</span>
+<span class="nc" id="L872">        }</span>
+<span class="nc" id="L873">        bindUsageProbe(dispatchCard.id(), workerIdentity, launchConfig);</span>
+        try {
+<span class="nc" id="L875">            entry.workerTask = workers.submit(() -&gt; {</span>
+                try {
+<span class="nc" id="L877">                    workerLaunchHookForTests.run();</span>
+<span class="nc" id="L878">                    AgentRunResult result = agentRunner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L879">                            dispatchCard, attempt, prompt, launchConfig, workerIdentity, agentEventListener()));</span>
+<span class="nc" id="L880">                    onWorkerExit(runningKey, workerIdentity, result);</span>
+<span class="nc" id="L881">                } catch (RuntimeException e) {</span>
+<span class="nc" id="L882">                    onWorkerExitWithoutResult(runningKey, workerIdentity, e);</span>
+<span class="nc" id="L883">                }</span>
+<span class="nc" id="L884">            });</span>
+<span class="nc" id="L885">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L886">            synchronized (this) {</span>
+<span class="nc" id="L887">                running.remove(runningKey);</span>
+<span class="nc" id="L888">            }</span>
+<span class="nc" id="L889">            releaseFromDispatch(dispatchCard, card, &quot;worker submission failed&quot;);</span>
+<span class="nc" id="L890">            scheduleRetry(</span>
+<span class="nc" id="L891">                    dispatchCard.id(),</span>
+<span class="nc" id="L892">                    nextAttempt(attempt),</span>
+<span class="nc" id="L893">                    dispatchCard.identifier(),</span>
+<span class="nc" id="L894">                    dispatchCard.cardUrl(),</span>
+<span class="nc" id="L895">                    e.getMessage(),</span>
+                    false);
+<span class="nc" id="L897">            return Optional.empty();</span>
+<span class="nc" id="L898">        }</span>
+<span class="nc" id="L899">        LOG.infof(</span>
+                &quot;card_id=%s card_identifier=%s worker_identity=%s outcome=dispatched&quot;,
+<span class="nc" id="L901">                dispatchCard.id(), dispatchCard.identifier(), workerIdentity);</span>
+<span class="nc" id="L902">        return Optional.of(dispatchCard);</span>
+    }
+
+    private void reconcileStaleUsageWorkpad(Card card) {
+<span class="nc" id="L906">        boolean hasManagedSection = card.comments().stream()</span>
+<span class="nc" id="L907">                .map(Card.Comment::text)</span>
+<span class="nc" id="L908">                .anyMatch(CodexUsageWorkpadSection::containsManagedSection);</span>
+<span class="nc bnc" id="L909" title="All 4 branches missed.">        if (!hasManagedSection || isDispatchPaused()) {</span>
+<span class="nc" id="L910">            return;</span>
+        }
+<span class="nc" id="L912">        queueUsageWorkpadCleanup(card.id());</span>
+<span class="nc" id="L913">        retryPendingUsageWorkpadCleanup(false);</span>
+<span class="nc" id="L914">    }</span>
+
+    private Optional&lt;Card&gt; refreshForDispatch(Card card) {
+<span class="nc" id="L917">        return refreshForDispatch(card, DispatchBudget.from(config, running.values()));</span>
+    }
+
+    private Optional&lt;Card&gt; refreshForDispatch(Card card, DispatchBudget budget) {
+        try {
+<span class="nc" id="L922">            CardLookupResult result = tracker.fetchCardStatesForPromptByIds(config, List.of(card.id()))</span>
+<span class="nc" id="L923">                    .get(card.id());</span>
+<span class="nc bnc" id="L924" title="All 4 branches missed.">            if (result instanceof CardLookupResult.Found found &amp;&amp; canDispatch(found.card(), budget)) {</span>
+<span class="nc" id="L925">                return Optional.of(found.card());</span>
+            }
+<span class="nc bnc" id="L927" title="All 2 branches missed.">            if (result instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L928">                LOG.warnf(</span>
+                        &quot;card_id=%s card_identifier=%s dispatch=skipped reason=%s&quot;,
+<span class="nc" id="L930">                        card.id(), card.identifier(), failed.message());</span>
+            }
+<span class="nc" id="L932">            return Optional.empty();</span>
+<span class="nc" id="L933">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L934">            LOG.warnf(&quot;card_id=%s card_identifier=%s dispatch=skipped reason=%s&quot;, card.id(), card.identifier(), e);</span>
+<span class="nc" id="L935">            return Optional.empty();</span>
+        }
+    }
+
+    private void onWorkerExit(RuntimeCardKey cardKey, String workerIdentity, AgentRunResult result) {
+<span class="nc" id="L940">        operationLock.lock();</span>
+        try {
+<span class="nc" id="L942">            currentRunningEntry(cardKey, workerIdentity)</span>
+<span class="nc" id="L943">                    .ifPresent(entry -&gt; handleWorkerExit(cardKey, workerIdentity, result, entry));</span>
+        } finally {
+            try {
+<span class="nc" id="L946">                workerExitCompletionHookForTests.run();</span>
+            } finally {
+<span class="nc" id="L948">                operationLock.unlock();</span>
+            }
+        }
+<span class="nc" id="L951">    }</span>
+
+    private void onWorkerExitWithoutResult(RuntimeCardKey cardKey, String workerIdentity, RuntimeException failure) {
+<span class="nc" id="L954">        operationLock.lock();</span>
+        try {
+<span class="nc" id="L956">            currentRunningEntry(cardKey, workerIdentity).ifPresent(entry -&gt; {</span>
+                String reason =
+<span class="nc bnc" id="L958" title="All 2 branches missed.">                        blank(failure.getMessage()) ? &quot;agent runner failed without a result&quot; : failure.getMessage();</span>
+<span class="nc bnc" id="L959" title="All 2 branches missed.">                if (isBoundUsageProbe(entry.launchTarget, cardKey.cardId(), workerIdentity)) {</span>
+<span class="nc" id="L960">                    terminateRunning(cardKey, false, false, reason);</span>
+                } else {
+<span class="nc" id="L962">                    handleWorkerExit(cardKey, workerIdentity, AgentRunResult.fail(reason), entry);</span>
+                }
+<span class="nc" id="L964">            });</span>
+        } finally {
+<span class="nc" id="L966">            operationLock.unlock();</span>
+        }
+<span class="nc" id="L968">    }</span>
+
+    private void handleWorkerExit(
+            RuntimeCardKey cardKey, String workerIdentity, AgentRunResult result, RunningEntry entry) {
+<span class="nc" id="L972">        synchronized (this) {</span>
+<span class="nc" id="L973">            running.remove(cardKey);</span>
+<span class="nc" id="L974">            addRuntime(entry);</span>
+<span class="nc" id="L975">        }</span>
+<span class="nc" id="L976">        boolean currentTrackerTarget = isCurrentTrackerTarget(entry.launchTarget);</span>
+<span class="nc bnc" id="L977" title="All 2 branches missed.">        boolean typedUsageLimit = result.failureCategory() == AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT;</span>
+<span class="nc bnc" id="L978" title="All 4 branches missed.">        boolean commandScopedUsageLimit = typedUsageLimit &amp;&amp; isCurrentCodexCommand(entry.launchCommand);</span>
+<span class="nc bnc" id="L979" title="All 2 branches missed.">        DispatchPause usagePause = commandScopedUsageLimit ? installOrExtendUsagePause(entry, result) : null;</span>
+<span class="nc bnc" id="L980" title="All 4 branches missed.">        if (!commandScopedUsageLimit &amp;&amp; isBoundUsageProbe(entry.launchTarget, cardKey.cardId(), workerIdentity)) {</span>
+<span class="nc" id="L981">            clearUsagePauseAfterProbeResult(entry.launchTarget, cardKey.cardId(), workerIdentity);</span>
+        }
+<span class="nc" id="L983">        WorkerExitState state = workerExitState(cardKey.cardId(), entry.identifier(), entry.launchConfig);</span>
+<span class="nc bnc" id="L984" title="All 4 branches missed.">        if (state.retry() &amp;&amp; !currentTrackerTarget) {</span>
+<span class="nc" id="L985">            releaseAfterFailedWorkerExit(entry, state, &quot;tracker target changed during worker run&quot;);</span>
+<span class="nc" id="L986">            removeClaim(cardKey);</span>
+<span class="nc" id="L987">            return;</span>
+        }
+<span class="nc bnc" id="L989" title="All 2 branches missed.">        if (result.success()) {</span>
+<span class="nc" id="L990">            synchronized (this) {</span>
+<span class="nc" id="L991">                completed.add(cardKey);</span>
+<span class="nc" id="L992">            }</span>
+<span class="nc bnc" id="L993" title="All 2 branches missed.">            if (state.retry()) {</span>
+<span class="nc" id="L994">                scheduleRetry(cardKey.cardId(), 1, entry.identifier(), entry.card.cardUrl(), null, true);</span>
+            } else {
+<span class="nc" id="L996">                completeWorkerExit(cardKey, entry, state);</span>
+            }
+<span class="nc bnc" id="L998" title="All 2 branches missed.">        } else if (state.retry()) {</span>
+<span class="nc" id="L999">            releaseAfterFailedWorkerExit(entry, state, result.reason());</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">            if (commandScopedUsageLimit) {</span>
+<span class="nc" id="L1001">                scheduleUsageLimitRetry(</span>
+<span class="nc" id="L1002">                        cardKey.cardId(),</span>
+<span class="nc" id="L1003">                        nextAttempt(entry.retryAttempt),</span>
+<span class="nc" id="L1004">                        entry.identifier(),</span>
+<span class="nc" id="L1005">                        entry.card.cardUrl(),</span>
+<span class="nc" id="L1006">                        result.reason(),</span>
+                        usagePause);
+            } else {
+<span class="nc" id="L1009">                scheduleRetry(</span>
+<span class="nc" id="L1010">                        cardKey.cardId(),</span>
+<span class="nc" id="L1011">                        nextAttempt(entry.retryAttempt),</span>
+<span class="nc" id="L1012">                        entry.identifier(),</span>
+<span class="nc" id="L1013">                        entry.card.cardUrl(),</span>
+<span class="nc" id="L1014">                        result.reason(),</span>
+                        false);
+            }
+        } else {
+<span class="nc" id="L1018">            completeWorkerExit(cardKey, entry, state);</span>
+        }
+<span class="nc" id="L1020">    }</span>
+
+    private boolean isCurrentCodexCommand(String command) {
+<span class="nc" id="L1023">        return Objects.equals(command, config.codex().command());</span>
+    }
+
+    private boolean isCurrentTrackerTarget(TrackerTarget target) {
+<span class="nc" id="L1027">        return target.equals(TrackerTarget.from(config));</span>
+    }
+
+    private WorkerExitState workerExitState(String cardId, String identifier, EffectiveConfig workerConfig) {
+        try {
+<span class="nc" id="L1032">            CardLookupResult result =</span>
+<span class="nc" id="L1033">                    tracker.fetchCardStatesByIds(workerConfig, List.of(cardId)).get(cardId);</span>
+<span class="nc bnc" id="L1034" title="All 4 branches missed.">            return switch (result) {</span>
+<span class="nc" id="L1035">                case CardLookupResult.Missing ignored -&gt; WorkerExitState.complete(true, null);</span>
+<span class="nc" id="L1036">                case CardLookupResult.Failed failed -&gt; {</span>
+<span class="nc" id="L1037">                    LOG.warnf(</span>
+                            &quot;card_id=%s card_identifier=%s worker_exit_refresh=failed reason=%s&quot;,
+<span class="nc" id="L1039">                            cardId, identifier, failed.message());</span>
+<span class="nc" id="L1040">                    yield WorkerExitState.retry(null);</span>
+                }
+<span class="nc" id="L1042">                case CardLookupResult.Found found -&gt; workerExitState(found.card(), workerConfig);</span>
+<span class="nc" id="L1043">                case null -&gt; WorkerExitState.retry(null);</span>
+            };
+<span class="nc" id="L1045">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1046">            LOG.warnf(</span>
+                    &quot;card_id=%s card_identifier=%s worker_exit_refresh=failed reason=%s&quot;,
+<span class="nc" id="L1048">                    cardId, identifier, e.getMessage());</span>
+<span class="nc" id="L1049">            return WorkerExitState.retry(null);</span>
+        }
+    }
+
+    private WorkerExitState workerExitState(Card card, EffectiveConfig workerConfig) {
+<span class="nc bnc" id="L1054" title="All 2 branches missed.">        if (isOutOfBoardScope(card, workerConfig)) {</span>
+<span class="nc" id="L1055">            return WorkerExitState.complete(false, card);</span>
+        }
+<span class="nc bnc" id="L1057" title="All 2 branches missed.">        if (TrelloClient.isTerminal(card, workerConfig)) {</span>
+<span class="nc" id="L1058">            return WorkerExitState.complete(true, card);</span>
+        }
+<span class="nc bnc" id="L1060" title="All 2 branches missed.">        if (TrelloClient.isActive(card, workerConfig)) {</span>
+<span class="nc" id="L1061">            return WorkerExitState.retry(card);</span>
+        }
+<span class="nc" id="L1063">        return WorkerExitState.complete(false, card);</span>
+    }
+
+    private void completeWorkerExit(RuntimeCardKey cardKey, RunningEntry entry, WorkerExitState state) {
+<span class="nc" id="L1067">        synchronized (this) {</span>
+<span class="nc" id="L1068">            claimed.remove(cardKey);</span>
+<span class="nc" id="L1069">        }</span>
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">        if (state.cleanupWorkspace()) {</span>
+<span class="nc" id="L1071">            workspaces.removeForIdentifierIfPresent(entry.identifier(), entry.launchConfig);</span>
+        }
+<span class="nc" id="L1073">    }</span>
+
+    private void releaseAfterFailedWorkerExit(RunningEntry entry, WorkerExitState state, String reason) {
+<span class="nc bnc" id="L1076" title="All 2 branches missed.">        if (state.card() == null) {</span>
+<span class="nc" id="L1077">            releaseCurrentFromDispatch(entry.launchConfig, entry.card, entry.dispatchSource, reason);</span>
+<span class="nc" id="L1078">            return;</span>
+        }
+<span class="nc" id="L1080">        releaseFromDispatch(entry.launchConfig, state.card(), entry.dispatchSource, reason);</span>
+<span class="nc" id="L1081">    }</span>
+
+    private static void cancelWorkerTask(RunningEntry entry) {
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">        if (entry.workerTask != null) {</span>
+<span class="nc" id="L1085">            entry.workerTask.cancel(true);</span>
+        }
+<span class="nc" id="L1087">    }</span>
+
+    private void onAgentEvent(AgentEvent event) {
+<span class="nc" id="L1090">        onAgentEventAndReportAccepted(event);</span>
+<span class="nc" id="L1091">    }</span>
+
+    private boolean onAgentEventAndReportAccepted(AgentEvent event) {
+<span class="nc" id="L1094">        operationLock.lock();</span>
+        try {
+<span class="nc" id="L1096">            Optional&lt;Map.Entry&lt;RuntimeCardKey, RunningEntry&gt;&gt; ownedEntry = running.entrySet().stream()</span>
+<span class="nc" id="L1097">                    .filter(entry -&gt; entry.getValue().workerIdentity.equals(event.workerIdentity()))</span>
+<span class="nc" id="L1098">                    .findAny();</span>
+<span class="nc bnc" id="L1099" title="All 2 branches missed.">            if (ownedEntry.isEmpty()) {</span>
+<span class="nc" id="L1100">                return false;</span>
+            }
+<span class="nc" id="L1102">            RuntimeCardKey cardKey = ownedEntry.orElseThrow().getKey();</span>
+<span class="nc" id="L1103">            Optional&lt;RunningEntry&gt; currentEntry = currentRunningEntry(cardKey, event.workerIdentity());</span>
+<span class="nc bnc" id="L1104" title="All 2 branches missed.">            if (currentEntry.isEmpty()) {</span>
+<span class="nc" id="L1105">                return false;</span>
+            }
+<span class="nc" id="L1107">            applyAgentEvent(cardKey, currentEntry.orElseThrow(), event);</span>
+<span class="nc" id="L1108">            return true;</span>
+        } finally {
+<span class="nc" id="L1110">            operationLock.unlock();</span>
+        }
+    }
+
+    private AgentEventListener agentEventListener() {
+<span class="nc" id="L1115">        return new AgentEventListener() {</span>
+            @Override
+            public void onEvent(AgentEvent event) {
+<span class="nc" id="L1118">                SymphonyOrchestrator.this.onAgentEvent(event);</span>
+<span class="nc" id="L1119">            }</span>
+
+            @Override
+            public boolean onEventAndReportAccepted(AgentEvent event) {
+<span class="nc" id="L1123">                return SymphonyOrchestrator.this.onAgentEventAndReportAccepted(event);</span>
+            }
+        };
+    }
+
+    private synchronized void applyAgentEvent(RuntimeCardKey cardKey, RunningEntry entry, AgentEvent event) {
+<span class="nc" id="L1129">        entry.lastEvent = event.event();</span>
+<span class="nc" id="L1130">        entry.lastMessage = event.message();</span>
+<span class="nc" id="L1131">        entry.lastEventAt = event.timestamp();</span>
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">        entry.threadId = event.threadId() == null ? entry.threadId : event.threadId();</span>
+<span class="nc bnc" id="L1133" title="All 2 branches missed.">        entry.turnId = event.turnId() == null ? entry.turnId : event.turnId();</span>
+<span class="nc bnc" id="L1134" title="All 4 branches missed.">        if (entry.threadId != null &amp;&amp; entry.turnId != null) {</span>
+<span class="nc" id="L1135">            entry.sessionId = entry.threadId + &quot;-&quot; + entry.turnId;</span>
+        }
+<span class="nc bnc" id="L1137" title="All 2 branches missed.">        if (&quot;turn/started&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L1138" title="All 2 branches missed.">                || &quot;session_started&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">                || &quot;session_continued&quot;.equals(event.event())) {</span>
+<span class="nc" id="L1140">            entry.turnCount++;</span>
+        }
+<span class="nc" id="L1142">        applyUsage(entry, event.usage());</span>
+<span class="nc bnc" id="L1143" title="All 2 branches missed.">        if (&quot;account/rateLimits/updated&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L1144" title="All 2 branches missed.">                &amp;&amp; event.payload() != null</span>
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">                &amp;&amp; !event.payload().isNull()) {</span>
+<span class="nc" id="L1146">            rateLimitsByCommand.put(entry.launchCommand, event.payload());</span>
+        }
+<span class="nc" id="L1148">        addRecentEvent(cardKey, new CardDebugDetails.EventInfo(event.timestamp(), event.event(), event.message()));</span>
+<span class="nc" id="L1149">    }</span>
+
+    private synchronized Optional&lt;RunningEntry&gt; currentRunningEntry(RuntimeCardKey cardKey, String workerIdentity) {
+<span class="nc" id="L1152">        removeExpiredIgnoredWorkers();</span>
+<span class="nc bnc" id="L1153" title="All 2 branches missed.">        if (ignoredWorkers.remove(workerIdentity) != null) {</span>
+<span class="nc" id="L1154">            LOG.debugf(&quot;card_id=%s worker_identity=%s outcome=ignored_stale_worker&quot;, cardKey.cardId(), workerIdentity);</span>
+<span class="nc" id="L1155">            return Optional.empty();</span>
+        }
+<span class="nc" id="L1157">        RunningEntry entry = running.get(cardKey);</span>
+<span class="nc bnc" id="L1158" title="All 4 branches missed.">        if (entry == null || !entry.workerIdentity.equals(workerIdentity)) {</span>
+<span class="nc" id="L1159">            LOG.debugf(</span>
+<span class="nc" id="L1160">                    &quot;card_id=%s worker_identity=%s outcome=ignored_unknown_worker&quot;, cardKey.cardId(), workerIdentity);</span>
+<span class="nc" id="L1161">            return Optional.empty();</span>
+        }
+<span class="nc" id="L1163">        return Optional.of(entry);</span>
+    }
+
+    private void applyUsage(RunningEntry entry, Map&lt;String, Long&gt; usage) {
+<span class="nc bnc" id="L1167" title="All 4 branches missed.">        if (usage == null || usage.isEmpty()) {</span>
+<span class="nc" id="L1168">            return;</span>
+        }
+<span class="nc" id="L1170">        long input = usage.getOrDefault(&quot;input_tokens&quot;, 0L);</span>
+<span class="nc" id="L1171">        long output = usage.getOrDefault(&quot;output_tokens&quot;, 0L);</span>
+<span class="nc" id="L1172">        long total = usage.getOrDefault(&quot;total_tokens&quot;, input + output);</span>
+<span class="nc" id="L1173">        totalInputTokens += Math.max(0, input - entry.lastReportedInputTokens);</span>
+<span class="nc" id="L1174">        totalOutputTokens += Math.max(0, output - entry.lastReportedOutputTokens);</span>
+<span class="nc" id="L1175">        totalTokens += Math.max(0, total - entry.lastReportedTotalTokens);</span>
+<span class="nc" id="L1176">        entry.lastReportedInputTokens = input;</span>
+<span class="nc" id="L1177">        entry.lastReportedOutputTokens = output;</span>
+<span class="nc" id="L1178">        entry.lastReportedTotalTokens = total;</span>
+<span class="nc" id="L1179">        entry.inputTokens = input;</span>
+<span class="nc" id="L1180">        entry.outputTokens = output;</span>
+<span class="nc" id="L1181">        entry.totalTokens = total;</span>
+<span class="nc" id="L1182">    }</span>
+
+    private DispatchPause installOrExtendUsagePause(RunningEntry entry, AgentRunResult result) {
+<span class="nc" id="L1185">        String cardId = entry.cardId;</span>
+<span class="nc" id="L1186">        String workerIdentity = entry.workerIdentity;</span>
+<span class="nc" id="L1187">        EffectiveConfig currentConfig = config;</span>
+        EffectiveConfig workpadOwnerConfig =
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">                entry.launchTarget.equals(TrackerTarget.from(currentConfig)) ? currentConfig : entry.launchConfig;</span>
+<span class="nc" id="L1190">        var workpadTarget = new UsageWorkpadTarget(entry.launchTarget, cardId);</span>
+<span class="nc" id="L1191">        Instant detectedAt = clock.instant();</span>
+<span class="nc" id="L1192">        Instant reportedReset = result.retryNotBefore()</span>
+<span class="nc" id="L1193">                .filter(candidate -&gt; candidate.isAfter(detectedAt))</span>
+<span class="nc" id="L1194">                .orElseGet(() -&gt; detectedAt.plus(usageProbeFallbackDelay(currentConfig)));</span>
+<span class="nc" id="L1195">        String message = usageLimitMessage(result.reason());</span>
+        DispatchPause pause;
+        Map&lt;UsageWorkpadTarget, UsageWorkpadState&gt; workpadsToUpdate;
+<span class="nc" id="L1198">        synchronized (this) {</span>
+<span class="nc" id="L1199">            pendingUsageWorkpadCleanup.remove(workpadTarget);</span>
+<span class="nc" id="L1200">            usageWorkpadMessages.put(workpadTarget, new UsageWorkpadState(workpadOwnerConfig, message));</span>
+<span class="nc bnc" id="L1201" title="All 2 branches missed.">            if (dispatchPause == null) {</span>
+<span class="nc" id="L1202">                dispatchPauseGeneration++;</span>
+<span class="nc" id="L1203">                dispatchPause = new DispatchPause(</span>
+<span class="nc" id="L1204">                        entry.launchCommand, dispatchPauseGeneration, detectedAt, reportedReset, Optional.empty());</span>
+            } else {
+<span class="nc" id="L1206">                Optional&lt;UsageProbe&gt; retainedProbe =</span>
+<span class="nc bnc" id="L1207" title="All 2 branches missed.">                        dispatchPause.probe().filter(probe -&gt; !probe.matches(workpadTarget, workerIdentity));</span>
+                Instant extendedUntil =
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">                        reportedReset.isAfter(dispatchPause.until()) ? reportedReset : dispatchPause.until();</span>
+<span class="nc" id="L1210">                dispatchPause = new DispatchPause(</span>
+<span class="nc" id="L1211">                        dispatchPause.command(),</span>
+<span class="nc" id="L1212">                        dispatchPause.generation(),</span>
+<span class="nc" id="L1213">                        dispatchPause.detectedAt(),</span>
+                        extendedUntil,
+                        retainedProbe);
+            }
+<span class="nc" id="L1217">            pause = dispatchPause;</span>
+<span class="nc" id="L1218">            scheduleDispatchPauseDeadline(pause);</span>
+<span class="nc bnc" id="L1219" title="All 2 branches missed.">            for (RetryEntry retry : List.copyOf(retryAttempts.values())) {</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">                Instant deferredUntil = retry.dueAt().isAfter(pause.until()) ? retry.dueAt() : pause.until();</span>
+<span class="nc" id="L1221">                rescheduleRetryEntry(retry, deferredUntil);</span>
+<span class="nc" id="L1222">            }</span>
+<span class="nc" id="L1223">            workpadsToUpdate = Map.copyOf(usageWorkpadMessages);</span>
+<span class="nc" id="L1224">        }</span>
+<span class="nc" id="L1225">        workpadsToUpdate.forEach((target, state) -&gt; updateUsageWorkpad(</span>
+<span class="nc" id="L1226">                state.ownerConfig(), target.cardId(), CodexUsageWorkpadSection.paused(state.message(), pause.until())));</span>
+<span class="nc" id="L1227">        LOG.infof(</span>
+                &quot;codex_dispatch_pause=%s outcome=active detected_at=%s until=%s&quot;,
+<span class="nc" id="L1229">                CODEX_USAGE_LIMIT_PAUSE, pause.detectedAt(), pause.until());</span>
+<span class="nc" id="L1230">        return pause;</span>
+    }
+
+    private static String usageLimitMessage(String reason) {
+<span class="nc" id="L1234">        int separator = reason.indexOf(&quot;: &quot;);</span>
+<span class="nc bnc" id="L1235" title="All 2 branches missed.">        return separator &lt; 0 ? reason : reason.substring(separator + 2);</span>
+    }
+
+    private Duration usageProbeFallbackDelay() {
+<span class="nc" id="L1239">        return usageProbeFallbackDelay(config);</span>
+    }
+
+    private static Duration usageProbeFallbackDelay(EffectiveConfig fallbackConfig) {
+<span class="nc" id="L1243">        Duration configured = fallbackConfig.agent().maxRetryBackoff();</span>
+<span class="nc bnc" id="L1244" title="All 4 branches missed.">        return configured.isZero() || configured.isNegative() ? CONTINUATION_DELAY : configured;</span>
+    }
+
+    private synchronized void bindUsageProbe(String cardId, String workerIdentity, EffectiveConfig launchConfig) {
+<span class="nc bnc" id="L1248" title="All 2 branches missed.">        if (dispatchPause == null</span>
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">                || !Objects.equals(dispatchPause.command(), launchConfig.codex().command())) {</span>
+<span class="nc" id="L1250">            return;</span>
+        }
+<span class="nc" id="L1252">        Optional&lt;UsageProbe&gt; probe = dispatchPause.probe();</span>
+<span class="nc bnc" id="L1253" title="All 2 branches missed.">        if (probe.isEmpty()) {</span>
+<span class="nc" id="L1254">            return;</span>
+        }
+<span class="nc" id="L1256">        UsageProbe launching = probe.orElseThrow();</span>
+<span class="nc" id="L1257">        UsageWorkpadTarget target = usageWorkpadTarget(launchConfig, cardId);</span>
+<span class="nc bnc" id="L1258" title="All 4 branches missed.">        if (launching.target().equals(target) &amp;&amp; launching.workerIdentity().isEmpty()) {</span>
+<span class="nc" id="L1259">            dispatchPause = dispatchPause.probing(target, workerIdentity);</span>
+        }
+<span class="nc" id="L1261">    }</span>
+
+    private synchronized boolean isUsageProbeCard(TrackerTarget trackerTarget, String cardId) {
+<span class="nc" id="L1264">        var target = new UsageWorkpadTarget(trackerTarget, cardId);</span>
+<span class="nc bnc" id="L1265" title="All 2 branches missed.">        return dispatchPause != null</span>
+                &amp;&amp; dispatchPause
+<span class="nc" id="L1267">                        .probe()</span>
+<span class="nc" id="L1268">                        .map(UsageProbe::target)</span>
+<span class="nc" id="L1269">                        .map(target::equals)</span>
+<span class="nc bnc" id="L1270" title="All 2 branches missed.">                        .orElse(false);</span>
+    }
+
+    private synchronized boolean isBoundUsageProbe(TrackerTarget trackerTarget, String cardId, String workerIdentity) {
+<span class="nc" id="L1274">        var target = new UsageWorkpadTarget(trackerTarget, cardId);</span>
+<span class="nc bnc" id="L1275" title="All 2 branches missed.">        return dispatchPause != null</span>
+                &amp;&amp; dispatchPause
+<span class="nc" id="L1277">                        .probe()</span>
+<span class="nc" id="L1278">                        .filter(probe -&gt; probe.matches(target, workerIdentity))</span>
+<span class="nc bnc" id="L1279" title="All 2 branches missed.">                        .isPresent();</span>
+    }
+
+    private synchronized String usageWorkpadMessage(UsageWorkpadTarget target) {
+<span class="nc" id="L1283">        UsageWorkpadState state = usageWorkpadMessages.get(target);</span>
+<span class="nc bnc" id="L1284" title="All 2 branches missed.">        return state == null ? &quot;Codex usage is temporarily unavailable.&quot; : state.message();</span>
+    }
+
+    private boolean updateUsageWorkpad(EffectiveConfig ownerConfig, String cardId, String section) {
+<span class="nc" id="L1288">        boolean updated = usageWorkpads</span>
+<span class="nc" id="L1289">                .map(handler -&gt; handler.updateCodexUsageSection(ownerConfig, cardId, section))</span>
+<span class="nc" id="L1290">                .orElse(true);</span>
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">        if (!updated) {</span>
+<span class="nc" id="L1292">            LOG.warnf(&quot;card_id=%s codex_usage_workpad=failed&quot;, cardId);</span>
+        }
+<span class="nc" id="L1294">        return updated;</span>
+    }
+
+    private synchronized void queueUsageWorkpadCleanup(String cardId) {
+<span class="nc" id="L1298">        queueUsageWorkpadCleanup(cardId, config);</span>
+<span class="nc" id="L1299">    }</span>
+
+    private synchronized void queueUsageWorkpadCleanup(String cardId, EffectiveConfig ownerConfig) {
+<span class="nc" id="L1302">        queueUsageWorkpadCleanup(usageWorkpadTarget(ownerConfig, cardId), ownerConfig);</span>
+<span class="nc" id="L1303">    }</span>
+
+    private synchronized void queueUsageWorkpadCleanup(UsageWorkpadTarget target, EffectiveConfig ownerConfig) {
+<span class="nc" id="L1306">        Instant now = clock.instant();</span>
+<span class="nc" id="L1307">        pendingUsageWorkpadCleanup.compute(</span>
+                target,
+<span class="nc bnc" id="L1309" title="All 4 branches missed.">                (ignored, existing) -&gt; existing == null || !existing.expiresAt().isAfter(now)</span>
+<span class="nc" id="L1310">                        ? new UsageWorkpadCleanup(ownerConfig, now.plus(USAGE_WORKPAD_CLEANUP_TTL), now)</span>
+<span class="nc" id="L1311">                        : existing);</span>
+<span class="nc bnc" id="L1312" title="All 2 branches missed.">        while (pendingUsageWorkpadCleanup.size() &gt; USAGE_WORKPAD_CLEANUP_LIMIT) {</span>
+<span class="nc" id="L1313">            UsageWorkpadTarget oldestTarget =</span>
+<span class="nc" id="L1314">                    pendingUsageWorkpadCleanup.keySet().iterator().next();</span>
+<span class="nc" id="L1315">            pendingUsageWorkpadCleanup.remove(oldestTarget);</span>
+<span class="nc" id="L1316">            LOG.warnf(&quot;card_id=%s codex_usage_workpad_cleanup=evicted&quot;, oldestTarget.cardId());</span>
+<span class="nc" id="L1317">        }</span>
+<span class="nc" id="L1318">    }</span>
+
+    private static UsageWorkpadTarget usageWorkpadTarget(EffectiveConfig ownerConfig, String cardId) {
+<span class="nc" id="L1321">        return new UsageWorkpadTarget(TrackerTarget.from(ownerConfig), cardId);</span>
+    }
+
+    private void retryPendingUsageWorkpadCleanup(boolean force) {
+<span class="nc" id="L1325">        Instant now = clock.instant();</span>
+        List&lt;PendingUsageWorkpadCleanup&gt; pending;
+<span class="nc" id="L1327">        synchronized (this) {</span>
+<span class="nc" id="L1328">            pendingUsageWorkpadCleanup</span>
+<span class="nc" id="L1329">                    .entrySet()</span>
+<span class="nc bnc" id="L1330" title="All 2 branches missed.">                    .removeIf(entry -&gt; !entry.getValue().expiresAt().isAfter(now));</span>
+<span class="nc" id="L1331">            pending = pendingUsageWorkpadCleanup.entrySet().stream()</span>
+<span class="nc bnc" id="L1332" title="All 4 branches missed.">                    .filter(entry -&gt; force || !entry.getValue().nextAttemptAt().isAfter(now))</span>
+<span class="nc" id="L1333">                    .map(entry -&gt; new PendingUsageWorkpadCleanup(entry.getKey(), entry.getValue()))</span>
+<span class="nc" id="L1334">                    .toList();</span>
+<span class="nc" id="L1335">        }</span>
+<span class="nc" id="L1336">        pending.forEach(pendingCleanup -&gt; {</span>
+<span class="nc" id="L1337">            UsageWorkpadTarget target = pendingCleanup.target();</span>
+<span class="nc" id="L1338">            UsageWorkpadCleanup attempted = pendingCleanup.cleanup();</span>
+<span class="nc" id="L1339">            boolean updated = updateUsageWorkpad(attempted.ownerConfig(), target.cardId(), null);</span>
+<span class="nc" id="L1340">            synchronized (this) {</span>
+<span class="nc bnc" id="L1341" title="All 2 branches missed.">                if (updated) {</span>
+<span class="nc" id="L1342">                    pendingUsageWorkpadCleanup.remove(target);</span>
+                } else {
+<span class="nc" id="L1344">                    pendingUsageWorkpadCleanup.put(</span>
+                            target,
+                            new UsageWorkpadCleanup(
+<span class="nc" id="L1347">                                    attempted.ownerConfig(),</span>
+<span class="nc" id="L1348">                                    attempted.expiresAt(),</span>
+<span class="nc" id="L1349">                                    now.plus(USAGE_WORKPAD_CLEANUP_RETRY_DELAY)));</span>
+                }
+<span class="nc" id="L1351">            }</span>
+<span class="nc" id="L1352">        });</span>
+<span class="nc" id="L1353">    }</span>
+
+    private synchronized void scheduleDispatchPauseDeadline(DispatchPause pause) {
+<span class="nc bnc" id="L1356" title="All 2 branches missed.">        if (dispatchPauseTimer != null) {</span>
+<span class="nc" id="L1357">            dispatchPauseTimer.cancel(false);</span>
+        }
+<span class="nc" id="L1359">        long delayMillis = delayMillisUntil(pause.until());</span>
+<span class="nc" id="L1360">        dispatchPauseTimer = scheduler.schedule(</span>
+<span class="nc" id="L1361">                () -&gt; onDispatchPauseDeadline(pause.command(), pause.generation(), pause.until()),</span>
+                delayMillis,
+                TimeUnit.MILLISECONDS);
+<span class="nc" id="L1364">        dispatchPauseScheduleHookForTests.run();</span>
+<span class="nc" id="L1365">    }</span>
+
+    private void onDispatchPauseDeadline(String expectedCommand, long expectedGeneration, Instant expectedUntil) {
+<span class="nc" id="L1368">        operationLock.lock();</span>
+        try {
+<span class="nc bnc" id="L1370" title="All 2 branches missed.">            if (!isStarted()) {</span>
+<span class="nc" id="L1371">                return;</span>
+            }
+<span class="nc" id="L1373">            synchronized (this) {</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">                if (dispatchPause == null</span>
+<span class="nc bnc" id="L1375" title="All 2 branches missed.">                        || !Objects.equals(dispatchPause.command(), expectedCommand)</span>
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">                        || dispatchPause.generation() != expectedGeneration</span>
+<span class="nc bnc" id="L1377" title="All 2 branches missed.">                        || !dispatchPause.until().equals(expectedUntil)) {</span>
+<span class="nc" id="L1378">                    return;</span>
+                }
+<span class="nc bnc" id="L1380" title="All 2 branches missed.">                if (clock.instant().isBefore(expectedUntil)) {</span>
+<span class="nc" id="L1381">                    scheduleDispatchPauseDeadline(dispatchPause);</span>
+<span class="nc" id="L1382">                    return;</span>
+                }
+<span class="nc bnc" id="L1384" title="All 2 branches missed.">                if (dispatchPause.probe().isPresent()) {</span>
+<span class="nc" id="L1385">                    return;</span>
+                }
+<span class="nc" id="L1387">            }</span>
+<span class="nc" id="L1388">            selectUsageProbeAtDeadline();</span>
+        } finally {
+<span class="nc" id="L1390">            operationLock.unlock();</span>
+        }
+<span class="nc" id="L1392">    }</span>
+
+    private void selectUsageProbeAtDeadline() {
+        Optional&lt;RetryEntry&gt; selectedRetry;
+<span class="nc" id="L1396">        synchronized (this) {</span>
+            // Retry entries retain insertion order. Prefer the oldest due card that observed the
+            // usage limit, then the oldest due deferred retry, before probing a new candidate.
+<span class="nc" id="L1399">            Instant now = clock.instant();</span>
+<span class="nc" id="L1400">            selectedRetry = retryAttempts.values().stream()</span>
+<span class="nc" id="L1401">                    .filter(retry -&gt; Objects.equals(retry.codexCommand(), dispatchPause.command()))</span>
+<span class="nc" id="L1402">                    .filter(retry -&gt; retry.trackerTarget().equals(TrackerTarget.from(config)))</span>
+<span class="nc" id="L1403">                    .filter(RetryEntry::codexUsageLimit)</span>
+<span class="nc bnc" id="L1404" title="All 2 branches missed.">                    .filter(retry -&gt; !retry.dueAt().isAfter(now))</span>
+<span class="nc" id="L1405">                    .findFirst()</span>
+<span class="nc" id="L1406">                    .or(() -&gt; retryAttempts.values().stream()</span>
+<span class="nc" id="L1407">                            .filter(retry -&gt; Objects.equals(retry.codexCommand(), dispatchPause.command()))</span>
+<span class="nc" id="L1408">                            .filter(retry -&gt; retry.trackerTarget().equals(TrackerTarget.from(config)))</span>
+<span class="nc bnc" id="L1409" title="All 2 branches missed.">                            .filter(retry -&gt; !retry.dueAt().isAfter(now))</span>
+<span class="nc" id="L1410">                            .findFirst());</span>
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">            selectedRetry.filter(retry -&gt; !retry.codexUsageLimit()).ifPresent(this::promoteToUsageProbeRetry);</span>
+<span class="nc" id="L1412">        }</span>
+<span class="nc" id="L1413">        selectedRetry.ifPresentOrElse(</span>
+<span class="nc" id="L1414">                retry -&gt; handleRetryTimer(runtimeKey(retry), retry.generation()),</span>
+                this::probeOneCandidateAtUsageDeadline);
+<span class="nc" id="L1416">    }</span>
+
+    private synchronized void promoteToUsageProbeRetry(RetryEntry retry) {
+<span class="nc" id="L1419">        RuntimeCardKey retryKey = runtimeKey(retry);</span>
+<span class="nc" id="L1420">        RetryEntry current = retryAttempts.get(retryKey);</span>
+<span class="nc bnc" id="L1421" title="All 2 branches missed.">        if (retry.equals(current)) {</span>
+<span class="nc" id="L1422">            retryAttempts.put(</span>
+                    retryKey,
+                    new RetryEntry(
+<span class="nc" id="L1425">                            retry.cardId(),</span>
+<span class="nc" id="L1426">                            retry.identifier(),</span>
+<span class="nc" id="L1427">                            retry.cardUrl(),</span>
+<span class="nc" id="L1428">                            retry.attempt(),</span>
+<span class="nc" id="L1429">                            retry.dueAt(),</span>
+<span class="nc" id="L1430">                            retry.naturalDueAt(),</span>
+<span class="nc" id="L1431">                            retry.codexCommand(),</span>
+<span class="nc" id="L1432">                            retry.trackerTarget(),</span>
+<span class="nc" id="L1433">                            retry.generation(),</span>
+<span class="nc" id="L1434">                            retry.timer(),</span>
+<span class="nc" id="L1435">                            retry.error(),</span>
+                            true));
+        }
+<span class="nc" id="L1438">    }</span>
+
+    private void probeOneCandidateAtUsageDeadline() {
+        Optional&lt;Card&gt; candidate;
+        try {
+<span class="nc" id="L1443">            List&lt;Card&gt; fetched = tracker.fetchCandidateCards(config);</span>
+<span class="nc" id="L1444">            candidate = fetched.stream()</span>
+<span class="nc" id="L1445">                    .sorted(TrelloClient.dispatchComparator(config, prerequisitePriorityOverrides(fetched)))</span>
+<span class="nc" id="L1446">                    .filter(card -&gt; shouldDispatch(card, false))</span>
+<span class="nc" id="L1447">                    .findFirst();</span>
+<span class="nc" id="L1448">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1449">            LOG.warnf(&quot;codex_dispatch_pause=%s probe_candidate=failed&quot;, CODEX_USAGE_LIMIT_PAUSE);</span>
+<span class="nc" id="L1450">            rearmUsagePauseWithoutProbe();</span>
+<span class="nc" id="L1451">            return;</span>
+<span class="nc" id="L1452">        }</span>
+<span class="nc bnc" id="L1453" title="All 2 branches missed.">        if (candidate.isEmpty()) {</span>
+<span class="nc" id="L1454">            rearmUsagePauseWithoutProbe();</span>
+<span class="nc" id="L1455">            return;</span>
+        }
+<span class="nc" id="L1457">        Card probeCard = candidate.orElseThrow();</span>
+<span class="nc" id="L1458">        UsageWorkpadTarget workpadTarget = usageWorkpadTarget(config, probeCard.id());</span>
+<span class="nc" id="L1459">        synchronized (this) {</span>
+<span class="nc bnc" id="L1460" title="All 4 branches missed.">            if (dispatchPause == null || dispatchPause.probe().isPresent()) {</span>
+<span class="nc" id="L1461">                return;</span>
+            }
+<span class="nc" id="L1463">            usageWorkpadMessages.putIfAbsent(</span>
+                    workpadTarget, new UsageWorkpadState(config, &quot;Codex usage is temporarily unavailable.&quot;));
+<span class="nc" id="L1465">            pendingUsageWorkpadCleanup.remove(workpadTarget);</span>
+<span class="nc" id="L1466">            dispatchPause = dispatchPause.launching(workpadTarget);</span>
+<span class="nc" id="L1467">        }</span>
+<span class="nc" id="L1468">        updateUsageWorkpad(</span>
+<span class="nc" id="L1469">                config, probeCard.id(), CodexUsageWorkpadSection.rechecking(usageWorkpadMessage(workpadTarget)));</span>
+<span class="nc" id="L1470">        boolean workerStarted = false;</span>
+        try {
+<span class="nc" id="L1472">            workerStarted = refreshForDispatch(probeCard)</span>
+<span class="nc" id="L1473">                    .flatMap(refreshed -&gt; dispatch(refreshed, null))</span>
+<span class="nc" id="L1474">                    .isPresent();</span>
+        } finally {
+<span class="nc bnc" id="L1476" title="All 2 branches missed.">            if (!workerStarted) {</span>
+<span class="nc" id="L1477">                rearmUsageProbeWithoutResult(</span>
+                        workpadTarget,
+                        1,
+<span class="nc" id="L1480">                        probeCard.identifier(),</span>
+<span class="nc" id="L1481">                        probeCard.cardUrl(),</span>
+                        &quot;usage availability candidate probe did not start&quot;);
+            }
+        }
+<span class="nc" id="L1485">    }</span>
+
+    private void rearmUsagePauseWithoutProbe() {
+        DispatchPause pause;
+        Map&lt;UsageWorkpadTarget, UsageWorkpadState&gt; workpadsToUpdate;
+<span class="nc" id="L1490">        synchronized (this) {</span>
+<span class="nc bnc" id="L1491" title="All 4 branches missed.">            if (dispatchPause == null || dispatchPause.probe().isPresent()) {</span>
+<span class="nc" id="L1492">                return;</span>
+            }
+<span class="nc" id="L1494">            Instant now = clock.instant();</span>
+<span class="nc" id="L1495">            Instant fallbackDeadline = now.plus(usageProbeFallbackDelay());</span>
+<span class="nc" id="L1496">            Instant nextDeadline = retryAttempts.values().stream()</span>
+<span class="nc" id="L1497">                    .map(RetryEntry::dueAt)</span>
+<span class="nc bnc" id="L1498" title="All 4 branches missed.">                    .filter(dueAt -&gt; dueAt.isAfter(now) &amp;&amp; dueAt.isBefore(fallbackDeadline))</span>
+<span class="nc" id="L1499">                    .min(Instant::compareTo)</span>
+<span class="nc" id="L1500">                    .orElse(fallbackDeadline);</span>
+<span class="nc" id="L1501">            dispatchPause = new DispatchPause(</span>
+<span class="nc" id="L1502">                    dispatchPause.command(),</span>
+<span class="nc" id="L1503">                    dispatchPause.generation(),</span>
+<span class="nc" id="L1504">                    dispatchPause.detectedAt(),</span>
+                    nextDeadline,
+<span class="nc" id="L1506">                    Optional.empty());</span>
+<span class="nc" id="L1507">            pause = dispatchPause;</span>
+<span class="nc" id="L1508">            scheduleDispatchPauseDeadline(pause);</span>
+<span class="nc bnc" id="L1509" title="All 2 branches missed.">            for (RetryEntry retry : List.copyOf(retryAttempts.values())) {</span>
+<span class="nc bnc" id="L1510" title="All 2 branches missed.">                Instant deferredUntil = retry.dueAt().isAfter(nextDeadline) ? retry.dueAt() : nextDeadline;</span>
+<span class="nc" id="L1511">                rescheduleRetryEntry(retry, deferredUntil);</span>
+<span class="nc" id="L1512">            }</span>
+<span class="nc" id="L1513">            workpadsToUpdate = Map.copyOf(usageWorkpadMessages);</span>
+<span class="nc" id="L1514">        }</span>
+<span class="nc" id="L1515">        workpadsToUpdate.forEach((target, state) -&gt; updateUsageWorkpad(</span>
+<span class="nc" id="L1516">                state.ownerConfig(), target.cardId(), CodexUsageWorkpadSection.paused(state.message(), pause.until())));</span>
+<span class="nc" id="L1517">        LOG.infof(</span>
+                &quot;codex_dispatch_pause=%s outcome=rearmed_without_candidate detected_at=%s until=%s&quot;,
+<span class="nc" id="L1519">                CODEX_USAGE_LIMIT_PAUSE, pause.detectedAt(), pause.until());</span>
+<span class="nc" id="L1520">    }</span>
+
+    private void clearUsagePauseAfterProbeResult(TrackerTarget trackerTarget, String cardId, String workerIdentity) {
+<span class="nc bnc" id="L1523" title="All 2 branches missed.">        if (!isBoundUsageProbe(trackerTarget, cardId, workerIdentity)) {</span>
+<span class="nc" id="L1524">            return;</span>
+        }
+<span class="nc" id="L1526">        clearUsagePause();</span>
+<span class="nc" id="L1527">    }</span>
+
+    private void clearUsagePause() {
+        Map&lt;UsageWorkpadTarget, UsageWorkpadState&gt; workpadsToClear;
+<span class="nc" id="L1531">        synchronized (this) {</span>
+<span class="nc bnc" id="L1532" title="All 2 branches missed.">            if (dispatchPause == null) {</span>
+<span class="nc" id="L1533">                return;</span>
+            }
+<span class="nc" id="L1535">            dispatchPause = null;</span>
+<span class="nc bnc" id="L1536" title="All 2 branches missed.">            if (dispatchPauseTimer != null) {</span>
+<span class="nc" id="L1537">                dispatchPauseTimer.cancel(false);</span>
+<span class="nc" id="L1538">                dispatchPauseTimer = null;</span>
+            }
+<span class="nc" id="L1540">            workpadsToClear = Map.copyOf(usageWorkpadMessages);</span>
+<span class="nc bnc" id="L1541" title="All 2 branches missed.">            for (Map.Entry&lt;UsageWorkpadTarget, UsageWorkpadState&gt; entry : workpadsToClear.entrySet()) {</span>
+<span class="nc" id="L1542">                queueUsageWorkpadCleanup(entry.getKey(), entry.getValue().ownerConfig());</span>
+<span class="nc" id="L1543">            }</span>
+<span class="nc" id="L1544">            usageWorkpadMessages.clear();</span>
+<span class="nc" id="L1545">            Instant now = clock.instant();</span>
+<span class="nc bnc" id="L1546" title="All 2 branches missed.">            for (RetryEntry retry : List.copyOf(retryAttempts.values())) {</span>
+<span class="nc bnc" id="L1547" title="All 2 branches missed.">                Instant dueAt = retry.naturalDueAt().isAfter(now) ? retry.naturalDueAt() : now;</span>
+<span class="nc" id="L1548">                rescheduleRetryEntry(retry, dueAt);</span>
+<span class="nc" id="L1549">            }</span>
+<span class="nc bnc" id="L1550" title="All 2 branches missed.">            if (started) {</span>
+<span class="nc" id="L1551">                scheduleTick(Duration.ZERO);</span>
+            }
+<span class="nc" id="L1553">        }</span>
+<span class="nc" id="L1554">        retryPendingUsageWorkpadCleanup(false);</span>
+<span class="nc" id="L1555">        LOG.infof(&quot;codex_dispatch_pause=%s outcome=cleared&quot;, CODEX_USAGE_LIMIT_PAUSE);</span>
+<span class="nc" id="L1556">    }</span>
+
+    private void rearmUsageProbeWithoutResult(
+            UsageWorkpadTarget workpadTarget, int attempt, String identifier, String cardUrl, String error) {
+        DispatchPause pause;
+        RetryEntry queued;
+        Map&lt;UsageWorkpadTarget, UsageWorkpadState&gt; workpadsToUpdate;
+<span class="nc" id="L1563">        synchronized (this) {</span>
+<span class="nc bnc" id="L1564" title="All 2 branches missed.">            if (!isUsageProbeCard(workpadTarget.trackerTarget(), workpadTarget.cardId())) {</span>
+<span class="nc" id="L1565">                return;</span>
+            }
+<span class="nc" id="L1567">            queued = retryAttempts.remove(runtimeKey(workpadTarget.trackerTarget(), workpadTarget.cardId()));</span>
+<span class="nc bnc" id="L1568" title="All 2 branches missed.">            if (queued != null) {</span>
+<span class="nc" id="L1569">                queued.timer().cancel(false);</span>
+            }
+<span class="nc" id="L1571">            Instant fallbackDeadline = clock.instant().plus(usageProbeFallbackDelay());</span>
+            Instant nextDeadline =
+<span class="nc bnc" id="L1573" title="All 2 branches missed.">                    fallbackDeadline.isAfter(dispatchPause.until()) ? fallbackDeadline : dispatchPause.until();</span>
+<span class="nc" id="L1574">            dispatchPause = new DispatchPause(</span>
+<span class="nc" id="L1575">                    dispatchPause.command(),</span>
+<span class="nc" id="L1576">                    dispatchPause.generation(),</span>
+<span class="nc" id="L1577">                    dispatchPause.detectedAt(),</span>
+                    nextDeadline,
+<span class="nc" id="L1579">                    Optional.empty());</span>
+<span class="nc" id="L1580">            pause = dispatchPause;</span>
+<span class="nc" id="L1581">            scheduleDispatchPauseDeadline(pause);</span>
+<span class="nc bnc" id="L1582" title="All 2 branches missed.">            for (RetryEntry retry : List.copyOf(retryAttempts.values())) {</span>
+<span class="nc bnc" id="L1583" title="All 2 branches missed.">                Instant deferredUntil = retry.dueAt().isAfter(nextDeadline) ? retry.dueAt() : nextDeadline;</span>
+<span class="nc" id="L1584">                rescheduleRetryEntry(retry, deferredUntil);</span>
+<span class="nc" id="L1585">            }</span>
+<span class="nc" id="L1586">            workpadsToUpdate = Map.copyOf(usageWorkpadMessages);</span>
+<span class="nc" id="L1587">        }</span>
+<span class="nc bnc" id="L1588" title="All 2 branches missed.">        int retryAttempt = queued == null ? attempt : queued.attempt();</span>
+<span class="nc bnc" id="L1589" title="All 2 branches missed.">        String retryIdentifier = queued == null ? identifier : queued.identifier();</span>
+<span class="nc bnc" id="L1590" title="All 2 branches missed.">        String retryCardUrl = queued == null ? cardUrl : queued.cardUrl();</span>
+<span class="nc bnc" id="L1591" title="All 2 branches missed.">        String retryError = queued == null ? error : queued.error();</span>
+<span class="nc" id="L1592">        scheduleRetryAt(</span>
+<span class="nc" id="L1593">                workpadTarget.cardId(),</span>
+                retryAttempt,
+                retryIdentifier,
+                retryCardUrl,
+                retryError,
+<span class="nc" id="L1598">                pause.until(),</span>
+                true,
+<span class="nc" id="L1600">                pause.command(),</span>
+<span class="nc" id="L1601">                workpadTarget.trackerTarget());</span>
+<span class="nc" id="L1602">        workpadsToUpdate.forEach((target, state) -&gt; updateUsageWorkpad(</span>
+<span class="nc" id="L1603">                state.ownerConfig(), target.cardId(), CodexUsageWorkpadSection.paused(state.message(), pause.until())));</span>
+<span class="nc" id="L1604">        LOG.infof(</span>
+                &quot;codex_dispatch_pause=%s outcome=rearmed detected_at=%s until=%s&quot;,
+<span class="nc" id="L1606">                CODEX_USAGE_LIMIT_PAUSE, pause.detectedAt(), pause.until());</span>
+<span class="nc" id="L1607">    }</span>
+
+    private void scheduleRetry(
+            String cardId, int attempt, String identifier, String cardUrl, String error, boolean continuation) {
+<span class="nc bnc" id="L1611" title="All 2 branches missed.">        Duration delay = continuation ? CONTINUATION_DELAY : backoff(attempt);</span>
+<span class="nc" id="L1612">        scheduleRetryAt(</span>
+                cardId,
+                attempt,
+                identifier,
+                cardUrl,
+                error,
+<span class="nc" id="L1618">                clock.instant().plus(delay),</span>
+                false,
+<span class="nc" id="L1620">                config.codex().command(),</span>
+<span class="nc" id="L1621">                TrackerTarget.from(config));</span>
+<span class="nc" id="L1622">    }</span>
+
+    private void scheduleUsageLimitRetry(
+            String cardId, int attempt, String identifier, String cardUrl, String error, DispatchPause pause) {
+<span class="nc" id="L1626">        scheduleRetryAt(</span>
+                cardId,
+                attempt,
+                identifier,
+                cardUrl,
+                error,
+<span class="nc" id="L1632">                pause.until(),</span>
+                true,
+<span class="nc" id="L1634">                pause.command(),</span>
+<span class="nc" id="L1635">                TrackerTarget.from(config));</span>
+<span class="nc" id="L1636">    }</span>
+
+    private void scheduleRetryAt(
+            String cardId,
+            int attempt,
+            String identifier,
+            String cardUrl,
+            String error,
+            Instant naturalDueAt,
+            boolean codexUsageLimit,
+            String codexCommand,
+            TrackerTarget trackerTarget) {
+        Instant scheduledAt;
+        long delayMillis;
+<span class="nc" id="L1650">        RuntimeCardKey retryKey = runtimeKey(trackerTarget, cardId);</span>
+<span class="nc" id="L1651">        synchronized (this) {</span>
+            scheduledAt = dispatchPause != null
+<span class="nc bnc" id="L1653" title="All 2 branches missed.">                            &amp;&amp; Objects.equals(dispatchPause.command(), codexCommand)</span>
+<span class="nc bnc" id="L1654" title="All 4 branches missed.">                            &amp;&amp; dispatchPause.until().isAfter(naturalDueAt)</span>
+<span class="nc" id="L1655">                    ? dispatchPause.until()</span>
+<span class="nc" id="L1656">                    : naturalDueAt;</span>
+<span class="nc" id="L1657">            delayMillis = delayMillisUntil(scheduledAt);</span>
+<span class="nc" id="L1658">            RetryEntry existing = retryAttempts.remove(retryKey);</span>
+<span class="nc bnc" id="L1659" title="All 2 branches missed.">            if (existing != null) {</span>
+<span class="nc" id="L1660">                existing.timer().cancel(false);</span>
+            }
+<span class="nc" id="L1662">            retryGeneration++;</span>
+<span class="nc" id="L1663">            long generation = retryGeneration;</span>
+<span class="nc" id="L1664">            ScheduledFuture&lt;?&gt; timer =</span>
+<span class="nc" id="L1665">                    scheduler.schedule(() -&gt; onRetryTimer(retryKey, generation), delayMillis, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L1666">            retryAttempts.put(</span>
+                    retryKey,
+                    new RetryEntry(
+                            cardId,
+                            identifier,
+                            cardUrl,
+                            attempt,
+                            scheduledAt,
+                            naturalDueAt,
+                            codexCommand,
+                            trackerTarget,
+                            generation,
+                            timer,
+                            error,
+                            codexUsageLimit));
+<span class="nc" id="L1681">            claimed.add(retryKey);</span>
+<span class="nc" id="L1682">        }</span>
+<span class="nc" id="L1683">        LOG.infof(</span>
+                &quot;card_id=%s card_identifier=%s outcome=retrying attempt=%d delay_ms=%d&quot;,
+<span class="nc" id="L1685">                cardId, identifier, attempt, delayMillis);</span>
+<span class="nc" id="L1686">    }</span>
+
+    private void onRetryTimer(RuntimeCardKey cardKey, long generation) {
+<span class="nc" id="L1689">        retryTimerWaitingHookForTests.run();</span>
+<span class="nc" id="L1690">        operationLock.lock();</span>
+        try {
+<span class="nc bnc" id="L1692" title="All 2 branches missed.">            if (!isStarted()) {</span>
+<span class="nc" id="L1693">                return;</span>
+            }
+<span class="nc" id="L1695">            handleRetryTimer(cardKey, generation);</span>
+        } finally {
+<span class="nc" id="L1697">            operationLock.unlock();</span>
+        }
+<span class="nc" id="L1699">    }</span>
+
+    private void handleRetryTimer(RuntimeCardKey cardKey, long generation) {
+        RetryEntry pendingRetry;
+<span class="nc" id="L1703">        synchronized (this) {</span>
+<span class="nc" id="L1704">            pendingRetry = retryAttempts.get(cardKey);</span>
+<span class="nc" id="L1705">        }</span>
+<span class="nc bnc" id="L1706" title="All 2 branches missed.">        if (pendingRetry == null</span>
+<span class="nc bnc" id="L1707" title="All 2 branches missed.">                || pendingRetry.generation() != generation</span>
+<span class="nc bnc" id="L1708" title="All 2 branches missed.">                || deferRetryForDispatchPause(pendingRetry)) {</span>
+<span class="nc" id="L1709">            return;</span>
+        }
+        RetryEntry retry;
+<span class="nc" id="L1712">        synchronized (this) {</span>
+<span class="nc" id="L1713">            RetryEntry current = retryAttempts.get(cardKey);</span>
+<span class="nc bnc" id="L1714" title="All 4 branches missed.">            retry = current != null &amp;&amp; current.generation() == generation ? retryAttempts.remove(cardKey) : null;</span>
+<span class="nc" id="L1715">        }</span>
+<span class="nc bnc" id="L1716" title="All 2 branches missed.">        if (retry == null) {</span>
+<span class="nc" id="L1717">            return;</span>
+        }
+<span class="nc" id="L1719">        retry.timer().cancel(false);</span>
+<span class="nc" id="L1720">        String cardId = cardKey.cardId();</span>
+<span class="nc" id="L1721">        var workpadTarget = new UsageWorkpadTarget(retry.trackerTarget(), cardId);</span>
+<span class="nc" id="L1722">        boolean usageRecheck = isUsageProbeCard(retry.trackerTarget(), cardId);</span>
+<span class="nc" id="L1723">        boolean recheckWorkerStarted = false;</span>
+<span class="nc" id="L1724">        boolean retireUsageProbe = false;</span>
+        try {
+            Map&lt;String, CardLookupResult&gt; refreshed;
+            try {
+<span class="nc bnc" id="L1728" title="All 2 branches missed.">                refreshed = usageRecheck</span>
+<span class="nc" id="L1729">                        ? tracker.fetchCardStatesForPromptByIds(config, List.of(cardId))</span>
+<span class="nc" id="L1730">                        : tracker.fetchCardStatesByIds(config, List.of(cardId));</span>
+<span class="nc" id="L1731">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L1732">                scheduleRetry(</span>
+                        cardId,
+<span class="nc" id="L1734">                        retry.attempt() + 1,</span>
+<span class="nc" id="L1735">                        retry.identifier(),</span>
+<span class="nc" id="L1736">                        retry.cardUrl(),</span>
+                        &quot;retry card refresh failed&quot;,
+                        false);
+<span class="nc" id="L1739">                return;</span>
+<span class="nc" id="L1740">            }</span>
+<span class="nc" id="L1741">            CardLookupResult result = refreshed.get(cardId);</span>
+<span class="nc bnc" id="L1742" title="All 2 branches missed.">            if (result instanceof CardLookupResult.Missing) {</span>
+<span class="nc" id="L1743">                retireUsageProbe = usageRecheck;</span>
+<span class="nc" id="L1744">                removeClaim(cardKey);</span>
+<span class="nc" id="L1745">                workspaces.removeForIdentifierIfPresent(retry.identifier(), config);</span>
+<span class="nc bnc" id="L1746" title="All 2 branches missed.">            } else if (result instanceof CardLookupResult.Failed) {</span>
+<span class="nc" id="L1747">                scheduleRetry(</span>
+                        cardId,
+<span class="nc" id="L1749">                        retry.attempt() + 1,</span>
+<span class="nc" id="L1750">                        retry.identifier(),</span>
+<span class="nc" id="L1751">                        retry.cardUrl(),</span>
+                        &quot;retry card refresh failed&quot;,
+                        false);
+<span class="nc bnc" id="L1754" title="All 2 branches missed.">            } else if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc" id="L1755">                Card card = found.card();</span>
+<span class="nc bnc" id="L1756" title="All 2 branches missed.">                if (isOutOfBoardScope(card)) {</span>
+<span class="nc" id="L1757">                    retireUsageProbe = usageRecheck;</span>
+<span class="nc" id="L1758">                    removeClaim(cardKey);</span>
+<span class="nc bnc" id="L1759" title="All 2 branches missed.">                } else if (TrelloClient.isTerminal(card, config)) {</span>
+<span class="nc" id="L1760">                    retireUsageProbe = usageRecheck;</span>
+<span class="nc" id="L1761">                    removeClaim(cardKey);</span>
+<span class="nc" id="L1762">                    workspaces.removeForIdentifierIfPresent(card.identifier(), config);</span>
+<span class="nc bnc" id="L1763" title="All 2 branches missed.">                } else if (!TrelloClient.isActive(card, config)) {</span>
+<span class="nc" id="L1764">                    retireUsageProbe = usageRecheck;</span>
+<span class="nc" id="L1765">                    removeClaim(cardKey);</span>
+<span class="nc bnc" id="L1766" title="All 2 branches missed.">                } else if (!shouldDispatchIgnoringSlots(card, true)) {</span>
+<span class="nc" id="L1767">                    retireUsageProbe = usageRecheck;</span>
+<span class="nc" id="L1768">                    releaseFromDispatch(card, &quot;card is active but not currently dispatch-eligible&quot;);</span>
+<span class="nc" id="L1769">                    scheduleRetry(</span>
+                            cardId,
+<span class="nc" id="L1771">                            retry.attempt() + 1,</span>
+<span class="nc" id="L1772">                            card.identifier(),</span>
+<span class="nc" id="L1773">                            card.cardUrl(),</span>
+                            &quot;card is active but not currently dispatch-eligible&quot;,
+                            false);
+<span class="nc bnc" id="L1776" title="All 2 branches missed.">                } else if (availableSlots() == 0) {</span>
+<span class="nc" id="L1777">                    releaseFromDispatch(card, &quot;no available orchestrator slots&quot;);</span>
+<span class="nc" id="L1778">                    scheduleRetry(</span>
+                            cardId,
+<span class="nc" id="L1780">                            retry.attempt() + 1,</span>
+<span class="nc" id="L1781">                            card.identifier(),</span>
+<span class="nc" id="L1782">                            card.cardUrl(),</span>
+                            &quot;no available orchestrator slots&quot;,
+                            false);
+<span class="nc bnc" id="L1785" title="All 2 branches missed.">                } else if (perStateSlots(card) == 0) {</span>
+<span class="nc" id="L1786">                    releaseFromDispatch(card, &quot;no available orchestrator slots for card state&quot;);</span>
+<span class="nc" id="L1787">                    scheduleRetry(</span>
+                            cardId,
+<span class="nc" id="L1789">                            retry.attempt() + 1,</span>
+<span class="nc" id="L1790">                            card.identifier(),</span>
+<span class="nc" id="L1791">                            card.cardUrl(),</span>
+                            &quot;no available orchestrator slots for card state&quot;,
+                            false);
+                } else {
+<span class="nc" id="L1795">                    removeClaim(cardKey);</span>
+<span class="nc" id="L1796">                    recheckWorkerStarted = refreshForDispatch(card)</span>
+<span class="nc" id="L1797">                            .flatMap(promptCard -&gt; dispatch(promptCard, retry.attempt()))</span>
+<span class="nc" id="L1798">                            .isPresent();</span>
+                }
+            }
+        } finally {
+<span class="nc bnc" id="L1802" title="All 4 branches missed.">            if (usageRecheck &amp;&amp; !recheckWorkerStarted) {</span>
+<span class="nc bnc" id="L1803" title="All 2 branches missed.">                if (retireUsageProbe) {</span>
+<span class="nc" id="L1804">                    retireUsageProbeWithoutResult(workpadTarget);</span>
+                } else {
+<span class="nc" id="L1806">                    rearmUsageProbeWithoutResult(</span>
+                            workpadTarget,
+<span class="nc" id="L1808">                            retry.attempt(),</span>
+<span class="nc" id="L1809">                            retry.identifier(),</span>
+<span class="nc" id="L1810">                            retry.cardUrl(),</span>
+                            &quot;usage availability recheck did not start&quot;);
+                }
+            }
+        }
+<span class="nc" id="L1815">    }</span>
+
+    private void retireUsageProbeWithoutResult(UsageWorkpadTarget workpadTarget) {
+        boolean cleanupWorkpad;
+<span class="nc" id="L1819">        synchronized (this) {</span>
+<span class="nc bnc" id="L1820" title="All 2 branches missed.">            if (!isUsageProbeCard(workpadTarget.trackerTarget(), workpadTarget.cardId())) {</span>
+<span class="nc" id="L1821">                return;</span>
+            }
+<span class="nc" id="L1823">            UsageWorkpadState state = usageWorkpadMessages.remove(workpadTarget);</span>
+<span class="nc bnc" id="L1824" title="All 2 branches missed.">            cleanupWorkpad = state != null;</span>
+<span class="nc bnc" id="L1825" title="All 2 branches missed.">            if (cleanupWorkpad) {</span>
+<span class="nc" id="L1826">                queueUsageWorkpadCleanup(workpadTarget, state.ownerConfig());</span>
+            }
+<span class="nc" id="L1828">            Instant transferAt = clock.instant();</span>
+<span class="nc" id="L1829">            dispatchPause = new DispatchPause(</span>
+<span class="nc" id="L1830">                    dispatchPause.command(),</span>
+<span class="nc" id="L1831">                    dispatchPause.generation(),</span>
+<span class="nc" id="L1832">                    dispatchPause.detectedAt(),</span>
+                    transferAt,
+<span class="nc" id="L1834">                    Optional.empty());</span>
+<span class="nc" id="L1835">            scheduleDispatchPauseDeadline(dispatchPause);</span>
+<span class="nc" id="L1836">        }</span>
+<span class="nc bnc" id="L1837" title="All 2 branches missed.">        if (cleanupWorkpad) {</span>
+<span class="nc" id="L1838">            retryPendingUsageWorkpadCleanup(false);</span>
+        }
+<span class="nc" id="L1840">        LOG.infof(&quot;card_id=%s codex_dispatch_pause=%s probe=retired&quot;, workpadTarget.cardId(), CODEX_USAGE_LIMIT_PAUSE);</span>
+<span class="nc" id="L1841">    }</span>
+
+    private boolean deferRetryForDispatchPause(RetryEntry retry) {
+        DispatchPause pause;
+<span class="nc" id="L1845">        boolean beginRecheck = false;</span>
+<span class="nc" id="L1846">        synchronized (this) {</span>
+<span class="nc" id="L1847">            pause = dispatchPause;</span>
+<span class="nc bnc" id="L1848" title="All 2 branches missed.">            if (pause == null) {</span>
+<span class="nc" id="L1849">                return false;</span>
+            }
+<span class="nc bnc" id="L1851" title="All 2 branches missed.">            if (!Objects.equals(pause.command(), retry.codexCommand())) {</span>
+<span class="nc" id="L1852">                return false;</span>
+            }
+<span class="nc bnc" id="L1854" title="All 2 branches missed.">            if (pause.probe().isPresent()) {</span>
+<span class="nc" id="L1855">                return true;</span>
+            }
+<span class="nc" id="L1857">            Instant now = clock.instant();</span>
+<span class="nc bnc" id="L1858" title="All 2 branches missed.">            if (now.isBefore(pause.until())) {</span>
+<span class="nc" id="L1859">                rescheduleRetryEntry(retry, pause.until());</span>
+<span class="nc" id="L1860">                return true;</span>
+            }
+<span class="nc bnc" id="L1862" title="All 2 branches missed.">            if (!retry.codexUsageLimit()) {</span>
+<span class="nc" id="L1863">                return true;</span>
+            }
+<span class="nc" id="L1865">            var workpadTarget = new UsageWorkpadTarget(retry.trackerTarget(), retry.cardId());</span>
+<span class="nc" id="L1866">            usageWorkpadMessages.putIfAbsent(</span>
+                    workpadTarget, new UsageWorkpadState(config, &quot;Codex usage is temporarily unavailable.&quot;));
+<span class="nc" id="L1868">            pendingUsageWorkpadCleanup.remove(workpadTarget);</span>
+<span class="nc" id="L1869">            dispatchPause = pause.launching(workpadTarget);</span>
+<span class="nc bnc" id="L1870" title="All 2 branches missed.">            if (dispatchPauseTimer != null) {</span>
+<span class="nc" id="L1871">                dispatchPauseTimer.cancel(false);</span>
+            }
+<span class="nc" id="L1873">            beginRecheck = true;</span>
+<span class="nc" id="L1874">        }</span>
+<span class="nc bnc" id="L1875" title="All 2 branches missed.">        if (beginRecheck) {</span>
+<span class="nc" id="L1876">            var workpadTarget = new UsageWorkpadTarget(retry.trackerTarget(), retry.cardId());</span>
+<span class="nc" id="L1877">            UsageWorkpadState state = usageWorkpadMessages.get(workpadTarget);</span>
+<span class="nc" id="L1878">            updateUsageWorkpad(</span>
+<span class="nc" id="L1879">                    state.ownerConfig(),</span>
+<span class="nc" id="L1880">                    retry.cardId(),</span>
+<span class="nc" id="L1881">                    CodexUsageWorkpadSection.rechecking(usageWorkpadMessage(workpadTarget)));</span>
+        }
+<span class="nc" id="L1883">        return false;</span>
+    }
+
+    private void rescheduleRetryEntry(RetryEntry retry, Instant dueAt) {
+<span class="nc" id="L1887">        retryEntryRescheduleHookForTests.accept(retry.cardId(), retry.generation());</span>
+<span class="nc" id="L1888">        synchronized (this) {</span>
+<span class="nc" id="L1889">            RetryEntry current = retryAttempts.get(runtimeKey(retry));</span>
+<span class="nc bnc" id="L1890" title="All 2 branches missed.">            if (current == null) {</span>
+<span class="nc" id="L1891">                return;</span>
+            }
+<span class="nc" id="L1893">            retry.timer().cancel(false);</span>
+<span class="nc" id="L1894">            replaceRetryEntry(</span>
+                    retry,
+                    dueAt,
+<span class="nc" id="L1897">                    retry.naturalDueAt(),</span>
+<span class="nc" id="L1898">                    retry.codexCommand(),</span>
+<span class="nc" id="L1899">                    retry.trackerTarget(),</span>
+<span class="nc" id="L1900">                    retry.codexUsageLimit());</span>
+<span class="nc" id="L1901">        }</span>
+<span class="nc" id="L1902">    }</span>
+
+    /// Called with the state monitor held.
+    private void rescheduleRetryForCommandChange(RetryEntry retry, EffectiveConfig nextConfig, Instant now) {
+<span class="nc" id="L1906">        RetryEntry current = retryAttempts.get(runtimeKey(retry));</span>
+<span class="nc bnc" id="L1907" title="All 4 branches missed.">        if (current == null || current.generation() != retry.generation()) {</span>
+<span class="nc" id="L1908">            return;</span>
+        }
+<span class="nc" id="L1910">        retry.timer().cancel(false);</span>
+<span class="nc bnc" id="L1911" title="All 2 branches missed.">        Instant naturalDueAt = retry.codexUsageLimit() ? now : retry.naturalDueAt();</span>
+<span class="nc bnc" id="L1912" title="All 2 branches missed.">        Instant dueAt = naturalDueAt.isAfter(now) ? naturalDueAt : now;</span>
+<span class="nc" id="L1913">        replaceRetryEntry(</span>
+<span class="nc" id="L1914">                retry, dueAt, naturalDueAt, nextConfig.codex().command(), TrackerTarget.from(nextConfig), false);</span>
+<span class="nc" id="L1915">    }</span>
+
+    /// Called with the state monitor held after the prior timer has been cancelled.
+    private void replaceRetryEntry(
+            RetryEntry retry,
+            Instant dueAt,
+            Instant naturalDueAt,
+            String codexCommand,
+            TrackerTarget trackerTarget,
+            boolean codexUsageLimit) {
+<span class="nc" id="L1925">        long delayMillis = delayMillisUntil(dueAt);</span>
+<span class="nc" id="L1926">        retryGeneration++;</span>
+<span class="nc" id="L1927">        long generation = retryGeneration;</span>
+<span class="nc" id="L1928">        RuntimeCardKey previousKey = runtimeKey(retry);</span>
+<span class="nc" id="L1929">        RuntimeCardKey replacementKey = runtimeKey(trackerTarget, retry.cardId());</span>
+<span class="nc" id="L1930">        ScheduledFuture&lt;?&gt; timer =</span>
+<span class="nc" id="L1931">                scheduler.schedule(() -&gt; onRetryTimer(replacementKey, generation), delayMillis, TimeUnit.MILLISECONDS);</span>
+<span class="nc bnc" id="L1932" title="All 2 branches missed.">        if (!previousKey.equals(replacementKey)) {</span>
+<span class="nc" id="L1933">            retryAttempts.remove(previousKey);</span>
+<span class="nc" id="L1934">            claimed.remove(previousKey);</span>
+<span class="nc" id="L1935">            claimed.add(replacementKey);</span>
+        }
+<span class="nc" id="L1937">        retryAttempts.put(</span>
+                replacementKey,
+                new RetryEntry(
+<span class="nc" id="L1940">                        retry.cardId(),</span>
+<span class="nc" id="L1941">                        retry.identifier(),</span>
+<span class="nc" id="L1942">                        retry.cardUrl(),</span>
+<span class="nc" id="L1943">                        retry.attempt(),</span>
+                        dueAt,
+                        naturalDueAt,
+                        codexCommand,
+                        trackerTarget,
+                        generation,
+                        timer,
+<span class="nc" id="L1950">                        retry.error(),</span>
+                        codexUsageLimit));
+<span class="nc" id="L1952">    }</span>
+
+    private long delayMillisUntil(Instant dueAt) {
+<span class="nc" id="L1955">        Duration remaining = Duration.between(clock.instant(), dueAt);</span>
+<span class="nc bnc" id="L1956" title="All 4 branches missed.">        if (remaining.isNegative() || remaining.isZero()) {</span>
+<span class="nc" id="L1957">            return 0;</span>
+        }
+        try {
+<span class="nc" id="L1960">            return Math.max(remaining.toMillis(), 1);</span>
+<span class="nc" id="L1961">        } catch (ArithmeticException e) {</span>
+<span class="nc" id="L1962">            return Long.MAX_VALUE;</span>
+        }
+    }
+
+    private synchronized void removeClaim(RuntimeCardKey cardKey) {
+<span class="nc" id="L1967">        claimed.remove(cardKey);</span>
+<span class="nc" id="L1968">    }</span>
+
+    private boolean shouldDispatch(Card card, boolean ignoreClaim) {
+<span class="nc bnc" id="L1971" title="All 6 branches missed.">        return shouldDispatchIgnoringSlots(card, ignoreClaim) &amp;&amp; availableSlots() &gt; 0 &amp;&amp; perStateSlots(card) &gt; 0;</span>
+    }
+
+    private boolean canDispatch(Card card, DispatchBudget budget) {
+<span class="nc bnc" id="L1975" title="All 4 branches missed.">        return shouldDispatchIgnoringSlots(card, false) &amp;&amp; budget.hasSlotFor(card);</span>
+    }
+
+    private boolean shouldDispatchIgnoringSlots(Card card, boolean ignoreClaim) {
+<span class="nc" id="L1979">        RuntimeCardKey cardKey = currentRuntimeKey(card.id());</span>
+<span class="nc bnc" id="L1980" title="All 4 branches missed.">        return isCandidateEligibleIgnoringRuntimeState(card)</span>
+<span class="nc bnc" id="L1981" title="All 2 branches missed.">                &amp;&amp; (ignoreClaim || !claimed.contains(cardKey))</span>
+<span class="nc bnc" id="L1982" title="All 2 branches missed.">                &amp;&amp; !running.containsKey(cardKey);</span>
+    }
+
+    private boolean isCandidateEligibleIgnoringRuntimeState(Card card) {
+<span class="nc bnc" id="L1986" title="All 2 branches missed.">        return card.hasRequiredDispatchFields()</span>
+<span class="nc bnc" id="L1987" title="All 2 branches missed.">                &amp;&amp; !isOutOfBoardScope(card)</span>
+<span class="nc bnc" id="L1988" title="All 2 branches missed.">                &amp;&amp; TrelloClient.isActive(card, config)</span>
+<span class="nc bnc" id="L1989" title="All 2 branches missed.">                &amp;&amp; !TrelloClient.isTerminal(card, config)</span>
+<span class="nc bnc" id="L1990" title="All 2 branches missed.">                &amp;&amp; hasRequiredLabels(card)</span>
+<span class="nc bnc" id="L1991" title="All 2 branches missed.">                &amp;&amp; blockersAllowDispatch(card);</span>
+    }
+
+    private boolean hasRequiredLabels(Card card) {
+<span class="nc" id="L1995">        return hasRequiredLabels(card, config);</span>
+    }
+
+    private static boolean hasRequiredLabels(Card card, EffectiveConfig eligibilityConfig) {
+<span class="nc" id="L1999">        List&lt;String&gt; requiredLabels = eligibilityConfig.tracker().requiredLabels();</span>
+<span class="nc bnc" id="L2000" title="All 2 branches missed.">        if (requiredLabels.isEmpty()) {</span>
+<span class="nc" id="L2001">            return true;</span>
+        }
+<span class="nc bnc" id="L2003" title="All 2 branches missed.">        if (requiredLabels.stream().anyMatch(String::isBlank)) {</span>
+<span class="nc" id="L2004">            return false;</span>
+        }
+<span class="nc" id="L2006">        Set&lt;String&gt; cardLabels =</span>
+<span class="nc" id="L2007">                card.labels().stream().map(StateNames::normalize).collect(toImmutableSet());</span>
+<span class="nc" id="L2008">        return cardLabels.containsAll(requiredLabels);</span>
+    }
+
+    private Map&lt;String, Integer&gt; prerequisitePriorityOverrides(List&lt;Card&gt; candidates) {
+<span class="nc" id="L2012">        Set&lt;String&gt; dispatchableCandidateIds = dispatchableCandidateIds(candidates);</span>
+<span class="nc" id="L2013">        Map&lt;String, Integer&gt; overrides = HashMap.newHashMap(dispatchableCandidateIds.size());</span>
+<span class="nc bnc" id="L2014" title="All 2 branches missed.">        for (Card card : candidates) {</span>
+<span class="nc bnc" id="L2015" title="All 2 branches missed.">            if (blockersAllowDispatch(card)) {</span>
+<span class="nc" id="L2016">                continue;</span>
+            }
+<span class="nc" id="L2018">            int inheritedPriority = priorityOrDefault(card);</span>
+<span class="nc bnc" id="L2019" title="All 2 branches missed.">            for (var blocker : card.blockedBy()) {</span>
+<span class="nc bnc" id="L2020" title="All 2 branches missed.">                if (dispatchableCandidateIds.contains(blocker.id())) {</span>
+<span class="nc" id="L2021">                    overrides.merge(blocker.id(), inheritedPriority, Math::min);</span>
+                }
+<span class="nc" id="L2023">            }</span>
+<span class="nc" id="L2024">        }</span>
+<span class="nc" id="L2025">        return overrides;</span>
+    }
+
+    private Set&lt;String&gt; dispatchableCandidateIds(List&lt;Card&gt; candidates) {
+<span class="nc" id="L2029">        Set&lt;String&gt; seen = HashSet.newHashSet(candidates.size());</span>
+<span class="nc" id="L2030">        Set&lt;String&gt; dispatchableIds = HashSet.newHashSet(candidates.size());</span>
+<span class="nc bnc" id="L2031" title="All 2 branches missed.">        for (Card candidate : candidates) {</span>
+<span class="nc bnc" id="L2032" title="All 4 branches missed.">            if (seen.add(candidate.id()) &amp;&amp; shouldDispatchIgnoringSlots(candidate, false)) {</span>
+<span class="nc" id="L2033">                dispatchableIds.add(candidate.id());</span>
+            }
+<span class="nc" id="L2035">        }</span>
+<span class="nc" id="L2036">        return dispatchableIds;</span>
+    }
+
+    private static int priorityOrDefault(Card card) {
+<span class="nc bnc" id="L2040" title="All 2 branches missed.">        return card.priority() == null ? Integer.MAX_VALUE : card.priority();</span>
+    }
+
+    private Set&lt;String&gt; releaseIdleInProgressOverflow(List&lt;Card&gt; candidates) {
+<span class="nc bnc" id="L2044" title="All 2 branches missed.">        if (blank(config.tracker().inProgressState())) {</span>
+<span class="nc" id="L2045">            return Set.of();</span>
+        }
+
+<span class="nc" id="L2048">        DispatchBudget planned = DispatchBudget.from(config, running.values());</span>
+<span class="nc" id="L2049">        Set&lt;String&gt; releasedCards = HashSet.newHashSet(candidates.size());</span>
+<span class="nc bnc" id="L2050" title="All 2 branches missed.">        for (Card card : candidates) {</span>
+<span class="nc bnc" id="L2051" title="All 2 branches missed.">            if (isAlreadyReserved(card)) {</span>
+<span class="nc" id="L2052">                continue;</span>
+            }
+<span class="nc bnc" id="L2054" title="All 4 branches missed.">            if (shouldDispatchIgnoringSlots(card, false) &amp;&amp; planned.tryReserve(card)) {</span>
+<span class="nc" id="L2055">                continue;</span>
+            }
+<span class="nc bnc" id="L2057" title="All 2 branches missed.">            if (isConfiguredInProgress(card)) {</span>
+<span class="nc" id="L2058">                releaseFromDispatch(card, &quot;not currently running&quot;);</span>
+<span class="nc" id="L2059">                releasedCards.add(card.id());</span>
+            }
+<span class="nc" id="L2061">        }</span>
+<span class="nc" id="L2062">        return releasedCards;</span>
+    }
+
+    private boolean isAlreadyReserved(Card card) {
+<span class="nc" id="L2066">        RuntimeCardKey cardKey = currentRuntimeKey(card.id());</span>
+<span class="nc bnc" id="L2067" title="All 4 branches missed.">        return running.containsKey(cardKey) || claimed.contains(cardKey);</span>
+    }
+
+    private void releaseFromDispatch(Card card, String reason) {
+<span class="nc" id="L2071">        releaseFromDispatch(card, card, reason);</span>
+<span class="nc" id="L2072">    }</span>
+
+    private void releaseFromDispatch(Card card, Card dispatchSource, String reason) {
+<span class="nc" id="L2075">        releaseFromDispatch(config, card, dispatchSource, reason);</span>
+<span class="nc" id="L2076">    }</span>
+
+    private void releaseFromDispatch(EffectiveConfig releaseConfig, Card card, Card dispatchSource, String reason) {
+<span class="nc bnc" id="L2079" title="All 2 branches missed.">        if (!isConfiguredInProgress(releaseConfig, card)) {</span>
+<span class="nc" id="L2080">            return;</span>
+        }
+        try {
+<span class="nc" id="L2083">            tracker.releaseFromDispatch(releaseConfig, card, dispatchSource);</span>
+<span class="nc" id="L2084">            LOG.infof(</span>
+                    &quot;card_id=%s card_identifier=%s outcome=released_from_in_progress reason=%s&quot;,
+<span class="nc" id="L2086">                    card.id(), card.identifier(), reason);</span>
+<span class="nc" id="L2087">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L2088">            LOG.warnf(</span>
+                    &quot;card_id=%s card_identifier=%s outcome=release_from_in_progress_failed reason=%s&quot;,
+<span class="nc" id="L2090">                    card.id(), card.identifier(), e.getMessage());</span>
+<span class="nc" id="L2091">        }</span>
+<span class="nc" id="L2092">    }</span>
+
+    private void releaseCurrentFromDispatch(Card card, Card dispatchSource, String reason) {
+<span class="nc" id="L2095">        releaseCurrentFromDispatch(config, card, dispatchSource, reason);</span>
+<span class="nc" id="L2096">    }</span>
+
+    private void releaseCurrentFromDispatch(
+            EffectiveConfig releaseConfig, Card card, Card dispatchSource, String reason) {
+<span class="nc bnc" id="L2100" title="All 2 branches missed.">        if (blank(releaseConfig.tracker().inProgressState())) {</span>
+<span class="nc" id="L2101">            return;</span>
+        }
+        try {
+<span class="nc" id="L2104">            CardLookupResult result = tracker.fetchCardStatesByIds(releaseConfig, List.of(card.id()))</span>
+<span class="nc" id="L2105">                    .get(card.id());</span>
+<span class="nc bnc" id="L2106" title="All 2 branches missed.">            if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc" id="L2107">                releaseFromDispatch(releaseConfig, found.card(), dispatchSource, reason);</span>
+<span class="nc bnc" id="L2108" title="All 2 branches missed.">            } else if (result instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L2109">                LOG.warnf(</span>
+                        &quot;card_id=%s card_identifier=%s outcome=release_from_in_progress_refresh_failed reason=%s&quot;,
+<span class="nc" id="L2111">                        card.id(), card.identifier(), failed.message());</span>
+            }
+<span class="nc" id="L2113">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L2114">            LOG.warnf(</span>
+                    &quot;card_id=%s card_identifier=%s outcome=release_from_in_progress_refresh_failed reason=%s&quot;,
+<span class="nc" id="L2116">                    card.id(), card.identifier(), e.getMessage());</span>
+<span class="nc" id="L2117">        }</span>
+<span class="nc" id="L2118">    }</span>
+
+    private boolean isConfiguredInProgress(Card card) {
+<span class="nc" id="L2121">        return isConfiguredInProgress(config, card);</span>
+    }
+
+    private static boolean isConfiguredInProgress(EffectiveConfig checkConfig, Card card) {
+<span class="nc" id="L2125">        return StateNames.normalize(checkConfig.tracker().inProgressState()).equals(StateNames.normalize(card.state()));</span>
+    }
+
+    private boolean blockersAllowDispatch(Card card) {
+<span class="nc bnc" id="L2129" title="All 2 branches missed.">        if (!config.tracker().blockerEnforcedStates().contains(StateNames.normalize(card.state()))) {</span>
+<span class="nc" id="L2130">            return true;</span>
+        }
+<span class="nc bnc" id="L2132" title="All 2 branches missed.">        if (!card.prerequisiteProblems().isEmpty()) {</span>
+<span class="nc" id="L2133">            return false;</span>
+        }
+<span class="nc" id="L2135">        return card.blockedBy().stream()</span>
+<span class="nc bnc" id="L2136" title="All 2 branches missed.">                .allMatch(blocker -&gt; blocker.state() != null</span>
+<span class="nc bnc" id="L2137" title="All 2 branches missed.">                        &amp;&amp; config.tracker().terminalStates().contains(StateNames.normalize(blocker.state())));</span>
+    }
+
+    private int availableSlots() {
+<span class="nc" id="L2141">        return Math.max(config.agent().maxConcurrentAgents() - running.size(), 0);</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L2145" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+
+    private int perStateSlots(Card card) {
+<span class="nc" id="L2149">        String state = StateNames.normalize(card.state());</span>
+<span class="nc" id="L2150">        return Math.max(perStateLimit(card) - runningCountsByState().getOrDefault(state, 0), 0);</span>
+    }
+
+    private int perStateLimit(Card card) {
+<span class="nc" id="L2154">        return config.agent()</span>
+<span class="nc" id="L2155">                .maxConcurrentAgentsByState()</span>
+<span class="nc" id="L2156">                .getOrDefault(StateNames.normalize(card.state()), config.agent().maxConcurrentAgents());</span>
+    }
+
+    private Map&lt;String, Integer&gt; runningCountsByState() {
+<span class="nc" id="L2160">        return running.values().stream()</span>
+<span class="nc" id="L2161">                .map(entry -&gt; StateNames.normalize(entry.card.state()))</span>
+<span class="nc" id="L2162">                .collect(Collectors.toMap(Function.identity(), state -&gt; 1, Integer::sum, HashMap::new));</span>
+    }
+
+    private static final class DispatchBudget {
+        private final int maxTotal;
+        private final Map&lt;String, Integer&gt; maxByState;
+        private final Map&lt;String, Integer&gt; usedByState;
+        private int usedTotal;
+
+        private DispatchBudget(
+<span class="nc" id="L2172">                int maxTotal, Map&lt;String, Integer&gt; maxByState, int usedTotal, Map&lt;String, Integer&gt; usedByState) {</span>
+<span class="nc" id="L2173">            this.maxTotal = maxTotal;</span>
+<span class="nc" id="L2174">            this.maxByState = maxByState;</span>
+<span class="nc" id="L2175">            this.usedTotal = usedTotal;</span>
+<span class="nc" id="L2176">            this.usedByState = usedByState;</span>
+<span class="nc" id="L2177">        }</span>
+
+        static DispatchBudget from(EffectiveConfig config, Collection&lt;RunningEntry&gt; runningEntries) {
+<span class="nc" id="L2180">            Map&lt;String, Integer&gt; usedByState = runningEntries.stream()</span>
+<span class="nc" id="L2181">                    .map(entry -&gt; StateNames.normalize(entry.card.state()))</span>
+<span class="nc" id="L2182">                    .collect(Collectors.toMap(Function.identity(), state -&gt; 1, Integer::sum, HashMap::new));</span>
+<span class="nc" id="L2183">            return new DispatchBudget(</span>
+<span class="nc" id="L2184">                    config.agent().maxConcurrentAgents(),</span>
+<span class="nc" id="L2185">                    config.agent().maxConcurrentAgentsByState(),</span>
+<span class="nc" id="L2186">                    runningEntries.size(),</span>
+                    usedByState);
+        }
+
+        boolean hasAnySlot() {
+<span class="nc bnc" id="L2191" title="All 2 branches missed.">            return usedTotal &lt; maxTotal;</span>
+        }
+
+        boolean hasSlotFor(Card card) {
+<span class="nc" id="L2195">            String state = StateNames.normalize(card.state());</span>
+<span class="nc bnc" id="L2196" title="All 4 branches missed.">            return hasAnySlot() &amp;&amp; usedByState.getOrDefault(state, 0) &lt; limitFor(state);</span>
+        }
+
+        boolean tryReserve(Card card) {
+<span class="nc bnc" id="L2200" title="All 2 branches missed.">            if (!hasSlotFor(card)) {</span>
+<span class="nc" id="L2201">                return false;</span>
+            }
+<span class="nc" id="L2203">            reserve(card);</span>
+<span class="nc" id="L2204">            return true;</span>
+        }
+
+        void reserve(Card card) {
+<span class="nc" id="L2208">            usedTotal++;</span>
+<span class="nc" id="L2209">            usedByState.merge(StateNames.normalize(card.state()), 1, Integer::sum);</span>
+<span class="nc" id="L2210">        }</span>
+
+        private int limitFor(String state) {
+<span class="nc" id="L2213">            return maxByState.getOrDefault(state, maxTotal);</span>
+        }
+    }
+
+    private static final class WorkflowProcessLock implements AutoCloseable {
+        private final FileChannel channel;
+        private final FileLock lock;
+
+<span class="nc" id="L2221">        private WorkflowProcessLock(FileChannel channel, FileLock lock) {</span>
+<span class="nc" id="L2222">            this.channel = channel;</span>
+<span class="nc" id="L2223">            this.lock = lock;</span>
+<span class="nc" id="L2224">        }</span>
+
+        static WorkflowProcessLock acquire(Path workflowPath) {
+<span class="nc" id="L2227">            Path lockPath = lockPath(workflowPath);</span>
+<span class="nc" id="L2228">            Path lockDirectory = lockPath.getParent();</span>
+<span class="nc bnc" id="L2229" title="All 2 branches missed.">            if (lockDirectory == null) {</span>
+<span class="nc" id="L2230">                throw new WorkflowException(</span>
+                        &quot;workflow_lock_unavailable&quot;,
+                        &quot;Workflow runtime lock requires a configured state home or workflow directory.&quot;);
+            }
+            try {
+<span class="nc" id="L2235">                Files.createDirectories(lockDirectory);</span>
+<span class="nc" id="L2236">                FileChannel channel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);</span>
+                try {
+<span class="nc" id="L2238">                    FileLock lock = tryWorkflowLock(channel);</span>
+<span class="nc bnc" id="L2239" title="All 2 branches missed.">                    if (lock == null) {</span>
+<span class="nc" id="L2240">                        closeQuietly(channel);</span>
+<span class="nc" id="L2241">                        throw new WorkflowException(</span>
+                                &quot;workflow_already_running&quot;,
+                                &quot;Another Symphony for Trello process is already using this workflow file.&quot;);
+                    }
+<span class="nc" id="L2245">                    return new WorkflowProcessLock(channel, lock);</span>
+<span class="nc" id="L2246">                } catch (IOException e) {</span>
+<span class="nc" id="L2247">                    closeQuietly(channel);</span>
+<span class="nc" id="L2248">                    throw e;</span>
+                }
+<span class="nc" id="L2250">            } catch (IOException e) {</span>
+<span class="nc" id="L2251">                throw new WorkflowException(</span>
+                        &quot;workflow_lock_unavailable&quot;, &quot;Workflow runtime lock cannot be acquired.&quot;, e);
+            }
+        }
+
+        private static Path lockPath(Path workflowPath) {
+            try {
+<span class="nc" id="L2258">                Path canonicalWorkflowPath = workflowPath.toRealPath();</span>
+<span class="nc" id="L2259">                String digest = Sha3.sha3_256(canonicalWorkflowPath.toString());</span>
+<span class="nc" id="L2260">                return fallbackLockDirectory(canonicalWorkflowPath).resolve(digest + &quot;.lock&quot;);</span>
+<span class="nc" id="L2261">            } catch (IOException e) {</span>
+<span class="nc" id="L2262">                throw new WorkflowException(</span>
+                        &quot;workflow_lock_unavailable&quot;, &quot;Workflow runtime lock cannot resolve the workflow file.&quot;, e);
+            }
+        }
+
+        private static Path fallbackLockDirectory(Path canonicalWorkflowPath) {
+<span class="nc" id="L2268">            Path workflowParent = canonicalWorkflowPath.getParent();</span>
+<span class="nc bnc" id="L2269" title="All 2 branches missed.">            if (workflowParent == null) {</span>
+<span class="nc" id="L2270">                throw new WorkflowException(</span>
+                        &quot;workflow_lock_unavailable&quot;,
+                        &quot;Workflow runtime lock requires a configured state home or workflow directory.&quot;);
+            }
+<span class="nc" id="L2274">            return workflowParent.resolve(&quot;.symphony-trello-locks&quot;);</span>
+        }
+
+        private static FileLock tryWorkflowLock(FileChannel channel) throws IOException {
+            try {
+<span class="nc" id="L2279">                return channel.tryLock();</span>
+<span class="nc" id="L2280">            } catch (OverlappingFileLockException e) {</span>
+<span class="nc" id="L2281">                return null;</span>
+            }
+        }
+
+        private static void closeQuietly(FileChannel channel) {
+            try {
+<span class="nc" id="L2287">                channel.close();</span>
+<span class="nc" id="L2288">            } catch (IOException ignored) {</span>
+                // Startup is already failing, and the OS will reclaim the descriptor on exit.
+<span class="nc" id="L2290">            }</span>
+<span class="nc" id="L2291">        }</span>
+
+        @Override
+        public void close() {
+            try {
+<span class="nc" id="L2296">                lock.release();</span>
+<span class="nc" id="L2297">            } catch (IOException e) {</span>
+<span class="nc" id="L2298">                LOG.warnf(&quot;workflow_runtime_lock outcome=release_failed reason=%s&quot;, e.getMessage());</span>
+<span class="nc" id="L2299">            }</span>
+<span class="nc" id="L2300">            closeQuietly(channel);</span>
+<span class="nc" id="L2301">        }</span>
+    }
+
+    private boolean isOutOfBoardScope(Card card) {
+<span class="nc" id="L2305">        return isOutOfBoardScope(card, config);</span>
+    }
+
+    private static boolean isOutOfBoardScope(Card card, EffectiveConfig checkConfig) {
+<span class="nc bnc" id="L2309" title="All 2 branches missed.">        return card.boardId() != null</span>
+<span class="nc bnc" id="L2310" title="All 2 branches missed.">                &amp;&amp; !card.boardId().equals(checkConfig.tracker().resolvedBoardId());</span>
+    }
+
+    private Duration backoff(int attempt) {
+<span class="nc" id="L2314">        long delay = INITIAL_RETRY_BACKOFF_MILLIS * (1L &lt;&lt; Math.clamp(attempt - 1, 0, MAX_RETRY_BACKOFF_SHIFT));</span>
+<span class="nc" id="L2315">        return Duration.ofMillis(</span>
+<span class="nc" id="L2316">                Math.min(delay, config.agent().maxRetryBackoff().toMillis()));</span>
+    }
+
+    private static int nextAttempt(Integer current) {
+<span class="nc bnc" id="L2320" title="All 2 branches missed.">        return current == null ? 1 : current + 1;</span>
+    }
+
+    private void addRuntime(RunningEntry entry) {
+<span class="nc" id="L2324">        endedRuntimeMillis += Duration.between(entry.startedAt, clock.instant()).toMillis();</span>
+<span class="nc" id="L2325">    }</span>
+
+    private void addRecentEvent(RuntimeCardKey cardKey, CardDebugDetails.EventInfo event) {
+<span class="nc" id="L2328">        recentEvents</span>
+<span class="nc" id="L2329">                .computeIfAbsent(cardKey, ignored -&gt; EvictingQueue.create(RECENT_EVENT_LIMIT))</span>
+<span class="nc" id="L2330">                .add(event);</span>
+<span class="nc" id="L2331">    }</span>
+
+    private List&lt;CardDebugDetails.EventInfo&gt; recentEventsFor(RuntimeCardKey cardKey) {
+<span class="nc" id="L2334">        EvictingQueue&lt;CardDebugDetails.EventInfo&gt; events = recentEvents.get(cardKey);</span>
+<span class="nc bnc" id="L2335" title="All 2 branches missed.">        return events == null ? List.of() : List.copyOf(events);</span>
+    }
+
+    private synchronized void removeExpiredIgnoredWorkers() {
+<span class="nc" id="L2339">        Instant now = clock.instant();</span>
+<span class="nc" id="L2340">        ignoredWorkers.entrySet().removeIf(entry -&gt; entry.getValue().isBefore(now));</span>
+<span class="nc" id="L2341">    }</span>
+
+    private synchronized void trimIgnoredWorkers() {
+<span class="nc bnc" id="L2344" title="All 2 branches missed.">        while (ignoredWorkers.size() &gt; IGNORED_WORKER_LIMIT) {</span>
+<span class="nc" id="L2345">            String first = ignoredWorkers.keySet().iterator().next();</span>
+<span class="nc" id="L2346">            ignoredWorkers.remove(first);</span>
+<span class="nc" id="L2347">        }</span>
+<span class="nc" id="L2348">    }</span>
+
+    private synchronized void scheduleTick(Duration delay) {
+<span class="nc bnc" id="L2351" title="All 2 branches missed.">        if (tickTimer != null) {</span>
+<span class="nc" id="L2352">            tickTimer.cancel(false);</span>
+        }
+<span class="nc" id="L2354">        tickTimer = scheduler.schedule(this::tick, delay.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L2355">    }</span>
+
+    public synchronized RuntimeSnapshot snapshot() {
+<span class="nc" id="L2358">        Instant now = clock.instant();</span>
+<span class="nc" id="L2359">        List&lt;RuntimeSnapshot.RunningRow&gt; runningRows =</span>
+<span class="nc" id="L2360">                running.values().stream().map(this::runningRow).toList();</span>
+<span class="nc" id="L2361">        List&lt;RuntimeSnapshot.RetryRow&gt; retryRows =</span>
+<span class="nc" id="L2362">                retryAttempts.values().stream().map(this::retryRow).toList();</span>
+<span class="nc" id="L2363">        double activeSeconds = running.values().stream()</span>
+<span class="nc" id="L2364">                        .mapToLong(</span>
+<span class="nc" id="L2365">                                entry -&gt; Duration.between(entry.startedAt, now).toMillis())</span>
+<span class="nc" id="L2366">                        .sum()</span>
+                / 1000.0;
+<span class="nc" id="L2368">        return new RuntimeSnapshot(</span>
+                now,
+<span class="nc" id="L2370">                new RuntimeSnapshot.Counts(runningRows.size(), retryRows.size()),</span>
+<span class="nc" id="L2371">                routing(),</span>
+                runningRows,
+                retryRows,
+                new RuntimeSnapshot.TokenTotals(
+                        totalInputTokens, totalOutputTokens, totalTokens, endedRuntimeMillis / 1000.0 + activeSeconds),
+                dispatchPause == null
+<span class="nc bnc" id="L2377" title="All 4 branches missed.">                                || !Objects.equals(</span>
+<span class="nc" id="L2378">                                        dispatchPause.command(), config.codex().command())</span>
+<span class="nc" id="L2379">                        ? null</span>
+<span class="nc" id="L2380">                        : new RuntimeSnapshot.DispatchPause(</span>
+<span class="nc" id="L2381">                                CODEX_USAGE_LIMIT_PAUSE, dispatchPause.detectedAt(), dispatchPause.until()),</span>
+<span class="nc bnc" id="L2382" title="All 2 branches missed.">                config == null ? null : rateLimitsByCommand.get(config.codex().command()));</span>
+    }
+
+    private RuntimeSnapshot.Routing routing() {
+<span class="nc bnc" id="L2386" title="All 2 branches missed.">        if (config == null) {</span>
+<span class="nc" id="L2387">            return new RuntimeSnapshot.Routing(List.of(), List.of(), List.of());</span>
+        }
+<span class="nc" id="L2389">        return new RuntimeSnapshot.Routing(</span>
+<span class="nc" id="L2390">                List.copyOf(config.tracker().activeStates()),</span>
+<span class="nc" id="L2391">                List.copyOf(config.tracker().terminalStates()),</span>
+<span class="nc" id="L2392">                List.copyOf(config.trelloTools().allowedMoveListNames()));</span>
+    }
+
+    public synchronized Optional&lt;CardDebugDetails&gt; cardDetails(String cardIdentifier) {
+<span class="nc bnc" id="L2396" title="All 2 branches missed.">        TrackerTarget currentTarget = config == null ? null : TrackerTarget.from(config);</span>
+<span class="nc" id="L2397">        Optional&lt;CardDetailsSelection&gt; selection = running.entrySet().stream()</span>
+<span class="nc" id="L2398">                .filter(entry -&gt; Objects.equals(entry.getKey().trackerTarget(), currentTarget))</span>
+<span class="nc" id="L2399">                .filter(entry -&gt; entry.getValue().identifier().equals(cardIdentifier))</span>
+<span class="nc" id="L2400">                .findFirst()</span>
+<span class="nc" id="L2401">                .map(this::runningCardDetailsSelection)</span>
+<span class="nc" id="L2402">                .or(() -&gt; retryAttempts.entrySet().stream()</span>
+<span class="nc" id="L2403">                        .filter(entry -&gt; Objects.equals(entry.getKey().trackerTarget(), currentTarget))</span>
+<span class="nc" id="L2404">                        .filter(entry -&gt; entry.getValue().identifier().equals(cardIdentifier))</span>
+<span class="nc" id="L2405">                        .findFirst()</span>
+<span class="nc" id="L2406">                        .map(this::retryCardDetailsSelection))</span>
+<span class="nc" id="L2407">                .or(() -&gt; running.entrySet().stream()</span>
+<span class="nc" id="L2408">                        .filter(entry -&gt; entry.getValue().identifier().equals(cardIdentifier))</span>
+<span class="nc" id="L2409">                        .findFirst()</span>
+<span class="nc" id="L2410">                        .map(this::runningCardDetailsSelection))</span>
+<span class="nc" id="L2411">                .or(() -&gt; retryAttempts.entrySet().stream()</span>
+<span class="nc" id="L2412">                        .filter(entry -&gt; entry.getValue().identifier().equals(cardIdentifier))</span>
+<span class="nc" id="L2413">                        .findFirst()</span>
+<span class="nc" id="L2414">                        .map(this::retryCardDetailsSelection));</span>
+<span class="nc" id="L2415">        return selection.map(detailsSelection -&gt; new CardDebugDetails(</span>
+                cardIdentifier,
+<span class="nc" id="L2417">                detailsSelection.cardKey().cardId(),</span>
+<span class="nc" id="L2418">                detailsSelection.status(),</span>
+                new CardDebugDetails.WorkspaceInfo(
+<span class="nc" id="L2420">                        detailsSelection.workspaceRoot().resolve(WorkspaceManager.sanitize(cardIdentifier))),</span>
+<span class="nc" id="L2421">                new CardDebugDetails.AttemptInfo(0, detailsSelection.currentRetryAttempt()),</span>
+<span class="nc" id="L2422">                detailsSelection.runningRow(),</span>
+<span class="nc" id="L2423">                detailsSelection.retryRow(),</span>
+<span class="nc" id="L2424">                new CardDebugDetails.LogInfo(List.of()),</span>
+<span class="nc" id="L2425">                recentEventsFor(detailsSelection.cardKey()),</span>
+<span class="nc" id="L2426">                detailsSelection.lastError(),</span>
+<span class="nc" id="L2427">                Map.of()));</span>
+    }
+
+    private CardDetailsSelection runningCardDetailsSelection(Map.Entry&lt;RuntimeCardKey, RunningEntry&gt; ownedEntry) {
+<span class="nc" id="L2431">        RunningEntry entry = ownedEntry.getValue();</span>
+<span class="nc" id="L2432">        return new CardDetailsSelection(</span>
+<span class="nc" id="L2433">                ownedEntry.getKey(),</span>
+                &quot;running&quot;,
+<span class="nc" id="L2435">                entry.launchConfig.workspace().root(),</span>
+                null,
+<span class="nc" id="L2437">                runningRow(entry),</span>
+                null,
+                null);
+    }
+
+    private CardDetailsSelection retryCardDetailsSelection(Map.Entry&lt;RuntimeCardKey, RetryEntry&gt; ownedRetry) {
+<span class="nc" id="L2443">        RetryEntry retry = ownedRetry.getValue();</span>
+<span class="nc" id="L2444">        return new CardDetailsSelection(</span>
+<span class="nc" id="L2445">                ownedRetry.getKey(),</span>
+                &quot;retrying&quot;,
+<span class="nc" id="L2447">                config.workspace().root(),</span>
+<span class="nc" id="L2448">                retry.attempt(),</span>
+                null,
+<span class="nc" id="L2450">                retryRow(retry),</span>
+<span class="nc" id="L2451">                retry.error());</span>
+    }
+
+    private RuntimeSnapshot.RetryRow retryRow(RetryEntry retry) {
+<span class="nc" id="L2455">        return new RuntimeSnapshot.RetryRow(</span>
+<span class="nc" id="L2456">                retry.cardId(), retry.identifier(), retry.cardUrl(), retry.attempt(), retry.dueAt(), retry.error());</span>
+    }
+
+    private RuntimeSnapshot.RunningRow runningRow(RunningEntry entry) {
+<span class="nc" id="L2460">        return new RuntimeSnapshot.RunningRow(</span>
+                entry.cardId,
+<span class="nc" id="L2462">                entry.identifier(),</span>
+<span class="nc" id="L2463">                entry.card.cardUrl(),</span>
+<span class="nc" id="L2464">                entry.card.state(),</span>
+                entry.sessionId,
+                entry.turnCount,
+                entry.lastEvent,
+                entry.lastMessage,
+                entry.startedAt,
+                entry.lastEventAt,
+<span class="nc" id="L2471">                Map.of(</span>
+                        &quot;input_tokens&quot;,
+<span class="nc" id="L2473">                        entry.inputTokens,</span>
+                        &quot;output_tokens&quot;,
+<span class="nc" id="L2475">                        entry.outputTokens,</span>
+                        &quot;total_tokens&quot;,
+<span class="nc" id="L2477">                        entry.totalTokens));</span>
+    }
+
+    private RuntimeCardKey currentRuntimeKey(String cardId) {
+<span class="nc" id="L2481">        return runtimeKey(TrackerTarget.from(config), cardId);</span>
+    }
+
+    private static RuntimeCardKey runtimeKey(EffectiveConfig ownerConfig, String cardId) {
+<span class="nc" id="L2485">        return runtimeKey(TrackerTarget.from(ownerConfig), cardId);</span>
+    }
+
+    private static RuntimeCardKey runtimeKey(RunningEntry entry) {
+<span class="nc" id="L2489">        return runtimeKey(entry.launchTarget, entry.cardId);</span>
+    }
+
+    private static RuntimeCardKey runtimeKey(RetryEntry retry) {
+<span class="nc" id="L2493">        return runtimeKey(retry.trackerTarget(), retry.cardId());</span>
+    }
+
+    private static RuntimeCardKey runtimeKey(TrackerTarget trackerTarget, String cardId) {
+<span class="nc" id="L2497">        return new RuntimeCardKey(trackerTarget, cardId);</span>
+    }
+
+<span class="nc" id="L2500">    private record RuntimeCardKey(TrackerTarget trackerTarget, String cardId) {}</span>
+
+<span class="nc" id="L2502">    private record CardDetailsSelection(</span>
+            RuntimeCardKey cardKey,
+            String status,
+            Path workspaceRoot,
+            Integer currentRetryAttempt,
+            RuntimeSnapshot.RunningRow runningRow,
+            RuntimeSnapshot.RetryRow retryRow,
+            String lastError) {}
+
+<span class="nc" id="L2511">    private record DispatchPause(</span>
+            String command, long generation, Instant detectedAt, Instant until, Optional&lt;UsageProbe&gt; probe) {
+        private DispatchPause launching(UsageWorkpadTarget target) {
+<span class="nc" id="L2514">            return new DispatchPause(</span>
+<span class="nc" id="L2515">                    command, generation, detectedAt, until, Optional.of(new UsageProbe(target, Optional.empty())));</span>
+        }
+
+        private DispatchPause probing(UsageWorkpadTarget target, String workerIdentity) {
+<span class="nc" id="L2519">            return new DispatchPause(</span>
+                    command,
+                    generation,
+                    detectedAt,
+                    until,
+<span class="nc" id="L2524">                    Optional.of(new UsageProbe(target, Optional.of(workerIdentity))));</span>
+        }
+    }
+
+<span class="nc" id="L2528">    private record UsageProbe(UsageWorkpadTarget target, Optional&lt;String&gt; workerIdentity) {</span>
+        private boolean matches(UsageWorkpadTarget expectedTarget, String expectedWorkerIdentity) {
+<span class="nc bnc" id="L2530" title="All 4 branches missed.">            return target.equals(expectedTarget) &amp;&amp; workerIdentity.equals(Optional.of(expectedWorkerIdentity));</span>
+        }
+    }
+
+<span class="nc" id="L2534">    private record UsageWorkpadTarget(TrackerTarget trackerTarget, String cardId) {}</span>
+
+<span class="nc" id="L2536">    private record UsageWorkpadState(EffectiveConfig ownerConfig, String message) {}</span>
+
+<span class="nc" id="L2538">    private record UsageWorkpadCleanup(EffectiveConfig ownerConfig, Instant expiresAt, Instant nextAttemptAt) {}</span>
+
+<span class="nc" id="L2540">    private record PendingUsageWorkpadCleanup(UsageWorkpadTarget target, UsageWorkpadCleanup cleanup) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

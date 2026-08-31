@@ -1,0 +1,1348 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalWorkerManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalWorkerManager.java</span></div><h1>LocalWorkerManager.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.TrelloEnvironment;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.EnvironmentReferences;
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import com.google.common.util.concurrent.Striped;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.locks.Lock;
+import java.util.function.Function;
+
+final class LocalWorkerManager {
+    private static final int STARTUP_LOG_BYTE_LIMIT = 128 * 1024;
+<span class="nc" id="L30">    private static final Striped&lt;Lock&gt; PROCESS_LOCKS = Striped.lazyWeakLock(1024);</span>
+
+    private final Map&lt;String, String&gt; environment;
+    private final WorkflowConfigEditor workflowConfig;
+    private final LocalHealthChecker healthChecker;
+    private final ManagedProcessPlatform platform;
+    private final LocalLogTailer logTailer;
+    private final TrelloCredentialPreflight credentialPreflight;
+
+    /// Verifies resolved Trello credentials against the configured endpoint before a worker launch.
+    /// Implementations throw [TrelloBoardSetupException] with code `trello_auth_failed`
+    /// or `trello_permission_denied` for credential problems and `trello_api_request`
+    /// for transport problems.
+    @FunctionalInterface
+    interface TrelloCredentialPreflight {
+        void verify(URI endpoint, String apiKey, String apiToken);
+    }
+
+    LocalWorkerManager(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L49">        this(environment, new WorkflowConfigEditor());</span>
+<span class="nc" id="L50">    }</span>
+
+    LocalWorkerManager(Map&lt;String, String&gt; environment, WorkflowConfigEditor workflowConfig) {
+<span class="nc" id="L53">        this(</span>
+                environment,
+                workflowConfig,
+                new LocalHealthChecker(environment, workflowConfig),
+<span class="nc" id="L57">                platformForCurrentOs(),</span>
+                new LocalLogTailer(),
+<span class="nc" id="L59">                defaultCredentialPreflight());</span>
+<span class="nc" id="L60">    }</span>
+
+    LocalWorkerManager(
+            Map&lt;String, String&gt; environment,
+            WorkflowConfigEditor workflowConfig,
+            LocalHealthChecker healthChecker,
+            ManagedProcessPlatform platform,
+            LocalLogTailer logTailer,
+<span class="nc" id="L68">            TrelloCredentialPreflight credentialPreflight) {</span>
+<span class="nc" id="L69">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L70">        this.workflowConfig = workflowConfig;</span>
+<span class="nc" id="L71">        this.healthChecker = healthChecker;</span>
+<span class="nc" id="L72">        this.platform = platform;</span>
+<span class="nc" id="L73">        this.logTailer = logTailer;</span>
+<span class="nc" id="L74">        this.credentialPreflight = credentialPreflight;</span>
+<span class="nc" id="L75">    }</span>
+
+    private static TrelloCredentialPreflight defaultCredentialPreflight() {
+<span class="nc" id="L78">        return (endpoint, apiKey, apiToken) -&gt; new TrelloBoardSetup(ConnectedBoardRepository.jsonMapper())</span>
+<span class="nc" id="L79">                .getMemberInfo(new TrelloBoardSetup.MemberInfoRequest(</span>
+                        endpoint, new TrelloBoardSetup.TrelloCredentials(apiKey, apiToken)));
+    }
+
+    int start(StartWorkerRequest request, PrintStream out) throws IOException {
+<span class="nc" id="L84">        LocalWorkerPaths paths = LocalWorkerPaths.from(</span>
+<span class="nc" id="L85">                request.appHome(), request.configDir(), request.workspaceRoot(), request.stateHome(), environment);</span>
+<span class="nc" id="L86">        ConnectedBoardManifest manifest = new ConnectedBoardRepository(paths.manifestPath()).loadForLifecycle();</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        if (!request.all()</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                &amp;&amp; request.envPath().isPresent()</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                &amp;&amp; request.board().isEmpty()</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                &amp;&amp; request.workflow().isEmpty()) {</span>
+<span class="nc" id="L91">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_selection_conflict&quot;, &quot;--env requires --board or --workflow.&quot;);
+        }
+<span class="nc bnc" id="L94" title="All 4 branches missed.">        if (request.all() || request.plainStart()) {</span>
+<span class="nc" id="L95">            startAll(paths, manifest, request, out);</span>
+<span class="nc" id="L96">            return 0;</span>
+        }
+<span class="nc" id="L98">        Optional&lt;Path&gt; explicitEnvPath =</span>
+<span class="nc" id="L99">                request.envPath().map(path -&gt; path.toAbsolutePath().normalize());</span>
+<span class="nc" id="L100">        Path fallbackEnvPath = paths.defaultEnvPath().toAbsolutePath().normalize();</span>
+<span class="nc" id="L101">        ConnectedBoard selectedBoard = selectOne(</span>
+<span class="nc" id="L102">                manifest, request.board(), request.workflow(), &quot;start&quot;, explicitEnvPath, fallbackEnvPath, true);</span>
+<span class="nc" id="L103">        Path envPath = request.envPath()</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                .orElseGet(() -&gt; selectedBoard.envPath() == null ? paths.defaultEnvPath() : selectedBoard.envPath())</span>
+<span class="nc" id="L105">                .toAbsolutePath()</span>
+<span class="nc" id="L106">                .normalize();</span>
+<span class="nc bnc" id="L107" title="All 4 branches missed.">        ConnectedBoard board = request.workflow().isPresent() &amp;&amp; selectedBoard.envPath() == null</span>
+<span class="nc" id="L108">                ? workflowBoard(selectedBoard.workflowPath(), envPath)</span>
+<span class="nc" id="L109">                : selectedBoard;</span>
+<span class="nc" id="L110">        rejectBoardManagedByAnotherWorkflow(paths, manifest, board);</span>
+<span class="nc" id="L111">        start(paths, board, envPath, request.envPath().isPresent(), out);</span>
+<span class="nc" id="L112">        return 0;</span>
+    }
+
+    private void rejectBoardManagedByAnotherWorkflow(
+            LocalWorkerPaths paths, ConnectedBoardManifest manifest, ConnectedBoard board) throws IOException {
+<span class="nc" id="L117">        boardManagedByAnotherRunningWorkflow(paths, manifest, board).ifPresent(row -&gt; {</span>
+<span class="nc" id="L118">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_board_already_managed&quot;,
+<span class="nc" id="L120">                    &quot;Trello board &quot; + DisplayNames.quotedName(row.boardName())</span>
+                            + &quot; is already managed by a running worker for another workflow.&quot;
+                            + &quot;\nStop that worker first with symphony-trello stop --workflow, or start that workflow instead.&quot;);
+        });
+<span class="nc" id="L124">    }</span>
+
+    private Optional&lt;ConnectedBoard&gt; boardManagedByAnotherRunningWorkflow(
+            LocalWorkerPaths paths, ConnectedBoardManifest manifest, ConnectedBoard board) throws IOException {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        for (ConnectedBoard row : manifest.boards()) {</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">            if (PathsEqual.samePath(row.workflowPath(), board.workflowPath())) {</span>
+<span class="nc" id="L130">                continue;</span>
+            }
+<span class="nc bnc" id="L132" title="All 2 branches missed.">            if (!sameTrelloBoard(row, board)) {</span>
+<span class="nc" id="L133">                continue;</span>
+            }
+<span class="nc bnc" id="L135" title="All 2 branches missed.">            if (isRunningManagedWorker(paths, row)) {</span>
+<span class="nc" id="L136">                return Optional.of(row);</span>
+            }
+<span class="nc" id="L138">        }</span>
+<span class="nc" id="L139">        return Optional.empty();</span>
+    }
+
+    private static boolean sameTrelloBoard(ConnectedBoard row, ConnectedBoard board) {
+<span class="nc" id="L143">        Set&lt;String&gt; rowIdentifiers = stableBoardIdentifiers(row);</span>
+<span class="nc" id="L144">        return stableBoardIdentifiers(board).stream().anyMatch(rowIdentifiers::contains);</span>
+    }
+
+    /// Collects every stable Trello identifier of a board row. Created-board manifest rows can
+    /// store the 24-character board id in boardKey, leaving the short link only recoverable from
+    /// the stored board URL. Identifiers are lowercased to match connected-board selector
+    /// case handling.
+    private static Set&lt;String&gt; stableBoardIdentifiers(ConnectedBoard board) {
+<span class="nc" id="L152">        Set&lt;String&gt; identifiers = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L153">        addBoardIdentifier(identifiers, board.boardId());</span>
+<span class="nc" id="L154">        addBoardIdentifier(identifiers, board.boardKey());</span>
+<span class="nc" id="L155">        String urlIdentifier = TrelloBoardIds.parseStoredBoardUrl(board.boardUrl());</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (!urlIdentifier.equals(board.boardUrl())) {</span>
+<span class="nc" id="L157">            addBoardIdentifier(identifiers, urlIdentifier);</span>
+        }
+<span class="nc" id="L159">        return identifiers;</span>
+    }
+
+    private static void addBoardIdentifier(Set&lt;String&gt; identifiers, String identifier) {
+<span class="nc bnc" id="L163" title="All 4 branches missed.">        if (identifier != null &amp;&amp; !identifier.isBlank()) {</span>
+<span class="nc" id="L164">            identifiers.add(identifier.toLowerCase(Locale.ROOT));</span>
+        }
+<span class="nc" id="L166">    }</span>
+
+    private boolean isRunningManagedWorker(LocalWorkerPaths paths, ConnectedBoard row) throws IOException {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (canStopManagedWorker(paths, row)) {</span>
+<span class="nc" id="L170">            return true;</span>
+        }
+        try {
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            return healthChecker.boardHealth(row).kind() == BoardHealthKind.SAME_WORKFLOW;</span>
+<span class="nc" id="L174">        } catch (TrelloBoardSetupException e) {</span>
+            // A row with unresolvable port configuration cannot be probed; do not block this start
+            // because of an unrelated broken manifest row.
+<span class="nc" id="L177">            return false;</span>
+        }
+    }
+
+    private void startAll(
+            LocalWorkerPaths paths, ConnectedBoardManifest manifest, StartWorkerRequest request, PrintStream out)
+            throws IOException {
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (request.board().isPresent()</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                || request.workflow().isPresent()</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">                || request.envPath().isPresent()) {</span>
+<span class="nc" id="L187">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_selection_conflict&quot;, &quot;--all cannot be used with --board, --workflow, or --env.&quot;);
+        }
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        if (manifest.boards().isEmpty()) {</span>
+<span class="nc" id="L191">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_board_not_found&quot;, &quot;No Trello boards are connected to Symphony.&quot;);
+        }
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        for (ConnectedBoard board : manifest.boards()) {</span>
+            // Plain branching because the absent branch starts the worker with checked IO.
+<span class="nc" id="L196">            Optional&lt;ConnectedBoard&gt; managedElsewhere = boardManagedByAnotherRunningWorkflow(paths, manifest, board);</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            if (managedElsewhere.isPresent()) {</span>
+<span class="nc" id="L198">                ConnectedBoard running = managedElsewhere.get();</span>
+<span class="nc" id="L199">                out.println(&quot;Skipped workflow file because Trello board &quot;</span>
+<span class="nc" id="L200">                        + DisplayNames.quotedName(running.boardName())</span>
+                        + &quot; is already managed by another running workflow.&quot;);
+<span class="nc" id="L202">                continue;</span>
+            }
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            Path envPath = (board.envPath() == null ? paths.defaultEnvPath() : board.envPath())</span>
+<span class="nc" id="L205">                    .toAbsolutePath()</span>
+<span class="nc" id="L206">                    .normalize();</span>
+<span class="nc" id="L207">            start(paths, board, envPath, out);</span>
+<span class="nc" id="L208">        }</span>
+<span class="nc" id="L209">    }</span>
+
+    void start(LocalWorkerPaths paths, ConnectedBoard board, Path envPath, PrintStream out) throws IOException {
+<span class="nc" id="L212">        start(paths, board, envPath, false, out);</span>
+<span class="nc" id="L213">    }</span>
+
+    private void start(
+            LocalWorkerPaths paths, ConnectedBoard board, Path envPath, boolean explicitEnvOverride, PrintStream out)
+            throws IOException {
+<span class="nc" id="L218">        validateWorkerWorkflowPath(board.workflowPath());</span>
+<span class="nc" id="L219">        validateWorkerEnvPath(envPath);</span>
+<span class="nc" id="L220">        workflowConfig.requireLaunchableWorkflowFile(board.workflowPath());</span>
+<span class="nc" id="L221">        Function&lt;String, Optional&lt;String&gt;&gt; workflowEnvironment =</span>
+<span class="nc" id="L222">                WorkflowEnvironmentResolver.resolver(environment, envPath);</span>
+<span class="nc" id="L223">        var store = new ManagedProcessStore(paths.stateHome());</span>
+<span class="nc" id="L224">        ManagedProcessStore.ManagedProcessFiles files = store.files(board.workflowPath());</span>
+<span class="nc" id="L225">        Files.createDirectories(paths.stateHome());</span>
+<span class="nc" id="L226">        startWithProcessLock(paths, board, envPath, explicitEnvOverride, out, store, files, workflowEnvironment);</span>
+<span class="nc" id="L227">    }</span>
+
+    private static void validateWorkerEnvPath(Path envPath) {
+<span class="nc bnc" id="L230" title="All 4 branches missed.">        if (Files.exists(envPath) &amp;&amp; !Files.isRegularFile(envPath)) {</span>
+<span class="nc" id="L231">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;, &quot;--env must point to a regular dotenv file.&quot;);
+        }
+<span class="nc" id="L234">    }</span>
+
+    private static void validateWorkerWorkflowPath(Path workflowPath) {
+<span class="nc bnc" id="L237" title="All 4 branches missed.">        if (Files.exists(workflowPath) &amp;&amp; !Files.isRegularFile(workflowPath)) {</span>
+<span class="nc" id="L238">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;, &quot;--workflow must point to a regular workflow file.&quot;);
+        }
+<span class="nc" id="L241">    }</span>
+
+    private void startWithProcessLock(
+            LocalWorkerPaths paths,
+            ConnectedBoard board,
+            Path envPath,
+            boolean explicitEnvOverride,
+            PrintStream out,
+            ManagedProcessStore store,
+            ManagedProcessStore.ManagedProcessFiles files,
+            Function&lt;String, Optional&lt;String&gt;&gt; workflowEnvironment)
+            throws IOException {
+<span class="nc" id="L253">        try (var ignored = acquireProcessLock(files)) {</span>
+<span class="nc" id="L254">            startLocked(paths, board, envPath, explicitEnvOverride, out, store, files, workflowEnvironment);</span>
+        }
+<span class="nc" id="L256">    }</span>
+
+    private void startLocked(
+            LocalWorkerPaths paths,
+            ConnectedBoard board,
+            Path envPath,
+            boolean explicitEnvOverride,
+            PrintStream out,
+            ManagedProcessStore store,
+            ManagedProcessStore.ManagedProcessFiles files,
+            Function&lt;String, Optional&lt;String&gt;&gt; workflowEnvironment)
+            throws IOException {
+<span class="nc" id="L268">        int healthPort = healthChecker.managedHealthPort(board.workflowPath(), board.serverPort(), envPath);</span>
+<span class="nc" id="L269">        Optional&lt;WorkerCredentialUsage&gt; credentialUsage = workerCredentialUsage(board.workflowPath(), envPath);</span>
+
+<span class="nc" id="L271">        Long existingPid = store.readPid(files.pidFile());</span>
+<span class="nc" id="L272">        boolean restartManagedWorker = false;</span>
+        BoardHealth existingHealth;
+<span class="nc bnc" id="L274" title="All 4 branches missed.">        if (existingPid != null &amp;&amp; platform.isAlive(existingPid)) {</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            if (!platform.isManaged(existingPid, paths.appHome(), board.workflowPath())) {</span>
+<span class="nc" id="L276">                String pidToken = pathToken(paths, files.pidFile());</span>
+<span class="nc" id="L277">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_worker_pid_unmanaged&quot;,
+                        &quot;State file belongs to another process for selected workflow file pid=&quot; + existingPid
+<span class="nc" id="L280">                                + &quot; pid_file_token=&quot; + pidToken + lookupHint(pidToken));</span>
+            }
+<span class="nc" id="L282">            BoardHealth health =</span>
+<span class="nc" id="L283">                    healthChecker.workflowHealth(board.workflowPath(), board.boardId(), board.boardKey(), healthPort);</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            if (health.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L285">                handleSameWorkflowWorker(</span>
+                        paths,
+                        board,
+                        envPath,
+                        explicitEnvOverride,
+                        health,
+                        store,
+                        files,
+                        out,
+<span class="nc" id="L294">                        Optional.of(existingPid));</span>
+<span class="nc" id="L295">                return;</span>
+            }
+<span class="nc" id="L297">            existingHealth = health;</span>
+<span class="nc" id="L298">            restartManagedWorker = true;</span>
+<span class="nc" id="L299">        } else {</span>
+<span class="nc" id="L300">            existingHealth =</span>
+<span class="nc" id="L301">                    healthChecker.workflowHealth(board.workflowPath(), board.boardId(), board.boardKey(), healthPort);</span>
+        }
+
+<span class="nc bnc" id="L304" title="All 2 branches missed.">        if (existingHealth.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L305">            handleSameWorkflowWorker(</span>
+<span class="nc" id="L306">                    paths, board, envPath, explicitEnvOverride, existingHealth, store, files, out, Optional.empty());</span>
+<span class="nc" id="L307">            return;</span>
+        }
+
+<span class="nc" id="L310">        boolean workflowServerPortUsed = workflowServerPortUsed(envPath);</span>
+<span class="nc" id="L311">        EffectiveConfig launchConfig = workflowConfig.prepareLaunchWorkflow(</span>
+<span class="nc" id="L312">                board.workflowPath(), workflowEnvironment, workflowServerPortUsed, paths.configDir());</span>
+<span class="nc" id="L313">        credentialUsage.ifPresent(this::validateWorkerCredentials);</span>
+<span class="nc" id="L314">        workflowConfig.validateLaunchDispatch(board.workflowPath(), launchConfig);</span>
+
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (!restartManagedWorker) {</span>
+<span class="nc" id="L317">            rejectPortConflict(board, existingHealth, healthPort);</span>
+        }
+
+<span class="nc" id="L320">        verifyTrelloCredentialsBeforeLaunch(launchConfig, credentialUsage);</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (restartManagedWorker) {</span>
+<span class="nc" id="L322">            stopPid(store, files, existingPid);</span>
+<span class="nc" id="L323">            BoardHealth postStopHealth =</span>
+<span class="nc" id="L324">                    healthChecker.workflowHealth(board.workflowPath(), board.boardId(), board.boardKey(), healthPort);</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            if (handlePostStopHealth(paths, board, envPath, explicitEnvOverride, store, files, out, postStopHealth)) {</span>
+<span class="nc" id="L326">                return;</span>
+            }
+<span class="nc bnc" id="L328" title="All 4 branches missed.">        } else if (existingPid != null &amp;&amp; !platform.isAlive(existingPid)) {</span>
+<span class="nc" id="L329">            store.deletePid(files.pidFile());</span>
+        }
+
+<span class="nc" id="L332">        List&lt;String&gt; command = List.of(</span>
+<span class="nc" id="L333">                javaExecutable(),</span>
+<span class="nc" id="L334">                &quot;-Dsymphony.trello.managed.app_home=&quot; + paths.appHome(),</span>
+                &quot;-jar&quot;,
+<span class="nc" id="L336">                paths.appHome().resolve(&quot;target/quarkus-app/quarkus-run.jar&quot;).toString(),</span>
+<span class="nc" id="L337">                board.workflowPath().toString());</span>
+<span class="nc" id="L338">        Map&lt;String, String&gt; processEnvironment = Map.of(</span>
+<span class="nc" id="L339">                &quot;SYMPHONY_TRELLO_DOTENV&quot;, envPath.toString(),</span>
+<span class="nc" id="L340">                &quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;, paths.configDir().toString(),</span>
+<span class="nc" id="L341">                &quot;SYMPHONY_TRELLO_WORKSPACE_ROOT&quot;, paths.workspaceRoot().toString(),</span>
+<span class="nc" id="L342">                &quot;SYMPHONY_TRELLO_STATE_HOME&quot;, paths.stateHome().toString());</span>
+<span class="nc" id="L343">        StartupLogOffsets logOffsets = StartupLogOffsets.capture(files);</span>
+<span class="nc" id="L344">        ManagedProcessHandle handle =</span>
+<span class="nc" id="L345">                platform.start(command, paths.appHome(), processEnvironment, files.stdoutLog(), files.stderrLog());</span>
+<span class="nc" id="L346">        store.writePid(files.pidFile(), handle.pid());</span>
+<span class="nc" id="L347">        BoardHealth health = healthChecker.waitForSameWorkflow(board, healthPort, () -&gt; platform.isAlive(handle.pid()));</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        if (health.kind() != BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L349">            stopPid(store, files, handle.pid());</span>
+<span class="nc" id="L350">            throwKnownStartupFailure(files, logOffsets, platform.appendsToExistingLogs(), credentialUsage);</span>
+<span class="nc" id="L351">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_start_unhealthy&quot;,
+<span class="nc" id="L353">                    &quot;Symphony start returned successfully, but &quot; + LocalHealthChecker.localStateUrl(health.port())</span>
+                            + &quot; did not report the expected workflow and board for &quot;
+<span class="nc" id="L355">                            + DisplayNames.quotedName(board.boardName()) + &quot;. Run symphony-trello diagnostics &quot;</span>
+                            + &quot;to collect safe troubleshooting details, or rerun symphony-trello logs with the same &quot;
+                            + &quot;board or workflow selector for local log output.&quot;
+<span class="nc" id="L358">                            + startupPrivateContextHint(paths, board, files));</span>
+        }
+<span class="nc bnc" id="L360" title="All 2 branches missed.">        if (!platform.isAlive(handle.pid())</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                || !platform.isManaged(handle.pid(), paths.appHome(), board.workflowPath())) {</span>
+<span class="nc" id="L362">            stopStartedProcess(store, files, handle.pid());</span>
+<span class="nc" id="L363">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_start_unhealthy&quot;,
+                    &quot;Symphony reported the expected workflow and board on &quot;
+<span class="nc" id="L366">                            + LocalHealthChecker.localStateUrl(health.port())</span>
+                            + &quot;, but the newly started managed process is not running for this install. &quot;
+                            + &quot;Run symphony-trello diagnostics to collect safe troubleshooting details, &quot;
+                            + &quot;or rerun symphony-trello logs with the same board or workflow selector for local log output.&quot;
+<span class="nc" id="L370">                            + startupPrivateContextHint(paths, board, files));</span>
+        }
+<span class="nc" id="L372">        out.println(&quot;Started Symphony for Trello: &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L373">    }</span>
+
+    private boolean workflowServerPortUsed(Path envPath) {
+<span class="nc" id="L376">        return healthChecker.externalHttpPortOverrideSource(envPath).isEmpty();</span>
+    }
+
+    private boolean handlePostStopHealth(
+            LocalWorkerPaths paths,
+            ConnectedBoard board,
+            Path envPath,
+            boolean explicitEnvOverride,
+            ManagedProcessStore store,
+            ManagedProcessStore.ManagedProcessFiles files,
+            PrintStream out,
+            BoardHealth postStopHealth)
+            throws IOException {
+<span class="nc bnc" id="L389" title="All 3 branches missed.">        return switch (postStopHealth.kind()) {</span>
+<span class="nc" id="L390">            case STOPPED -&gt; false;</span>
+            case PORT_USED, WRONG_WORKFLOW -&gt; {
+<span class="nc" id="L392">                rejectPortConflict(board, postStopHealth, postStopHealth.port());</span>
+<span class="nc" id="L393">                yield true;</span>
+            }
+            case SAME_WORKFLOW -&gt; {
+<span class="nc" id="L396">                handleSameWorkflowWorker(</span>
+                        paths,
+                        board,
+                        envPath,
+                        explicitEnvOverride,
+                        postStopHealth,
+                        store,
+                        files,
+                        out,
+<span class="nc" id="L405">                        Optional.empty());</span>
+<span class="nc" id="L406">                yield true;</span>
+            }
+        };
+    }
+
+    private static void rejectPortConflict(ConnectedBoard board, BoardHealth health, int healthPort) {
+<span class="nc bnc" id="L412" title="All 3 branches missed.">        switch (health.kind()) {</span>
+            case PORT_USED -&gt;
+<span class="nc" id="L414">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_worker_port_in_use&quot;,
+                        &quot;Local HTTP status port &quot; + healthPort
+                                + &quot; is already in use by another process, so the worker for &quot;
+<span class="nc" id="L418">                                + DisplayNames.quotedName(board.boardName())</span>
+                                + &quot; cannot start.\nFree the port or change the workflow server.port, then rerun symphony-trello start.&quot;);
+            case WRONG_WORKFLOW -&gt; {
+<span class="nc" id="L421">                String servingWorkflow = health.actualWorkflowPath()</span>
+<span class="nc" id="L422">                        .map(ignored -&gt; &quot; It currently serves another Symphony workflow.&quot;)</span>
+<span class="nc" id="L423">                        .orElse(&quot;&quot;);</span>
+<span class="nc" id="L424">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_worker_port_in_use&quot;,
+                        &quot;Local HTTP status port &quot; + healthPort
+                                + &quot; is already serving another Symphony workflow, so the worker for &quot;
+<span class="nc" id="L428">                                + DisplayNames.quotedName(board.boardName()) + &quot; cannot start.&quot; + servingWorkflow</span>
+                                + &quot;\nStop that worker or change the workflow server.port, then rerun symphony-trello start.&quot;);
+            }
+            case SAME_WORKFLOW, STOPPED -&gt; {}
+        }
+<span class="nc" id="L433">    }</span>
+
+    private void handleSameWorkflowWorker(
+            LocalWorkerPaths paths,
+            ConnectedBoard board,
+            Path envPath,
+            boolean explicitEnvOverride,
+            BoardHealth health,
+            ManagedProcessStore store,
+            ManagedProcessStore.ManagedProcessFiles files,
+            PrintStream out,
+            Optional&lt;Long&gt; recordedManagedPid)
+            throws IOException {
+<span class="nc" id="L446">        printIgnoredEnvOverride(paths, board, envPath, explicitEnvOverride, out);</span>
+<span class="nc" id="L447">        recordedManagedPid.ifPresentOrElse(</span>
+<span class="nc" id="L448">                pid -&gt; out.println(&quot;Symphony for Trello is already running for &quot;</span>
+<span class="nc" id="L449">                        + DisplayNames.quotedName(board.boardName()) + &quot; pid=&quot; + pid),</span>
+<span class="nc" id="L450">                () -&gt; out.println(&quot;Symphony for Trello is already running for &quot;</span>
+<span class="nc" id="L451">                        + DisplayNames.quotedName(board.boardName()) + &quot; at &quot;</span>
+<span class="nc" id="L452">                        + LocalHealthChecker.localServerUrl(health.port())));</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        if (recordedManagedPid.isEmpty()) {</span>
+<span class="nc" id="L454">            repairOrReportUntrackedWorker(paths, board, health, store, files, out);</span>
+        }
+<span class="nc" id="L456">    }</span>
+
+    private void repairOrReportUntrackedWorker(
+            LocalWorkerPaths paths,
+            ConnectedBoard board,
+            BoardHealth health,
+            ManagedProcessStore store,
+            ManagedProcessStore.ManagedProcessFiles files,
+            PrintStream out)
+            throws IOException {
+<span class="nc" id="L466">        Optional&lt;Long&gt; verifiedPid = verifiedManagedWorkerPid(paths, board, health);</span>
+        // Plain branching because the present branch writes the pid file with checked IO.
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        if (verifiedPid.isPresent()) {</span>
+<span class="nc" id="L469">            store.writePid(files.pidFile(), verifiedPid.get());</span>
+<span class="nc" id="L470">            out.println(&quot;Restored missing managed worker tracking pid=&quot; + verifiedPid.get());</span>
+<span class="nc" id="L471">            return;</span>
+        }
+<span class="nc" id="L473">        out.println(&quot;This worker is untracked because it has no managed pid for this install.&quot;);</span>
+<span class="nc" id="L474">        health.workerPid()</span>
+<span class="nc" id="L475">                .ifPresentOrElse(</span>
+<span class="nc" id="L476">                        pid -&gt; out.println(</span>
+                                &quot;Stop the worker process manually, then rerun symphony-trello start. Reported worker pid=&quot;
+                                        + pid),
+<span class="nc" id="L479">                        () -&gt; out.println(&quot;Stop the worker process manually, then rerun symphony-trello start.&quot;));</span>
+<span class="nc" id="L480">    }</span>
+
+    private Optional&lt;Long&gt; verifiedManagedWorkerPid(LocalWorkerPaths paths, ConnectedBoard board, BoardHealth health) {
+<span class="nc bnc" id="L483" title="All 2 branches missed.">        if (health.kind() != BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L484">            return Optional.empty();</span>
+        }
+<span class="nc" id="L486">        return health.workerPid()</span>
+<span class="nc bnc" id="L487" title="All 4 branches missed.">                .filter(pid -&gt; platform.isAlive(pid) &amp;&amp; platform.isManaged(pid, paths.appHome(), board.workflowPath()));</span>
+    }
+
+    private static void printIgnoredEnvOverride(
+            LocalWorkerPaths paths, ConnectedBoard board, Path envPath, boolean explicitEnvOverride, PrintStream out) {
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        if (!explicitEnvOverride) {</span>
+<span class="nc" id="L493">            return;</span>
+        }
+<span class="nc bnc" id="L495" title="All 2 branches missed.">        Path configuredEnvPath = (board.envPath() == null ? paths.defaultEnvPath() : board.envPath())</span>
+<span class="nc" id="L496">                .toAbsolutePath()</span>
+<span class="nc" id="L497">                .normalize();</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        if (PathsEqual.samePath(envPath, configuredEnvPath)) {</span>
+<span class="nc" id="L499">            return;</span>
+        }
+<span class="nc" id="L501">        out.println(&quot;Supplied --env was not applied because Symphony for Trello is already running.&quot;);</span>
+<span class="nc" id="L502">        out.println(&quot;Stop and start this worker to use: &quot; + envPath);</span>
+<span class="nc" id="L503">    }</span>
+
+    private Optional&lt;WorkerCredentialUsage&gt; workerCredentialUsage(Path workflowPath, Path envPath) {
+<span class="nc" id="L506">        return workflowConfig</span>
+<span class="nc" id="L507">                .trackerCredentialReferences(workflowPath)</span>
+<span class="nc" id="L508">                .map(references -&gt; workerCredentialUsage(</span>
+                        envPath,
+<span class="nc" id="L510">                        requiredEnvironmentCredential(references.apiKey(), TrelloEnvironment.API_KEY),</span>
+<span class="nc" id="L511">                        requiredEnvironmentCredential(references.apiToken(), TrelloEnvironment.API_TOKEN)));</span>
+    }
+
+    private WorkerCredentialUsage workerCredentialUsage(
+            Path envPath, Optional&lt;String&gt; apiKeyEnvironment, Optional&lt;String&gt; apiTokenEnvironment) {
+<span class="nc" id="L516">        Map&lt;String, String&gt; dotenv = LocalEnvironment.load(envPath);</span>
+<span class="nc" id="L517">        return new WorkerCredentialUsage(</span>
+                envPath,
+                apiKeyEnvironment,
+                apiTokenEnvironment,
+<span class="nc" id="L521">                credentialSource(apiKeyEnvironment, dotenv),</span>
+<span class="nc" id="L522">                credentialSource(apiTokenEnvironment, dotenv),</span>
+<span class="nc" id="L523">                dotenvValue(apiKeyEnvironment, dotenv),</span>
+<span class="nc" id="L524">                dotenvValue(apiTokenEnvironment, dotenv));</span>
+    }
+
+    private static Optional&lt;String&gt; dotenvValue(Optional&lt;String&gt; environmentName, Map&lt;String, String&gt; dotenv) {
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        return environmentName.map(dotenv::get).filter(value -&gt; !TrelloCredentialStore.blank(value));</span>
+    }
+
+    private TrelloBoardSetupException.TrelloCredentialSource credentialSource(
+            Optional&lt;String&gt; environmentName, Map&lt;String, String&gt; dotenv) {
+<span class="nc" id="L533">        return environmentName</span>
+<span class="nc" id="L534">                .map(name -&gt; {</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">                    if (!TrelloCredentialStore.blank(environment.get(name))) {</span>
+<span class="nc" id="L536">                        return TrelloBoardSetupException.TrelloCredentialSource.SHELL_ENVIRONMENT;</span>
+                    }
+<span class="nc bnc" id="L538" title="All 2 branches missed.">                    if (!TrelloCredentialStore.blank(dotenv.get(name))) {</span>
+<span class="nc" id="L539">                        return TrelloBoardSetupException.TrelloCredentialSource.DOTENV_FILE;</span>
+                    }
+<span class="nc" id="L541">                    return TrelloBoardSetupException.TrelloCredentialSource.MISSING;</span>
+                })
+<span class="nc" id="L543">                .orElse(TrelloBoardSetupException.TrelloCredentialSource.WORKFLOW_CONFIG);</span>
+    }
+
+    private void verifyTrelloCredentialsBeforeLaunch(
+            EffectiveConfig launchConfig, Optional&lt;WorkerCredentialUsage&gt; credentialUsage) {
+        try {
+<span class="nc" id="L549">            credentialPreflight.verify(</span>
+<span class="nc" id="L550">                    URI.create(launchConfig.tracker().endpoint()),</span>
+<span class="nc" id="L551">                    launchConfig.tracker().apiKey(),</span>
+<span class="nc" id="L552">                    launchConfig.tracker().apiToken());</span>
+<span class="nc" id="L553">        } catch (TrelloBoardSetupException e) {</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">            if (isCredentialFailure(e)) {</span>
+<span class="nc" id="L555">                throw withCredentialContext(e, credentialUsage);</span>
+            }
+<span class="nc bnc" id="L557" title="All 2 branches missed.">            if (isMalformedCredentialRejection(e)) {</span>
+                // The preflight request only carries the resolved key and token, so a Trello
+                // invalid-request rejection here means the resolved credential values are
+                // malformed, not that the request shape is wrong.
+<span class="nc" id="L561">                throw withCredentialContext(</span>
+                        new TrelloBoardSetupException(
+                                &quot;trello_auth_failed&quot;,
+                                &quot;Trello rejected the resolved API credentials while starting Symphony.&quot;,
+                                e),
+                        credentialUsage);
+            }
+            // Transport or transient Trello API problems must not block the launch; the worker
+            // retries them and the post-start health check still classifies startup failures.
+<span class="nc" id="L570">        }</span>
+<span class="nc" id="L571">    }</span>
+
+    private static boolean isCredentialFailure(TrelloBoardSetupException e) {
+<span class="nc bnc" id="L574" title="All 4 branches missed.">        return &quot;trello_auth_failed&quot;.equals(e.code()) || &quot;trello_permission_denied&quot;.equals(e.code());</span>
+    }
+
+    private static boolean isMalformedCredentialRejection(TrelloBoardSetupException e) {
+<span class="nc" id="L578">        return &quot;trello_invalid_request&quot;.equals(e.code());</span>
+    }
+
+    private static TrelloBoardSetupException withCredentialContext(
+            TrelloBoardSetupException exception, Optional&lt;WorkerCredentialUsage&gt; credentialUsage) {
+<span class="nc" id="L583">        return credentialUsage</span>
+<span class="nc" id="L584">                .map(usage -&gt; exception</span>
+<span class="nc" id="L585">                        .withDotenvPath(usage.envPath())</span>
+<span class="nc" id="L586">                        .withTrelloCredentialEnvironmentNames(</span>
+<span class="nc" id="L587">                                usage.apiKeyEnvironment().orElse(TrelloEnvironment.API_KEY),</span>
+<span class="nc" id="L588">                                usage.apiTokenEnvironment().orElse(TrelloEnvironment.API_TOKEN))</span>
+<span class="nc" id="L589">                        .withTrelloCredentialSources(usage.apiKeySource(), usage.apiTokenSource()))</span>
+<span class="nc" id="L590">                .orElse(exception);</span>
+    }
+
+    private void validateWorkerCredentials(WorkerCredentialUsage usage) {
+<span class="nc bnc" id="L594" title="All 2 branches missed.">        boolean hasApiKey = usage.apiKeySource() != TrelloBoardSetupException.TrelloCredentialSource.MISSING;</span>
+<span class="nc bnc" id="L595" title="All 2 branches missed.">        boolean hasApiToken = usage.apiTokenSource() != TrelloBoardSetupException.TrelloCredentialSource.MISSING;</span>
+<span class="nc bnc" id="L596" title="All 4 branches missed.">        if (!hasApiKey &amp;&amp; !hasApiToken) {</span>
+<span class="nc" id="L597">            throw missingWorkerCredentialException(</span>
+                    &quot;setup_worker_missing_trello_credentials&quot;, &quot;Missing Trello credentials for worker start.&quot;, usage);
+        }
+<span class="nc bnc" id="L600" title="All 2 branches missed.">        if (!hasApiKey) {</span>
+<span class="nc" id="L601">            throw missingWorkerCredentialException(</span>
+                    &quot;setup_worker_missing_api_key&quot;, &quot;Missing Trello API key for worker start.&quot;, usage);
+        }
+<span class="nc bnc" id="L604" title="All 2 branches missed.">        if (!hasApiToken) {</span>
+<span class="nc" id="L605">            throw missingWorkerCredentialException(</span>
+                    &quot;setup_worker_missing_api_token&quot;, &quot;Missing Trello API token for worker start.&quot;, usage);
+        }
+<span class="nc" id="L608">        rejectReferenceLookingDotenvCredential(</span>
+<span class="nc" id="L609">                usage.envPath(), usage.apiKeyEnvironment(), usage.apiKeySource(), usage.apiKeyDotenvValue());</span>
+<span class="nc" id="L610">        rejectReferenceLookingDotenvCredential(</span>
+<span class="nc" id="L611">                usage.envPath(), usage.apiTokenEnvironment(), usage.apiTokenSource(), usage.apiTokenDotenvValue());</span>
+<span class="nc" id="L612">    }</span>
+
+    /// The worker uses a dotenv value only when the shell environment does not provide the
+    /// variable, so only a value the dotenv file actually contributes is checked against the
+    /// shared credential-file contract in [TrelloCredentialStore#dotenvCredential]. The
+    /// check runs before the Trello credential preflight and before the worker launch, so a
+    /// reference-looking value fails locally instead of reaching Trello as a literal credential.
+    private static void rejectReferenceLookingDotenvCredential(
+            Path envPath,
+            Optional&lt;String&gt; environmentName,
+            TrelloBoardSetupException.TrelloCredentialSource source,
+            Optional&lt;String&gt; dotenvValue) {
+<span class="nc bnc" id="L624" title="All 2 branches missed.">        if (source != TrelloBoardSetupException.TrelloCredentialSource.DOTENV_FILE) {</span>
+<span class="nc" id="L625">            return;</span>
+        }
+<span class="nc" id="L627">        environmentName.ifPresent(name -&gt; {</span>
+            try {
+<span class="nc" id="L629">                TrelloCredentialStore.dotenvCredential(name, dotenvValue.orElse(null));</span>
+<span class="nc" id="L630">            } catch (TrelloBoardSetupException e) {</span>
+                // withDotenvPath copies code, message, and cause into a context-enriched copy,
+                // and the fresh trace still names this rejection site.
+<span class="nc" id="L633">                throw e.withDotenvPath(envPath); // NOPMD - PreserveStackTrace: enriched copy</span>
+<span class="nc" id="L634">            }</span>
+<span class="nc" id="L635">        });</span>
+<span class="nc" id="L636">    }</span>
+
+    private static TrelloBoardSetupException missingWorkerCredentialException(
+            String code, String message, WorkerCredentialUsage usage) {
+<span class="nc" id="L640">        return new TrelloBoardSetupException(code, message)</span>
+<span class="nc" id="L641">                .withDotenvPath(usage.envPath())</span>
+<span class="nc" id="L642">                .withTrelloCredentialEnvironmentNames(</span>
+<span class="nc" id="L643">                        usage.apiKeyEnvironment().orElse(TrelloEnvironment.API_KEY),</span>
+<span class="nc" id="L644">                        usage.apiTokenEnvironment().orElse(TrelloEnvironment.API_TOKEN));</span>
+    }
+
+    private static Optional&lt;String&gt; requiredEnvironmentCredential(
+            Optional&lt;String&gt; configuredValue, String defaultEnvironmentName) {
+<span class="nc bnc" id="L649" title="All 2 branches missed.">        if (configuredValue.isEmpty()) {</span>
+<span class="nc" id="L650">            return Optional.of(defaultEnvironmentName);</span>
+        }
+<span class="nc" id="L652">        return configuredValue.map(String::trim).flatMap(LocalWorkerManager::environmentCredentialName);</span>
+    }
+
+    private static Optional&lt;String&gt; environmentCredentialName(String configuredValue) {
+<span class="nc" id="L656">        return EnvironmentReferences.referenceName(configuredValue);</span>
+    }
+
+    private static void throwKnownStartupFailure(
+            ManagedProcessStore.ManagedProcessFiles files,
+            StartupLogOffsets logOffsets,
+            boolean appendsToExistingLogs,
+            Optional&lt;WorkerCredentialUsage&gt; credentialUsage) {
+<span class="nc" id="L664">        String logs = startupLogs(files, logOffsets, appendsToExistingLogs);</span>
+<span class="nc bnc" id="L665" title="All 2 branches missed.">        if (logs.contains(&quot;Trello authentication failed&quot;)) {</span>
+<span class="nc" id="L666">            throw withCredentialContext(</span>
+                    new TrelloBoardSetupException(
+                            &quot;trello_auth_failed&quot;, &quot;Trello authentication failed while starting Symphony.&quot;),
+                    credentialUsage);
+        }
+<span class="nc bnc" id="L671" title="All 2 branches missed.">        if (logs.contains(&quot;Trello permission denied&quot;)) {</span>
+<span class="nc" id="L672">            throw new TrelloBoardSetupException(</span>
+                    &quot;trello_permission_denied&quot;, &quot;Trello permission denied while starting Symphony.&quot;);
+        }
+<span class="nc bnc" id="L675" title="All 2 branches missed.">        if (logs.contains(&quot;Trello board is archived&quot;)) {</span>
+<span class="nc" id="L676">            throw new TrelloBoardSetupException(</span>
+                    &quot;trello_board_closed&quot;, &quot;Configured Trello board is archived while starting Symphony.&quot;);
+        }
+<span class="nc" id="L679">    }</span>
+
+    private static String startupLogs(
+            ManagedProcessStore.ManagedProcessFiles files,
+            StartupLogOffsets logOffsets,
+            boolean appendsToExistingLogs) {
+<span class="nc" id="L685">        return startupLog(files.stdoutLog(), logOffsets.stdoutOffset(), appendsToExistingLogs) + &quot;\n&quot;</span>
+<span class="nc" id="L686">                + startupLog(files.stderrLog(), logOffsets.stderrOffset(), appendsToExistingLogs);</span>
+    }
+
+    private static String startupLog(Path path, StartupLogSnapshot snapshot, boolean appendsToExistingLogs) {
+<span class="nc bnc" id="L690" title="All 2 branches missed.">        if (!Files.isRegularFile(path)) {</span>
+<span class="nc" id="L691">            return &quot;&quot;;</span>
+        }
+        try {
+<span class="nc" id="L694">            long size = Files.size(path);</span>
+<span class="nc" id="L695">            long start = startupLogStart(path, snapshot, size, appendsToExistingLogs);</span>
+<span class="nc bnc" id="L696" title="All 2 branches missed.">            if (start &lt; 0L) {</span>
+<span class="nc" id="L697">                return &quot;&quot;;</span>
+            }
+<span class="nc" id="L699">            try (FileChannel channel = FileChannel.open(path)) {</span>
+<span class="nc" id="L700">                channel.position(start);</span>
+<span class="nc" id="L701">                ByteBuffer buffer = ByteBuffer.allocate((int) (size - start));</span>
+<span class="nc" id="L702">                channel.read(buffer);</span>
+<span class="nc" id="L703">                buffer.flip();</span>
+<span class="nc" id="L704">                return StandardCharsets.UTF_8.decode(buffer).toString();</span>
+            }
+<span class="nc" id="L706">        } catch (IOException ignored) {</span>
+<span class="nc" id="L707">            return &quot;&quot;;</span>
+        }
+    }
+
+    private static long startupLogStart(
+            Path path, StartupLogSnapshot snapshot, long size, boolean appendsToExistingLogs) throws IOException {
+<span class="nc bnc" id="L713" title="All 2 branches missed.">        if (!appendsToExistingLogs) {</span>
+<span class="nc bnc" id="L714" title="All 4 branches missed.">            return size != snapshot.size() || modifiedAfterSnapshot(path, snapshot)</span>
+<span class="nc" id="L715">                    ? Math.max(0L, size - STARTUP_LOG_BYTE_LIMIT)</span>
+<span class="nc" id="L716">                    : -1L;</span>
+        }
+<span class="nc bnc" id="L718" title="All 2 branches missed.">        if (size &gt; snapshot.size()) {</span>
+<span class="nc" id="L719">            return Math.max(snapshot.size(), size - STARTUP_LOG_BYTE_LIMIT);</span>
+        }
+<span class="nc bnc" id="L721" title="All 4 branches missed.">        if (size &lt; snapshot.size() || modifiedAfterSnapshot(path, snapshot)) {</span>
+<span class="nc" id="L722">            return Math.max(0L, size - STARTUP_LOG_BYTE_LIMIT);</span>
+        }
+<span class="nc" id="L724">        return -1L;</span>
+    }
+
+    private static boolean modifiedAfterSnapshot(Path path, StartupLogSnapshot snapshot) throws IOException {
+<span class="nc" id="L728">        long modifiedMillis = Files.getLastModifiedTime(path).toMillis();</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">        return modifiedMillis &gt; snapshot.modifiedMillis();</span>
+    }
+
+<span class="nc" id="L732">    private record StartupLogOffsets(StartupLogSnapshot stdoutOffset, StartupLogSnapshot stderrOffset) {</span>
+        static StartupLogOffsets capture(ManagedProcessStore.ManagedProcessFiles files) {
+<span class="nc" id="L734">            return new StartupLogOffsets(</span>
+<span class="nc" id="L735">                    StartupLogSnapshot.snapshot(files.stdoutLog()), StartupLogSnapshot.snapshot(files.stderrLog()));</span>
+        }
+    }
+
+<span class="nc" id="L739">    private record WorkerCredentialUsage(</span>
+            Path envPath,
+            Optional&lt;String&gt; apiKeyEnvironment,
+            Optional&lt;String&gt; apiTokenEnvironment,
+            TrelloBoardSetupException.TrelloCredentialSource apiKeySource,
+            TrelloBoardSetupException.TrelloCredentialSource apiTokenSource,
+            Optional&lt;String&gt; apiKeyDotenvValue,
+            Optional&lt;String&gt; apiTokenDotenvValue) {}
+
+<span class="nc" id="L748">    private record StartupLogSnapshot(long size, long modifiedMillis) {</span>
+        private static StartupLogSnapshot snapshot(Path path) {
+            try {
+<span class="nc bnc" id="L751" title="All 2 branches missed.">                if (!Files.isRegularFile(path)) {</span>
+<span class="nc" id="L752">                    return new StartupLogSnapshot(0L, 0L);</span>
+                }
+<span class="nc" id="L754">                return new StartupLogSnapshot(</span>
+<span class="nc" id="L755">                        Files.size(path), Files.getLastModifiedTime(path).toMillis());</span>
+<span class="nc" id="L756">            } catch (IOException ignored) {</span>
+<span class="nc" id="L757">                return new StartupLogSnapshot(0L, 0L);</span>
+            }
+        }
+    }
+
+    private void stopStartedProcess(ManagedProcessStore store, ManagedProcessStore.ManagedProcessFiles files, long pid)
+            throws IOException {
+<span class="nc bnc" id="L764" title="All 2 branches missed.">        if (platform.isAlive(pid)) {</span>
+<span class="nc" id="L765">            stopPid(store, files, pid);</span>
+        } else {
+<span class="nc" id="L767">            store.deletePid(files.pidFile());</span>
+        }
+<span class="nc" id="L769">    }</span>
+
+    int stop(StopWorkerRequest request, PrintStream out) throws IOException {
+<span class="nc" id="L772">        LocalWorkerPaths paths = LocalWorkerPaths.from(</span>
+<span class="nc" id="L773">                request.appHome(), request.configDir(), request.workspaceRoot(), request.stateHome(), environment);</span>
+<span class="nc" id="L774">        ConnectedBoardManifest manifest = loadLifecycleManifest(paths, request.workflow());</span>
+<span class="nc" id="L775">        List&lt;ConnectedBoard&gt; boards =</span>
+<span class="nc" id="L776">                selectForStop(manifest, request.board(), request.workflow(), paths.defaultEnvPath());</span>
+<span class="nc" id="L777">        boards = withDefaultEnvForExplicitWorkflow(paths, request.workflow(), boards);</span>
+<span class="nc" id="L778">        var store = new ManagedProcessStore(paths.stateHome());</span>
+<span class="nc bnc" id="L779" title="All 2 branches missed.">        if (boards.isEmpty()) {</span>
+<span class="nc" id="L780">            stopPidFiles(paths, store, out);</span>
+<span class="nc" id="L781">            return 0;</span>
+        }
+<span class="nc bnc" id="L783" title="All 2 branches missed.">        for (ConnectedBoard board : boards) {</span>
+<span class="nc" id="L784">            stop(paths, store, board, out);</span>
+<span class="nc" id="L785">        }</span>
+<span class="nc" id="L786">        return 0;</span>
+    }
+
+    void stop(LocalWorkerPaths paths, ConnectedBoard board, PrintStream out) throws IOException {
+<span class="nc" id="L790">        stop(paths, new ManagedProcessStore(paths.stateHome()), board, out);</span>
+<span class="nc" id="L791">    }</span>
+
+    void rotateLogsForReplacedBoards(LocalWorkerPaths paths, ConnectedBoard board, List&lt;ConnectedBoard&gt; replacedBoards)
+            throws IOException {
+<span class="nc" id="L795">        var store = new ManagedProcessStore(paths.stateHome());</span>
+<span class="nc bnc" id="L796" title="All 2 branches missed.">        for (ConnectedBoard replaced : replacedBoards) {</span>
+<span class="nc bnc" id="L797" title="All 2 branches missed.">            if (PathsEqual.samePath(replaced.workflowPath(), board.workflowPath())</span>
+<span class="nc bnc" id="L798" title="All 2 branches missed.">                    &amp;&amp; !replaced.boardId().equals(board.boardId())) {</span>
+<span class="nc" id="L799">                store.rotateLogsForNewBoardIdentity(replaced.workflowPath());</span>
+            }
+<span class="nc" id="L801">        }</span>
+<span class="nc" id="L802">    }</span>
+
+    boolean canStopManagedWorker(LocalWorkerPaths paths, ConnectedBoard board) throws IOException {
+<span class="nc" id="L805">        var store = new ManagedProcessStore(paths.stateHome());</span>
+<span class="nc" id="L806">        ManagedProcessStore.ManagedProcessFiles files = store.files(board.workflowPath());</span>
+<span class="nc" id="L807">        Long pid = store.readPid(files.pidFile());</span>
+<span class="nc bnc" id="L808" title="All 6 branches missed.">        return pid != null &amp;&amp; platform.isAlive(pid) &amp;&amp; platform.isManaged(pid, paths.appHome(), board.workflowPath());</span>
+    }
+
+    /// True when stop would actually stop a running worker for this board: either a managed pid
+    /// file exists, or the board is healthy without a pid file and reports a worker pid that
+    /// verifies as managed for this install. Setup flows use this to decide whether a replaced
+    /// board needs a restart after its worker was stopped.
+    boolean canStopRunningWorker(LocalWorkerPaths paths, ConnectedBoard board) throws IOException {
+<span class="nc bnc" id="L816" title="All 2 branches missed.">        if (canStopManagedWorker(paths, board)) {</span>
+<span class="nc" id="L817">            return true;</span>
+        }
+<span class="nc" id="L819">        BoardHealth health = healthChecker.boardHealth(board);</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">        return health.kind() == BoardHealthKind.SAME_WORKFLOW</span>
+<span class="nc bnc" id="L821" title="All 2 branches missed.">                &amp;&amp; verifiedManagedWorkerPid(paths, board, health).isPresent();</span>
+    }
+
+    int status(WorkerStatusRequest request, PrintStream out) throws IOException {
+<span class="nc" id="L825">        LocalWorkerPaths paths = LocalWorkerPaths.from(</span>
+<span class="nc" id="L826">                request.appHome(), request.configDir(), request.workspaceRoot(), request.stateHome(), environment);</span>
+<span class="nc" id="L827">        ConnectedBoardManifest manifest = loadLifecycleManifest(paths, request.workflow());</span>
+<span class="nc" id="L828">        List&lt;ConnectedBoard&gt; boards =</span>
+<span class="nc" id="L829">                selectForStatus(manifest, request.board(), request.workflow(), paths.defaultEnvPath());</span>
+<span class="nc" id="L830">        boards = withDefaultEnvForExplicitWorkflow(paths, request.workflow(), boards);</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">        if (boards.isEmpty()) {</span>
+<span class="nc" id="L832">            printPidFileStatus(paths, out);</span>
+<span class="nc" id="L833">            return 0;</span>
+        }
+<span class="nc" id="L835">        var store = new ManagedProcessStore(paths.stateHome());</span>
+<span class="nc" id="L836">        Set&lt;String&gt; duplicateBoardNames = duplicateBoardNames(boards);</span>
+<span class="nc bnc" id="L837" title="All 2 branches missed.">        for (ConnectedBoard board : boards) {</span>
+<span class="nc" id="L838">            String boardLabel = statusBoardLabel(board, duplicateBoardNames);</span>
+            try {
+<span class="nc" id="L840">                printWorkflowStatus(paths, store, board, boardLabel, out);</span>
+<span class="nc" id="L841">            } catch (TrelloBoardSetupException failure) {</span>
+<span class="nc" id="L842">                out.println(&quot;invalid &quot; + boardLabel + &quot; local status configuration (&quot; + failure.code() + &quot;)&quot;);</span>
+<span class="nc" id="L843">            } catch (RuntimeException failure) {</span>
+<span class="nc" id="L844">                out.println(&quot;invalid &quot; + boardLabel + &quot; local status evidence (setup_status_evidence_unavailable)&quot;);</span>
+<span class="nc" id="L845">            }</span>
+<span class="nc" id="L846">        }</span>
+<span class="nc" id="L847">        return 0;</span>
+    }
+
+    private void printWorkflowStatus(
+            LocalWorkerPaths paths,
+            ManagedProcessStore store,
+            ConnectedBoard board,
+            String boardLabel,
+            PrintStream out) {
+<span class="nc" id="L856">        ManagedProcessStore.ManagedProcessFiles files = store.files(board.workflowPath());</span>
+<span class="nc" id="L857">        WorkflowValidation workflowDiagnostics = workflowConfig.diagnosticsValidation(</span>
+<span class="nc" id="L858">                board.workflowPath(), WorkflowEnvironmentResolver.resolver(environment, board.envPath()));</span>
+<span class="nc bnc" id="L859" title="All 2 branches missed.">        if (!workflowDiagnostics.ok()) {</span>
+<span class="nc" id="L860">            out.println(</span>
+<span class="nc" id="L861">                    &quot;invalid &quot; + boardLabel + &quot; &quot; + workflowDiagnostics.message() + &quot; in that board's workflow file&quot;);</span>
+<span class="nc" id="L862">            return;</span>
+        }
+<span class="nc" id="L864">        Long pid = store.readPid(files.pidFile());</span>
+<span class="nc" id="L865">        BoardHealth health = healthChecker.boardHealth(board);</span>
+<span class="nc bnc" id="L866" title="All 4 branches missed.">        boolean livePid = pid != null &amp;&amp; platform.isAlive(pid);</span>
+<span class="nc bnc" id="L867" title="All 4 branches missed.">        boolean managedPid = livePid &amp;&amp; platform.isManaged(pid, paths.appHome(), board.workflowPath());</span>
+<span class="nc bnc" id="L868" title="All 2 branches missed.">        if (managedPid) {</span>
+<span class="nc" id="L869">            printManagedStatus(boardLabel, pid, health, out);</span>
+<span class="nc" id="L870">            return;</span>
+        }
+<span class="nc" id="L872">        verifiedManagedWorkerPid(paths, board, health)</span>
+<span class="nc" id="L873">                .ifPresentOrElse(</span>
+<span class="nc" id="L874">                        verifiedPid -&gt; printVerifiedWorkerStatus(boardLabel, pid, health, verifiedPid, out),</span>
+<span class="nc" id="L875">                        () -&gt; printUnverifiedStatus(paths, files, boardLabel, pid, livePid, health, out));</span>
+<span class="nc" id="L876">    }</span>
+
+    private static void printManagedStatus(String boardLabel, long pid, BoardHealth health, PrintStream out) {
+<span class="nc bnc" id="L879" title="All 2 branches missed.">        boolean matchingEndpointPid = health.kind() == BoardHealthKind.SAME_WORKFLOW</span>
+<span class="nc" id="L880">                &amp;&amp; health.workerPid()</span>
+<span class="nc" id="L881">                        .filter(reportedPid -&gt; reportedPid.equals(pid))</span>
+<span class="nc bnc" id="L882" title="All 2 branches missed.">                        .isPresent();</span>
+<span class="nc bnc" id="L883" title="All 2 branches missed.">        if (matchingEndpointPid) {</span>
+<span class="nc" id="L884">            out.println(</span>
+<span class="nc" id="L885">                    &quot;running &quot; + boardLabel + &quot; pid=&quot; + pid + &quot; &quot; + LocalHealthChecker.localServerUrl(health.port()));</span>
+<span class="nc" id="L886">            return;</span>
+        }
+<span class="nc bnc" id="L888" title="All 2 branches missed.">        String reason = health.kind() == BoardHealthKind.SAME_WORKFLOW</span>
+<span class="nc" id="L889">                ? &quot;WORKER_PID_MISMATCH&quot;</span>
+<span class="nc" id="L890">                : health.kind().toString();</span>
+<span class="nc" id="L891">        out.println(&quot;unhealthy &quot; + boardLabel + &quot; pid=&quot; + pid + &quot; &quot; + LocalHealthChecker.localServerUrl(health.port())</span>
+                + &quot; (&quot; + reason + &quot;)&quot;);
+<span class="nc" id="L893">    }</span>
+
+    private static void printVerifiedWorkerStatus(
+            String boardLabel, Long recordedPid, BoardHealth health, long verifiedPid, PrintStream out) {
+<span class="nc bnc" id="L897" title="All 2 branches missed.">        String tracking = recordedPid == null ? &quot;untracked, no managed pid&quot; : &quot;stale managed pid=&quot; + recordedPid;</span>
+<span class="nc" id="L898">        out.println(&quot;running &quot; + boardLabel + &quot; pid=&quot; + verifiedPid + &quot; &quot;</span>
+<span class="nc" id="L899">                + LocalHealthChecker.localServerUrl(health.port()) + &quot; (&quot; + tracking + &quot;)&quot;);</span>
+<span class="nc" id="L900">    }</span>
+
+    private static void printUnverifiedStatus(
+            LocalWorkerPaths paths,
+            ManagedProcessStore.ManagedProcessFiles files,
+            String boardLabel,
+            Long pid,
+            boolean livePid,
+            BoardHealth health,
+            PrintStream out) {
+<span class="nc bnc" id="L910" title="All 2 branches missed.">        if (livePid) {</span>
+<span class="nc" id="L911">            out.println(&quot;stale &quot; + boardLabel + &quot; pid=&quot; + pid + &quot; does not belong to this install pid_file_token=&quot;</span>
+<span class="nc" id="L912">                    + pathToken(paths, files.pidFile()));</span>
+<span class="nc bnc" id="L913" title="All 2 branches missed.">        } else if (health.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L914">            out.println(&quot;unhealthy &quot; + boardLabel + &quot; &quot; + LocalHealthChecker.localServerUrl(health.port())</span>
+                    + &quot; (UNVERIFIED_WORKER_PID)&quot;);
+<span class="nc bnc" id="L916" title="All 2 branches missed.">        } else if (health.kind() == BoardHealthKind.STOPPED) {</span>
+<span class="nc" id="L917">            out.println(&quot;stopped &quot; + boardLabel);</span>
+        } else {
+<span class="nc" id="L919">            out.println(&quot;unhealthy &quot; + boardLabel + &quot; &quot; + LocalHealthChecker.localServerUrl(health.port()) + &quot; (&quot;</span>
+<span class="nc" id="L920">                    + health.kind() + &quot;)&quot;);</span>
+        }
+<span class="nc" id="L922">    }</span>
+
+    private static Set&lt;String&gt; duplicateBoardNames(List&lt;ConnectedBoard&gt; boards) {
+<span class="nc" id="L925">        Set&lt;String&gt; seen = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L926">        Set&lt;String&gt; duplicates = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L927" title="All 2 branches missed.">        for (ConnectedBoard board : boards) {</span>
+<span class="nc bnc" id="L928" title="All 2 branches missed.">            if (!seen.add(board.boardName())) {</span>
+<span class="nc" id="L929">                duplicates.add(board.boardName());</span>
+            }
+<span class="nc" id="L931">        }</span>
+<span class="nc" id="L932">        return duplicates;</span>
+    }
+
+    private static String statusBoardLabel(ConnectedBoard board, Set&lt;String&gt; duplicateBoardNames) {
+<span class="nc" id="L936">        String label = DisplayNames.quotedName(board.boardName());</span>
+<span class="nc bnc" id="L937" title="All 2 branches missed.">        if (!duplicateBoardNames.contains(board.boardName())) {</span>
+<span class="nc" id="L938">            return label;</span>
+        }
+        // Duplicate connected board names need a safe disambiguator so the user can pick the right
+        // --board or --workflow selector.
+<span class="nc" id="L942">        return label + &quot; [&quot; + board.boardKey() + &quot; &quot; + PathNames.fileName(board.workflowPath()) + &quot;]&quot;;</span>
+    }
+
+    int logs(WorkerLogsRequest request, PrintStream out) throws IOException {
+<span class="nc" id="L946">        LocalWorkerPaths paths = LocalWorkerPaths.from(</span>
+<span class="nc" id="L947">                request.appHome(), request.configDir(), request.workspaceRoot(), request.stateHome(), environment);</span>
+<span class="nc" id="L948">        ConnectedBoardManifest manifest = loadLifecycleManifest(paths, request.workflow());</span>
+<span class="nc" id="L949">        ConnectedBoard board = selectOne(</span>
+<span class="nc" id="L950">                manifest, request.board(), request.workflow(), &quot;logs&quot;, Optional.empty(), paths.defaultEnvPath(), false);</span>
+<span class="nc" id="L951">        ManagedProcessStore.ManagedProcessFiles files =</span>
+<span class="nc" id="L952">                new ManagedProcessStore(paths.stateHome()).files(board.workflowPath());</span>
+<span class="nc" id="L953">        List&lt;Path&gt; logFiles = List.of(files.stdoutLog(), files.stderrLog());</span>
+<span class="nc bnc" id="L954" title="All 2 branches missed.">        if (request.follow()) {</span>
+<span class="nc" id="L955">            logTailer.follow(logFiles, out);</span>
+        } else {
+<span class="nc" id="L957">            logTailer.printRecent(logFiles, 100, out);</span>
+        }
+<span class="nc" id="L959">        return 0;</span>
+    }
+
+    private void stop(LocalWorkerPaths paths, ManagedProcessStore store, ConnectedBoard board, PrintStream out)
+            throws IOException {
+<span class="nc" id="L964">        ManagedProcessStore.ManagedProcessFiles files = store.files(board.workflowPath());</span>
+<span class="nc bnc" id="L965" title="All 2 branches missed.">        if (!Files.isDirectory(paths.stateHome())) {</span>
+<span class="nc" id="L966">            stopLocked(paths, store, board, out, files);</span>
+<span class="nc" id="L967">            return;</span>
+        }
+<span class="nc" id="L969">        stopWithProcessLock(paths, store, board, out, files);</span>
+<span class="nc" id="L970">    }</span>
+
+    private void stopLocked(
+            LocalWorkerPaths paths,
+            ManagedProcessStore store,
+            ConnectedBoard board,
+            PrintStream out,
+            ManagedProcessStore.ManagedProcessFiles files)
+            throws IOException {
+<span class="nc" id="L979">        Long pid = store.readPid(files.pidFile());</span>
+<span class="nc bnc" id="L980" title="All 4 branches missed.">        if (pid == null || !platform.isAlive(pid)) {</span>
+<span class="nc" id="L981">            store.deletePid(files.pidFile());</span>
+<span class="nc" id="L982">            BoardHealth health = healthChecker.boardHealth(board);</span>
+<span class="nc bnc" id="L983" title="All 2 branches missed.">            if (health.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L984">                Optional&lt;Long&gt; verifiedPid = verifiedManagedWorkerPid(paths, board, health);</span>
+                // Plain branching because the present branch stops the worker with checked IO.
+<span class="nc bnc" id="L986" title="All 2 branches missed.">                if (verifiedPid.isPresent()) {</span>
+<span class="nc" id="L987">                    stopPid(store, files, verifiedPid.get());</span>
+<span class="nc" id="L988">                    out.println(&quot;Stopped untracked managed worker for &quot; + DisplayNames.quotedName(board.boardName())</span>
+<span class="nc" id="L989">                            + &quot; pid=&quot; + verifiedPid.get());</span>
+<span class="nc" id="L990">                    return;</span>
+                }
+<span class="nc" id="L992">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_worker_untracked&quot;,
+                        &quot;Cannot stop the worker for &quot;
+<span class="nc" id="L995">                                + DisplayNames.quotedName(board.boardName())</span>
+                                + &quot; because the worker is healthy but has no managed pid. Stop the process manually, then start it again with symphony-trello start.&quot;
+<span class="nc" id="L997">                                + health.workerPid()</span>
+<span class="nc" id="L998">                                        .map(reportedPid -&gt; &quot; Reported worker pid=&quot; + reportedPid)</span>
+<span class="nc" id="L999">                                        .orElse(&quot;&quot;));</span>
+            }
+<span class="nc" id="L1001">            out.println(&quot;Symphony for Trello is already stopped for &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L1002">            return;</span>
+        }
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">        if (!platform.isManaged(pid, paths.appHome(), board.workflowPath())) {</span>
+            // The process is not ours, but the pid file is managed state pointing at a foreign
+            // process; remove it so repeated stops do not keep reporting the same stale pid.
+<span class="nc" id="L1007">            out.println(&quot;Skipped unmanaged stale pid for &quot; + DisplayNames.quotedName(board.boardName()) + &quot; pid=&quot; + pid</span>
+<span class="nc" id="L1008">                    + &quot; pid_file_token=&quot; + pathToken(paths, files.pidFile()));</span>
+<span class="nc" id="L1009">            removeStalePidFile(paths, store, files.pidFile(), out);</span>
+<span class="nc" id="L1010">            return;</span>
+        }
+<span class="nc" id="L1012">        stopPid(store, files, pid);</span>
+<span class="nc" id="L1013">        out.println(&quot;Stopped Symphony for Trello for &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L1014">    }</span>
+
+    private void stopPid(ManagedProcessStore store, ManagedProcessStore.ManagedProcessFiles files, long pid)
+            throws IOException {
+<span class="nc bnc" id="L1018" title="All 2 branches missed.">        if (!platform.stop(pid, Duration.ofSeconds(15), Duration.ofSeconds(5))) {</span>
+<span class="nc" id="L1019">            throw new TrelloBoardSetupException(&quot;setup_stop_failed&quot;, &quot;Managed process did not stop: pid=&quot; + pid);</span>
+        }
+<span class="nc" id="L1021">        store.deletePid(files.pidFile());</span>
+<span class="nc" id="L1022">    }</span>
+
+    private void stopWithProcessLock(
+            LocalWorkerPaths paths,
+            ManagedProcessStore store,
+            ConnectedBoard board,
+            PrintStream out,
+            ManagedProcessStore.ManagedProcessFiles files)
+            throws IOException {
+<span class="nc" id="L1031">        try (var ignored = acquireProcessLock(files)) {</span>
+<span class="nc" id="L1032">            stopLocked(paths, store, board, out, files);</span>
+        }
+<span class="nc" id="L1034">    }</span>
+
+    private static AcquiredProcessLock acquireProcessLock(ManagedProcessStore.ManagedProcessFiles files)
+            throws IOException {
+<span class="nc" id="L1038">        Lock processLock =</span>
+<span class="nc" id="L1039">                PROCESS_LOCKS.get(files.processLockFile().toAbsolutePath().normalize());</span>
+<span class="nc" id="L1040">        processLock.lock();</span>
+<span class="nc" id="L1041">        FileChannel channel = null;</span>
+<span class="nc" id="L1042">        FileLock fileLock = null;</span>
+        try {
+<span class="nc" id="L1044">            channel = FileChannel.open(files.processLockFile(), StandardOpenOption.CREATE, StandardOpenOption.WRITE);</span>
+<span class="nc" id="L1045">            fileLock = channel.lock();</span>
+<span class="nc bnc" id="L1046" title="All 2 branches missed.">            if (!fileLock.isValid()) {</span>
+<span class="nc" id="L1047">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_process_lock_failed&quot;, &quot;Could not acquire the managed worker process lock.&quot;);
+            }
+<span class="nc" id="L1050">            return new AcquiredProcessLock(processLock, channel, fileLock);</span>
+<span class="nc" id="L1051">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L1052">            closeQuietly(fileLock, e);</span>
+<span class="nc" id="L1053">            closeQuietly(channel, e);</span>
+<span class="nc" id="L1054">            processLock.unlock();</span>
+<span class="nc" id="L1055">            throw e;</span>
+        }
+    }
+
+    private static void closeQuietly(AutoCloseable closeable, Throwable originalFailure) {
+<span class="nc bnc" id="L1060" title="All 2 branches missed.">        if (closeable == null) {</span>
+<span class="nc" id="L1061">            return;</span>
+        }
+        try {
+<span class="nc" id="L1064">            closeable.close();</span>
+<span class="nc" id="L1065">        } catch (Exception closeFailure) {</span>
+<span class="nc" id="L1066">            originalFailure.addSuppressed(closeFailure);</span>
+<span class="nc" id="L1067">        }</span>
+<span class="nc" id="L1068">    }</span>
+
+<span class="nc" id="L1070">    private record AcquiredProcessLock(Lock processLock, FileChannel channel, FileLock fileLock)</span>
+            implements AutoCloseable {
+        @Override
+        public void close() throws IOException {
+<span class="nc" id="L1074">            try (channel;</span>
+                    fileLock) {
+                // try-with-resources closes the OS lock and channel before releasing the in-process lock.
+<span class="nc bnc" id="L1077" title="All 2 branches missed.">            } finally {</span>
+<span class="nc" id="L1078">                processLock.unlock();</span>
+            }
+<span class="nc" id="L1080">        }</span>
+    }
+
+    private void stopPidFiles(LocalWorkerPaths paths, ManagedProcessStore store, PrintStream out) throws IOException {
+<span class="nc" id="L1084">        List&lt;Path&gt; pidFiles = store.pidFiles();</span>
+<span class="nc bnc" id="L1085" title="All 2 branches missed.">        if (pidFiles.isEmpty()) {</span>
+<span class="nc" id="L1086">            out.println(&quot;No managed Symphony process found&quot;);</span>
+<span class="nc" id="L1087">            return;</span>
+        }
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">        for (Path pidFile : pidFiles) {</span>
+<span class="nc" id="L1090">            Long pid = store.readPid(pidFile);</span>
+<span class="nc" id="L1091">            String label = stateFileLabel(pidFile);</span>
+<span class="nc bnc" id="L1092" title="All 6 branches missed.">            if (pid != null &amp;&amp; platform.isAlive(pid) &amp;&amp; platform.isManaged(pid, paths.appHome())) {</span>
+<span class="nc" id="L1093">                stopPid(store, store.filesFromPidFile(pidFile), pid);</span>
+<span class="nc" id="L1094">                out.println(&quot;Stopped &quot; + label);</span>
+<span class="nc bnc" id="L1095" title="All 4 branches missed.">            } else if (pid != null &amp;&amp; platform.isAlive(pid)) {</span>
+<span class="nc" id="L1096">                out.println(&quot;Skipped unmanaged stale pid &quot; + label + &quot; pid=&quot; + pid + &quot; pid_file_token=&quot;</span>
+<span class="nc" id="L1097">                        + pathToken(paths, pidFile));</span>
+<span class="nc" id="L1098">                removeStalePidFile(paths, store, pidFile, out);</span>
+            } else {
+<span class="nc" id="L1100">                store.deletePid(pidFile);</span>
+            }
+<span class="nc" id="L1102">        }</span>
+<span class="nc" id="L1103">    }</span>
+
+    /// Pid-file fallback output runs only when no boards are connected, so no board name exists;
+    /// the label is the workflow file name without the internal state-file hash suffix.
+    private static String stateFileLabel(Path pidFile) {
+<span class="nc" id="L1108">        String name = PathNames.fileName(pidFile).replaceFirst(&quot;\\.pid$&quot;, &quot;&quot;);</span>
+<span class="nc" id="L1109">        return name.replaceFirst(&quot;\\.[0-9a-f]{12}$&quot;, &quot;&quot;);</span>
+    }
+
+    /// Refusing to kill the unrelated process is the safety contract; the pid file cleanup is only
+    /// best effort on top. A failed or already-done removal must say so instead of claiming the
+    /// file was removed.
+    private void removeStalePidFile(LocalWorkerPaths paths, ManagedProcessStore store, Path pidFile, PrintStream out) {
+        try {
+<span class="nc bnc" id="L1117" title="All 2 branches missed.">            if (store.deletePid(pidFile)) {</span>
+<span class="nc" id="L1118">                out.println(&quot;Removed the stale managed pid file. The unrelated process was not stopped.&quot;);</span>
+            } else {
+<span class="nc" id="L1120">                out.println(&quot;The stale managed pid file was already removed. The unrelated process was not stopped.&quot;);</span>
+            }
+<span class="nc" id="L1122">        } catch (IOException e) {</span>
+<span class="nc" id="L1123">            out.println(&quot;Could not remove the stale managed pid file. The unrelated process was not stopped.&quot;);</span>
+<span class="nc" id="L1124">            String pidToken = pathToken(paths, pidFile);</span>
+<span class="nc" id="L1125">            out.println(&quot;Remove the stale managed pid file manually, then rerun stop. pid_file_token=&quot; + pidToken</span>
+<span class="nc" id="L1126">                    + lookupHint(pidToken));</span>
+<span class="nc" id="L1127">        }</span>
+<span class="nc" id="L1128">    }</span>
+
+    private static String startupPrivateContextHint(
+            LocalWorkerPaths paths, ConnectedBoard board, ManagedProcessStore.ManagedProcessFiles files) {
+<span class="nc" id="L1132">        String workflowToken = pathToken(paths, board.workflowPath());</span>
+<span class="nc" id="L1133">        return &quot; Private context tokens: workflow=&quot; + workflowToken + &quot;, stdout_log=&quot;</span>
+<span class="nc" id="L1134">                + pathToken(paths, files.stdoutLog()) + &quot;, stderr_log=&quot; + pathToken(paths, files.stderrLog()) + &quot;.&quot;</span>
+<span class="nc" id="L1135">                + lookupHint(workflowToken);</span>
+    }
+
+    private static String lookupHint(String token) {
+<span class="nc" id="L1139">        return PrivateContextTokens.lookupHint(token);</span>
+    }
+
+    private static String pathToken(LocalWorkerPaths paths, Path path) {
+<span class="nc" id="L1143">        return PrivateContextTokens.pathToken(paths.configDir(), path);</span>
+    }
+
+    private void printPidFileStatus(LocalWorkerPaths paths, PrintStream out) throws IOException {
+<span class="nc" id="L1147">        var store = new ManagedProcessStore(paths.stateHome());</span>
+<span class="nc" id="L1148">        List&lt;Path&gt; pidFiles = store.pidFiles();</span>
+<span class="nc bnc" id="L1149" title="All 2 branches missed.">        if (pidFiles.isEmpty()) {</span>
+<span class="nc" id="L1150">            out.println(&quot;No managed Symphony process found&quot;);</span>
+<span class="nc" id="L1151">            return;</span>
+        }
+<span class="nc bnc" id="L1153" title="All 2 branches missed.">        for (Path pidFile : pidFiles) {</span>
+<span class="nc" id="L1154">            Long pid = store.readPid(pidFile);</span>
+<span class="nc" id="L1155">            String label = stateFileLabel(pidFile);</span>
+<span class="nc bnc" id="L1156" title="All 6 branches missed.">            if (pid != null &amp;&amp; platform.isAlive(pid) &amp;&amp; platform.isManaged(pid, paths.appHome())) {</span>
+<span class="nc" id="L1157">                out.println(&quot;untracked &quot; + label + &quot; pid=&quot; + pid</span>
+                        + &quot; (no connected workflow metadata; runtime identity not verified)&quot;);
+<span class="nc bnc" id="L1159" title="All 4 branches missed.">            } else if (pid != null &amp;&amp; platform.isAlive(pid)) {</span>
+<span class="nc" id="L1160">                out.println(&quot;stale &quot; + label + &quot; pid=&quot; + pid + &quot; does not belong to this install pid_file_token=&quot;</span>
+<span class="nc" id="L1161">                        + pathToken(paths, pidFile));</span>
+            } else {
+<span class="nc" id="L1163">                out.println(&quot;stopped &quot; + label);</span>
+            }
+<span class="nc" id="L1165">        }</span>
+<span class="nc" id="L1166">    }</span>
+
+    private ConnectedBoard selectOne(
+            ConnectedBoardManifest manifest,
+            Optional&lt;String&gt; board,
+            Optional&lt;Path&gt; workflow,
+            String command,
+            Optional&lt;Path&gt; explicitWorkflowEnvPath,
+            Path fallbackWorkflowEnvPath,
+            boolean validateServerPort) {
+<span class="nc bnc" id="L1176" title="All 4 branches missed.">        if (board.isPresent() &amp;&amp; workflow.isPresent()) {</span>
+<span class="nc" id="L1177">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_selection_conflict&quot;, &quot;--board and --workflow cannot be used together.&quot;);
+        }
+<span class="nc" id="L1180">        return board.map(selector -&gt; selectedBoard(manifest, selector))</span>
+<span class="nc" id="L1181">                .or(() -&gt; workflow.map(workflowSelector -&gt; selectedWorkflow(</span>
+                        manifest,
+                        workflowSelector,
+                        explicitWorkflowEnvPath,
+                        fallbackWorkflowEnvPath,
+                        validateServerPort)))
+<span class="nc" id="L1187">                .orElseGet(() -&gt; defaultSelectedBoard(manifest, command));</span>
+    }
+
+    private ConnectedBoard selectedBoard(ConnectedBoardManifest manifest, String selector) {
+<span class="nc" id="L1191">        List&lt;ConnectedBoard&gt; matches = manifest.findAllByBoard(selector);</span>
+<span class="nc bnc" id="L1192" title="All 2 branches missed.">        if (matches.isEmpty()) {</span>
+<span class="nc" id="L1193">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_board_not_found&quot;, &quot;No connected Trello board matches \&quot;&quot; + selector + &quot;\&quot;.&quot;);
+        }
+<span class="nc bnc" id="L1196" title="All 2 branches missed.">        if (matches.size() &gt; 1) {</span>
+<span class="nc" id="L1197">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_board_ambiguous&quot;,
+                    &quot;Multiple connected boards match --board. Re-run with a board id, short link, or --workflow.&quot;);
+        }
+<span class="nc" id="L1201">        return matches.getFirst();</span>
+    }
+
+    private ConnectedBoard selectedWorkflow(
+            ConnectedBoardManifest manifest,
+            Path workflowSelector,
+            Optional&lt;Path&gt; explicitWorkflowEnvPath,
+            Path fallbackWorkflowEnvPath,
+            boolean validateServerPort) {
+<span class="nc" id="L1210">        Path workflowPath = workflowSelector.toAbsolutePath().normalize();</span>
+<span class="nc" id="L1211">        List&lt;ConnectedBoard&gt; matches = manifest.findAllByWorkflow(workflowPath);</span>
+<span class="nc bnc" id="L1212" title="All 2 branches missed.">        if (matches.size() &gt; 1) {</span>
+<span class="nc" id="L1213">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_workflow_ambiguous&quot;,
+                    &quot;Multiple connected-board rows reference --workflow. Repair &quot;
+                            + ConnectedBoardManifest.FILE_NAME
+                            + &quot;, then rerun the command.&quot;);
+        }
+<span class="nc" id="L1219">        Path validationEnvPath = explicitWorkflowEnvPath.orElse(fallbackWorkflowEnvPath);</span>
+<span class="nc bnc" id="L1220" title="All 2 branches missed.">        ConnectedBoard board = matches.isEmpty() ? workflowBoard(workflowPath, validationEnvPath) : matches.getFirst();</span>
+<span class="nc" id="L1221">        validateExplicitWorkflowSelector(</span>
+                workflowPath,
+<span class="nc" id="L1223">                selectedWorkflowEnvPath(board, explicitWorkflowEnvPath, fallbackWorkflowEnvPath),</span>
+                validateServerPort);
+<span class="nc" id="L1225">        return board;</span>
+    }
+
+    private static Path selectedWorkflowEnvPath(
+            ConnectedBoard board, Optional&lt;Path&gt; explicitWorkflowEnvPath, Path fallbackWorkflowEnvPath) {
+<span class="nc" id="L1230">        return explicitWorkflowEnvPath.orElseGet(</span>
+<span class="nc bnc" id="L1231" title="All 2 branches missed.">                () -&gt; board.envPath() == null ? fallbackWorkflowEnvPath : board.envPath());</span>
+    }
+
+    private void validateExplicitWorkflowSelector(Path workflowPath, Path envPath, boolean validateForLaunch) {
+<span class="nc bnc" id="L1235" title="All 2 branches missed.">        if (validateForLaunch) {</span>
+            // start reports unusable explicit workflows through the launch validation path so the
+            // error carries the underlying loader or resolver cause; content problems are raised
+            // by resolveLaunchConfig before any worker is launched. stop, status, and logs keep
+            // the lenient recovery behavior for invalid explicit workflows.
+<span class="nc" id="L1240">            workflowConfig.requireLaunchableWorkflowFile(workflowPath);</span>
+        } else {
+<span class="nc" id="L1242">            validateWorkerWorkflowPath(workflowPath);</span>
+        }
+<span class="nc" id="L1244">        validateWorkerEnvPath(envPath);</span>
+<span class="nc" id="L1245">    }</span>
+
+    private static ConnectedBoardManifest loadLifecycleManifest(LocalWorkerPaths paths, Optional&lt;Path&gt; explicitWorkflow)
+            throws IOException {
+<span class="nc" id="L1249">        explicitWorkflow.ifPresent(LocalWorkerManager::requireExistingExplicitWorkflow);</span>
+<span class="nc" id="L1250">        return new ConnectedBoardRepository(paths.manifestPath()).loadForLifecycle();</span>
+    }
+
+    private static void requireExistingExplicitWorkflow(Path workflow) {
+<span class="nc" id="L1254">        Path workflowPath = workflow.toAbsolutePath().normalize();</span>
+<span class="nc bnc" id="L1255" title="All 2 branches missed.">        if (!Files.exists(workflowPath)) {</span>
+<span class="nc" id="L1256">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;, &quot;--workflow must point to an existing workflow file.&quot;);
+        }
+<span class="nc" id="L1259">        validateWorkerWorkflowPath(workflowPath);</span>
+<span class="nc" id="L1260">    }</span>
+
+    private ConnectedBoard defaultSelectedBoard(ConnectedBoardManifest manifest, String command) {
+<span class="nc bnc" id="L1263" title="All 2 branches missed.">        if (manifest.boards().size() == 1) {</span>
+<span class="nc" id="L1264">            return manifest.boards().getFirst();</span>
+        }
+<span class="nc bnc" id="L1266" title="All 2 branches missed.">        if (manifest.boards().isEmpty()) {</span>
+<span class="nc" id="L1267">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_board_not_found&quot;, &quot;No Trello boards are connected to Symphony.&quot;);
+        }
+<span class="nc" id="L1270">        throw new TrelloBoardSetupException(</span>
+                &quot;setup_worker_board_required&quot;,
+                &quot;Multiple Trello boards are connected. Re-run with --board NAME or --workflow PATH for &quot; + command
+                        + &quot;.&quot;);
+    }
+
+    private List&lt;ConnectedBoard&gt; selectForStop(
+            ConnectedBoardManifest manifest,
+            Optional&lt;String&gt; board,
+            Optional&lt;Path&gt; workflow,
+            Path explicitWorkflowEnvPath) {
+<span class="nc bnc" id="L1281" title="All 4 branches missed.">        if (board.isPresent() || workflow.isPresent()) {</span>
+<span class="nc" id="L1282">            return List.of(</span>
+<span class="nc" id="L1283">                    selectOne(manifest, board, workflow, &quot;stop&quot;, Optional.empty(), explicitWorkflowEnvPath, false));</span>
+        }
+<span class="nc" id="L1285">        return manifest.boards();</span>
+    }
+
+    private List&lt;ConnectedBoard&gt; selectForStatus(
+            ConnectedBoardManifest manifest,
+            Optional&lt;String&gt; board,
+            Optional&lt;Path&gt; workflow,
+            Path explicitWorkflowEnvPath) {
+<span class="nc bnc" id="L1293" title="All 4 branches missed.">        if (board.isPresent() || workflow.isPresent()) {</span>
+<span class="nc" id="L1294">            return List.of(</span>
+<span class="nc" id="L1295">                    selectOne(manifest, board, workflow, &quot;status&quot;, Optional.empty(), explicitWorkflowEnvPath, false));</span>
+        }
+<span class="nc" id="L1297">        return manifest.boards();</span>
+    }
+
+    private ConnectedBoard workflowBoard(Path workflowPath, Path envPath) {
+<span class="nc" id="L1301">        var environmentResolver = WorkflowEnvironmentResolver.resolver(environment, envPath);</span>
+<span class="nc" id="L1302">        String boardId = workflowConfig</span>
+<span class="nc" id="L1303">                .boardId(workflowPath, environmentResolver)</span>
+<span class="nc" id="L1304">                .orElseGet(() -&gt; PathNames.fileName(workflowPath));</span>
+<span class="nc" id="L1305">        int serverPort = workflowConfig</span>
+<span class="nc" id="L1306">                .serverPort(workflowPath, environmentResolver)</span>
+<span class="nc" id="L1307">                .orElse(TrelloBoardSetup.DEFAULT_SERVER_PORT);</span>
+<span class="nc" id="L1308">        return new ConnectedBoard(</span>
+                boardId,
+                boardId,
+<span class="nc" id="L1311">                PathNames.fileName(workflowPath),</span>
+                &quot;&quot;,
+                workflowPath,
+                envPath,
+                TrelloBoardSetup.DEFAULT_WORKSPACE_ROOT,
+                serverPort,
+                false,
+<span class="nc" id="L1318">                List.of(),</span>
+                false);
+    }
+
+    private List&lt;ConnectedBoard&gt; withDefaultEnvForExplicitWorkflow(
+            LocalWorkerPaths paths, Optional&lt;Path&gt; workflow, List&lt;ConnectedBoard&gt; boards) {
+<span class="nc bnc" id="L1324" title="All 2 branches missed.">        if (workflow.isEmpty()) {</span>
+<span class="nc" id="L1325">            return boards;</span>
+        }
+<span class="nc" id="L1327">        return boards.stream()</span>
+<span class="nc" id="L1328">                .map(board -&gt;</span>
+<span class="nc bnc" id="L1329" title="All 2 branches missed.">                        board.envPath() == null ? workflowBoard(board.workflowPath(), paths.defaultEnvPath()) : board)</span>
+<span class="nc" id="L1330">                .toList();</span>
+    }
+
+    private static ManagedProcessPlatform platformForCurrentOs() {
+<span class="nc bnc" id="L1334" title="All 2 branches missed.">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;)</span>
+<span class="nc" id="L1335">                ? new WindowsManagedProcessPlatform()</span>
+<span class="nc" id="L1336">                : new PosixManagedProcessPlatform();</span>
+    }
+
+    private static String javaExecutable() {
+<span class="nc bnc" id="L1340" title="All 2 branches missed.">        return Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, isWindows() ? &quot;java.exe&quot; : &quot;java&quot;)</span>
+<span class="nc" id="L1341">                .toString();</span>
+    }
+
+    private static boolean isWindows() {
+<span class="nc" id="L1345">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

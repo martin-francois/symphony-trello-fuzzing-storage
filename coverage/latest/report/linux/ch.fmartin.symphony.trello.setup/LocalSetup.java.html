@@ -1,0 +1,2007 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalSetup.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalSetup.java</span></div><h1>LocalSetup.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.ISO_CONTROL_CHARACTERS;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+
+import ch.fmartin.symphony.trello.CliExitCodes;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.GitHubIntegration;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.TrelloCredentials;
+import ch.fmartin.symphony.trello.setup.TrelloCredentialStore.CredentialSelection;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.CharMatcher;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+public final class LocalSetup {
+<span class="nc" id="L35">    private static final CharMatcher UNSAFE_COMMAND_SELECTOR_CHARACTER =</span>
+<span class="nc" id="L36">            CharMatcher.anyOf(&quot;\&quot;\\$`!%&quot;).or(ISO_CONTROL_CHARACTERS).precomputed();</span>
+<span class="nc" id="L37">    private static final Path DEFAULT_ENV_PATH = Path.of(&quot;.env&quot;);</span>
+    private static final String DEFAULT_COMMAND = &quot;symphony-trello&quot;;
+    private static final String CONFIG_DIR_ENV = &quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;;
+    private static final String COMMAND_ENV = &quot;SYMPHONY_TRELLO_COMMAND&quot;;
+    private static final String CALLER_DIR_ENV = &quot;SYMPHONY_TRELLO_CALLER_DIR&quot;;
+    static final String INSTALLER_COMPLETION_ENV = &quot;SYMPHONY_TRELLO_INSTALLER_COMPLETION&quot;;
+    private static final String INSTALLER_COMPLETION_DEFER = &quot;defer&quot;;
+    private static final String INSTALLER_COMPLETION_PRINT = &quot;print&quot;;
+<span class="nc" id="L45">    private static final Duration LOCAL_STATUS_TIMEOUT = Duration.ofMillis(500);</span>
+
+    private final TrelloBoardSetup boardSetup;
+    private final Map&lt;String, String&gt; environment;
+    private final WorkflowConfigEditor workflowConfig;
+    private final LocalHealthChecker healthChecker;
+    private final LocalWorkerManager workerManager;
+    private final PrerequisiteChecker prerequisiteChecker;
+    private final CodexAuthFlow codexAuthFlow;
+    private final TrelloCredentialStore credentialStore;
+    private final GitHubConfigurator githubConfigurator;
+    private final TrelloBoardConnector boardConnector;
+    private final WorkspaceAccessFlow workspaceAccessFlow;
+    private final CodexSandboxFlow codexSandboxFlow;
+    private final SetupDiagnosticReporter diagnosticReporter;
+
+    public LocalSetup(TrelloBoardSetup boardSetup, CommandRunner commands) {
+<span class="nc" id="L62">        this(boardSetup, commands, System.getenv());</span>
+<span class="nc" id="L63">    }</span>
+
+    LocalSetup(TrelloBoardSetup boardSetup, CommandRunner commands, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L66">        this(boardSetup, commands, environment, new WorkflowConfigEditor(), null);</span>
+<span class="nc" id="L67">    }</span>
+
+    LocalSetup(
+            TrelloBoardSetup boardSetup,
+            CommandRunner commands,
+            Map&lt;String, String&gt; environment,
+            WorkflowConfigEditor workflowConfig,
+            LocalWorkerManager workerManager) {
+<span class="nc" id="L75">        this(boardSetup, commands, environment, workflowConfig, workerManager, () -&gt; System.getProperty(&quot;os.name&quot;, &quot;&quot;));</span>
+<span class="nc" id="L76">    }</span>
+
+    LocalSetup(
+            TrelloBoardSetup boardSetup,
+            CommandRunner commands,
+            Map&lt;String, String&gt; environment,
+            WorkflowConfigEditor workflowConfig,
+            LocalWorkerManager workerManager,
+<span class="nc" id="L84">            Supplier&lt;String&gt; osName) {</span>
+<span class="nc" id="L85">        this.boardSetup = boardSetup;</span>
+<span class="nc" id="L86">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L87">        this.workflowConfig = workflowConfig;</span>
+<span class="nc" id="L88">        HttpClient httpClient = localStatusHttpClient(); // NOPMD - LocalSetup owns this client for its lifetime.</span>
+<span class="nc" id="L89">        this.healthChecker = new LocalHealthChecker(environment, workflowConfig, httpClient);</span>
+<span class="nc" id="L90">        this.workerManager =</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                workerManager == null ? new LocalWorkerManager(environment, workflowConfig) : workerManager;</span>
+<span class="nc" id="L92">        this.prerequisiteChecker = new PrerequisiteChecker(commands);</span>
+<span class="nc" id="L93">        this.codexAuthFlow = new CodexAuthFlow(commands);</span>
+<span class="nc" id="L94">        this.credentialStore = new TrelloCredentialStore(this.environment);</span>
+<span class="nc" id="L95">        this.githubConfigurator = new GitHubConfigurator(commands, osName);</span>
+<span class="nc" id="L96">        this.boardConnector =</span>
+                new TrelloBoardConnector(boardSetup, workflowConfig, this.workerManager, this.environment);
+<span class="nc" id="L98">        this.workspaceAccessFlow = new WorkspaceAccessFlow();</span>
+<span class="nc" id="L99">        this.codexSandboxFlow = new CodexSandboxFlow();</span>
+<span class="nc" id="L100">        this.diagnosticReporter = new SetupDiagnosticReporter(this.environment, commands);</span>
+<span class="nc" id="L101">    }</span>
+
+    public static int run(String[] args, InputStream in, PrintStream out, PrintStream err) {
+<span class="nc" id="L104">        var json = new ObjectMapper();</span>
+<span class="nc" id="L105">        return run(args, in, out, err, () -&gt; new CodexModelDefaultsResolver(json).resolveSelectionDefaults());</span>
+    }
+
+    static int run(
+            String[] args,
+            InputStream in,
+            PrintStream out,
+            PrintStream err,
+            Supplier&lt;CodexModelSelectionDefaults&gt; codexModelSelectionDefaults) {
+<span class="nc" id="L114">        var json = new ObjectMapper();</span>
+<span class="nc" id="L115">        return new SetupLocalCommandFactory()</span>
+<span class="nc" id="L116">                .execute(</span>
+                        args,
+                        new LocalSetup(
+                                new TrelloBoardSetup(json, codexModelSelectionDefaults), new ProcessCommandRunner()),
+                        new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8)),
+                        out,
+                        err);
+    }
+
+    int run(String[] args, BufferedReader input, PrintStream out, PrintStream err) {
+<span class="nc" id="L126">        return new SetupLocalCommandFactory().execute(args, this, input, out, err);</span>
+    }
+
+    int run(LocalSetupRequest request, BufferedReader input, PrintStream out, PrintStream err) {
+<span class="nc" id="L130">        return run(request, new StreamTerminal(input, out, err));</span>
+    }
+
+    int run(LocalSetupRequest request, Terminal terminal) {
+<span class="nc" id="L134">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L135">        PrintStream err = borrowedErr(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L136">        Options options = null;</span>
+<span class="nc" id="L137">        boolean completionOnly = installerCompletionMode(INSTALLER_COMPLETION_PRINT);</span>
+        try {
+<span class="nc" id="L139">            options = Options.from(request, environment);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (completionOnly) {</span>
+<span class="nc" id="L141">                printFinalHandoff(out, connectedBoards(options).loadForLifecycle(), options.command());</span>
+<span class="nc" id="L142">                return 0;</span>
+            }
+
+<span class="nc" id="L145">            printHeader(out, options);</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">            if (!confirmWorkspaceRoot(options, terminal)) {</span>
+<span class="nc" id="L147">                return 0;</span>
+            }
+<span class="nc" id="L149">            Prerequisites prerequisites = prerequisites();</span>
+<span class="nc" id="L150">            printPrerequisites(out, prerequisites, options);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (options.check()) {</span>
+<span class="nc" id="L152">                return runCheck(options, prerequisites, out);</span>
+            }
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            if (options.repairPort()) {</span>
+<span class="nc" id="L155">                return repairPort(options, out);</span>
+            }
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            if (options.dryRun()) {</span>
+<span class="nc" id="L158">                options = validatePreflightCodexReasoningEffort(options, prerequisites);</span>
+<span class="nc" id="L159">                rejectInvalidUnconnectedBoardSelector(connectedBoardsUnchecked(options), options);</span>
+<span class="nc" id="L160">                boardConnector.rejectDryRunNewBoardInProgress(options);</span>
+<span class="nc" id="L161">                preflightLocalWorkflowWrite(options);</span>
+<span class="nc" id="L162">                printDryRun(out, options, prerequisites);</span>
+<span class="nc" id="L163">                return 0;</span>
+            }
+<span class="nc" id="L165">            ConnectedBoardRepository boards = connectedBoards(options);</span>
+<span class="nc" id="L166">            ConnectedBoardManifest manifest = boards.loadForLifecycle();</span>
+<span class="nc" id="L167">            rejectInvalidUnconnectedBoardSelector(manifest, options);</span>
+<span class="nc bnc" id="L168" title="All 4 branches missed.">            if (!manifest.boards().isEmpty() &amp;&amp; !options.forceNewSetup()) {</span>
+<span class="nc" id="L169">                ExistingSetupAction action = existingSetupAction(manifest, terminal, options);</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                if (action == ExistingSetupAction.DISCONNECT) {</span>
+<span class="nc" id="L171">                    disconnectBoard(options, manifest, terminal);</span>
+<span class="nc" id="L172">                    return 0;</span>
+                }
+<span class="nc bnc" id="L174" title="All 2 branches missed.">                if (action != ExistingSetupAction.CONNECT) {</span>
+<span class="nc" id="L175">                    codexAuthFlow.ensureAuthenticated(prerequisites, options, terminal);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                    if (action == ExistingSetupAction.KEEP) {</span>
+<span class="nc" id="L177">                        out.println();</span>
+<span class="nc" id="L178">                        out.println(&quot;Keeping connected Trello boards.&quot;);</span>
+<span class="nc" id="L179">                        startExistingBoards(options, manifest, out);</span>
+<span class="nc" id="L180">                        printFinalHandoffUnlessDeferred(out, manifest, options.command());</span>
+<span class="nc" id="L181">                        return 0;</span>
+                    }
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                    if (action == ExistingSetupAction.UPDATE_CODEX_ACCESS) {</span>
+<span class="nc" id="L184">                        updateExistingCodexAccess(options, manifest, terminal);</span>
+<span class="nc" id="L185">                        return 0;</span>
+                    }
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                    if (action == ExistingSetupAction.UPGRADE_GITHUB) {</span>
+<span class="nc" id="L188">                        upgradeExistingBoardToGithub(options, manifest, terminal);</span>
+<span class="nc" id="L189">                        return 0;</span>
+                    }
+                }
+            }
+<span class="nc" id="L193">            TrelloBoardConnector.BoardSetupChoice boardSetupChoice = boardConnector.chooseBoardSetup(options, terminal);</span>
+<span class="nc" id="L194">            options = configureRepositoryUrl(options, terminal);</span>
+<span class="nc" id="L195">            options = validatePreflightCodexReasoningEffort(options, prerequisites);</span>
+<span class="nc" id="L196">            boardConnector.preflightRequestedServerPort(options, manifest);</span>
+<span class="nc" id="L197">            codexAuthFlow.ensureAuthenticated(prerequisites, options, terminal);</span>
+<span class="nc" id="L198">            options = validatePreflightCodexReasoningEffort(options);</span>
+
+<span class="nc" id="L200">            preflightLocalWorkflowWrite(options);</span>
+<span class="nc" id="L201">            CredentialSelection credentialSelection = credentials(options, options.envPath(), terminal);</span>
+<span class="nc" id="L202">            TrelloCredentials credentials = credentialSelection.credentials();</span>
+<span class="nc" id="L203">            TrelloBoardSetup.MemberInfo memberInfo =</span>
+<span class="nc" id="L204">                    boardSetup.getMemberInfo(new TrelloBoardSetup.MemberInfoRequest(options.endpoint(), credentials));</span>
+<span class="nc" id="L205">            out.println();</span>
+<span class="nc" id="L206">            out.println(&quot;Validating Trello...&quot;);</span>
+<span class="nc" id="L207">            out.println(&quot;  OK  Connected to Trello as \&quot;&quot; + memberInfo.displayName() + &quot;\&quot;&quot;);</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (!credentialSelection.persist()) {</span>
+<span class="nc" id="L209">                out.println();</span>
+<span class="nc" id="L210">                out.println(&quot;Using Trello credentials...&quot;);</span>
+<span class="nc" id="L211">                out.println(</span>
+<span class="nc" id="L212">                        &quot;  OK  Credentials loaded from &quot; + credentialSelection.sourceDescription(options.envPath()));</span>
+<span class="nc" id="L213">                out.println(&quot;  OK  Trello API key: &quot; + TrelloCredentialStore.redact(credentials.apiKey()));</span>
+<span class="nc" id="L214">                out.println(&quot;  OK  Trello token: &quot; + TrelloCredentialStore.redact(credentials.apiToken()));</span>
+            }
+
+<span class="nc" id="L217">            Options githubOptions = options;</span>
+<span class="nc" id="L218">            TrelloBoardConnector.GitHubIntegrationResolution githubIntegrationResolution =</span>
+<span class="nc" id="L219">                    () -&gt; resolveGitHubIntegration(githubOptions, prerequisites, terminal);</span>
+<span class="nc" id="L220">            Path credentialEnvPath = options.envPath();</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">            TrelloBoardConnector.CredentialPersistence credentialPersistence = credentialSelection.persist()</span>
+<span class="nc" id="L222">                    ? () -&gt; writeEnv(credentialSelection, credentialEnvPath, terminal)</span>
+<span class="nc" id="L223">                    : () -&gt; {};</span>
+<span class="nc" id="L224">            SetupResult result = boardConnector.createOrConnectBoard(</span>
+                    boardSetupChoice,
+                    options,
+                    credentials,
+                    githubIntegrationResolution,
+                    manifest,
+                    credentialPersistence,
+                    terminal);
+<span class="nc" id="L232">            GitHubIntegration githubIntegration = result.githubIntegration();</span>
+<span class="nc" id="L233">            options = configureCodexAccess(options, terminal);</span>
+<span class="nc" id="L234">            applyCodexAccess(options, result.workflowPath());</span>
+<span class="nc" id="L235">            ConnectedBoard connectedBoard = ConnectedBoard.from(result, options, githubIntegration);</span>
+<span class="nc" id="L236">            List&lt;ConnectedBoard&gt; replacedBoards = manifest.boardsReplacedBy(connectedBoard);</span>
+<span class="nc" id="L237">            stopReplacedBoards(options, replacedBoards);</span>
+<span class="nc" id="L238">            workerManager.rotateLogsForReplacedBoards(localWorkerPaths(options), connectedBoard, replacedBoards);</span>
+<span class="nc" id="L239">            manifest = manifest.withBoard(connectedBoard);</span>
+<span class="nc" id="L240">            boards.save(manifest);</span>
+
+<span class="nc" id="L242">            out.println();</span>
+<span class="nc" id="L243">            out.println(&quot;Trello board&quot;);</span>
+<span class="nc" id="L244">            out.println(&quot;  OK  Board connected: &quot; + DisplayNames.quotedName(result.boardName()));</span>
+<span class="nc" id="L245">            out.println(&quot;  OK  Board lists: &quot; + quoted(result.lists()));</span>
+<span class="nc" id="L246">            out.println(&quot;  OK  Workflow written: &quot;</span>
+<span class="nc" id="L247">                    + result.workflowPath().toAbsolutePath().normalize());</span>
+<span class="nc" id="L248">            RepositoryDefaultSummary.printGuided(</span>
+<span class="nc" id="L249">                    out, workflowConfig.repositoryDefaults(result.workflowPath()), result.workflowPath());</span>
+<span class="nc" id="L250">            out.println(&quot;  OK  Local server port selected for &quot; + DisplayNames.quotedName(result.boardName()) + &quot;: &quot;</span>
+<span class="nc" id="L251">                    + result.serverPort());</span>
+<span class="nc" id="L252">            printWorkspaceAndSandboxSummary(options, out);</span>
+<span class="nc" id="L253">            startBoard(options, connectedBoard, out);</span>
+<span class="nc" id="L254">            out.println();</span>
+<span class="nc" id="L255">            out.println(&quot;Board:&quot;);</span>
+<span class="nc" id="L256">            out.println(&quot;  &quot; + result.boardUrl());</span>
+<span class="nc" id="L257">            printFinalHandoffUnlessDeferred(out, manifest, options.command());</span>
+<span class="nc" id="L258">            return 0;</span>
+<span class="nc" id="L259">        } catch (TrelloBoardSetupException | IllegalArgumentException | IOException e) {</span>
+<span class="nc" id="L260">            err.println(&quot;setup_failed code=%s message=%s&quot;.formatted(errorCode(e), e.getMessage()));</span>
+<span class="nc" id="L261">            Optional&lt;Path&gt; hintEnvPath = Optional.ofNullable(options).map(Options::envPath);</span>
+<span class="nc" id="L262">            SetupDiagnosticReporter.userActionHint(e, hintEnvPath).ifPresent(hint -&gt; err.println(&quot;Next step: &quot; + hint));</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">            if (!completionOnly) {</span>
+<span class="nc" id="L264">                diagnosticReporter.reportFailure(e, request, terminal);</span>
+            }
+<span class="nc" id="L266">            return CliExitCodes.SETUP_FAILURE;</span>
+        }
+    }
+
+    private boolean installerCompletionMode(String expected) {
+<span class="nc" id="L271">        return expected.equals(environment.get(INSTALLER_COMPLETION_ENV));</span>
+    }
+
+    private void printFinalHandoffUnlessDeferred(PrintStream out, ConnectedBoardManifest manifest, String cliCommand) {
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        if (!installerCompletionMode(INSTALLER_COMPLETION_DEFER)) {</span>
+<span class="nc" id="L276">            printFinalHandoff(out, manifest, cliCommand);</span>
+        }
+<span class="nc" id="L278">    }</span>
+
+    private void preflightLocalWorkflowWrite(Options options) {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        if (!options.workflowPathExplicit()) {</span>
+<span class="nc" id="L282">            return;</span>
+        }
+        // Same workflow write preflight as direct new-board/import-board: directory paths,
+        // file-valued parents, existing files without --force, and unwritable parents are
+        // expected input errors before any dry-run plan or Trello member validation.
+<span class="nc" id="L287">        boardSetup.preflightWorkflowWrite(options.workflowPath(), options.force());</span>
+<span class="nc" id="L288">    }</span>
+
+    private static ConnectedBoardRepository connectedBoards(Options options) {
+<span class="nc" id="L291">        return new ConnectedBoardRepository(options.manifestPath());</span>
+    }
+
+    private ConnectedBoardManifest connectedBoardsUnchecked(Options options) {
+        try {
+<span class="nc" id="L296">            return connectedBoards(options).load();</span>
+<span class="nc" id="L297">        } catch (IOException e) {</span>
+<span class="nc" id="L298">            return new ConnectedBoardManifest(List.of());</span>
+        }
+    }
+
+    private LocalWorkerPaths localWorkerPaths(Options options) {
+<span class="nc" id="L303">        return LocalWorkerPaths.from(</span>
+<span class="nc" id="L304">                Optional.empty(),</span>
+<span class="nc" id="L305">                Optional.of(options.configDir()),</span>
+<span class="nc" id="L306">                Optional.of(options.workspaceRoot()),</span>
+<span class="nc" id="L307">                Optional.empty(),</span>
+                environment);
+    }
+
+    private int runCheck(Options options, Prerequisites prerequisites, PrintStream out) throws IOException {
+<span class="nc" id="L312">        ConnectedBoardRepository.ManifestLoadResult manifestLoad =</span>
+<span class="nc" id="L313">                connectedBoards(options).loadForCheck();</span>
+<span class="nc" id="L314">        ConnectedBoardManifest manifest = manifestLoad.manifest();</span>
+<span class="nc" id="L315">        boolean ok = prerequisites.readyFor(options);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (prerequisites.readyFor(options)) {</span>
+<span class="nc" id="L317">            out.println(&quot;  OK      Local prerequisites ready&quot;);</span>
+        }
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        for (String warning : manifestLoad.warnings()) {</span>
+<span class="nc" id="L320">            out.println(&quot;  WARN    &quot; + warning);</span>
+<span class="nc" id="L321">            ok = false;</span>
+<span class="nc" id="L322">        }</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">        if (manifest.boards().isEmpty()) {</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">            if (!manifestLoad.warnings().isEmpty()) {</span>
+<span class="nc" id="L325">                return CliExitCodes.SETUP_FAILURE;</span>
+            }
+<span class="nc" id="L327">            out.println(&quot;  WARN    No Trello boards connected to Symphony&quot;);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">            return prerequisites.readyFor(options) ? 0 : CliExitCodes.SETUP_FAILURE;</span>
+        }
+<span class="nc" id="L330">        List&lt;ConnectedBoard&gt; selectedBoards = boardsForCheck(manifest, options);</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        for (ConnectedBoard board : selectedBoards) {</span>
+<span class="nc" id="L332">            ConnectedBoardLocalValidation localValidation = validateConnectedBoardLocalPaths(board);</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            for (String warning : localValidation.warnings()) {</span>
+<span class="nc" id="L334">                out.println(&quot;  WARN    &quot; + warning);</span>
+<span class="nc" id="L335">            }</span>
+<span class="nc" id="L336">            ConnectedBoard healthBoard = withWorkflowServerPort(board);</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">            BoardHealth health = localValidation.ok()</span>
+<span class="nc" id="L338">                    ? healthChecker.boardHealth(healthBoard)</span>
+<span class="nc" id="L339">                    : new BoardHealth(BoardHealthKind.STOPPED, board.serverPort(), Optional.empty(), Optional.empty());</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">            if (!localValidation.ok()) {</span>
+<span class="nc" id="L341">                ok = false;</span>
+            } else {
+<span class="nc" id="L343">                Function&lt;String, Optional&lt;String&gt;&gt; workflowEnvironment =</span>
+<span class="nc" id="L344">                        WorkflowEnvironmentResolver.resolver(environment, board.envPath());</span>
+<span class="nc" id="L345">                WorkflowValidation workflow = workflowConfig.validate(board, workflowEnvironment);</span>
+<span class="nc bnc" id="L346" title="All 4 branches missed.">                if (workflow.ok() || isHealthyStaleManifestPort(board, healthBoard, workflow, health)) {</span>
+<span class="nc" id="L347">                    out.println(&quot;  OK      Workflow: &quot; + board.workflowPath());</span>
+                } else {
+<span class="nc" id="L349">                    out.println(&quot;  WARN    &quot; + workflow.message());</span>
+<span class="nc" id="L350">                    ok = false;</span>
+                }
+            }
+<span class="nc bnc" id="L353" title="All 4 branches missed.">            if (board.githubEnabled() &amp;&amp; !prerequisites.githubAuth().available()) {</span>
+<span class="nc" id="L354">                out.println(</span>
+<span class="nc" id="L355">                        &quot;  WARN    GitHub CLI is not authenticated for &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L356">                ok = false;</span>
+            }
+<span class="nc bnc" id="L358" title="All 4 branches missed.">            if (localValidation.envUsable() &amp;&amp; !checkTrelloCredentials(options, board, out)) {</span>
+<span class="nc" id="L359">                ok = false;</span>
+            }
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            if (localValidation.ok()) {</span>
+<span class="nc" id="L362">                printBoardHealth(options, manifest, healthBoard, health, out);</span>
+<span class="nc bnc" id="L363" title="All 4 branches missed.">                ok = ok &amp;&amp; health.kind() == BoardHealthKind.SAME_WORKFLOW;</span>
+            }
+<span class="nc" id="L365">        }</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        return ok ? 0 : CliExitCodes.SETUP_FAILURE;</span>
+    }
+
+    private static boolean isHealthyStaleManifestPort(
+            ConnectedBoard board, ConnectedBoard healthBoard, WorkflowValidation workflow, BoardHealth health) {
+<span class="nc bnc" id="L371" title="All 2 branches missed.">        return board.serverPort() != healthBoard.serverPort()</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">                &amp;&amp; health.kind() == BoardHealthKind.SAME_WORKFLOW</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">                &amp;&amp; workflow.message().startsWith(&quot;Workflow server.port does not match the connected board&quot;);</span>
+    }
+
+    private static List&lt;ConnectedBoard&gt; boardsForCheck(ConnectedBoardManifest manifest, Options options) {
+<span class="nc" id="L377">        return options.existingBoardId()</span>
+<span class="nc" id="L378">                .map(selector -&gt; List.of(selectedConnectedBoard(manifest, selector)))</span>
+<span class="nc" id="L379">                .orElseGet(manifest::boards);</span>
+    }
+
+    private static ConnectedBoardLocalValidation validateConnectedBoardLocalPaths(ConnectedBoard board) {
+<span class="nc" id="L383">        List&lt;String&gt; warnings = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L384">        boolean envUsable = true;</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">        if (board.workflowPath() == null) {</span>
+<span class="nc" id="L386">            warnings.add(&quot;Workflow path for &quot; + DisplayNames.quotedName(board.boardName())</span>
+                    + &quot; is missing from &quot;
+                    + ConnectedBoardManifest.FILE_NAME
+                    + &quot;.&quot;);
+<span class="nc bnc" id="L390" title="All 2 branches missed.">        } else if (Files.isDirectory(board.workflowPath())) {</span>
+<span class="nc" id="L391">            warnings.add(&quot;Workflow path for &quot; + DisplayNames.quotedName(board.boardName())</span>
+<span class="nc" id="L392">                    + &quot; must be a workflow file, but it is a directory: &quot; + board.workflowPath());</span>
+        }
+<span class="nc bnc" id="L394" title="All 2 branches missed.">        if (board.workspaceRoot() == null) {</span>
+<span class="nc" id="L395">            warnings.add(&quot;Workspace root for &quot; + DisplayNames.quotedName(board.boardName())</span>
+                    + &quot; is missing from &quot;
+                    + ConnectedBoardManifest.FILE_NAME
+                    + &quot;.&quot;);
+<span class="nc bnc" id="L399" title="All 4 branches missed.">        } else if (Files.exists(board.workspaceRoot()) &amp;&amp; !Files.isDirectory(board.workspaceRoot())) {</span>
+<span class="nc" id="L400">            warnings.add(&quot;Workspace root for &quot; + DisplayNames.quotedName(board.boardName()) + &quot; must be a directory: &quot;</span>
+<span class="nc" id="L401">                    + board.workspaceRoot());</span>
+        }
+<span class="nc bnc" id="L403" title="All 2 branches missed.">        if (!LocalPort.isValid(board.serverPort())) {</span>
+<span class="nc" id="L404">            warnings.add(&quot;Connected board &quot; + DisplayNames.quotedName(board.boardName()) + &quot; has invalid server port &quot;</span>
+<span class="nc" id="L405">                    + board.serverPort() + &quot;; expected &quot; + LocalPort.MIN + &quot; to &quot; + LocalPort.MAX + &quot;.&quot;);</span>
+        }
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (board.envPath() == null) {</span>
+<span class="nc" id="L408">            warnings.add(&quot;Trello credential path for &quot; + DisplayNames.quotedName(board.boardName())</span>
+                    + &quot; is missing from &quot;
+                    + ConnectedBoardManifest.FILE_NAME
+                    + &quot;.&quot;);
+<span class="nc" id="L412">            envUsable = false;</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        } else if (Files.isDirectory(board.envPath())) {</span>
+<span class="nc" id="L414">            warnings.add(&quot;Trello credential path for &quot; + DisplayNames.quotedName(board.boardName())</span>
+<span class="nc" id="L415">                    + &quot; must be a dotenv file, but it is a directory: &quot; + board.envPath());</span>
+<span class="nc" id="L416">            envUsable = false;</span>
+        }
+<span class="nc bnc" id="L418" title="All 2 branches missed.">        for (Path root : board.additionalWritableRoots()) {</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">            if (!root.isAbsolute()) {</span>
+<span class="nc" id="L420">                warnings.add(&quot;Additional writable root for &quot; + DisplayNames.quotedName(board.boardName())</span>
+                        + &quot; must be an absolute path: &quot; + root);
+            }
+<span class="nc" id="L423">        }</span>
+<span class="nc" id="L424">        return new ConnectedBoardLocalValidation(List.copyOf(warnings), envUsable);</span>
+    }
+
+    private static void printBoardHealth(
+            Options options,
+            ConnectedBoardManifest manifest,
+            ConnectedBoard board,
+            BoardHealth health,
+            PrintStream out) {
+<span class="nc bnc" id="L433" title="All 2 branches missed.">        if (health.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L434">            out.println(&quot;  OK    &quot; + DisplayNames.quotedName(board.boardName()) + &quot; local server: &quot;</span>
+<span class="nc" id="L435">                    + LocalHealthChecker.localServerUrl(health.port()) + &quot; (already running)&quot;);</span>
+<span class="nc" id="L436">            return;</span>
+        }
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (health.kind() == BoardHealthKind.STOPPED) {</span>
+<span class="nc" id="L439">            out.println(&quot;  WARN  &quot; + DisplayNames.quotedName(board.boardName()) + &quot; local server is not running&quot;);</span>
+<span class="nc" id="L440">            out.println(&quot;        Start: &quot; + options.command() + &quot; start --env &quot; + board.envPath() + &quot; --workflow &quot;</span>
+<span class="nc" id="L441">                    + board.workflowPath());</span>
+<span class="nc" id="L442">            return;</span>
+        }
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (health.kind() == BoardHealthKind.PORT_USED) {</span>
+<span class="nc" id="L445">            out.println(&quot;  WARN  &quot; + DisplayNames.quotedName(board.boardName()) + &quot; configured port &quot; + health.port()</span>
+                    + &quot; is in use by another process&quot;);
+<span class="nc" id="L447">            out.println(&quot;        Suggested fix: &quot; + repairPortCommand(options, manifest, board));</span>
+<span class="nc" id="L448">            return;</span>
+        }
+<span class="nc" id="L450">        out.println(&quot;  WARN  &quot; + DisplayNames.quotedName(board.boardName()) + &quot; local server: &quot;</span>
+<span class="nc" id="L451">                + LocalHealthChecker.localServerUrl(health.port()) + &quot; (wrong Symphony workflow or board)&quot;);</span>
+<span class="nc" id="L452">        out.println(&quot;        Expected workflow: &quot;</span>
+<span class="nc" id="L453">                + board.workflowPath().toAbsolutePath().normalize());</span>
+<span class="nc" id="L454">        out.println(&quot;        Actual workflow: &quot; + health.actualWorkflowPath().orElse(&quot;&lt;unknown&gt;&quot;));</span>
+<span class="nc" id="L455">        out.println(&quot;        Expected board: &quot; + board.boardId() + &quot; or &quot; + board.boardKey());</span>
+<span class="nc" id="L456">        out.println(&quot;        Actual board: &quot; + health.actualBoardId().orElse(&quot;&lt;unknown&gt;&quot;));</span>
+<span class="nc" id="L457">        out.println(&quot;        Suggested fix: &quot; + repairPortCommand(options, manifest, board));</span>
+<span class="nc" id="L458">    }</span>
+
+    private static String repairPortCommand(Options options, ConnectedBoardManifest manifest, ConnectedBoard board) {
+<span class="nc" id="L461">        return options.command() + &quot; setup-local repair-port --board \&quot;&quot; + repairPortSelector(manifest, board) + &quot;\&quot;&quot;;</span>
+    }
+
+    private static String repairPortSelector(ConnectedBoardManifest manifest, ConnectedBoard board) {
+<span class="nc" id="L465">        long sameNameCount = manifest.boards().stream()</span>
+<span class="nc" id="L466">                .filter(candidate -&gt; equalsIgnoreCase(candidate.boardName(), board.boardName()))</span>
+<span class="nc" id="L467">                .count();</span>
+<span class="nc bnc" id="L468" title="All 4 branches missed.">        if (sameNameCount &lt;= 1 &amp;&amp; commandSafeSelector(board.boardName())) {</span>
+<span class="nc" id="L469">            return board.boardName();</span>
+        }
+<span class="nc bnc" id="L471" title="All 4 branches missed.">        if (!blank(board.boardKey()) &amp;&amp; commandSafeSelector(board.boardKey())) {</span>
+<span class="nc" id="L472">            return board.boardKey();</span>
+        }
+<span class="nc" id="L474">        return board.boardId();</span>
+    }
+
+    /// The suggested repair command wraps the selector in plain double quotes, where `$` and
+    /// backticks still expand in POSIX shells and PowerShell, `!` still triggers history
+    /// expansion in interactive bash, paired `%` still expands in cmd, backslashes and
+    /// embedded quotes break the quoting itself, and the CLI rejects control characters in its own
+    /// arguments. A board name containing any of those can never become a copyable runnable
+    /// suggestion, so the opaque board key or id selects the same board safely instead. All other
+    /// characters, including spaces and the remaining punctuation, are literal inside double quotes
+    /// in POSIX shells, PowerShell, and cmd.
+    private static boolean commandSafeSelector(String value) {
+<span class="nc bnc" id="L486" title="All 6 branches missed.">        return value != null &amp;&amp; !value.isBlank() &amp;&amp; UNSAFE_COMMAND_SELECTOR_CHARACTER.matchesNoneOf(value);</span>
+    }
+
+    private boolean checkTrelloCredentials(Options options, ConnectedBoard board, PrintStream out) {
+        try {
+<span class="nc" id="L491">            CredentialSelection credentials = credentialStore.loadExisting(options, board.envPath());</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">            if (TrelloCredentialStore.blank(credentials.apiKeyValue())</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">                    || TrelloCredentialStore.blank(credentials.apiTokenValue())) {</span>
+<span class="nc" id="L494">                out.println(&quot;  WARN    Trello credentials are missing for &quot; + DisplayNames.quotedName(board.boardName())</span>
+<span class="nc" id="L495">                        + &quot;: &quot; + board.envPath());</span>
+<span class="nc" id="L496">                return false;</span>
+            }
+<span class="nc" id="L498">            TrelloBoardSetup.MemberInfo member = boardSetup.getMemberInfo(</span>
+<span class="nc" id="L499">                    new TrelloBoardSetup.MemberInfoRequest(options.endpoint(), credentials.credentials()));</span>
+<span class="nc" id="L500">            out.println(&quot;  OK      Trello credentials for &quot; + DisplayNames.quotedName(board.boardName()) + &quot; as &quot;</span>
+<span class="nc" id="L501">                    + member.displayName());</span>
+<span class="nc" id="L502">            return true;</span>
+<span class="nc" id="L503">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L504">            out.println(&quot;  WARN    Trello credential check failed for &quot; + DisplayNames.quotedName(board.boardName())</span>
+<span class="nc" id="L505">                    + &quot;: &quot; + e.getMessage());</span>
+<span class="nc" id="L506">            return false;</span>
+        }
+    }
+
+    private int repairPort(Options options, PrintStream out) throws IOException {
+<span class="nc" id="L511">        ConnectedBoardRepository boards = connectedBoards(options);</span>
+<span class="nc" id="L512">        ConnectedBoardManifest manifest = boards.loadForLifecycle();</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">        if (manifest.boards().isEmpty()) {</span>
+<span class="nc" id="L514">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_repair_board_not_found&quot;,
+                    &quot;No Trello boards are connected to Symphony in the selected manifest. Run setup-local or import-board first, or rerun repair-port with the correct --config-dir or --manifest.&quot;);
+        }
+<span class="nc" id="L518">        String boardSelector = options.repairBoardName()</span>
+<span class="nc" id="L519">                .orElseThrow(() -&gt; new TrelloBoardSetupException(</span>
+                        &quot;setup_repair_board_required&quot;, &quot;repair-port requires --board NAME.&quot;));
+<span class="nc" id="L521">        ConnectedBoard board = selectedConnectedBoard(</span>
+                manifest,
+                boardSelector,
+                &quot;setup_repair_board_not_found&quot;,
+                &quot;No connected Trello board matches \&quot;&quot; + boardSelector + &quot;\&quot;.&quot;);
+<span class="nc" id="L526">        healthChecker.externalHttpPortOverrideSource(board.envPath()).ifPresent(overrideSource -&gt; {</span>
+<span class="nc" id="L527">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_repair_port_http_override&quot;,
+                    &quot;setup-local repair-port cannot update workflow server.port while &quot;
+                            + overrideSource
+                            + &quot; overrides the HTTP port. Remove or update SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT in the board env file or service environment, then rerun setup-local repair-port.&quot;);
+        });
+<span class="nc" id="L533">        ConnectedBoard reconciledBoard = withWorkflowServerPort(board);</span>
+<span class="nc" id="L534">        BoardHealth health = healthChecker.boardHealth(reconciledBoard);</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">        if (health.kind() == BoardHealthKind.SAME_WORKFLOW</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">                &amp;&amp; reconciledBoard.serverPort() != board.serverPort()</span>
+<span class="nc bnc" id="L537" title="All 2 branches missed.">                &amp;&amp; !serverPortReservedByOtherBoard(manifest, reconciledBoard)) {</span>
+<span class="nc" id="L538">            return repairManifestPort(options, out, boards, manifest, board, reconciledBoard);</span>
+        }
+<span class="nc bnc" id="L540" title="All 2 branches missed.">        if (reconciledBoard.serverPort() == board.serverPort()</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">                &amp;&amp; !serverPortReservedByOtherBoard(manifest, reconciledBoard)</span>
+<span class="nc bnc" id="L542" title="All 4 branches missed.">                &amp;&amp; (health.kind() == BoardHealthKind.SAME_WORKFLOW || health.kind() == BoardHealthKind.STOPPED)) {</span>
+<span class="nc" id="L543">            out.println(&quot;  OK      No port repair needed. &quot; + DisplayNames.quotedName(reconciledBoard.boardName())</span>
+                    + &quot; is already configured for an available port: &quot;
+<span class="nc" id="L545">                    + LocalHealthChecker.localServerUrl(reconciledBoard.serverPort()));</span>
+<span class="nc" id="L546">            return 0;</span>
+        }
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        boolean wasRunning = health.kind() == BoardHealthKind.SAME_WORKFLOW;</span>
+<span class="nc" id="L549">        int port = nextAvailablePort(options, manifest, reconciledBoard);</span>
+<span class="nc bnc" id="L550" title="All 2 branches missed.">        if (options.dryRun()) {</span>
+<span class="nc" id="L551">            out.println();</span>
+<span class="nc" id="L552">            out.println(&quot;Dry run&quot;);</span>
+<span class="nc" id="L553">            out.println(&quot;  WOULD   update &quot; + DisplayNames.quotedName(reconciledBoard.boardName()) + &quot; to use &quot;</span>
+<span class="nc" id="L554">                    + LocalHealthChecker.localServerUrl(port));</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">            if (wasRunning) {</span>
+<span class="nc" id="L556">                out.println(&quot;  WOULD   restart Symphony for &quot; + DisplayNames.quotedName(reconciledBoard.boardName()));</span>
+            } else {
+<span class="nc" id="L558">                out.println(&quot;          Restart: &quot; + options.command() + &quot; start --env &quot; + reconciledBoard.envPath()</span>
+<span class="nc" id="L559">                        + &quot; --workflow &quot; + reconciledBoard.workflowPath());</span>
+            }
+<span class="nc" id="L561">            return 0;</span>
+        }
+<span class="nc" id="L563">        ensureManagedRestartPossible(options, reconciledBoard, health);</span>
+<span class="nc bnc" id="L564" title="All 2 branches missed.">        if (wasRunning) {</span>
+<span class="nc" id="L565">            stopBoard(options, reconciledBoard.boardName(), reconciledBoard.workflowPath());</span>
+        }
+<span class="nc" id="L567">        workflowConfig.updateServerPort(reconciledBoard.workflowPath(), port);</span>
+<span class="nc" id="L568">        boards.save(manifest.withBoard(reconciledBoard.withServerPort(port)));</span>
+<span class="nc" id="L569">        out.println(&quot;  OK      Updated &quot; + DisplayNames.quotedName(reconciledBoard.boardName()) + &quot; to use &quot;</span>
+<span class="nc" id="L570">                + LocalHealthChecker.localServerUrl(port));</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">        if (wasRunning) {</span>
+<span class="nc" id="L572">            startBoard(options, reconciledBoard.withServerPort(port), out);</span>
+        } else {
+<span class="nc" id="L574">            out.println(&quot;          Restart: &quot; + options.command() + &quot; start --env &quot; + reconciledBoard.envPath()</span>
+<span class="nc" id="L575">                    + &quot; --workflow &quot; + reconciledBoard.workflowPath());</span>
+        }
+<span class="nc" id="L577">        return 0;</span>
+    }
+
+    private ConnectedBoard withWorkflowServerPort(ConnectedBoard board) {
+<span class="nc bnc" id="L581" title="All 2 branches missed.">        if (board.workflowPath() == null) {</span>
+<span class="nc" id="L582">            return board;</span>
+        }
+<span class="nc" id="L584">        return workflowConfig</span>
+<span class="nc" id="L585">                .serverPort(board.workflowPath(), WorkflowEnvironmentResolver.resolver(environment, board.envPath()))</span>
+<span class="nc" id="L586">                .map(board::withServerPort)</span>
+<span class="nc" id="L587">                .orElse(board);</span>
+    }
+
+    private static int repairManifestPort(
+            Options options,
+            PrintStream out,
+            ConnectedBoardRepository boards,
+            ConnectedBoardManifest manifest,
+            ConnectedBoard staleBoard,
+            ConnectedBoard reconciledBoard)
+            throws IOException {
+<span class="nc bnc" id="L598" title="All 2 branches missed.">        if (options.dryRun()) {</span>
+<span class="nc" id="L599">            out.println();</span>
+<span class="nc" id="L600">            out.println(&quot;Dry run&quot;);</span>
+<span class="nc" id="L601">            out.println(</span>
+<span class="nc" id="L602">                    &quot;  WOULD   update connected-board manifest for &quot; + DisplayNames.quotedName(staleBoard.boardName())</span>
+<span class="nc" id="L603">                            + &quot; to use &quot; + LocalHealthChecker.localServerUrl(reconciledBoard.serverPort()));</span>
+<span class="nc" id="L604">            out.println(&quot;          Workflow and running Symphony worker already use this port.&quot;);</span>
+<span class="nc" id="L605">            return 0;</span>
+        }
+<span class="nc" id="L607">        boards.save(manifest.withBoard(reconciledBoard));</span>
+<span class="nc" id="L608">        out.println(&quot;  OK      Updated connected-board manifest for &quot; + DisplayNames.quotedName(staleBoard.boardName())</span>
+<span class="nc" id="L609">                + &quot; to use &quot; + LocalHealthChecker.localServerUrl(reconciledBoard.serverPort()));</span>
+<span class="nc" id="L610">        return 0;</span>
+    }
+
+    private static boolean serverPortReservedByOtherBoard(ConnectedBoardManifest manifest, ConnectedBoard board) {
+<span class="nc" id="L614">        return manifest.boards().stream()</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                .filter(connectedBoard -&gt; !connectedBoard.boardId().equals(board.boardId()))</span>
+<span class="nc bnc" id="L616" title="All 2 branches missed.">                .anyMatch(connectedBoard -&gt; connectedBoard.serverPort() == board.serverPort());</span>
+    }
+
+    private int nextAvailablePort(Options options, ConnectedBoardManifest manifest, ConnectedBoard ignoredBoard) {
+<span class="nc" id="L620">        Set&lt;Integer&gt; reserved = manifest.boards().stream()</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">                .filter(board -&gt; !board.boardId().equals(ignoredBoard.boardId()))</span>
+<span class="nc" id="L622">                .map(ConnectedBoard::serverPort)</span>
+                // Use a mutable HashSet so file-discovered ports can be merged below and each port check is fast.
+<span class="nc" id="L624">                .collect(Collectors.toCollection(HashSet::new));</span>
+        // Local workflow files outside the manifest still reserve their ports, so a repaired
+        // board cannot collide with a stale or disconnected workflow that may be started later.
+<span class="nc" id="L627">        reserved.addAll(localWorkflowFilePortReservations(options, ignoredBoard));</span>
+<span class="nc bnc" id="L628" title="All 2 branches missed.">        for (int port = TrelloBoardSetup.DEFAULT_SERVER_PORT; port &lt;= LocalPort.MAX; port++) {</span>
+<span class="nc bnc" id="L629" title="All 4 branches missed.">            if (!reserved.contains(port) &amp;&amp; !boardSetup.portInUse(port)) {</span>
+<span class="nc" id="L630">                return port;</span>
+            }
+        }
+<span class="nc" id="L633">        throw new TrelloBoardSetupException(&quot;setup_server_port_unavailable&quot;, &quot;No free local server port was found.&quot;);</span>
+    }
+
+    private Set&lt;Integer&gt; localWorkflowFilePortReservations(Options options, ConnectedBoard ignoredBoard) {
+<span class="nc" id="L637">        Path configDir = options.configDir();</span>
+<span class="nc bnc" id="L638" title="All 4 branches missed.">        if (configDir == null || !Files.isDirectory(configDir)) {</span>
+<span class="nc" id="L639">            return Set.of();</span>
+        }
+<span class="nc" id="L641">        try (var files = Files.list(configDir)) {</span>
+<span class="nc" id="L642">            return files.filter(Files::isRegularFile)</span>
+<span class="nc" id="L643">                    .filter(file -&gt; PathNames.fileName(file).endsWith(&quot;.md&quot;))</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">                    .filter(file -&gt; ignoredBoard.workflowPath() == null</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">                            || !PathsEqual.samePath(file, ignoredBoard.workflowPath()))</span>
+<span class="nc" id="L646">                    .map(file -&gt; workflowConfig.serverPort(</span>
+<span class="nc" id="L647">                            file, WorkflowEnvironmentResolver.resolver(environment, options.envPath())))</span>
+<span class="nc" id="L648">                    .flatMap(Optional::stream)</span>
+<span class="nc" id="L649">                    .collect(toImmutableSet());</span>
+<span class="nc" id="L650">        } catch (IOException ignored) {</span>
+            // A config directory that cannot be listed leaves only the manifest and probe checks.
+<span class="nc" id="L652">            return Set.of();</span>
+        }
+    }
+
+    private Prerequisites prerequisites() {
+<span class="nc" id="L657">        return prerequisiteChecker.check();</span>
+    }
+
+    private CredentialSelection credentials(Options options, Path envPath, Terminal terminal) throws IOException {
+<span class="nc" id="L661">        return credentialStore.loadOrPrompt(options, envPath, terminal);</span>
+    }
+
+    private void writeEnv(CredentialSelection credentials, Path envPath, Terminal terminal) throws IOException {
+<span class="nc" id="L665">        credentialStore.write(credentials, envPath, terminal);</span>
+<span class="nc" id="L666">    }</span>
+
+    private GitHubIntegration resolveGitHubIntegration(Options options, Prerequisites prerequisites, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L670">        return githubConfigurator.resolve(options, prerequisites, terminal);</span>
+    }
+
+    static boolean isBroadAccessPathForCli(Path path) {
+<span class="nc" id="L674">        return WorkspaceAccessFlow.isBroadAccessPath(path);</span>
+    }
+
+    private Options configureCodexAccess(Options options, Terminal terminal) throws IOException {
+<span class="nc" id="L678">        List&lt;Path&gt; allowedPaths = workspaceAccessFlow.resolve(options, terminal);</span>
+<span class="nc" id="L679">        boolean dangerFullAccess = codexSandboxFlow.resolve(options, terminal);</span>
+<span class="nc" id="L680">        return options.withCodexAccess(allowedPaths, dangerFullAccess);</span>
+    }
+
+    private static Options configureRepositoryUrl(Options options, Terminal terminal) throws IOException {
+<span class="nc bnc" id="L684" title="All 4 branches missed.">        if (options.nonInteractive() || options.repositoryUrl().isPresent()) {</span>
+<span class="nc" id="L685">            return options;</span>
+        }
+<span class="nc" id="L687">        return options.withRepositoryUrl(</span>
+<span class="nc" id="L688">                RepositoryUrlInput.fromPrompt(terminal.readLine(RepositoryUrlInput.PROMPT + &quot; &quot;)));</span>
+    }
+
+    private Options configureCodexModel(Options options, Path workflowPath, Terminal terminal) throws IOException {
+<span class="nc" id="L692">        CodexModelSelectionDefaults catalog =</span>
+<span class="nc" id="L693">                options.codexModelCatalog().orElseGet(boardSetup::resolvedCodexModelSelectionDefaults);</span>
+<span class="nc" id="L694">        CodexModelSelectionFlow.Selection selected = new CodexModelSelectionFlow()</span>
+<span class="nc" id="L695">                .resolve(options, boardSetup.codexModelSelectionDefaultsForWorkflow(workflowPath, catalog), terminal);</span>
+<span class="nc" id="L696">        return options.withCodexModelCatalog(catalog).withCodexModelSelection(selected);</span>
+    }
+
+    private Options validatePreflightCodexReasoningEffort(Options options) {
+<span class="nc" id="L700">        return options.codexReasoningEffort()</span>
+<span class="nc" id="L701">                .filter(ignored -&gt; codexModelKnownDuringPreflight(options))</span>
+<span class="nc" id="L702">                .map(reasoningEffort -&gt; validatePreflightCodexReasoningEffort(options, reasoningEffort))</span>
+<span class="nc" id="L703">                .orElse(options);</span>
+    }
+
+    private Options validatePreflightCodexReasoningEffort(Options options, Prerequisites prerequisites) {
+<span class="nc bnc" id="L707" title="All 4 branches missed.">        if (!options.dryRun() &amp;&amp; !prerequisites.codexAuth().available()) {</span>
+            // Login can refresh model access, so dynamic catalog validation waits until authentication.
+<span class="nc" id="L709">            return options;</span>
+        }
+<span class="nc" id="L711">        return validatePreflightCodexReasoningEffort(options);</span>
+    }
+
+    private Options validatePreflightCodexReasoningEffort(Options options, String reasoningEffort) {
+<span class="nc" id="L715">        Optional&lt;Path&gt; workflowPath = TrelloBoardConnector.preflightWorkflowPath(options);</span>
+<span class="nc bnc" id="L716" title="All 6 branches missed.">        if (options.codexModel().isEmpty() &amp;&amp; workflowPath.isEmpty() &amp;&amp; !preflightUsesCatalogDefaultModel(options)) {</span>
+<span class="nc" id="L717">            return options;</span>
+        }
+<span class="nc bnc" id="L719" title="All 2 branches missed.">        if (options.dryRun()) {</span>
+<span class="nc" id="L720">            return boardSetup</span>
+<span class="nc" id="L721">                    .resolvedCodexModelSelectionDefaultsForDryRun()</span>
+<span class="nc" id="L722">                    .map(catalog -&gt;</span>
+<span class="nc" id="L723">                            validatePreflightCodexReasoningEffort(options, reasoningEffort, workflowPath, catalog))</span>
+<span class="nc" id="L724">                    .orElse(options);</span>
+        }
+<span class="nc" id="L726">        CodexModelSelectionDefaults catalog =</span>
+<span class="nc" id="L727">                options.codexModelCatalog().orElseGet(boardSetup::resolvedCodexModelSelectionDefaults);</span>
+<span class="nc" id="L728">        return validatePreflightCodexReasoningEffort(options, reasoningEffort, workflowPath, catalog);</span>
+    }
+
+    private Options validatePreflightCodexReasoningEffort(
+            Options options, String reasoningEffort, Optional&lt;Path&gt; workflowPath, CodexModelSelectionDefaults catalog) {
+<span class="nc" id="L733">        CodexModelSelectionDefaults selectionDefaults = options.codexModel()</span>
+<span class="nc" id="L734">                .map(ignored -&gt; catalog)</span>
+<span class="nc" id="L735">                .or(() -&gt; workflowPath.map(path -&gt; boardSetup.codexModelSelectionDefaultsForWorkflow(path, catalog)))</span>
+<span class="nc" id="L736">                .orElse(catalog);</span>
+<span class="nc" id="L737">        String model = options.codexModel().orElseGet(selectionDefaults.defaults()::model);</span>
+<span class="nc" id="L738">        selectionDefaults.validateReasoningEffortForModel(model, reasoningEffort);</span>
+<span class="nc" id="L739">        return options.withCodexModelCatalog(catalog);</span>
+    }
+
+    private static boolean codexModelKnownDuringPreflight(Options options) {
+<span class="nc bnc" id="L743" title="All 2 branches missed.">        return options.codexModel().isPresent()</span>
+<span class="nc bnc" id="L744" title="All 6 branches missed.">                || (!options.configureGithub() &amp;&amp; (options.dryRun() || options.nonInteractive()));</span>
+    }
+
+    private static boolean preflightUsesCatalogDefaultModel(Options options) {
+<span class="nc bnc" id="L748" title="All 6 branches missed.">        if (!options.force() || options.existingBoardId().isEmpty() || !Files.isDirectory(options.configDir())) {</span>
+<span class="nc" id="L749">            return true;</span>
+        }
+<span class="nc" id="L751">        try (var files = Files.list(options.configDir())) {</span>
+<span class="nc" id="L752">            return files.filter(Files::isRegularFile)</span>
+<span class="nc" id="L753">                    .map(PathNames::fileName)</span>
+<span class="nc" id="L754">                    .noneMatch(WorkflowFileNames::isGeneratedFileName);</span>
+<span class="nc" id="L755">        } catch (IOException ignored) {</span>
+            // An unreadable directory could contain the forced board's workflow, so its model is unknown.
+<span class="nc" id="L757">            return false;</span>
+        }
+    }
+
+    private static boolean confirmWorkspaceRoot(Options options, Terminal terminal) throws IOException {
+<span class="nc bnc" id="L762" title="All 2 branches missed.">        if (!options.workspaceRootExplicit()</span>
+<span class="nc bnc" id="L763" title="All 2 branches missed.">                || options.nonInteractive()</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">                || !WorkspaceAccessFlow.isBroadAccessPath(options.workspaceRoot())) {</span>
+<span class="nc" id="L765">            return true;</span>
+        }
+<span class="nc" id="L767">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L768">        terminal.info(</span>
+                &quot;Using / as the workspace root lets Symphony create per-card workspaces from the whole filesystem root.&quot;);
+<span class="nc" id="L770">        terminal.info(&quot;This is unsafe unless you intentionally want that.&quot;);</span>
+<span class="nc bnc" id="L771" title="All 2 branches missed.">        if (PromptSupport.yes(terminal, &quot;Use / as the workspace root anyway? [y/N] &quot;)) {</span>
+<span class="nc" id="L772">            return true;</span>
+        }
+<span class="nc" id="L774">        terminal.info(&quot;Workspace-root selection cancelled.&quot;);</span>
+<span class="nc" id="L775">        return false;</span>
+    }
+
+    private TrelloBoardSetup boardSetupWithCodexModel(Options options) {
+<span class="nc" id="L779">        return options.codexModelDefaults()</span>
+<span class="nc bnc" id="L780" title="All 2 branches missed.">                .map(defaults -&gt; options.hasExplicitCodexModelRequest()</span>
+<span class="nc" id="L781">                        ? boardSetup.withCodexModelOverrides(</span>
+<span class="nc" id="L782">                                defaults, options.codexModel(), options.codexReasoningEffort())</span>
+<span class="nc" id="L783">                        : boardSetup.withCodexModelDefaults(defaults))</span>
+<span class="nc" id="L784">                .orElse(boardSetup);</span>
+    }
+
+    private static ExistingSetupAction existingSetupAction(
+            ConnectedBoardManifest manifest, Terminal terminal, Options options) throws IOException {
+<span class="nc" id="L789">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L790">        rejectAmbiguousConnectedBoardSelector(manifest, options);</span>
+<span class="nc bnc" id="L791" title="All 2 branches missed.">        if (hasPotentialConnectedBoardCodexAccessTarget(manifest, options)) {</span>
+<span class="nc" id="L792">            rejectMixedCodexAccessUpdate(options);</span>
+        }
+<span class="nc bnc" id="L794" title="All 2 branches missed.">        if (options.nonInteractive()) {</span>
+<span class="nc bnc" id="L795" title="All 2 branches missed.">            if (options.configureGithub()) {</span>
+<span class="nc" id="L796">                rejectConfigureGithubWorkflowSelector(options);</span>
+            } else {
+<span class="nc" id="L798">                rejectNonInteractiveIgnoredWorkflowUpdate(options);</span>
+            }
+        }
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        if (options.githubMode().orElse(false)) {</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">            if (hasSelectedGithubBoardCodexAccessTarget(manifest, options)) {</span>
+<span class="nc" id="L803">                return ExistingSetupAction.UPDATE_CODEX_ACCESS;</span>
+            }
+<span class="nc bnc" id="L805" title="All 4 branches missed.">            if (options.configureGithub() || !options.hasExplicitBoardSetupRequest()) {</span>
+<span class="nc" id="L806">                List&lt;ConnectedBoard&gt; nonGithubBoards = nonGithubBoards(manifest);</span>
+<span class="nc bnc" id="L807" title="All 2 branches missed.">                if (!nonGithubBoards.isEmpty()) {</span>
+<span class="nc" id="L808">                    rejectInvalidConfigureGithubUpgradeRequestBeforeAuth(options, nonGithubBoards);</span>
+<span class="nc" id="L809">                    return ExistingSetupAction.UPGRADE_GITHUB;</span>
+                }
+<span class="nc bnc" id="L811" title="All 2 branches missed.">                if (options.nonInteractive()) {</span>
+<span class="nc" id="L812">                    rejectNonInteractiveIgnoredConfigureGithubUpdate(options);</span>
+                }
+<span class="nc" id="L814">                rejectConfigureGithubUpdateWithoutUpgrade(options);</span>
+<span class="nc bnc" id="L815" title="All 2 branches missed.">                if (hasConnectedBoardCodexAccessTarget(manifest, options)) {</span>
+<span class="nc" id="L816">                    return ExistingSetupAction.UPDATE_CODEX_ACCESS;</span>
+                }
+<span class="nc" id="L818">                return ExistingSetupAction.KEEP;</span>
+            }
+<span class="nc bnc" id="L820" title="All 2 branches missed.">            if (options.hasExplicitBoardSetupRequest()) {</span>
+<span class="nc" id="L821">                return ExistingSetupAction.CONNECT;</span>
+            }
+<span class="nc" id="L823">            return ExistingSetupAction.KEEP;</span>
+        }
+<span class="nc bnc" id="L825" title="All 2 branches missed.">        if (hasConnectedBoardCodexAccessTarget(manifest, options)) {</span>
+<span class="nc" id="L826">            return ExistingSetupAction.UPDATE_CODEX_ACCESS;</span>
+        }
+<span class="nc bnc" id="L828" title="All 2 branches missed.">        if (options.hasExplicitBoardSetupRequest()) {</span>
+<span class="nc" id="L829">            return ExistingSetupAction.CONNECT;</span>
+        }
+<span class="nc bnc" id="L831" title="All 2 branches missed.">        if (options.nonInteractive()) {</span>
+<span class="nc" id="L832">            return ExistingSetupAction.KEEP;</span>
+        }
+<span class="nc" id="L834">        out.println();</span>
+<span class="nc" id="L835">        out.println(&quot;Trello boards configured for Symphony:&quot;);</span>
+<span class="nc bnc" id="L836" title="All 2 branches missed.">        for (int i = 0; i &lt; manifest.boards().size(); i++) {</span>
+<span class="nc" id="L837">            ConnectedBoard board = manifest.boards().get(i);</span>
+<span class="nc" id="L838">            out.println(</span>
+<span class="nc" id="L839">                    &quot;  &quot; + (i + 1) + &quot;. &quot; + DisplayNames.quotedName(board.boardName()) + &quot;     &quot; + board.boardUrl());</span>
+        }
+<span class="nc" id="L841">        out.println();</span>
+<span class="nc" id="L842">        out.println(&quot;What do you want to do?&quot;);</span>
+<span class="nc" id="L843">        out.println(&quot;  1. Keep connected Trello boards&quot;);</span>
+<span class="nc" id="L844">        out.println(&quot;  2. Connect another Trello board&quot;);</span>
+<span class="nc" id="L845">        out.println(&quot;  3. Disconnect a Trello board from Symphony&quot;);</span>
+<span class="nc" id="L846">        out.println();</span>
+<span class="nc bnc" id="L847" title="All 3 branches missed.">        return switch (parseChoice(terminal.readLine(&quot;Choice [1]: &quot;), 1, 3)) {</span>
+<span class="nc" id="L848">            case 2 -&gt; ExistingSetupAction.CONNECT;</span>
+<span class="nc" id="L849">            case 3 -&gt; ExistingSetupAction.DISCONNECT;</span>
+<span class="nc" id="L850">            default -&gt; ExistingSetupAction.KEEP;</span>
+        };
+    }
+
+    private static boolean hasConnectedBoardCodexAccessTarget(ConnectedBoardManifest manifest, Options options) {
+<span class="nc bnc" id="L855" title="All 2 branches missed.">        return options.hasCodexAccessOnlyUpdateRequest()</span>
+<span class="nc bnc" id="L856" title="All 2 branches missed.">                &amp;&amp; hasPotentialConnectedBoardCodexAccessTarget(manifest, options);</span>
+    }
+
+    private static boolean hasPotentialConnectedBoardCodexAccessTarget(
+            ConnectedBoardManifest manifest, Options options) {
+<span class="nc bnc" id="L861" title="All 4 branches missed.">        if (!options.hasCodexAccessUpdateRequest() || options.boardName().isPresent()) {</span>
+<span class="nc" id="L862">            return false;</span>
+        }
+<span class="nc" id="L864">        return options.existingBoardId()</span>
+<span class="nc" id="L865">                .map(selector -&gt; manifest.findByBoard(selector).isPresent())</span>
+<span class="nc" id="L866">                .orElse(true);</span>
+    }
+
+    private static void rejectAmbiguousConnectedBoardSelector(ConnectedBoardManifest manifest, Options options) {
+<span class="nc" id="L870">        options.existingBoardId().ifPresent(selector -&gt; rejectAmbiguousConnectedBoardSelector(manifest, selector));</span>
+<span class="nc" id="L871">    }</span>
+
+    private static void rejectInvalidUnconnectedBoardSelector(ConnectedBoardManifest manifest, Options options) {
+<span class="nc" id="L874">        options.existingBoardId().ifPresent(selector -&gt; rejectInvalidUnconnectedBoardSelector(manifest, selector));</span>
+<span class="nc" id="L875">    }</span>
+
+    private static void rejectInvalidUnconnectedBoardSelector(ConnectedBoardManifest manifest, String selectedBoard) {
+<span class="nc" id="L878">        List&lt;ConnectedBoard&gt; connectedMatches = manifest.findAllByBoard(selectedBoard);</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">        if (connectedMatches.size() &gt; 1) {</span>
+<span class="nc" id="L880">            throw ambiguousConnectedBoardSelector();</span>
+        }
+<span class="nc bnc" id="L882" title="All 2 branches missed.">        if (!connectedMatches.isEmpty()) {</span>
+<span class="nc" id="L883">            return;</span>
+        }
+        try {
+<span class="nc" id="L886">            TrelloBoardIds.parseImportBoardSelector(selectedBoard);</span>
+<span class="nc" id="L887">        } catch (TrelloBoardSetupException exception) {</span>
+<span class="nc" id="L888">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;,
+                    &quot;Invalid --board value. Use a Trello board URL, short link, board id, or a connected board name.&quot;,
+                    exception);
+<span class="nc" id="L892">        }</span>
+<span class="nc" id="L893">    }</span>
+
+    private static void rejectAmbiguousConnectedBoardSelector(ConnectedBoardManifest manifest, String selector) {
+<span class="nc bnc" id="L896" title="All 2 branches missed.">        if (manifest.findAllByBoard(selector).size() &gt; 1) {</span>
+<span class="nc" id="L897">            throw ambiguousConnectedBoardSelector();</span>
+        }
+<span class="nc" id="L899">    }</span>
+
+    private static boolean hasSelectedGithubBoardCodexAccessTarget(ConnectedBoardManifest manifest, Options options) {
+<span class="nc bnc" id="L902" title="All 2 branches missed.">        if (!options.hasCodexAccessOnlyUpdateRequest()</span>
+<span class="nc bnc" id="L903" title="All 2 branches missed.">                || options.boardName().isPresent()</span>
+<span class="nc bnc" id="L904" title="All 2 branches missed.">                || options.existingBoardId().isEmpty()) {</span>
+<span class="nc" id="L905">            return false;</span>
+        }
+<span class="nc" id="L907">        return options.existingBoardId()</span>
+<span class="nc" id="L908">                .flatMap(manifest::findByBoard)</span>
+<span class="nc" id="L909">                .filter(ConnectedBoard::githubEnabled)</span>
+<span class="nc" id="L910">                .isPresent();</span>
+    }
+
+    private void updateExistingCodexAccess(Options options, ConnectedBoardManifest manifest, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L915">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L916">        ConnectedBoard board = selectBoardForCodexAccessUpdate(options, manifest, terminal);</span>
+<span class="nc" id="L917">        ConnectedBoard updated = withRequestedCodexAccess(options, board, terminal);</span>
+<span class="nc" id="L918">        BoardHealth health = healthChecker.boardHealth(board);</span>
+<span class="nc" id="L919">        ensureManagedRestartPossible(options, board, health);</span>
+<span class="nc" id="L920">        applyCodexAccess(</span>
+<span class="nc" id="L921">                options.withCodexAccess(updated.additionalWritableRoots(), updated.dangerFullAccess()),</span>
+<span class="nc" id="L922">                board.workflowPath());</span>
+<span class="nc" id="L923">        connectedBoards(options).save(manifest.withBoard(updated));</span>
+
+<span class="nc" id="L925">        out.println();</span>
+<span class="nc" id="L926">        out.println(&quot;Codex access&quot;);</span>
+<span class="nc" id="L927">        out.println(&quot;  OK  Updated workflow: &quot; + board.workflowPath());</span>
+<span class="nc" id="L928">        printWorkspaceAndSandboxSummary(</span>
+<span class="nc" id="L929">                options.withCodexAccess(updated.additionalWritableRoots(), updated.dangerFullAccess()), out);</span>
+<span class="nc bnc" id="L930" title="All 4 branches missed.">        if (health.kind() == BoardHealthKind.SAME_WORKFLOW &amp;&amp; !options.noStart()) {</span>
+<span class="nc" id="L931">            stopBoard(options, board.boardName(), board.workflowPath());</span>
+<span class="nc" id="L932">            startBoard(options, updated, out);</span>
+<span class="nc bnc" id="L933" title="All 2 branches missed.">        } else if (health.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L934">            out.println();</span>
+<span class="nc" id="L935">            out.println(&quot;Restart skipped. Restart Symphony for the updated workflow when you are ready:&quot;);</span>
+<span class="nc" id="L936">            out.println(&quot;  &quot; + options.command() + &quot; stop --workflow &quot; + board.workflowPath());</span>
+<span class="nc" id="L937">            out.println(&quot;  &quot; + options.command() + &quot; start --env &quot; + board.envPath() + &quot; --workflow &quot;</span>
+<span class="nc" id="L938">                    + board.workflowPath());</span>
+        } else {
+<span class="nc" id="L940">            out.println();</span>
+<span class="nc" id="L941">            out.println(&quot;Start Symphony for the updated workflow:&quot;);</span>
+<span class="nc" id="L942">            out.println(&quot;  &quot; + options.command() + &quot; start --env &quot; + board.envPath() + &quot; --workflow &quot;</span>
+<span class="nc" id="L943">                    + board.workflowPath());</span>
+        }
+<span class="nc" id="L945">    }</span>
+
+    private ConnectedBoard withRequestedCodexAccess(Options options, ConnectedBoard board, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L949">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L950">        List&lt;Path&gt; requestedRoots = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L951" title="All 2 branches missed.">        for (Path root : options.additionalWritableRoots()) {</span>
+<span class="nc bnc" id="L952" title="All 6 branches missed.">            if (WorkspaceAccessFlow.isBroadAccessPath(root) &amp;&amp; !options.allowAllPaths() &amp;&amp; !options.nonInteractive()) {</span>
+<span class="nc" id="L953">                out.println();</span>
+<span class="nc" id="L954">                out.println(</span>
+                        &quot;Adding / grants broad recursive read/write access to all files and folders Symphony can normally access.&quot;);
+<span class="nc" id="L956">                out.println(</span>
+                        &quot;If you meant your home directory or one project, use ~ or that project directory instead.&quot;);
+<span class="nc bnc" id="L958" title="All 2 branches missed.">                if (!PromptSupport.yes(terminal, &quot;Allow / anyway? [y/N] &quot;)) {</span>
+<span class="nc" id="L959">                    continue;</span>
+                }
+            } else {
+<span class="nc" id="L962">                WorkspaceAccessFlow.rejectBroadAccessPath(root, options.allowAllPaths());</span>
+            }
+<span class="nc" id="L964">            requestedRoots.add(root);</span>
+<span class="nc" id="L965">        }</span>
+<span class="nc" id="L966">        List&lt;Path&gt; updatedRoots = new ArrayList&lt;&gt;(board.additionalWritableRoots());</span>
+<span class="nc bnc" id="L967" title="All 2 branches missed.">        for (Path root : requestedRoots) {</span>
+<span class="nc bnc" id="L968" title="All 2 branches missed.">            if (updatedRoots.stream().noneMatch(existing -&gt; PathsEqual.samePath(existing, root))) {</span>
+<span class="nc" id="L969">                updatedRoots.add(root);</span>
+            }
+<span class="nc" id="L971">        }</span>
+<span class="nc" id="L972">        boolean requestedDangerFullAccess = options.dangerFullAccess();</span>
+<span class="nc bnc" id="L973" title="All 4 branches missed.">        if (requestedDangerFullAccess &amp;&amp; !board.dangerFullAccess()) {</span>
+<span class="nc bnc" id="L974" title="All 2 branches missed.">            if (options.nonInteractive()) {</span>
+<span class="nc" id="L975">                CodexSandboxFlow.printWarning(terminal);</span>
+            } else {
+<span class="nc" id="L977">                out.println();</span>
+<span class="nc" id="L978">                out.println(&quot;Codex execution&quot;);</span>
+<span class="nc" id="L979">                requestedDangerFullAccess = PromptSupport.yes(</span>
+                        terminal,
+                        &quot;Allow Codex to run without its command/filesystem sandbox for this workflow (danger-full-access)? [y/N] &quot;);
+<span class="nc bnc" id="L982" title="All 2 branches missed.">                if (requestedDangerFullAccess) {</span>
+<span class="nc" id="L983">                    CodexSandboxFlow.printWarning(terminal);</span>
+                }
+            }
+        }
+<span class="nc bnc" id="L987" title="All 4 branches missed.">        boolean updatedDangerFullAccess = board.dangerFullAccess() || requestedDangerFullAccess;</span>
+<span class="nc" id="L988">        return board.withCodexAccess(List.copyOf(updatedRoots), updatedDangerFullAccess);</span>
+    }
+
+    private static ConnectedBoard selectBoardForCodexAccessUpdate(
+            Options options, ConnectedBoardManifest manifest, Terminal terminal) throws IOException {
+<span class="nc" id="L993">        rejectMixedCodexAccessUpdate(options);</span>
+<span class="nc" id="L994">        Optional&lt;String&gt; selector = options.existingBoardId();</span>
+<span class="nc bnc" id="L995" title="All 2 branches missed.">        if (selector.isEmpty()) {</span>
+<span class="nc" id="L996">            return selectBoardForCodexAccessUpdateWithoutSelector(options, manifest, terminal);</span>
+        }
+<span class="nc" id="L998">        return selectedConnectedBoard(manifest, selector.get());</span>
+    }
+
+    private static ConnectedBoard selectBoardForCodexAccessUpdateWithoutSelector(
+            Options options, ConnectedBoardManifest manifest, Terminal terminal) throws IOException {
+<span class="nc" id="L1003">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">        if (manifest.boards().size() == 1) {</span>
+<span class="nc" id="L1005">            return manifest.boards().getFirst();</span>
+        }
+<span class="nc bnc" id="L1007" title="All 2 branches missed.">        if (options.nonInteractive()) {</span>
+<span class="nc" id="L1008">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_board_selection_required&quot;,
+                    &quot;Multiple Trello boards are connected. Re-run with --board NAME to choose which connected board to update.&quot;);
+        }
+<span class="nc" id="L1012">        out.println();</span>
+<span class="nc" id="L1013">        out.println(&quot;Choose the Trello board to update:&quot;);</span>
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">        for (int i = 0; i &lt; manifest.boards().size(); i++) {</span>
+<span class="nc" id="L1015">            out.println(&quot;  &quot; + (i + 1) + &quot;. &quot;</span>
+<span class="nc" id="L1016">                    + DisplayNames.quotedName(manifest.boards().get(i).boardName()));</span>
+        }
+<span class="nc" id="L1018">        return manifest.boards()</span>
+<span class="nc" id="L1019">                .get(PromptSupport.requiredChoice(</span>
+<span class="nc" id="L1020">                                terminal.readLine(&quot;Board: &quot;),</span>
+<span class="nc" id="L1021">                                manifest.boards().size(),</span>
+                                &quot;setup_board_selection_required&quot;,
+                                &quot;Board selection is required.&quot;)
+                        - 1);
+    }
+
+    private static ConnectedBoard selectedConnectedBoard(ConnectedBoardManifest manifest, String selector) {
+<span class="nc" id="L1028">        return selectedConnectedBoard(</span>
+                manifest,
+                selector,
+                &quot;setup_board_selection_required&quot;,
+                &quot;No connected Trello board matches \&quot;&quot; + selector + &quot;\&quot;.&quot;);
+    }
+
+    private static ConnectedBoard selectedConnectedBoard(
+            ConnectedBoardManifest manifest, String selector, String notFoundCode, String notFoundMessage) {
+<span class="nc" id="L1037">        List&lt;ConnectedBoard&gt; matches = manifest.findAllByBoard(selector);</span>
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">        if (matches.isEmpty()) {</span>
+<span class="nc" id="L1039">            throw new TrelloBoardSetupException(notFoundCode, notFoundMessage);</span>
+        }
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">        if (matches.size() &gt; 1) {</span>
+<span class="nc" id="L1042">            throw ambiguousConnectedBoardSelector();</span>
+        }
+<span class="nc" id="L1044">        return matches.getFirst();</span>
+    }
+
+    private static TrelloBoardSetupException ambiguousConnectedBoardSelector() {
+<span class="nc" id="L1048">        return new TrelloBoardSetupException(</span>
+                &quot;setup_worker_board_ambiguous&quot;,
+                &quot;Multiple connected boards match --board. Re-run with a board id or short link.&quot;);
+    }
+
+    private static void rejectMixedCodexAccessUpdate(Options options) {
+<span class="nc bnc" id="L1054" title="All 4 branches missed.">        if (options.hasCodexAccessUpdateRequest() &amp;&amp; !options.hasCodexAccessOnlyUpdateRequest()) {</span>
+<span class="nc" id="L1055">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_mixed_codex_access_update&quot;,
+                    &quot;--add-path and --danger-full-access update Codex access only. Rerun without other workflow setup options such as --server-port, --active, --terminal, --in-progress, --blocked, --workspace-root, --workflow, or --max-agents.&quot;);
+        }
+<span class="nc" id="L1059">    }</span>
+
+    private static void rejectNonInteractiveIgnoredWorkflowUpdate(Options options) {
+<span class="nc bnc" id="L1062" title="All 4 branches missed.">        if (options.hasNonAccessWorkflowUpdateRequest() &amp;&amp; !options.hasExplicitBoardSetupRequest()) {</span>
+<span class="nc" id="L1063">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_board_selection_required&quot;,
+                    &quot;Existing connected Trello boards cannot be updated by an implicit keep rerun with workflow setup options. Re-run with --board or --board-name so setup can apply options such as --server-port, --active, --terminal, --workspace-root, --workflow, or --max-agents.&quot;);
+        }
+<span class="nc" id="L1067">    }</span>
+
+    private static void rejectNonInteractiveIgnoredConfigureGithubUpdate(Options options) {
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">        if (options.hasNonCodexModelWorkflowUpdateRequest()) {</span>
+<span class="nc" id="L1071">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_board_selection_required&quot;,
+                    &quot;setup-local configure-github can apply --max-agents, --codex-model, and --codex-reasoning-effort to the upgraded workflow, but other workflow setup options such as --server-port, --active, --terminal, --workspace-root, or --workflow are not applied on this path.&quot;);
+        }
+<span class="nc" id="L1075">    }</span>
+
+    private static void rejectConfigureGithubWorkflowSelector(Options options) {
+<span class="nc bnc" id="L1078" title="All 2 branches missed.">        if (options.workflowPathExplicit()) {</span>
+<span class="nc" id="L1079">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;,
+                    &quot;setup-local configure-github selects connected Trello boards with --board; --workflow is not supported.&quot;);
+        }
+<span class="nc" id="L1083">    }</span>
+
+    private static void rejectConfigureGithubUpdateWithoutUpgrade(Options options) {
+<span class="nc bnc" id="L1086" title="All 4 branches missed.">        if (options.configureGithub() &amp;&amp; options.hasConfigureGithubWorkflowUpdateRequest()) {</span>
+<span class="nc" id="L1087">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_github_upgrade_not_found&quot;,
+                    &quot;setup-local configure-github can apply --max-agents, --codex-model, and --codex-reasoning-effort only while upgrading a non-GitHub connected Trello board.&quot;);
+        }
+<span class="nc" id="L1091">    }</span>
+
+    private static void rejectInvalidConfigureGithubUpgradeRequestBeforeAuth(
+            Options options, List&lt;ConnectedBoard&gt; nonGithubBoards) {
+<span class="nc bnc" id="L1095" title="All 2 branches missed.">        if (!options.nonInteractive()) {</span>
+<span class="nc" id="L1096">            return;</span>
+        }
+<span class="nc" id="L1098">        options.existingBoardId().ifPresent(selector -&gt; nonGithubBoard(nonGithubBoards, selector));</span>
+<span class="nc" id="L1099">        rejectNonInteractiveIgnoredConfigureGithubUpdate(options);</span>
+<span class="nc" id="L1100">    }</span>
+
+    private void upgradeExistingBoardToGithub(Options options, ConnectedBoardManifest manifest, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L1104">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L1105">        ConnectedBoard board = selectNonGithubBoardForUpgrade(options, manifest, terminal);</span>
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">        if (!options.nonInteractive()</span>
+<span class="nc bnc" id="L1107" title="All 2 branches missed.">                &amp;&amp; !PromptSupport.yesDefaultTrue(</span>
+                        terminal,
+<span class="nc" id="L1109">                        &quot;Configure GitHub PR handling for &quot; + DisplayNames.quotedName(board.boardName())</span>
+                                + &quot;? [Y/n] &quot;)) {
+<span class="nc" id="L1111">            out.println(&quot;GitHub upgrade cancelled.&quot;);</span>
+<span class="nc" id="L1112">            return;</span>
+        }
+<span class="nc bnc" id="L1114" title="All 2 branches missed.">        if (options.hasExplicitCodexModelRequest()) {</span>
+<span class="nc" id="L1115">            options = configureCodexModel(options, board.workflowPath(), terminal);</span>
+        }
+
+<span class="nc" id="L1118">        CredentialSelection credentialSelection = credentials(options, board.envPath(), terminal);</span>
+<span class="nc" id="L1119">        TrelloCredentials credentials = credentialSelection.credentials();</span>
+<span class="nc" id="L1120">        TrelloBoardSetup.MemberInfo memberInfo =</span>
+<span class="nc" id="L1121">                boardSetup.getMemberInfo(new TrelloBoardSetup.MemberInfoRequest(options.endpoint(), credentials));</span>
+<span class="nc" id="L1122">        out.println();</span>
+<span class="nc" id="L1123">        out.println(&quot;Validating Trello...&quot;);</span>
+<span class="nc" id="L1124">        out.println(&quot;  OK  Connected to Trello as \&quot;&quot; + memberInfo.displayName() + &quot;\&quot;&quot;);</span>
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">        if (credentialSelection.persist()) {</span>
+<span class="nc" id="L1126">            writeEnv(credentialSelection, board.envPath(), terminal);</span>
+        }
+
+<span class="nc" id="L1129">        resolveGitHubIntegration(options, prerequisites(), terminal);</span>
+<span class="nc" id="L1130">        BoardHealth previousHealth = healthChecker.boardHealth(board);</span>
+<span class="nc" id="L1131">        ensureManagedRestartPossible(options, board, previousHealth);</span>
+<span class="nc" id="L1132">        TrelloBoardSetup selectedBoardSetup = boardSetupWithCodexModel(options);</span>
+<span class="nc" id="L1133">        List&lt;String&gt; openLists = selectedBoardSetup.getOpenBoardListNames(</span>
+<span class="nc" id="L1134">                new TrelloBoardSetup.BoardInfoRequest(options.endpoint(), credentials, board.boardId()));</span>
+<span class="nc" id="L1135">        WorkflowListConfiguration existingLists =</span>
+<span class="nc" id="L1136">                workflowConfig.listConfiguration(board.workflowPath()).onlyOpenLists(openLists);</span>
+<span class="nc bnc" id="L1137" title="All 2 branches missed.">        if (openLists.stream().noneMatch(name -&gt; name.equalsIgnoreCase(TrelloBoardSetup.RECOMMENDED_MERGING_STATE))) {</span>
+<span class="nc" id="L1138">            out.println();</span>
+<span class="nc" id="L1139">            out.println(&quot;GitHub mode needs one more Trello list:&quot;);</span>
+<span class="nc" id="L1140">            out.println(&quot;  &quot; + TrelloBoardSetup.RECOMMENDED_MERGING_STATE);</span>
+<span class="nc bnc" id="L1141" title="All 2 branches missed.">            if (!options.nonInteractive()</span>
+<span class="nc bnc" id="L1142" title="All 2 branches missed.">                    &amp;&amp; !PromptSupport.yesDefaultTrue(terminal, &quot;Create the missing GitHub list now? [Y/n] &quot;)) {</span>
+<span class="nc" id="L1143">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_github_upgrade_list_declined&quot;,
+                        &quot;GitHub workflow upgrade needs a Merging list for merge approval.&quot;);
+            }
+        }
+
+<span class="nc" id="L1149">        MaxAgentsSelection maxAgents = configureGithubMaxAgents(options, board.workflowPath());</span>
+<span class="nc" id="L1150">        TrelloBoardSetup.RepositoryDefaults repositoryDefaults =</span>
+<span class="nc" id="L1151">                workflowConfig.repositoryDefaults(board.workflowPath());</span>
+<span class="nc" id="L1152">        TrelloBoardSetup.ImportBoardResult result =</span>
+<span class="nc" id="L1153">                selectedBoardSetup.importExistingBoard(new TrelloBoardSetup.ImportBoardRequest(</span>
+<span class="nc" id="L1154">                        options.endpoint(),</span>
+                        credentials,
+<span class="nc" id="L1156">                        board.boardId(),</span>
+<span class="nc" id="L1157">                        existingLists.activeStates(),</span>
+<span class="nc" id="L1158">                        existingLists.terminalStates(),</span>
+<span class="nc" id="L1159">                        existingLists.inProgressState().orElse(null),</span>
+                        false,
+<span class="nc" id="L1161">                        existingLists.blockedState().orElse(null),</span>
+<span class="nc" id="L1162">                        board.workflowPath(),</span>
+<span class="nc" id="L1163">                        board.workspaceRoot(),</span>
+<span class="nc" id="L1164">                        board.serverPort(),</span>
+<span class="nc" id="L1165">                        maxAgents.value(),</span>
+                        true,
+                        GitHubIntegration.ENABLED,
+                        true,
+<span class="nc" id="L1169">                        board.envPath(),</span>
+<span class="nc" id="L1170">                        maxAgents.preservedFromWorkflow(),</span>
+                        repositoryDefaults));
+<span class="nc" id="L1172">        ConnectedBoard access = withRequestedCodexAccess(options, board, terminal);</span>
+<span class="nc" id="L1173">        applyCodexAccess(</span>
+<span class="nc" id="L1174">                options.withCodexAccess(access.additionalWritableRoots(), access.dangerFullAccess()),</span>
+<span class="nc" id="L1175">                board.workflowPath());</span>
+<span class="nc" id="L1176">        var upgraded = new ConnectedBoard(</span>
+<span class="nc" id="L1177">                board.boardId(),</span>
+<span class="nc" id="L1178">                board.boardKey(),</span>
+<span class="nc" id="L1179">                board.boardName(),</span>
+<span class="nc" id="L1180">                board.boardUrl(),</span>
+<span class="nc" id="L1181">                board.workflowPath(),</span>
+<span class="nc" id="L1182">                board.envPath(),</span>
+<span class="nc" id="L1183">                board.workspaceRoot(),</span>
+<span class="nc" id="L1184">                result.serverPort(),</span>
+                true,
+<span class="nc" id="L1186">                access.additionalWritableRoots(),</span>
+<span class="nc" id="L1187">                access.dangerFullAccess());</span>
+<span class="nc" id="L1188">        connectedBoards(options).save(manifest.withBoard(upgraded));</span>
+<span class="nc" id="L1189">        out.println();</span>
+<span class="nc" id="L1190">        out.println(&quot;  OK  GitHub workflow enabled for &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc bnc" id="L1191" title="All 4 branches missed.">        if (previousHealth.kind() == BoardHealthKind.SAME_WORKFLOW &amp;&amp; !options.noStart()) {</span>
+<span class="nc" id="L1192">            stopBoard(options, board.boardName(), board.workflowPath());</span>
+<span class="nc" id="L1193">            startBoard(options, upgraded, out);</span>
+<span class="nc bnc" id="L1194" title="All 2 branches missed.">        } else if (previousHealth.kind() == BoardHealthKind.SAME_WORKFLOW) {</span>
+<span class="nc" id="L1195">            out.println();</span>
+<span class="nc" id="L1196">            out.println(&quot;Restart skipped. Restart Symphony for the updated workflow when you are ready:&quot;);</span>
+<span class="nc" id="L1197">            out.println(&quot;  &quot; + options.command() + &quot; stop --workflow &quot; + board.workflowPath());</span>
+<span class="nc" id="L1198">            out.println(&quot;  &quot; + options.command() + &quot; start --env &quot; + board.envPath() + &quot; --workflow &quot;</span>
+<span class="nc" id="L1199">                    + board.workflowPath());</span>
+        } else {
+<span class="nc" id="L1201">            out.println(&quot;          Restart: &quot; + options.command() + &quot; start --env &quot; + board.envPath() + &quot; --workflow &quot;</span>
+<span class="nc" id="L1202">                    + board.workflowPath());</span>
+        }
+<span class="nc" id="L1204">    }</span>
+
+    private MaxAgentsSelection configureGithubMaxAgents(Options options, Path workflowPath) {
+<span class="nc bnc" id="L1207" title="All 2 branches missed.">        if (options.maxAgentsExplicit()) {</span>
+<span class="nc" id="L1208">            return new MaxAgentsSelection(options.maxAgents(), false);</span>
+        }
+<span class="nc" id="L1210">        return workflowConfig</span>
+<span class="nc" id="L1211">                .maxAgents(workflowPath)</span>
+<span class="nc" id="L1212">                .map(maxAgents -&gt; new MaxAgentsSelection(maxAgents, true))</span>
+<span class="nc" id="L1213">                .orElseGet(() -&gt; new MaxAgentsSelection(options.maxAgents(), false));</span>
+    }
+
+    private static ConnectedBoard selectNonGithubBoardForUpgrade(
+            Options options, ConnectedBoardManifest manifest, Terminal terminal) throws IOException {
+<span class="nc" id="L1218">        List&lt;ConnectedBoard&gt; candidates = nonGithubBoards(manifest);</span>
+<span class="nc bnc" id="L1219" title="All 2 branches missed.">        if (candidates.isEmpty()) {</span>
+<span class="nc" id="L1220">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_github_upgrade_not_found&quot;, &quot;No non-GitHub connected board is available to upgrade.&quot;);
+        }
+<span class="nc" id="L1223">        Optional&lt;String&gt; requested = options.existingBoardId();</span>
+<span class="nc bnc" id="L1224" title="All 2 branches missed.">        if (requested.isEmpty()) {</span>
+<span class="nc" id="L1225">            return selectNonGithubBoardForUpgradeWithoutSelector(options, candidates, terminal);</span>
+        }
+<span class="nc" id="L1227">        return nonGithubBoard(candidates, requested.get());</span>
+    }
+
+    private static List&lt;ConnectedBoard&gt; nonGithubBoards(ConnectedBoardManifest manifest) {
+<span class="nc" id="L1231">        return manifest.boards().stream()</span>
+<span class="nc bnc" id="L1232" title="All 2 branches missed.">                .filter(board -&gt; !board.githubEnabled())</span>
+<span class="nc" id="L1233">                .toList();</span>
+    }
+
+    private static ConnectedBoard selectNonGithubBoardForUpgradeWithoutSelector(
+            Options options, List&lt;ConnectedBoard&gt; candidates, Terminal terminal) throws IOException {
+<span class="nc" id="L1238">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc bnc" id="L1239" title="All 2 branches missed.">        if (candidates.size() == 1) {</span>
+<span class="nc" id="L1240">            return candidates.getFirst();</span>
+        }
+<span class="nc bnc" id="L1242" title="All 2 branches missed.">        if (options.nonInteractive()) {</span>
+<span class="nc" id="L1243">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_github_upgrade_board_required&quot;,
+                    &quot;Multiple non-GitHub boards are connected. Re-run with --board NAME.&quot;);
+        }
+<span class="nc" id="L1247">        out.println();</span>
+<span class="nc" id="L1248">        out.println(&quot;Choose the Trello board to configure for GitHub:&quot;);</span>
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">        for (int i = 0; i &lt; candidates.size(); i++) {</span>
+<span class="nc" id="L1250">            out.println(&quot;  &quot; + (i + 1) + &quot;. &quot;</span>
+<span class="nc" id="L1251">                    + DisplayNames.quotedName(candidates.get(i).boardName()));</span>
+        }
+<span class="nc" id="L1253">        return candidates.get(PromptSupport.requiredChoice(</span>
+<span class="nc" id="L1254">                        terminal.readLine(&quot;Board: &quot;),</span>
+<span class="nc" id="L1255">                        candidates.size(),</span>
+                        &quot;setup_github_upgrade_board_required&quot;,
+                        &quot;Board selection is required.&quot;)
+                - 1);
+    }
+
+    private static ConnectedBoard nonGithubBoard(List&lt;ConnectedBoard&gt; candidates, String requested) {
+<span class="nc" id="L1262">        List&lt;ConnectedBoard&gt; exactMatches = candidates.stream()</span>
+<span class="nc bnc" id="L1263" title="All 2 branches missed.">                .filter(board -&gt; board.boardName().equalsIgnoreCase(requested)</span>
+<span class="nc bnc" id="L1264" title="All 2 branches missed.">                        || board.boardId().equalsIgnoreCase(requested)</span>
+<span class="nc bnc" id="L1265" title="All 2 branches missed.">                        || board.boardKey().equalsIgnoreCase(requested))</span>
+<span class="nc" id="L1266">                .toList();</span>
+<span class="nc bnc" id="L1267" title="All 2 branches missed.">        if (!exactMatches.isEmpty()) {</span>
+<span class="nc" id="L1268">            return singleNonGithubBoardMatch(exactMatches, requested);</span>
+        }
+<span class="nc" id="L1270">        String requestedBoardId = TrelloBoardIds.parse(requested);</span>
+<span class="nc" id="L1271">        List&lt;ConnectedBoard&gt; matches = candidates.stream()</span>
+<span class="nc bnc" id="L1272" title="All 2 branches missed.">                .filter(board -&gt; board.boardId().equalsIgnoreCase(requestedBoardId)</span>
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">                        || board.boardKey().equalsIgnoreCase(requestedBoardId))</span>
+<span class="nc" id="L1274">                .toList();</span>
+<span class="nc" id="L1275">        return singleNonGithubBoardMatch(matches, requested);</span>
+    }
+
+    private static ConnectedBoard singleNonGithubBoardMatch(List&lt;ConnectedBoard&gt; matches, String requested) {
+<span class="nc bnc" id="L1279" title="All 2 branches missed.">        if (matches.isEmpty()) {</span>
+<span class="nc" id="L1280">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_github_upgrade_not_found&quot;, &quot;No connected non-GitHub board matches \&quot;&quot; + requested + &quot;\&quot;.&quot;);
+        }
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">        if (matches.size() &gt; 1) {</span>
+<span class="nc" id="L1284">            throw ambiguousConnectedBoardSelector();</span>
+        }
+<span class="nc" id="L1286">        return matches.getFirst();</span>
+    }
+
+    private void disconnectBoard(Options options, ConnectedBoardManifest manifest, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L1291">        PrintStream out = borrowedOut(terminal); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L1292">        out.println();</span>
+<span class="nc" id="L1293">        out.println(&quot;Disconnecting a Trello board from Symphony only removes it from Symphony's local config.&quot;);</span>
+<span class="nc" id="L1294">        out.println(&quot;Note: this will NOT delete or archive the Trello board.&quot;);</span>
+<span class="nc" id="L1295">        out.println();</span>
+<span class="nc" id="L1296">        String answer = terminal.readLine(&quot;Disconnect which Trello board from Symphony? [1-&quot;</span>
+<span class="nc" id="L1297">                + manifest.boards().size() + &quot;]: &quot;);</span>
+<span class="nc bnc" id="L1298" title="All 2 branches missed.">        if (blank(answer)) {</span>
+<span class="nc" id="L1299">            out.println(&quot;Disconnect cancelled.&quot;);</span>
+<span class="nc" id="L1300">            return;</span>
+        }
+<span class="nc" id="L1302">        int selected = parseChoice(answer, 1, manifest.boards().size());</span>
+<span class="nc" id="L1303">        ConnectedBoard removed = manifest.boards().get(selected - 1);</span>
+<span class="nc" id="L1304">        stopBoard(options, removed.boardName(), removed.workflowPath());</span>
+<span class="nc" id="L1305">        connectedBoards(options).save(manifest.withoutBoard(removed.boardId()));</span>
+<span class="nc" id="L1306">        out.println(&quot;  OK  Symphony will stop managing &quot; + DisplayNames.quotedName(removed.boardName()));</span>
+<span class="nc" id="L1307">        out.println(&quot;  Trello board unchanged: &quot; + removed.boardUrl());</span>
+<span class="nc" id="L1308">    }</span>
+
+    private void startExistingBoards(Options options, ConnectedBoardManifest manifest, PrintStream out) {
+<span class="nc bnc" id="L1311" title="All 2 branches missed.">        for (ConnectedBoard board : manifest.boards()) {</span>
+<span class="nc" id="L1312">            startBoard(options, board, out);</span>
+<span class="nc" id="L1313">        }</span>
+<span class="nc" id="L1314">    }</span>
+
+    private void startBoard(Options options, ConnectedBoard board, PrintStream out) {
+<span class="nc bnc" id="L1317" title="All 2 branches missed.">        if (options.noStart()) {</span>
+<span class="nc" id="L1318">            out.println();</span>
+<span class="nc" id="L1319">            out.println(&quot;Start skipped. Start Symphony before moving Trello cards:&quot;);</span>
+<span class="nc" id="L1320">            out.println(&quot;  &quot; + options.command() + &quot; start --env &quot; + board.envPath() + &quot; --workflow &quot;</span>
+<span class="nc" id="L1321">                    + board.workflowPath());</span>
+<span class="nc" id="L1322">            return;</span>
+        }
+<span class="nc" id="L1324">        out.println();</span>
+<span class="nc" id="L1325">        out.println(&quot;Starting Symphony...&quot;);</span>
+        try {
+<span class="nc" id="L1327">            workerManager.start(localWorkerPaths(options), board, board.envPath(), out);</span>
+<span class="nc" id="L1328">        } catch (IOException e) {</span>
+<span class="nc" id="L1329">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_start_failed&quot;,
+<span class="nc" id="L1331">                    &quot;Could not start Symphony for &quot; + DisplayNames.quotedName(board.boardName()) + &quot;: &quot;</span>
+<span class="nc" id="L1332">                            + e.getMessage(),</span>
+                    e);
+<span class="nc" id="L1334">        }</span>
+<span class="nc" id="L1335">        out.println(&quot;  OK  Symphony is connected to &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L1336">    }</span>
+
+    private void stopBoard(Options options, String boardName, Path workflowPath) {
+<span class="nc" id="L1339">        ConnectedBoard board = connectedBoardsUnchecked(options)</span>
+<span class="nc" id="L1340">                .findByWorkflow(workflowPath)</span>
+<span class="nc" id="L1341">                .orElseGet(() -&gt; new ConnectedBoard(</span>
+<span class="nc" id="L1342">                        PathNames.fileName(workflowPath),</span>
+<span class="nc" id="L1343">                        PathNames.fileName(workflowPath),</span>
+                        boardName,
+                        &quot;&quot;,
+                        workflowPath,
+<span class="nc" id="L1347">                        options.envPath(),</span>
+<span class="nc" id="L1348">                        options.workspaceRoot(),</span>
+                        TrelloBoardSetup.DEFAULT_SERVER_PORT,
+                        false,
+<span class="nc" id="L1351">                        List.of(),</span>
+                        false));
+        try {
+<span class="nc" id="L1354">            try (var out = new PrintStream(OutputStream.nullOutputStream(), true, StandardCharsets.UTF_8)) {</span>
+<span class="nc" id="L1355">                workerManager.stop(localWorkerPaths(options), board, out);</span>
+            }
+<span class="nc" id="L1357">        } catch (IOException e) {</span>
+<span class="nc" id="L1358">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_stop_failed&quot;,
+<span class="nc" id="L1360">                    &quot;Could not stop Symphony for &quot; + DisplayNames.quotedName(boardName) + &quot;: &quot; + e.getMessage(),</span>
+                    e);
+<span class="nc" id="L1362">        }</span>
+<span class="nc" id="L1363">    }</span>
+
+    private void ensureManagedRestartPossible(Options options, ConnectedBoard board, BoardHealth health) {
+<span class="nc bnc" id="L1366" title="All 4 branches missed.">        if (health.kind() != BoardHealthKind.SAME_WORKFLOW || options.noStart()) {</span>
+<span class="nc" id="L1367">            return;</span>
+        }
+        try {
+<span class="nc bnc" id="L1370" title="All 2 branches missed.">            if (workerManager.canStopManagedWorker(localWorkerPaths(options), board)) {</span>
+<span class="nc" id="L1371">                return;</span>
+            }
+<span class="nc" id="L1373">        } catch (IOException e) {</span>
+<span class="nc" id="L1374">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_state_unreadable&quot;,
+<span class="nc" id="L1376">                    &quot;Could not inspect managed worker state for &quot; + DisplayNames.quotedName(board.boardName()) + &quot;: &quot;</span>
+<span class="nc" id="L1377">                            + e.getMessage(),</span>
+                    e);
+<span class="nc" id="L1379">        }</span>
+<span class="nc" id="L1380">        throw new TrelloBoardSetupException(</span>
+                &quot;setup_worker_untracked&quot;,
+<span class="nc" id="L1382">                &quot;Symphony is already running for &quot; + DisplayNames.quotedName(board.boardName()) + &quot; at &quot;</span>
+<span class="nc" id="L1383">                        + LocalHealthChecker.localServerUrl(health.port())</span>
+                        + &quot;, but this checkout has no managed pid for it. Stop that process manually, then rerun the setup command so Symphony can apply the workflow change and restart it.&quot;);
+    }
+
+    private static HttpClient localStatusHttpClient() {
+        // LocalSetup owns LocalHealthChecker for the process lifetime; closing this client after a run would break
+        // reuse.
+<span class="nc" id="L1390">        return HttpClient.newBuilder().connectTimeout(LOCAL_STATUS_TIMEOUT).build(); // NOPMD - owned by LocalSetup.</span>
+    }
+
+    private static PrintStream borrowedOut(Terminal terminal) {
+        // Terminal owns the stream. Setup code must write to it but must not close it.
+<span class="nc" id="L1395">        return terminal.out();</span>
+    }
+
+    private static PrintStream borrowedErr(Terminal terminal) {
+        // Terminal owns the stream. Setup code must write to it but must not close it.
+<span class="nc" id="L1400">        return terminal.err();</span>
+    }
+
+    private void stopReplacedBoards(Options options, List&lt;ConnectedBoard&gt; replacedBoards) {
+<span class="nc bnc" id="L1404" title="All 2 branches missed.">        if (replacedBoards.isEmpty()) {</span>
+<span class="nc" id="L1405">            return;</span>
+        }
+<span class="nc" id="L1407">        List&lt;Path&gt; stoppedWorkflowPaths = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L1408" title="All 2 branches missed.">        for (ConnectedBoard board : replacedBoards) {</span>
+<span class="nc bnc" id="L1409" title="All 2 branches missed.">            if (stoppedWorkflowPaths.stream().anyMatch(stopped -&gt; PathsEqual.samePath(stopped, board.workflowPath()))) {</span>
+<span class="nc" id="L1410">                continue;</span>
+            }
+<span class="nc" id="L1412">            stopBoard(options, board.boardName(), board.workflowPath());</span>
+<span class="nc" id="L1413">            stoppedWorkflowPaths.add(board.workflowPath());</span>
+<span class="nc" id="L1414">        }</span>
+<span class="nc" id="L1415">    }</span>
+
+    private static void printWorkspaceAndSandboxSummary(Options options, PrintStream out) {
+<span class="nc" id="L1418">        out.println();</span>
+<span class="nc" id="L1419">        out.println(&quot;Workspace access&quot;);</span>
+<span class="nc" id="L1420">        out.println(&quot;This controls which files/folders sandboxed card runs may use.&quot;);</span>
+<span class="nc" id="L1421">        out.println(&quot;Codex execution sandboxing is configured separately.&quot;);</span>
+<span class="nc" id="L1422">        out.println(&quot;Cards run in per-card workspaces under:&quot;);</span>
+<span class="nc" id="L1423">        out.println(&quot;  &quot; + options.workspaceRoot());</span>
+<span class="nc" id="L1424">        out.println(&quot;  OK  Additional read/write paths allowed: &quot;</span>
+<span class="nc" id="L1425">                + options.additionalWritableRoots().size());</span>
+<span class="nc" id="L1426">        out.println();</span>
+<span class="nc" id="L1427">        out.println(&quot;Codex execution&quot;);</span>
+<span class="nc bnc" id="L1428" title="All 2 branches missed.">        if (options.dangerFullAccess()) {</span>
+<span class="nc" id="L1429">            out.println(&quot;  WARN  Codex sandbox disabled: danger-full-access enabled for this workflow&quot;);</span>
+        } else {
+<span class="nc" id="L1431">            out.println(&quot;  OK  Codex sandbox: workspace-limited&quot;);</span>
+        }
+<span class="nc" id="L1433">    }</span>
+
+    private void applyCodexAccess(Options options, Path workflowPath) throws IOException {
+<span class="nc" id="L1436">        workflowConfig.applyCodexAccess(workflowPath, options.additionalWritableRoots(), options.dangerFullAccess());</span>
+<span class="nc" id="L1437">    }</span>
+
+    private static void printHeader(PrintStream out, Options options) {
+<span class="nc bnc" id="L1440" title="All 2 branches missed.">        out.println(options.check() ? &quot;Symphony setup check&quot; : &quot;Symphony for Trello setup&quot;);</span>
+<span class="nc" id="L1441">    }</span>
+
+    private static void printPrerequisites(PrintStream out, Prerequisites prerequisites, Options options) {
+<span class="nc" id="L1444">        out.println();</span>
+<span class="nc" id="L1445">        out.println(&quot;Checking prerequisites...&quot;);</span>
+<span class="nc" id="L1446">        out.println(statusLine(&quot;Git&quot;, prerequisites.git().available()));</span>
+<span class="nc" id="L1447">        out.println(statusLine(&quot;Java 25+ JDK&quot;, prerequisites.java().available()));</span>
+<span class="nc" id="L1448">        out.println(statusLine(&quot;Codex CLI&quot;, prerequisites.codex().available()));</span>
+<span class="nc" id="L1449">        out.println(</span>
+<span class="nc" id="L1450">                statusLine(&quot;Codex CLI authenticated&quot;, prerequisites.codexAuth().available()));</span>
+<span class="nc bnc" id="L1451" title="All 2 branches missed.">        if (prerequisites.githubAuth().available()) {</span>
+<span class="nc" id="L1452">            out.println(statusLine(&quot;GitHub CLI authenticated&quot;, true));</span>
+<span class="nc bnc" id="L1453" title="All 2 branches missed.">        } else if (options.githubMode().orElse(false)) {</span>
+<span class="nc" id="L1454">            out.println(statusLine(&quot;GitHub CLI authenticated&quot;, false));</span>
+        } else {
+<span class="nc" id="L1456">            out.println(&quot;  OPTIONAL GitHub CLI authenticated&quot;);</span>
+        }
+<span class="nc" id="L1458">    }</span>
+
+    private static String statusLine(String name, boolean ok) {
+<span class="nc bnc" id="L1461" title="All 2 branches missed.">        return &quot;  &quot; + (ok ? &quot;OK      &quot; : &quot;NEEDED  &quot;) + name;</span>
+    }
+
+    private static void printDryRun(PrintStream out, Options options, Prerequisites prerequisites) {
+<span class="nc" id="L1465">        out.println();</span>
+<span class="nc" id="L1466">        out.println(&quot;Dry run&quot;);</span>
+<span class="nc bnc" id="L1467" title="All 2 branches missed.">        if (!prerequisites.git().available()) {</span>
+<span class="nc" id="L1468">            out.println(&quot;  WOULD require Git installation&quot;);</span>
+        }
+<span class="nc bnc" id="L1470" title="All 2 branches missed.">        if (!prerequisites.java().available()) {</span>
+<span class="nc" id="L1471">            out.println(&quot;  WOULD require Java 25+ JDK installation&quot;);</span>
+        }
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">        if (!prerequisites.codex().available()) {</span>
+<span class="nc" id="L1474">            out.println(&quot;  WOULD require Codex CLI installation&quot;);</span>
+        }
+<span class="nc" id="L1476">        out.println(&quot;  WOULD configure Trello credentials: &quot; + options.envPath());</span>
+<span class="nc bnc" id="L1477" title="All 2 branches missed.">        if (options.workflowPathExplicit()) {</span>
+<span class="nc" id="L1478">            out.println(&quot;  WOULD write workflow: &quot; + plannedWorkflowPath(options));</span>
+        } else {
+<span class="nc" id="L1480">            out.println(&quot;  WOULD write workflow under: &quot; + options.configDir());</span>
+        }
+<span class="nc" id="L1482">        out.println(&quot;  WOULD update connected-board manifest: &quot; + options.manifestPath());</span>
+<span class="nc bnc" id="L1483" title="All 2 branches missed.">        if (!options.additionalWritableRoots().isEmpty()) {</span>
+<span class="nc" id="L1484">            out.println(&quot;  WOULD allow Codex read/write access to:&quot;);</span>
+<span class="nc" id="L1485">            options.additionalWritableRoots().forEach(root -&gt; out.println(&quot;    &quot; + root));</span>
+        }
+<span class="nc bnc" id="L1487" title="All 2 branches missed.">        if (options.dangerFullAccess()) {</span>
+<span class="nc" id="L1488">            out.println(&quot;  WOULD disable Codex command/filesystem sandbox with danger-full-access&quot;);</span>
+        }
+<span class="nc bnc" id="L1490" title="All 2 branches missed.">        if (options.noStart()) {</span>
+<span class="nc" id="L1491">            out.println(&quot;  WOULD NOT start Symphony after setup because --no-start is set&quot;);</span>
+        } else {
+<span class="nc" id="L1493">            out.println(&quot;  WOULD start Symphony after setup unless --no-start is used&quot;);</span>
+        }
+<span class="nc" id="L1495">    }</span>
+
+    private static Path plannedWorkflowPath(Options options) {
+<span class="nc bnc" id="L1498" title="All 2 branches missed.">        if (options.workflowPath().isAbsolute()) {</span>
+<span class="nc" id="L1499">            return options.workflowPath().normalize();</span>
+        }
+<span class="nc" id="L1501">        return options.configDir().resolve(options.workflowPath()).normalize();</span>
+    }
+
+    private static void printFinalHandoff(PrintStream out, ConnectedBoardManifest manifest, String cliCommand) {
+<span class="nc bnc" id="L1505" title="All 2 branches missed.">        if (manifest.boards().isEmpty()) {</span>
+<span class="nc" id="L1506">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_manifest_unavailable&quot;,
+                    &quot;No connected Trello boards are available for the installer completion handoff.&quot;);
+        }
+<span class="nc" id="L1510">        out.println();</span>
+<span class="nc bnc" id="L1511" title="All 2 branches missed.">        if (manifest.boards().size() == 1) {</span>
+<span class="nc" id="L1512">            ConnectedBoard board = manifest.boards().getFirst();</span>
+<span class="nc" id="L1513">            out.println(&quot;You're good to go - your Trello board is now a queue for Codex work.&quot;);</span>
+<span class="nc" id="L1514">            out.println(&quot;Connected board: &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L1515">            out.println(&quot;Workflow: &quot; + board.workflowPath().toAbsolutePath().normalize());</span>
+<span class="nc" id="L1516">            out.println();</span>
+<span class="nc" id="L1517">            out.println(&quot;Create a Trello card with a clear task and move it to this workflow's configured queue list.&quot;);</span>
+<span class="nc" id="L1518">        } else {</span>
+<span class="nc" id="L1519">            out.println(&quot;You're good to go - your Trello boards are now queues for Codex work.&quot;);</span>
+<span class="nc" id="L1520">            out.println(&quot;Connected boards and workflows:&quot;);</span>
+<span class="nc" id="L1521">            manifest.boards().forEach(board -&gt; {</span>
+<span class="nc" id="L1522">                out.println(&quot;  &quot; + DisplayNames.quotedName(board.boardName()));</span>
+<span class="nc" id="L1523">                out.println(</span>
+<span class="nc" id="L1524">                        &quot;    Workflow: &quot; + board.workflowPath().toAbsolutePath().normalize());</span>
+<span class="nc" id="L1525">            });</span>
+<span class="nc" id="L1526">            out.println();</span>
+<span class="nc" id="L1527">            out.println(</span>
+                    &quot;Create a Trello card with a clear task and move it to the matching workflow's configured queue list.&quot;);
+        }
+<span class="nc" id="L1530">        out.println();</span>
+<span class="nc" id="L1531">        out.println(&quot;Useful commands:&quot;);</span>
+<span class="nc" id="L1532">        String shell = SetupSystemProperties.get(ShellCommandRenderer.SHELL_PROPERTY);</span>
+<span class="nc" id="L1533">        String command = ShellCommandRenderer.executable(cliCommand, shell);</span>
+<span class="nc" id="L1534">        out.println(&quot;  &quot; + command + &quot; status&quot;);</span>
+<span class="nc" id="L1535">        manifest.boards()</span>
+<span class="nc" id="L1536">                .forEach(board -&gt; out.println(&quot;  &quot; + command + &quot; logs --workflow &quot;</span>
+<span class="nc" id="L1537">                        + ShellCommandRenderer.argument(</span>
+<span class="nc" id="L1538">                                board.workflowPath()</span>
+<span class="nc" id="L1539">                                        .toAbsolutePath()</span>
+<span class="nc" id="L1540">                                        .normalize()</span>
+<span class="nc" id="L1541">                                        .toString(),</span>
+                                shell)));
+<span class="nc" id="L1543">    }</span>
+
+    private static String errorCode(Exception e) {
+<span class="nc bnc" id="L1546" title="All 2 branches missed.">        return e instanceof TrelloBoardSetupException setupException ? setupException.code() : &quot;setup_local_failed&quot;;</span>
+    }
+
+    private static String quoted(List&lt;String&gt; values) {
+<span class="nc" id="L1550">        return DisplayNames.quotedList(values);</span>
+    }
+
+    private static int parseChoice(String answer, int defaultChoice, int maxChoice) {
+<span class="nc" id="L1554">        return PromptSupport.choice(answer, defaultChoice, maxChoice);</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L1558" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+
+    private static boolean equalsIgnoreCase(String actual, String expected) {
+<span class="nc bnc" id="L1562" title="All 6 branches missed.">        return actual != null &amp;&amp; expected != null &amp;&amp; actual.equalsIgnoreCase(expected);</span>
+    }
+
+<span class="nc" id="L1565">    record Options(</span>
+            boolean check,
+            boolean dryRun,
+            boolean repairPort,
+            boolean nonInteractive,
+            boolean force,
+            boolean forceNewSetup,
+            boolean configureGithub,
+            Optional&lt;Boolean&gt; githubMode,
+            Optional&lt;String&gt; apiKey,
+            Optional&lt;String&gt; apiToken,
+            Optional&lt;String&gt; boardName,
+            Optional&lt;String&gt; existingBoardId,
+            Optional&lt;String&gt; workspaceId,
+            Optional&lt;String&gt; repositoryUrl,
+            List&lt;String&gt; activeStates,
+            List&lt;String&gt; terminalStates,
+            String inProgressState,
+            boolean detectInProgressState,
+            String blockedState,
+            Path workflowPath,
+            boolean workflowPathExplicit,
+            Path workspaceRoot,
+            boolean workspaceRootExplicit,
+            Path configDir,
+            Path manifestPath,
+            Optional&lt;Integer&gt; serverPort,
+            int maxAgents,
+            boolean maxAgentsExplicit,
+            Optional&lt;String&gt; codexModel,
+            Optional&lt;String&gt; codexReasoningEffort,
+            Optional&lt;CodexModelSelectionDefaults&gt; codexModelCatalog,
+            Optional&lt;TrelloBoardSetup.CodexModelDefaults&gt; codexModelDefaults,
+            Path envPath,
+            List&lt;Path&gt; additionalWritableRoots,
+            boolean allowAllPaths,
+            boolean dangerFullAccess,
+            boolean noStart,
+            String command,
+            URI endpoint,
+            Path callerDirectory) {
+        static Options from(LocalSetupRequest request, Map&lt;String, String&gt; environment) {
+<span class="nc bnc" id="L1607" title="All 2 branches missed.">            boolean check = request.action() == LocalSetupRequest.Action.CHECK;</span>
+<span class="nc bnc" id="L1608" title="All 2 branches missed.">            boolean repairPort = request.action() == LocalSetupRequest.Action.REPAIR_PORT;</span>
+<span class="nc bnc" id="L1609" title="All 2 branches missed.">            boolean configureGithub = request.action() == LocalSetupRequest.Action.CONFIGURE_GITHUB;</span>
+<span class="nc" id="L1610">            Path configDir = request.configDir().orElseGet(() -&gt; defaultConfigDir(environment));</span>
+<span class="nc" id="L1611">            Path workflow = request.workflowPath().orElse(TrelloBoardSetup.DEFAULT_WORKFLOW_PATH);</span>
+<span class="nc" id="L1612">            boolean workflowPathExplicit = request.workflowPath().isPresent();</span>
+<span class="nc" id="L1613">            Path workspaceRoot = request.workspaceRoot().orElseGet(() -&gt; defaultWorkspaceRoot(environment));</span>
+<span class="nc" id="L1614">            Path manifest = request.manifestPath().orElse(Path.of(ConnectedBoardManifest.FILE_NAME));</span>
+<span class="nc" id="L1615">            boolean manifestPathExplicit = request.manifestPath().isPresent();</span>
+<span class="nc" id="L1616">            Path envPath = request.envPath().orElse(DEFAULT_ENV_PATH);</span>
+<span class="nc" id="L1617">            List&lt;Path&gt; additionalWritableRoots = request.additionalWritableRoots().stream()</span>
+<span class="nc" id="L1618">                    .map(path -&gt; WorkspaceAccessFlow.resolveAccessPath(path, callerDirectory(environment)))</span>
+<span class="nc" id="L1619">                    .toList();</span>
+<span class="nc" id="L1620">            request.serverPort().ifPresent(LocalPort::validateCliServerPort);</span>
+<span class="nc" id="L1621">            Boolean githubMode = request.githubMode().orElse(null);</span>
+<span class="nc bnc" id="L1622" title="All 2 branches missed.">            if (configureGithub) {</span>
+<span class="nc" id="L1623">                githubMode = true;</span>
+            }
+<span class="nc" id="L1625">            configDir = configDir.toAbsolutePath().normalize();</span>
+<span class="nc" id="L1626">            envPath = resolveUserDataPath(envPath, configDir);</span>
+<span class="nc" id="L1627">            manifest = resolveUserDataPath(manifest, configDir);</span>
+<span class="nc" id="L1628">            validateResolvedSetupPaths(configDir, manifest, manifestPathExplicit, request.action());</span>
+<span class="nc" id="L1629">            additionalWritableRoots =</span>
+<span class="nc" id="L1630">                    additionalWritableRoots.stream().map(Path::normalize).toList();</span>
+<span class="nc bnc" id="L1631" title="All 2 branches missed.">            if (request.nonInteractive()) {</span>
+<span class="nc" id="L1632">                boolean broadPathAllowed = request.allowAllPaths();</span>
+<span class="nc" id="L1633">                additionalWritableRoots.forEach(</span>
+<span class="nc" id="L1634">                        path -&gt; WorkspaceAccessFlow.rejectBroadAccessPath(path, broadPathAllowed));</span>
+            }
+<span class="nc bnc" id="L1636" title="All 2 branches missed.">            if (workflowPathExplicit) {</span>
+<span class="nc" id="L1637">                workflow = resolveUserDataPath(workflow, configDir);</span>
+            }
+<span class="nc" id="L1639">            boolean workspaceRootExplicit = request.workspaceRoot().isPresent();</span>
+<span class="nc" id="L1640">            TrelloCredentialStore.validateEnvPath(envPath);</span>
+<span class="nc" id="L1641">            String command = environment.getOrDefault(COMMAND_ENV, DEFAULT_COMMAND);</span>
+<span class="nc" id="L1642">            return new Options(</span>
+                    check,
+<span class="nc" id="L1644">                    request.dryRun(),</span>
+                    repairPort,
+<span class="nc" id="L1646">                    request.nonInteractive(),</span>
+<span class="nc" id="L1647">                    request.force(),</span>
+<span class="nc" id="L1648">                    request.forceNewSetup(),</span>
+                    configureGithub,
+<span class="nc" id="L1650">                    Optional.ofNullable(githubMode),</span>
+<span class="nc" id="L1651">                    request.apiKey(),</span>
+<span class="nc" id="L1652">                    request.apiToken(),</span>
+<span class="nc" id="L1653">                    request.boardName(),</span>
+<span class="nc" id="L1654">                    request.existingBoardId(),</span>
+<span class="nc" id="L1655">                    request.workspaceId(),</span>
+<span class="nc" id="L1656">                    request.repositoryUrl(),</span>
+<span class="nc" id="L1657">                    List.copyOf(request.activeStates()),</span>
+<span class="nc" id="L1658">                    List.copyOf(request.terminalStates()),</span>
+<span class="nc" id="L1659">                    request.inProgressState(),</span>
+<span class="nc" id="L1660">                    request.detectInProgressState(),</span>
+<span class="nc" id="L1661">                    request.blockedState(),</span>
+                    workflow,
+                    workflowPathExplicit,
+                    workspaceRoot,
+                    workspaceRootExplicit,
+                    configDir,
+                    manifest,
+<span class="nc" id="L1668">                    request.serverPort(),</span>
+<span class="nc" id="L1669">                    request.maxAgents(),</span>
+<span class="nc" id="L1670">                    request.maxAgentsExplicit(),</span>
+<span class="nc" id="L1671">                    request.codexModel(),</span>
+<span class="nc" id="L1672">                    request.codexReasoningEffort(),</span>
+<span class="nc" id="L1673">                    Optional.empty(),</span>
+<span class="nc" id="L1674">                    Optional.empty(),</span>
+                    envPath,
+<span class="nc" id="L1676">                    List.copyOf(additionalWritableRoots),</span>
+<span class="nc" id="L1677">                    request.allowAllPaths(),</span>
+<span class="nc" id="L1678">                    request.dangerFullAccess(),</span>
+<span class="nc" id="L1679">                    request.noStart(),</span>
+                    command,
+<span class="nc" id="L1681">                    request.endpoint(),</span>
+<span class="nc" id="L1682">                    callerDirectory(environment));</span>
+        }
+
+        private static void validateResolvedSetupPaths(
+                Path configDir, Path manifest, boolean manifestPathExplicit, LocalSetupRequest.Action action) {
+<span class="nc" id="L1687">            CliInputValidation.rejectExistingNonDirectoryPath(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc bnc" id="L1688" title="All 2 branches missed.">            if (!manifestPathExplicit) {</span>
+<span class="nc" id="L1689">                return;</span>
+            }
+            // repair-port operates on the existing manifest like the lifecycle commands, so
+            // corrupt manifest content is an expected setup_manifest_unavailable error from the
+            // strict load, not an invalid --manifest argument.
+<span class="nc bnc" id="L1694" title="All 4 branches missed.">            if (action == LocalSetupRequest.Action.CHECK || action == LocalSetupRequest.Action.REPAIR_PORT) {</span>
+<span class="nc" id="L1695">                ConnectedBoardRepository.validateManifestPathForCheck(manifest);</span>
+            } else {
+<span class="nc" id="L1697">                ConnectedBoardRepository.validateManifestPathForSetup(manifest);</span>
+            }
+<span class="nc" id="L1699">        }</span>
+
+        Options withCodexAccess(List&lt;Path&gt; additionalWritableRoots, boolean dangerFullAccess) {
+<span class="nc" id="L1702">            return new Options(</span>
+                    check,
+                    dryRun,
+                    repairPort,
+                    nonInteractive,
+                    force,
+                    forceNewSetup,
+                    configureGithub,
+                    githubMode,
+                    apiKey,
+                    apiToken,
+                    boardName,
+                    existingBoardId,
+                    workspaceId,
+                    repositoryUrl,
+                    activeStates,
+                    terminalStates,
+                    inProgressState,
+                    detectInProgressState,
+                    blockedState,
+                    workflowPath,
+                    workflowPathExplicit,
+                    workspaceRoot,
+                    workspaceRootExplicit,
+                    configDir,
+                    manifestPath,
+                    serverPort,
+                    maxAgents,
+                    maxAgentsExplicit,
+                    codexModel,
+                    codexReasoningEffort,
+                    codexModelCatalog,
+                    codexModelDefaults,
+                    envPath,
+                    additionalWritableRoots,
+                    allowAllPaths,
+                    dangerFullAccess,
+                    noStart,
+                    command,
+                    endpoint,
+                    callerDirectory);
+        }
+
+        Options withRepositoryUrl(Optional&lt;String&gt; repositoryUrl) {
+<span class="nc" id="L1746">            return new Options(</span>
+                    check,
+                    dryRun,
+                    repairPort,
+                    nonInteractive,
+                    force,
+                    forceNewSetup,
+                    configureGithub,
+                    githubMode,
+                    apiKey,
+                    apiToken,
+                    boardName,
+                    existingBoardId,
+                    workspaceId,
+                    repositoryUrl,
+                    activeStates,
+                    terminalStates,
+                    inProgressState,
+                    detectInProgressState,
+                    blockedState,
+                    workflowPath,
+                    workflowPathExplicit,
+                    workspaceRoot,
+                    workspaceRootExplicit,
+                    configDir,
+                    manifestPath,
+                    serverPort,
+                    maxAgents,
+                    maxAgentsExplicit,
+                    codexModel,
+                    codexReasoningEffort,
+                    codexModelCatalog,
+                    codexModelDefaults,
+                    envPath,
+                    additionalWritableRoots,
+                    allowAllPaths,
+                    dangerFullAccess,
+                    noStart,
+                    command,
+                    endpoint,
+                    callerDirectory);
+        }
+
+        private static Path resolveUserDataPath(Path path, Path configDir) {
+<span class="nc bnc" id="L1790" title="All 2 branches missed.">            return path.isAbsolute()</span>
+<span class="nc" id="L1791">                    ? path.normalize()</span>
+<span class="nc" id="L1792">                    : configDir.resolve(path).normalize();</span>
+        }
+
+        private static Path defaultConfigDir(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L1796">            String configured = environment.get(CONFIG_DIR_ENV);</span>
+<span class="nc bnc" id="L1797" title="All 2 branches missed.">            if (!blank(configured)) {</span>
+<span class="nc" id="L1798">                return Path.of(configured);</span>
+            }
+<span class="nc" id="L1800">            return Path.of(&quot;.&quot;).toAbsolutePath().normalize();</span>
+        }
+
+        private static Path callerDirectory(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L1804">            return configuredPath(environment, CALLER_DIR_ENV)</span>
+<span class="nc" id="L1805">                    .map(path -&gt; path.toAbsolutePath().normalize())</span>
+<span class="nc" id="L1806">                    .orElseGet(() -&gt; Path.of(&quot;.&quot;).toAbsolutePath().normalize());</span>
+        }
+
+        private static Path defaultWorkspaceRoot(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L1810">            return configuredPath(environment, &quot;SYMPHONY_TRELLO_WORKSPACE_ROOT&quot;)</span>
+<span class="nc" id="L1811">                    .orElse(TrelloBoardSetup.DEFAULT_WORKSPACE_ROOT);</span>
+        }
+
+        private static Optional&lt;Path&gt; configuredPath(Map&lt;String, String&gt; environment, String name) {
+<span class="nc" id="L1815">            return Optional.ofNullable(environment.get(name))</span>
+<span class="nc bnc" id="L1816" title="All 2 branches missed.">                    .filter(value -&gt; !blank(value))</span>
+<span class="nc" id="L1817">                    .map(Path::of);</span>
+        }
+
+        boolean hasExplicitBoardSetupRequest() {
+<span class="nc bnc" id="L1821" title="All 4 branches missed.">            return boardName.isPresent() || existingBoardId.isPresent();</span>
+        }
+
+        boolean hasCodexAccessUpdateRequest() {
+<span class="nc bnc" id="L1825" title="All 4 branches missed.">            return !additionalWritableRoots.isEmpty() || dangerFullAccess;</span>
+        }
+
+        boolean hasCodexAccessOnlyUpdateRequest() {
+<span class="nc bnc" id="L1829" title="All 4 branches missed.">            return hasCodexAccessUpdateRequest() &amp;&amp; !hasNonAccessWorkflowUpdateRequest();</span>
+        }
+
+        private boolean hasNonAccessWorkflowUpdateRequest() {
+<span class="nc bnc" id="L1833" title="All 4 branches missed.">            return hasBoardWorkflowUpdateRequest()</span>
+                    || maxAgentsExplicit
+<span class="nc bnc" id="L1835" title="All 2 branches missed.">                    || codexModel.isPresent()</span>
+<span class="nc bnc" id="L1836" title="All 2 branches missed.">                    || codexReasoningEffort.isPresent();</span>
+        }
+
+        private boolean hasNonCodexModelWorkflowUpdateRequest() {
+<span class="nc" id="L1840">            return hasBoardWorkflowUpdateRequest();</span>
+        }
+
+        private boolean hasBoardWorkflowUpdateRequest() {
+<span class="nc bnc" id="L1844" title="All 2 branches missed.">            return workspaceId.isPresent()</span>
+<span class="nc bnc" id="L1845" title="All 2 branches missed.">                    || repositoryUrl.isPresent()</span>
+<span class="nc bnc" id="L1846" title="All 2 branches missed.">                    || !activeStates.isEmpty()</span>
+<span class="nc bnc" id="L1847" title="All 6 branches missed.">                    || !terminalStates.isEmpty()</span>
+                    || inProgressState != null
+                    || !detectInProgressState
+<span class="nc bnc" id="L1850" title="All 6 branches missed.">                    || !blank(blockedState)</span>
+                    || workflowPathExplicit
+                    || workspaceRootExplicit
+<span class="nc bnc" id="L1853" title="All 2 branches missed.">                    || serverPort.isPresent();</span>
+        }
+
+        private boolean hasConfigureGithubWorkflowUpdateRequest() {
+<span class="nc bnc" id="L1857" title="All 6 branches missed.">            return maxAgentsExplicit || codexModel.isPresent() || codexReasoningEffort.isPresent();</span>
+        }
+
+        Optional&lt;String&gt; repairBoardName() {
+<span class="nc" id="L1861">            return existingBoardId;</span>
+        }
+
+        boolean hasExplicitCodexModelRequest() {
+<span class="nc bnc" id="L1865" title="All 4 branches missed.">            return codexModel.isPresent() || codexReasoningEffort.isPresent();</span>
+        }
+
+        Options withCodexModelCatalog(CodexModelSelectionDefaults catalog) {
+<span class="nc" id="L1869">            return new Options(</span>
+                    check,
+                    dryRun,
+                    repairPort,
+                    nonInteractive,
+                    force,
+                    forceNewSetup,
+                    configureGithub,
+                    githubMode,
+                    apiKey,
+                    apiToken,
+                    boardName,
+                    existingBoardId,
+                    workspaceId,
+                    repositoryUrl,
+                    activeStates,
+                    terminalStates,
+                    inProgressState,
+                    detectInProgressState,
+                    blockedState,
+                    workflowPath,
+                    workflowPathExplicit,
+                    workspaceRoot,
+                    workspaceRootExplicit,
+                    configDir,
+                    manifestPath,
+                    serverPort,
+                    maxAgents,
+                    maxAgentsExplicit,
+                    codexModel,
+                    codexReasoningEffort,
+<span class="nc" id="L1900">                    Optional.of(catalog),</span>
+                    codexModelDefaults,
+                    envPath,
+                    additionalWritableRoots,
+                    allowAllPaths,
+                    dangerFullAccess,
+                    noStart,
+                    command,
+                    endpoint,
+                    callerDirectory);
+        }
+
+        Options withCodexModelSelection(CodexModelSelectionFlow.Selection selected) {
+<span class="nc" id="L1913">            return new Options(</span>
+                    check,
+                    dryRun,
+                    repairPort,
+                    nonInteractive,
+                    force,
+                    forceNewSetup,
+                    configureGithub,
+                    githubMode,
+                    apiKey,
+                    apiToken,
+                    boardName,
+                    existingBoardId,
+                    workspaceId,
+                    repositoryUrl,
+                    activeStates,
+                    terminalStates,
+                    inProgressState,
+                    detectInProgressState,
+                    blockedState,
+                    workflowPath,
+                    workflowPathExplicit,
+                    workspaceRoot,
+                    workspaceRootExplicit,
+                    configDir,
+                    manifestPath,
+                    serverPort,
+                    maxAgents,
+                    maxAgentsExplicit,
+<span class="nc" id="L1942">                    codexModel.or(selected::modelOverride),</span>
+<span class="nc" id="L1943">                    codexReasoningEffort.or(selected::reasoningEffortOverride),</span>
+                    codexModelCatalog,
+<span class="nc" id="L1945">                    Optional.of(selected.defaults()),</span>
+                    envPath,
+                    additionalWritableRoots,
+                    allowAllPaths,
+                    dangerFullAccess,
+                    noStart,
+                    command,
+                    endpoint,
+                    callerDirectory);
+        }
+    }
+
+<span class="nc" id="L1957">    record SetupResult(</span>
+            String boardId,
+            String boardKey,
+            String boardName,
+            String boardUrl,
+            List&lt;String&gt; lists,
+            Path workflowPath,
+            int serverPort,
+            GitHubIntegration githubIntegration) {
+        static SetupResult from(TrelloBoardSetup.NewBoardResult result, GitHubIntegration githubIntegration) {
+<span class="nc" id="L1967">            return new SetupResult(</span>
+<span class="nc" id="L1968">                    result.boardId(),</span>
+<span class="nc" id="L1969">                    result.boardKey(),</span>
+<span class="nc" id="L1970">                    result.boardName(),</span>
+<span class="nc" id="L1971">                    result.boardUrl(),</span>
+<span class="nc" id="L1972">                    result.lists(),</span>
+<span class="nc" id="L1973">                    result.workflowPath(),</span>
+<span class="nc" id="L1974">                    result.serverPort(),</span>
+                    githubIntegration);
+        }
+
+        static SetupResult from(TrelloBoardSetup.ImportBoardResult result, GitHubIntegration githubIntegration) {
+<span class="nc" id="L1979">            return new SetupResult(</span>
+<span class="nc" id="L1980">                    result.boardId(),</span>
+<span class="nc" id="L1981">                    result.boardKey(),</span>
+<span class="nc" id="L1982">                    result.boardName(),</span>
+<span class="nc" id="L1983">                    result.boardUrl(),</span>
+<span class="nc" id="L1984">                    result.openLists(),</span>
+<span class="nc" id="L1985">                    result.workflowPath(),</span>
+<span class="nc" id="L1986">                    result.serverPort(),</span>
+                    githubIntegration);
+        }
+    }
+
+<span class="nc" id="L1991">    private record ConnectedBoardLocalValidation(List&lt;String&gt; warnings, boolean envUsable) {</span>
+        boolean ok() {
+<span class="nc" id="L1993">            return warnings.isEmpty();</span>
+        }
+    }
+
+<span class="nc" id="L1997">    private record MaxAgentsSelection(int value, boolean preservedFromWorkflow) {}</span>
+
+<span class="nc" id="L1999">    private enum ExistingSetupAction {</span>
+<span class="nc" id="L2000">        KEEP,</span>
+<span class="nc" id="L2001">        CONNECT,</span>
+<span class="nc" id="L2002">        DISCONNECT,</span>
+<span class="nc" id="L2003">        UPGRADE_GITHUB,</span>
+<span class="nc" id="L2004">        UPDATE_CODEX_ACCESS</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

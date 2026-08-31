@@ -1,0 +1,1854 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloClientTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">TrelloClientTest.java</span></div><h1>TrelloClientTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.boardJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.listsJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.respond;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.trelloList;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.config.ConfigDefaults;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Splitter;
+import java.math.BigDecimal;
+import java.net.URLDecoder;
+import java.net.http.HttpHeaders;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L45">final class TrelloClientTest {</span>
+    private static final String TRELLO_CARD_URL_PREFIX = &quot;https://trello.com/c/&quot;;
+
+    private FakeTrelloServer trello;
+<span class="nc" id="L49">    private final AtomicReference&lt;String&gt; authorization = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L50">    private final AtomicReference&lt;String&gt; attachmentResponse = new AtomicReference&lt;&gt;(&quot;[{\&quot;id\&quot;:\&quot;write-attachment\&quot;}]&quot;);</span>
+<span class="nc" id="L51">    private final List&lt;String&gt; readRequests = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L52">    private final List&lt;String&gt; writeRequests = new ArrayList&lt;&gt;();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @BeforeEach
+    void startServer() throws Exception {
+<span class="nc" id="L59">        trello = new FakeTrelloServer();</span>
+<span class="nc" id="L60">        trello.on(&quot;/1/boards/input&quot;, exchange -&gt; respond(exchange, boardJson(&quot;board-1&quot;, &quot;Board&quot;, false)));</span>
+<span class="nc" id="L61">        trello.on(</span>
+                &quot;/1/boards/board-1/lists&quot;,
+<span class="nc" id="L63">                exchange -&gt; respond(</span>
+                        exchange,
+<span class="nc" id="L65">                        listsJson(</span>
+<span class="nc" id="L66">                                trelloList(&quot;list-todo&quot;, &quot;Todo&quot;, 1),</span>
+<span class="nc" id="L67">                                trelloList(&quot;list-progress&quot;, &quot;In Progress&quot;, 2),</span>
+<span class="nc" id="L68">                                trelloList(&quot;list-done&quot;, &quot;Done&quot;, 3),</span>
+<span class="nc" id="L69">                                trelloList(&quot;list-archived&quot;, &quot;Later&quot;, true, 4))));</span>
+<span class="nc" id="L70">        trello.on(&quot;/1/boards/board-1/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L71">            authorization.set(exchange.getRequestHeaders().getFirst(&quot;Authorization&quot;));</span>
+<span class="nc" id="L72">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L73">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;000000000000000000000101&quot;,&quot;name&quot;:&quot;A&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;idShort&quot;:7,&quot;shortLink&quot;:&quot;abc&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[{&quot;id&quot;:&quot;l1&quot;,&quot;name&quot;:&quot;P1&quot;}],&quot;dateLastActivity&quot;:&quot;2026-02-24T20:10:12.000Z&quot;,&quot;pos&quot;:2},
+                      {&quot;id&quot;:&quot;000000000000000000000102&quot;,&quot;name&quot;:&quot;B&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-done&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;def&quot;,&quot;labels&quot;:[],&quot;pos&quot;:1}
+                    ]
+                    &quot;&quot;&quot;);
+<span class="nc" id="L81">        });</span>
+<span class="nc" id="L82">        trello.on(&quot;/1/cards/000000000000000000000101&quot;, exchange -&gt; {</span>
+<span class="nc" id="L83">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L84">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;000000000000000000000101&quot;,&quot;name&quot;:&quot;A&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;idShort&quot;:7,&quot;shortLink&quot;:&quot;abc&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[{&quot;id&quot;:&quot;l1&quot;,&quot;name&quot;:&quot;P1&quot;}],&quot;actions&quot;:[{&quot;id&quot;:&quot;comment-1&quot;,&quot;date&quot;:&quot;2026-02-24T20:11:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;Please rework the edge case.&quot;},&quot;memberCreator&quot;:{&quot;fullName&quot;:&quot;Reviewer&quot;}}],&quot;dateLastActivity&quot;:&quot;2026-02-24T20:10:12.000Z&quot;,&quot;pos&quot;:2}
+                    &quot;&quot;&quot;);
+<span class="nc" id="L89">        });</span>
+<span class="nc" id="L90">        trello.on(</span>
+<span class="nc" id="L91">                &quot;/1/boards/terminal-input&quot;, exchange -&gt; respond(exchange, boardJson(&quot;terminal-board&quot;, &quot;Board&quot;, false)));</span>
+<span class="nc" id="L92">        trello.on(</span>
+                &quot;/1/boards/terminal-board/lists&quot;,
+<span class="nc" id="L94">                exchange -&gt; respond(</span>
+                        exchange,
+<span class="nc" id="L96">                        listsJson(</span>
+<span class="nc" id="L97">                                trelloList(&quot;terminal-todo&quot;, &quot;Todo&quot;, 1),</span>
+<span class="nc" id="L98">                                trelloList(&quot;terminal-done&quot;, &quot;Done&quot;, 2),</span>
+<span class="nc" id="L99">                                trelloList(&quot;terminal-archived&quot;, &quot;Later&quot;, true, 3))));</span>
+<span class="nc" id="L100">        trello.on(</span>
+                &quot;/1/boards/terminal-board/cards/all&quot;,
+<span class="nc" id="L102">                exchange -&gt; respond(</span>
+                        exchange,
+                        &quot;&quot;&quot;
+                        [
+                          {&quot;id&quot;:&quot;000000000000000000000103&quot;,&quot;name&quot;:&quot;Done&quot;,&quot;idList&quot;:&quot;terminal-done&quot;,&quot;idBoard&quot;:&quot;terminal-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;done&quot;,&quot;labels&quot;:[],&quot;pos&quot;:1},
+                          {&quot;id&quot;:&quot;000000000000000000000104&quot;,&quot;name&quot;:&quot;Archived card&quot;,&quot;idList&quot;:&quot;terminal-todo&quot;,&quot;idBoard&quot;:&quot;terminal-board&quot;,&quot;closed&quot;:true,&quot;shortLink&quot;:&quot;archived&quot;,&quot;labels&quot;:[],&quot;pos&quot;:2},
+                          {&quot;id&quot;:&quot;000000000000000000000105&quot;,&quot;name&quot;:&quot;Archived list duplicate&quot;,&quot;idList&quot;:&quot;terminal-archived&quot;,&quot;idBoard&quot;:&quot;terminal-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;dup&quot;,&quot;labels&quot;:[],&quot;pos&quot;:3}
+                        ]
+                        &quot;&quot;&quot;));
+<span class="nc" id="L111">        trello.on(</span>
+                &quot;/1/lists/terminal-archived/cards&quot;,
+<span class="nc" id="L113">                exchange -&gt; respond(</span>
+                        exchange,
+                        &quot;&quot;&quot;
+                        [
+                          {&quot;id&quot;:&quot;000000000000000000000105&quot;,&quot;name&quot;:&quot;Archived list duplicate&quot;,&quot;idList&quot;:&quot;terminal-archived&quot;,&quot;idBoard&quot;:&quot;terminal-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;dup&quot;,&quot;labels&quot;:[],&quot;pos&quot;:3},
+                          {&quot;id&quot;:&quot;000000000000000000000106&quot;,&quot;name&quot;:&quot;Archived list only&quot;,&quot;idList&quot;:&quot;terminal-archived&quot;,&quot;idBoard&quot;:&quot;terminal-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;list-only&quot;,&quot;labels&quot;:[],&quot;pos&quot;:4}
+                        ]
+                        &quot;&quot;&quot;));
+<span class="nc" id="L121">        trello.on(</span>
+                &quot;/1/boards/lookup-input&quot;,
+<span class="nc" id="L123">                exchange -&gt; respond(exchange, &quot;{\&quot;id\&quot;:\&quot;lookup-board\&quot;,\&quot;name\&quot;:\&quot;Board\&quot;,\&quot;closed\&quot;:false}&quot;));</span>
+<span class="nc" id="L124">        trello.on(</span>
+                &quot;/1/boards/lookup-board/lists&quot;,
+<span class="nc" id="L126">                exchange -&gt; respond(</span>
+                        exchange,
+                        &quot;&quot;&quot;
+                        [
+                          {&quot;id&quot;:&quot;lookup-todo&quot;,&quot;name&quot;:&quot;Todo&quot;,&quot;closed&quot;:false,&quot;pos&quot;:1},
+                          {&quot;id&quot;:&quot;lookup-review&quot;,&quot;name&quot;:&quot;Review&quot;,&quot;closed&quot;:false,&quot;pos&quot;:2}
+                        ]
+                        &quot;&quot;&quot;));
+<span class="nc" id="L134">        trello.on(&quot;/1/cards/card-found&quot;, exchange -&gt; {</span>
+<span class="nc" id="L135">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L136">            respond(</span>
+                    exchange,
+                    &quot;{\&quot;id\&quot;:\&quot;card-found\&quot;,\&quot;name\&quot;:\&quot;Found\&quot;,\&quot;idList\&quot;:\&quot;lookup-review\&quot;,\&quot;idBoard\&quot;:\&quot;lookup-board\&quot;,\&quot;closed\&quot;:false,\&quot;shortLink\&quot;:\&quot;found\&quot;,\&quot;labels\&quot;:[],\&quot;actions\&quot;:[{\&quot;id\&quot;:\&quot;comment-2\&quot;,\&quot;date\&quot;:\&quot;2026-02-25T20:11:12.000Z\&quot;,\&quot;data\&quot;:{\&quot;text\&quot;:\&quot;Follow-up review note.\&quot;},\&quot;memberCreator\&quot;:{\&quot;username\&quot;:\&quot;reviewer\&quot;}}]}&quot;);
+<span class="nc" id="L139">        });</span>
+<span class="nc" id="L140">        trello.on(&quot;/1/cards/card-workpad-old&quot;, exchange -&gt; {</span>
+<span class="nc" id="L141">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L142">            String rawQuery = exchange.getRequestURI().getRawQuery();</span>
+<span class="nc bnc" id="L143" title="All 4 branches missed.">            boolean deepLookup = rawQuery != null &amp;&amp; rawQuery.contains(&quot;actions_limit=1000&quot;);</span>
+<span class="nc" id="L144">            respond(</span>
+                    exchange,
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                    cardWithActions(&quot;card-workpad-old&quot;, deepLookup ? oldWorkpadActions() : regularActions(20)));</span>
+<span class="nc" id="L147">        });</span>
+<span class="nc" id="L148">        trello.on(&quot;/1/cards/card-workpad-deep-failed&quot;, exchange -&gt; {</span>
+<span class="nc" id="L149">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L150">            String rawQuery = exchange.getRequestURI().getRawQuery();</span>
+<span class="nc bnc" id="L151" title="All 4 branches missed.">            if (rawQuery != null &amp;&amp; rawQuery.contains(&quot;actions_limit=1000&quot;)) {</span>
+<span class="nc" id="L152">                respond(exchange, 429, &quot;{}&quot;);</span>
+<span class="nc" id="L153">                return;</span>
+            }
+<span class="nc" id="L155">            respond(exchange, cardWithActions(&quot;card-workpad-deep-failed&quot;, regularActions(20)));</span>
+<span class="nc" id="L156">        });</span>
+<span class="nc" id="L157">        trello.on(&quot;/1/cards/idshort-probe-&quot;, exchange -&gt; {</span>
+<span class="nc" id="L158">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L159">            String path = exchange.getRequestURI().getPath();</span>
+<span class="nc" id="L160">            String suffix = path.substring(path.lastIndexOf(&quot;idshort-probe-&quot;) + &quot;idshort-probe-&quot;.length());</span>
+<span class="nc" id="L161">            respond(exchange, cardWithIdShort(&quot;idshort-probe-&quot; + suffix, idShortToken(suffix)));</span>
+<span class="nc" id="L162">        });</span>
+<span class="nc" id="L163">        trello.on(&quot;/1/cards/card-missing&quot;, exchange -&gt; {</span>
+<span class="nc" id="L164">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L165">            respond(exchange, 404, &quot;{}&quot;);</span>
+<span class="nc" id="L166">        });</span>
+<span class="nc" id="L167">        trello.on(&quot;/1/cards/card-failed&quot;, exchange -&gt; {</span>
+<span class="nc" id="L168">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L169">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L170">        });</span>
+<span class="nc" id="L171">        trello.on(&quot;/1/cards/card-malformed&quot;, exchange -&gt; {</span>
+<span class="nc" id="L172">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L173">            respond(</span>
+                    exchange,
+                    &quot;{\&quot;id\&quot;:\&quot;card-malformed\&quot;,\&quot;idList\&quot;:\&quot;lookup-review\&quot;,\&quot;idBoard\&quot;:\&quot;lookup-board\&quot;,\&quot;closed\&quot;:false,\&quot;labels\&quot;:[]}&quot;);
+<span class="nc" id="L176">        });</span>
+<span class="nc" id="L177">        trello.on(&quot;/1/cards/000000000000000000000107/idList&quot;, exchange -&gt; {</span>
+<span class="nc" id="L178">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L179">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;000000000000000000000107\&quot;}&quot;);</span>
+<span class="nc" id="L180">        });</span>
+<span class="nc" id="L181">        trello.on(&quot;/1/cards/000000000000000000000107&quot;, exchange -&gt; {</span>
+<span class="nc" id="L182">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L183">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;000000000000000000000107&quot;,&quot;name&quot;:&quot;Picked up&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-progress&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;idShort&quot;:8,&quot;shortLink&quot;:&quot;pickup&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;dateLastActivity&quot;:&quot;2026-02-24T20:10:12.000Z&quot;,&quot;pos&quot;:1}
+                    &quot;&quot;&quot;);
+<span class="nc" id="L188">        });</span>
+<span class="nc" id="L189">        trello.on(</span>
+                &quot;/1/boards/closed-input&quot;,
+<span class="nc" id="L191">                exchange -&gt; respond(exchange, &quot;{\&quot;id\&quot;:\&quot;closed-board\&quot;,\&quot;name\&quot;:\&quot;Board\&quot;,\&quot;closed\&quot;:true}&quot;));</span>
+<span class="nc" id="L192">        trello.on(&quot;/1/cards/write-card/actions/comments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L193">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L194">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;comment-1\&quot;}&quot;);</span>
+<span class="nc" id="L195">        });</span>
+<span class="nc" id="L196">        trello.on(&quot;/1/cards/write-card/idList&quot;, exchange -&gt; {</span>
+<span class="nc" id="L197">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L198">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;write-card\&quot;}&quot;);</span>
+<span class="nc" id="L199">        });</span>
+<span class="nc" id="L200">        trello.on(&quot;/1/cards/write-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (&quot;GET&quot;.equals(exchange.getRequestMethod())) {</span>
+<span class="nc" id="L202">                readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L203">                respond(exchange, &quot;[]&quot;);</span>
+<span class="nc" id="L204">                return;</span>
+            }
+<span class="nc" id="L206">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L207">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;write-checklist\&quot;}&quot;);</span>
+<span class="nc" id="L208">        });</span>
+<span class="nc" id="L209">        trello.on(&quot;/1/checklists/write-checklist/checkItems&quot;, exchange -&gt; {</span>
+<span class="nc" id="L210">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L211">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;write-check-item\&quot;}&quot;);</span>
+<span class="nc" id="L212">        });</span>
+<span class="nc" id="L213">        trello.on(&quot;/1/cards/write-card/attachments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L214">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L215">            respond(exchange, attachmentResponse.get());</span>
+<span class="nc" id="L216">        });</span>
+<span class="nc" id="L217">        trello.on(&quot;/1/actions/comment-1/text&quot;, exchange -&gt; {</span>
+<span class="nc" id="L218">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L219">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;comment-1\&quot;}&quot;);</span>
+<span class="nc" id="L220">        });</span>
+<span class="nc" id="L221">        trello.on(&quot;/1/cards/rate-limited-card/actions/comments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L222">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L223">            respond(exchange, 429, &quot;{}&quot;);</span>
+<span class="nc" id="L224">        });</span>
+<span class="nc" id="L225">        trello.startEmpty();</span>
+<span class="nc" id="L226">    }</span>
+
+    @AfterEach
+    void stopServer() {
+<span class="nc" id="L230">        trello.close();</span>
+<span class="nc" id="L231">    }</span>
+
+    @Test
+    void fetchesCandidatesWithOAuthHeaderAndNormalizesPriorityAndIdentifiers() {
+        // given
+<span class="nc" id="L236">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L237">        var config = config(&quot;input&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Todo&quot;)));</span>
+
+        // when
+<span class="nc" id="L240">        var cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L243">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L244">            assertThat(card.identifier()).isEqualTo(&quot;TRELLO-abc&quot;);</span>
+<span class="nc" id="L245">            assertThat(card.priority()).isOne();</span>
+<span class="nc" id="L246">            assertThat(card.state()).isEqualTo(&quot;Todo&quot;);</span>
+<span class="nc" id="L247">            assertThat(card.comments()).isEmpty();</span>
+<span class="nc" id="L248">            assertThat(card.createdAt()).isNotNull();</span>
+<span class="nc" id="L249">        });</span>
+<span class="nc" id="L250">        assertThat(authorization.get()).contains(&quot;oauth_consumer_key=\&quot;key\&quot;&quot;).contains(&quot;oauth_token=\&quot;token\&quot;&quot;);</span>
+<span class="nc" id="L251">        assertThat(readRequests).hasSize(1);</span>
+<span class="nc" id="L252">        assertThat(readRequests.getFirst())</span>
+<span class="nc" id="L253">                .startsWith(&quot;GET /1/boards/board-1/cards/open?&quot;)</span>
+<span class="nc" id="L254">                .contains(&quot;fields=&quot;)</span>
+<span class="nc" id="L255">                .doesNotContain(&quot;actions=&quot;);</span>
+<span class="nc" id="L256">    }</span>
+
+    @Test
+    void fetchesTerminalCardsFromTerminalListsArchivedCardsAndArchivedListsWithoutDuplicates() {
+        // given
+<span class="nc" id="L261">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L262">        var config = config(&quot;terminal-input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L265">        var cards = client.fetchTerminalCards(config);</span>
+
+        // then
+<span class="nc" id="L268">        assertThat(cards)</span>
+<span class="nc" id="L269">                .extracting(Card::identifier)</span>
+<span class="nc" id="L270">                .containsExactly(&quot;TRELLO-done&quot;, &quot;TRELLO-archived&quot;, &quot;TRELLO-dup&quot;, &quot;TRELLO-list-only&quot;);</span>
+<span class="nc" id="L271">        assertThat(cards).extracting(Card::state).containsExactly(&quot;Done&quot;, &quot;Archived&quot;, &quot;ArchivedList&quot;, &quot;ArchivedList&quot;);</span>
+<span class="nc" id="L272">    }</span>
+
+    @Test
+    void fetchCardStatesByIdsKeepsPartialFailuresLocalToEachCard() {
+        // Expected WARN in the build log (issue #354): skipping the malformed Trello card is the
+        // production behavior under test; muting shared logger categories would be JVM-global
+        // state and is unsafe with parallel test execution.
+        // given
+<span class="nc" id="L280">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L281">        var config = config(&quot;lookup-input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L284">        var results = client.fetchCardStatesByIds(</span>
+<span class="nc" id="L285">                config, List.of(&quot;card-found&quot;, &quot;card-missing&quot;, &quot;card-failed&quot;, &quot;card-malformed&quot;));</span>
+
+        // then
+<span class="nc" id="L288">        assertThat(results.keySet()).containsExactly(&quot;card-found&quot;, &quot;card-missing&quot;, &quot;card-failed&quot;, &quot;card-malformed&quot;);</span>
+<span class="nc" id="L289">        assertThat(results.get(&quot;card-found&quot;))</span>
+<span class="nc" id="L290">                .isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(found.card())</span>
+<span class="nc" id="L291">                        .satisfies(card -&gt; {</span>
+<span class="nc" id="L292">                            assertThat(card.state()).isEqualTo(&quot;Review&quot;);</span>
+<span class="nc" id="L293">                            assertThat(card.comments()).singleElement().satisfies(comment -&gt; {</span>
+<span class="nc" id="L294">                                assertThat(comment.text()).isEqualTo(&quot;Follow-up review note.&quot;);</span>
+<span class="nc" id="L295">                                assertThat(comment.author()).isEqualTo(&quot;reviewer&quot;);</span>
+<span class="nc" id="L296">                            });</span>
+<span class="nc" id="L297">                        }));</span>
+<span class="nc" id="L298">        assertThat(results.get(&quot;card-missing&quot;)).isInstanceOf(CardLookupResult.Missing.class);</span>
+<span class="nc" id="L299">        assertThat(results.get(&quot;card-failed&quot;))</span>
+<span class="nc" id="L300">                .isInstanceOfSatisfying(CardLookupResult.Failed.class, failed -&gt; assertThat(failed.code())</span>
+<span class="nc" id="L301">                        .isEqualTo(&quot;trello_api_status&quot;));</span>
+<span class="nc" id="L302">        assertThat(results.get(&quot;card-malformed&quot;))</span>
+<span class="nc" id="L303">                .isInstanceOfSatisfying(CardLookupResult.Failed.class, failed -&gt; assertThat(failed.code())</span>
+<span class="nc" id="L304">                        .isEqualTo(&quot;trello_unknown_payload&quot;));</span>
+<span class="nc" id="L305">        assertThat(readRequests).anySatisfy(request -&gt; assertThat(request)</span>
+<span class="nc" id="L306">                .startsWith(&quot;GET /1/cards/card-found?&quot;)</span>
+<span class="nc" id="L307">                .contains(&quot;actions_limit=20&quot;)</span>
+<span class="nc" id="L308">                .contains(&quot;action_fields=data%2Cdate%2CmemberCreator&quot;));</span>
+<span class="nc" id="L309">    }</span>
+
+    @MethodSource(&quot;idShortScenarios&quot;)
+    @ParameterizedTest(name = &quot;idShort {0} -&gt; {2}&quot;)
+    void idShortIsParsedAsWholeNumberOrRejectedAsMalformedPayload(
+            String scenario, Integer expectedIdShort, String description) {
+        // given
+<span class="nc" id="L316">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L317">        var config = config(&quot;lookup-input&quot;, Map.of());</span>
+<span class="nc" id="L318">        String cardId = &quot;idshort-probe-&quot; + scenario;</span>
+
+        // when
+<span class="nc" id="L321">        var result = client.fetchCardStatesByIds(config, List.of(cardId)).get(cardId);</span>
+
+        // then
+<span class="nc bnc" id="L324" title="All 2 branches missed.">        if (expectedIdShort != null) {</span>
+<span class="nc" id="L325">            assertThat(result).as(description).isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(</span>
+<span class="nc" id="L326">                            found.card().idShort())</span>
+<span class="nc" id="L327">                    .isEqualTo(expectedIdShort));</span>
+        } else {
+<span class="nc" id="L329">            assertThat(result)</span>
+<span class="nc" id="L330">                    .as(description)</span>
+<span class="nc" id="L331">                    .isInstanceOfSatisfying(CardLookupResult.Failed.class, failed -&gt; assertThat(failed.code())</span>
+<span class="nc" id="L332">                            .isEqualTo(&quot;trello_unknown_payload&quot;));</span>
+        }
+<span class="nc" id="L334">    }</span>
+
+    private static Stream&lt;Arguments&gt; idShortScenarios() {
+<span class="nc" id="L337">        return Stream.of(</span>
+<span class="nc" id="L338">                Arguments.of(&quot;whole&quot;, 7, &quot;a whole integer idShort parses unchanged&quot;),</span>
+<span class="nc" id="L339">                Arguments.of(&quot;whole-float&quot;, 7, &quot;a whole-valued float normalizes to its integer value&quot;),</span>
+<span class="nc" id="L340">                Arguments.of(&quot;fractional&quot;, null, &quot;a fractional idShort is rejected instead of truncated&quot;),</span>
+<span class="nc" id="L341">                Arguments.of(&quot;out-of-range&quot;, null, &quot;an idShort beyond int range is rejected&quot;),</span>
+<span class="nc" id="L342">                Arguments.of(&quot;non-numeric&quot;, null, &quot;a non-numeric idShort is rejected&quot;));</span>
+    }
+
+    @Test
+    void fetchCardStateForWorkpadRequestsDeepCommentWindowAndActionIds() {
+        // given
+<span class="nc" id="L348">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L349">        var config = config(&quot;lookup-input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L352">        var result = client.fetchCardStateForWorkpad(config, &quot;card-found&quot;);</span>
+
+        // then
+<span class="nc" id="L355">        assertThat(result).isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(found.card())</span>
+<span class="nc" id="L356">                .satisfies(card -&gt; assertThat(card.comments())</span>
+<span class="nc" id="L357">                        .singleElement()</span>
+<span class="nc" id="L358">                        .satisfies(comment -&gt; assertThat(comment.id()).isEqualTo(&quot;comment-2&quot;))));</span>
+<span class="nc" id="L359">        assertThat(readRequests).anySatisfy(request -&gt; assertThat(request)</span>
+<span class="nc" id="L360">                .startsWith(&quot;GET /1/cards/card-found?&quot;)</span>
+<span class="nc" id="L361">                .contains(&quot;actions_limit=1000&quot;)</span>
+<span class="nc" id="L362">                .contains(&quot;action_fields=id%2Cdata%2Cdate%2CmemberCreator&quot;));</span>
+<span class="nc" id="L363">    }</span>
+
+    @Test
+    void fetchCardStatesByIdsDoesNotFetchOlderWorkpadDuringStateRefresh() {
+        // given
+<span class="nc" id="L368">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L369">        var config = config(&quot;lookup-input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L372">        var results = client.fetchCardStatesByIds(config, List.of(&quot;card-workpad-old&quot;));</span>
+
+        // then
+<span class="nc" id="L375">        assertThat(results.get(&quot;card-workpad-old&quot;))</span>
+<span class="nc" id="L376">                .isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(</span>
+<span class="nc" id="L377">                                found.card().comments())</span>
+<span class="nc" id="L378">                        .hasSize(20)</span>
+<span class="nc" id="L379">                        .extracting(Card.Comment::text)</span>
+<span class="nc" id="L380">                        .doesNotContain(TrelloClient.WORKPAD_MARKER + &quot;\n\nOlder plan&quot;)</span>
+<span class="nc" id="L381">                        .contains(&quot;Regular comment 19&quot;));</span>
+<span class="nc" id="L382">        assertThat(readRequests)</span>
+<span class="nc" id="L383">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/card-workpad-old?&quot;))</span>
+<span class="nc" id="L384">                .singleElement()</span>
+<span class="nc" id="L385">                .satisfies(request -&gt; assertThat(request).contains(&quot;actions_limit=20&quot;));</span>
+<span class="nc" id="L386">    }</span>
+
+    @Test
+    void fetchCardStatesForPromptByIdsIncludesOlderWorkpadWithoutExpandingRecentComments() {
+        // given
+<span class="nc" id="L391">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L392">        var config = config(&quot;lookup-input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L395">        var results = client.fetchCardStatesForPromptByIds(config, List.of(&quot;card-workpad-old&quot;));</span>
+
+        // then
+<span class="nc" id="L398">        assertThat(results.get(&quot;card-workpad-old&quot;))</span>
+<span class="nc" id="L399">                .isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(</span>
+<span class="nc" id="L400">                                found.card().comments())</span>
+<span class="nc" id="L401">                        .hasSize(21)</span>
+<span class="nc" id="L402">                        .extracting(Card.Comment::text)</span>
+<span class="nc" id="L403">                        .startsWith(TrelloClient.WORKPAD_MARKER + &quot;\n\nOlder plan&quot;)</span>
+<span class="nc" id="L404">                        .contains(&quot;Regular comment 19&quot;));</span>
+<span class="nc" id="L405">        assertThat(readRequests)</span>
+<span class="nc" id="L406">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/card-workpad-old?&quot;))</span>
+<span class="nc" id="L407">                .satisfiesExactly(</span>
+<span class="nc" id="L408">                        request -&gt; assertThat(request).contains(&quot;actions_limit=20&quot;),</span>
+<span class="nc" id="L409">                        request -&gt; assertThat(request).contains(&quot;actions_limit=1000&quot;));</span>
+<span class="nc" id="L410">    }</span>
+
+    @Test
+    void fetchCardStatesForPromptByIdsKeepsReadableCardWhenOlderWorkpadLookupFails() {
+        // Expected WARN in the build log (issue #354): the simulated Trello rate limit makes the
+        // client log its operator guidance; muting shared logger categories would be JVM-global
+        // state and is unsafe with parallel test execution.
+        // given
+<span class="nc" id="L418">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L419">        var config = config(&quot;lookup-input&quot;, Map.of(&quot;max_api_retries&quot;, 0));</span>
+
+        // when
+<span class="nc" id="L422">        var results = client.fetchCardStatesForPromptByIds(config, List.of(&quot;card-workpad-deep-failed&quot;));</span>
+
+        // then
+<span class="nc" id="L425">        assertThat(results.get(&quot;card-workpad-deep-failed&quot;))</span>
+<span class="nc" id="L426">                .isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(</span>
+<span class="nc" id="L427">                                found.card().comments())</span>
+<span class="nc" id="L428">                        .hasSize(20)</span>
+<span class="nc" id="L429">                        .extracting(Card.Comment::text)</span>
+<span class="nc" id="L430">                        .contains(&quot;Regular comment 19&quot;)</span>
+<span class="nc" id="L431">                        .doesNotContain(TrelloClient.WORKPAD_MARKER + &quot;\n\nOlder plan&quot;));</span>
+<span class="nc" id="L432">        assertThat(readRequests)</span>
+<span class="nc" id="L433">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/card-workpad-deep-failed?&quot;))</span>
+<span class="nc" id="L434">                .satisfiesExactly(</span>
+<span class="nc" id="L435">                        request -&gt; assertThat(request).contains(&quot;actions_limit=20&quot;),</span>
+<span class="nc" id="L436">                        request -&gt; assertThat(request).contains(&quot;actions_limit=1000&quot;));</span>
+<span class="nc" id="L437">    }</span>
+
+    @Test
+    void fetchCardStatesForPromptByIdsIncludesChecklistAttachmentAndReferenceContext() {
+        // given
+<span class="nc" id="L442">        trello.on(&quot;/1/cards/card-context&quot;, exchange -&gt; {</span>
+<span class="nc" id="L443">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L444">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;card-context&quot;,&quot;name&quot;:&quot;Context&quot;,&quot;desc&quot;:&quot;Read the related material.&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;context&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[{&quot;id&quot;:&quot;comment-context&quot;,&quot;date&quot;:&quot;2026-02-25T20:11:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;No prerequisite in this comment.&quot;},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;reviewer&quot;}}],&quot;checklists&quot;:[{&quot;id&quot;:&quot;checklist-context&quot;,&quot;name&quot;:&quot;Related&quot;,&quot;checkItems&quot;:[{&quot;id&quot;:&quot;item-context&quot;,&quot;name&quot;:&quot;related to [the card](%s)&quot;,&quot;state&quot;:&quot;incomplete&quot;}]}],&quot;attachments&quot;:[{&quot;id&quot;:&quot;attachment-context&quot;,&quot;name&quot;:&quot;Design card&quot;,&quot;url&quot;:&quot;%s&quot;}]}
+                    &quot;&quot;&quot;
+<span class="nc" id="L449">                            .formatted(cardUrl(&quot;CTXMARK1&quot;), cardUrl(&quot;CTXATT1&quot;)));</span>
+<span class="nc" id="L450">        });</span>
+<span class="nc" id="L451">        trello.on(&quot;/1/cards/CTXMARK1&quot;, exchange -&gt; {</span>
+<span class="nc" id="L452">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L453">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;mark-card&quot;,&quot;name&quot;:&quot;Markdown reference&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;CTXMARK1&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:2}
+                    &quot;&quot;&quot;
+<span class="nc" id="L458">                            .formatted(cardUrl(&quot;CTXMARK1&quot;), cardUrl(&quot;CTXMARK1&quot;)));</span>
+<span class="nc" id="L459">        });</span>
+<span class="nc" id="L460">        trello.on(&quot;/1/cards/CTXATT1&quot;, exchange -&gt; {</span>
+<span class="nc" id="L461">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L462">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;attachment-card&quot;,&quot;name&quot;:&quot;Attachment reference&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;CTXATT1&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:3}
+                    &quot;&quot;&quot;
+<span class="nc" id="L467">                            .formatted(cardUrl(&quot;CTXATT1&quot;), cardUrl(&quot;CTXATT1&quot;)));</span>
+<span class="nc" id="L468">        });</span>
+<span class="nc" id="L469">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L470">        var config = config(&quot;lookup-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of()));</span>
+
+        // when
+<span class="nc" id="L473">        var results = client.fetchCardStatesForPromptByIds(config, List.of(&quot;card-context&quot;));</span>
+
+        // then
+<span class="nc" id="L476">        assertThat(results.get(&quot;card-context&quot;))</span>
+<span class="nc" id="L477">                .isInstanceOfSatisfying(CardLookupResult.Found.class, found -&gt; assertThat(found.card())</span>
+<span class="nc" id="L478">                        .satisfies(card -&gt; {</span>
+<span class="nc" id="L479">                            assertThat(card.checklists()).singleElement().satisfies(checklist -&gt; assertThat(</span>
+<span class="nc" id="L480">                                            checklist.name())</span>
+<span class="nc" id="L481">                                    .isEqualTo(&quot;Related&quot;));</span>
+<span class="nc" id="L482">                            assertThat(card.attachments()).singleElement().satisfies(attachment -&gt; assertThat(</span>
+<span class="nc" id="L483">                                            attachment.url())</span>
+<span class="nc" id="L484">                                    .isEqualTo(cardUrl(&quot;CTXATT1&quot;)));</span>
+<span class="nc" id="L485">                            assertThat(card.trelloReferences())</span>
+<span class="nc" id="L486">                                    .extracting(Card.TrelloReference::source)</span>
+<span class="nc" id="L487">                                    .containsExactly(&quot;checklist:Related&quot;, &quot;attachment&quot;);</span>
+<span class="nc" id="L488">                            assertThat(card.trelloReferences())</span>
+<span class="nc" id="L489">                                    .extracting(Card.TrelloReference::lookupId)</span>
+<span class="nc" id="L490">                                    .containsExactly(&quot;CTXMARK1&quot;, &quot;CTXATT1&quot;);</span>
+<span class="nc" id="L491">                        }));</span>
+<span class="nc" id="L492">        assertThat(readRequests)</span>
+<span class="nc" id="L493">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/card-context?&quot;))</span>
+<span class="nc" id="L494">                .singleElement()</span>
+<span class="nc" id="L495">                .satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L496">                        .contains(&quot;attachments=true&quot;)</span>
+<span class="nc" id="L497">                        .contains(&quot;attachment_fields=name%2Curl&quot;)</span>
+<span class="nc" id="L498">                        .contains(&quot;checklists=all&quot;)</span>
+<span class="nc" id="L499">                        .contains(&quot;checkItem_fields=id%2Cname%2Cstate&quot;));</span>
+<span class="nc" id="L500">        assertThat(writeRequests).isEmpty();</span>
+<span class="nc" id="L501">    }</span>
+
+    @Test
+    void fetchCardStatesForPromptByIdsLooksUpRepeatedPromptReferencesOnceForTheBatch() {
+        // given
+<span class="nc" id="L506">        trello.on(&quot;/1/cards/card-context-a&quot;, exchange -&gt; {</span>
+<span class="nc" id="L507">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L508">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;card-context-a&quot;,&quot;name&quot;:&quot;Context A&quot;,&quot;desc&quot;:&quot;See %s&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;contexta&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L513">                            .formatted(cardUrl(&quot;CTXSHARED&quot;)));</span>
+<span class="nc" id="L514">        });</span>
+<span class="nc" id="L515">        trello.on(&quot;/1/cards/card-context-b&quot;, exchange -&gt; {</span>
+<span class="nc" id="L516">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L517">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;card-context-b&quot;,&quot;name&quot;:&quot;Context B&quot;,&quot;desc&quot;:&quot;Also see %s&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;contextb&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:2}
+                    &quot;&quot;&quot;
+<span class="nc" id="L522">                            .formatted(cardUrl(&quot;CTXSHARED&quot;)));</span>
+<span class="nc" id="L523">        });</span>
+<span class="nc" id="L524">        trello.on(&quot;/1/cards/CTXSHARED&quot;, exchange -&gt; {</span>
+<span class="nc" id="L525">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L526">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;shared-card&quot;,&quot;name&quot;:&quot;Shared context&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;CTXSHARED&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:3}
+                    &quot;&quot;&quot;
+<span class="nc" id="L531">                            .formatted(cardUrl(&quot;CTXSHARED&quot;), cardUrl(&quot;CTXSHARED&quot;)));</span>
+<span class="nc" id="L532">        });</span>
+<span class="nc" id="L533">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L534">        var config = config(&quot;lookup-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of()));</span>
+
+        // when
+<span class="nc" id="L537">        var results = client.fetchCardStatesForPromptByIds(config, List.of(&quot;card-context-a&quot;, &quot;card-context-b&quot;));</span>
+
+        // then
+<span class="nc" id="L540">        assertThat(results.values())</span>
+<span class="nc" id="L541">                .filteredOn(CardLookupResult.Found.class::isInstance)</span>
+<span class="nc" id="L542">                .map(CardLookupResult.Found.class::cast)</span>
+<span class="nc" id="L543">                .extracting(found -&gt; found.card().trelloReferences())</span>
+<span class="nc" id="L544">                .allSatisfy(references -&gt; assertThat(references)</span>
+<span class="nc" id="L545">                        .singleElement()</span>
+<span class="nc" id="L546">                        .satisfies(reference -&gt; assertThat(reference.lookupId()).isEqualTo(&quot;CTXSHARED&quot;)));</span>
+<span class="nc" id="L547">        assertThat(readRequests)</span>
+<span class="nc" id="L548">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/CTXSHARED?&quot;))</span>
+<span class="nc" id="L549">                .hasSize(1);</span>
+<span class="nc" id="L550">        assertThat(writeRequests).isEmpty();</span>
+<span class="nc" id="L551">    }</span>
+
+    @Test
+    void writeOperationsSendExpectedMethodsAndDoNotRetryFailedWrites() {
+        // Expected WARN in the build log (issue #354): the simulated Trello rate limit makes the
+        // client log its operator guidance; muting shared logger categories would be JVM-global
+        // state and is unsafe with parallel test execution.
+        // given
+<span class="nc" id="L559">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L560">        var config = config(&quot;input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L563">        client.addComment(config, &quot;write-card&quot;, &quot;Ready for review&quot;);</span>
+<span class="nc" id="L564">        client.updateComment(config, &quot;comment-1&quot;, &quot;Updated workpad&quot;);</span>
+<span class="nc" id="L565">        client.moveCardToList(config, &quot;write-card&quot;, &quot;review-list&quot;);</span>
+<span class="nc" id="L566">        client.upsertChecklistItem(config, &quot;write-card&quot;, &quot;Release tasks&quot;, &quot;Publish release&quot;, true);</span>
+<span class="nc" id="L567">        TrelloClient.UrlAttachmentWrite attachment = client.addUrlAttachment(</span>
+                config, &quot;write-card&quot;, &quot;https://github.com/example/project/pull/12&quot;, &quot;Pull request&quot;);
+<span class="nc" id="L569">        Throwable thrown = catchThrowable(() -&gt; client.addComment(config, &quot;rate-limited-card&quot;, &quot;Retry me&quot;));</span>
+
+        // then
+<span class="nc" id="L572">        assertThat(attachment.attachmentId()).isEqualTo(&quot;write-attachment&quot;);</span>
+<span class="nc" id="L573">        assertThat(writeRequests)</span>
+<span class="nc" id="L574">                .containsExactly(</span>
+                        &quot;POST /1/cards/write-card/actions/comments?text=Ready+for+review&quot;,
+                        &quot;PUT /1/actions/comment-1/text?value=Updated+workpad&quot;,
+                        &quot;PUT /1/cards/write-card/idList?value=review-list&quot;,
+                        &quot;POST /1/cards/write-card/checklists?name=Release+tasks&quot;,
+                        &quot;POST /1/checklists/write-checklist/checkItems?name=Publish+release&amp;checked=true&quot;,
+                        &quot;POST /1/cards/write-card/attachments?url=https%3A%2F%2Fgithub.com%2Fexample%2Fproject%2Fpull%2F12&amp;name=Pull+request&quot;,
+                        &quot;POST /1/cards/rate-limited-card/actions/comments?text=Retry+me&quot;);
+<span class="nc" id="L582">        assertThat(thrown).isInstanceOfSatisfying(TrelloException.class, exception -&gt; assertThat(exception.code())</span>
+<span class="nc" id="L583">                .isEqualTo(&quot;trello_api_rate_limited&quot;));</span>
+<span class="nc" id="L584">    }</span>
+
+    @Test
+    void upsertChecklistItemRejectsDuplicateChecklistsWithoutMutation() {
+        // given
+<span class="nc" id="L589">        configureWriteCardChecklists(</span>
+                &quot;&quot;&quot;
+                [
+                  {&quot;id&quot;:&quot;checklist-1&quot;,&quot;name&quot;:&quot;Release tasks&quot;,&quot;checkItems&quot;:[]},
+                  {&quot;id&quot;:&quot;checklist-2&quot;,&quot;name&quot;:&quot;Release tasks&quot;,&quot;checkItems&quot;:[]}
+                ]
+                &quot;&quot;&quot;);
+<span class="nc" id="L596">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L597">        var config = config(&quot;input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L600">        Throwable thrown = catchThrowable(</span>
+<span class="nc" id="L601">                () -&gt; client.upsertChecklistItem(config, &quot;write-card&quot;, &quot;Release tasks&quot;, &quot;Publish release&quot;, true));</span>
+
+        // then
+<span class="nc" id="L604">        assertThat(thrown).isInstanceOfSatisfying(TrelloException.class, exception -&gt; assertThat(exception.code())</span>
+<span class="nc" id="L605">                .isEqualTo(&quot;trello_checklist_ambiguous&quot;));</span>
+<span class="nc" id="L606">        assertWriteCardChecklistsRead();</span>
+<span class="nc" id="L607">        assertThat(writeRequests).isEmpty();</span>
+<span class="nc" id="L608">    }</span>
+
+    @Test
+    void upsertChecklistItemRejectsDuplicateCheckItemsWithoutMutation() {
+        // given
+<span class="nc" id="L613">        configureWriteCardChecklists(</span>
+                &quot;&quot;&quot;
+                [
+                  {
+                    &quot;id&quot;:&quot;checklist-1&quot;,
+                    &quot;name&quot;:&quot;Release tasks&quot;,
+                    &quot;checkItems&quot;:[
+                      {&quot;id&quot;:&quot;item-1&quot;,&quot;name&quot;:&quot;Publish release&quot;,&quot;state&quot;:&quot;incomplete&quot;},
+                      {&quot;id&quot;:&quot;item-2&quot;,&quot;name&quot;:&quot;Publish release&quot;,&quot;state&quot;:&quot;incomplete&quot;}
+                    ]
+                  }
+                ]
+                &quot;&quot;&quot;);
+<span class="nc" id="L626">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L627">        var config = config(&quot;input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L630">        Throwable thrown = catchThrowable(</span>
+<span class="nc" id="L631">                () -&gt; client.upsertChecklistItem(config, &quot;write-card&quot;, &quot;Release tasks&quot;, &quot;Publish release&quot;, true));</span>
+
+        // then
+<span class="nc" id="L634">        assertThat(thrown).isInstanceOfSatisfying(TrelloException.class, exception -&gt; assertThat(exception.code())</span>
+<span class="nc" id="L635">                .isEqualTo(&quot;trello_check_item_ambiguous&quot;));</span>
+<span class="nc" id="L636">        assertWriteCardChecklistsRead();</span>
+<span class="nc" id="L637">        assertThat(writeRequests).isEmpty();</span>
+<span class="nc" id="L638">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;&quot;, &quot;[]&quot;, &quot;[{}]&quot;, &quot;{}&quot;, &quot;\&quot;not-an-attachment\&quot;&quot;})
+    void urlAttachmentWriteRejectsInvalidSuccessfulAttachmentPayloads(String responseBody) {
+        // given
+<span class="nc" id="L644">        attachmentResponse.set(responseBody);</span>
+<span class="nc" id="L645">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L646">        var config = config(&quot;input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L649">        Throwable thrown = catchThrowable(() -&gt;</span>
+<span class="nc" id="L650">                client.addUrlAttachment(config, &quot;write-card&quot;, &quot;https://github.com/example/project/pull/12&quot;, null));</span>
+
+        // then
+<span class="nc" id="L653">        assertThat(thrown).isInstanceOfSatisfying(TrelloException.class, exception -&gt; assertThat(exception.code())</span>
+<span class="nc" id="L654">                .isEqualTo(&quot;trello_unknown_payload&quot;));</span>
+<span class="nc" id="L655">        assertThat(writeRequests)</span>
+<span class="nc" id="L656">                .containsExactly(</span>
+                        &quot;POST /1/cards/write-card/attachments?url=https%3A%2F%2Fgithub.com%2Fexample%2Fproject%2Fpull%2F12&quot;);
+<span class="nc" id="L658">    }</span>
+
+    @Test
+    void rateLimitWarningNamesPollingIntervalSettingWorkflowPathAndBoardScaleGuidance() {
+        // given
+<span class="nc" id="L663">        var config = config(&quot;input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L666">        String warning = TrelloClient.rateLimitWarning(config);</span>
+
+        // then
+<span class="nc" id="L669">        assertThat(warning)</span>
+<span class="nc" id="L670">                .contains(&quot;Trello rate limit reached&quot;)</span>
+<span class="nc" id="L671">                .contains(&quot;polling.interval_ms&quot;)</span>
+<span class="nc" id="L672">                .contains(Long.toString(ConfigDefaults.DEFAULT_POLLING_INTERVAL_MS))</span>
+<span class="nc" id="L673">                .contains(tempDir.resolve(&quot;WORKFLOW.md&quot;).toString())</span>
+<span class="nc" id="L674">                .contains(&quot;more than 5-10 boards&quot;)</span>
+<span class="nc" id="L675">                .contains(&quot;same Trello token&quot;);</span>
+<span class="nc" id="L676">    }</span>
+
+    @Test
+    void negativeRetryAfterFallsBackToExponentialDelay() {
+        // given
+<span class="nc" id="L681">        var config = config(&quot;input&quot;, Map.of());</span>
+<span class="nc" id="L682">        HttpResponse&lt;String&gt; response = responseWithRetryAfter(&quot;-1&quot;);</span>
+
+        // when
+<span class="nc" id="L685">        Duration delay = TrelloClient.backoff(config, 1, response);</span>
+
+        // then
+<span class="nc" id="L688">        assertThat(delay)</span>
+<span class="nc" id="L689">                .isGreaterThanOrEqualTo(config.tracker().apiRetryBaseDelay())</span>
+<span class="nc" id="L690">                .isLessThan(config.tracker().apiRetryBaseDelay().multipliedBy(2));</span>
+<span class="nc" id="L691">    }</span>
+
+    @Test
+    void nonNegativeRetryAfterRemainsAuthoritative() {
+        // given
+<span class="nc" id="L696">        var config = config(&quot;input&quot;, Map.of());</span>
+<span class="nc" id="L697">        HttpResponse&lt;String&gt; response = responseWithRetryAfter(&quot;4&quot;);</span>
+
+        // when
+<span class="nc" id="L700">        Duration delay = TrelloClient.backoff(config, 1, response);</span>
+
+        // then
+<span class="nc" id="L703">        assertThat(delay).isEqualTo(Duration.ofSeconds(4));</span>
+<span class="nc" id="L704">    }</span>
+
+    @Test
+    void prepareForDispatchMovesQueueCardToConfiguredInProgressListAndReturnsRefreshedCard() {
+        // given
+<span class="nc" id="L709">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L710">        var config = config(</span>
+<span class="nc" id="L711">                &quot;input&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Todo&quot;, &quot;In Progress&quot;), &quot;in_progress_state&quot;, &quot;In Progress&quot;));</span>
+<span class="nc" id="L712">        Card queueCard = card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;Todo&quot;, &quot;list-todo&quot;, null, BigDecimal.ONE);</span>
+
+        // when
+<span class="nc" id="L715">        Card prepared = client.prepareForDispatch(config, queueCard);</span>
+
+        // then
+<span class="nc" id="L718">        assertThat(prepared.state()).isEqualTo(&quot;In Progress&quot;);</span>
+<span class="nc" id="L719">        assertThat(prepared.listId()).isEqualTo(&quot;list-progress&quot;);</span>
+<span class="nc" id="L720">        assertThat(writeRequests).containsExactly(&quot;PUT /1/cards/000000000000000000000107/idList?value=list-progress&quot;);</span>
+<span class="nc" id="L721">        assertThat(readRequests)</span>
+<span class="nc" id="L722">                .anySatisfy(request -&gt; assertThat(request).startsWith(&quot;GET /1/cards/000000000000000000000107?&quot;));</span>
+<span class="nc" id="L723">    }</span>
+
+    @Test
+    void releaseFromDispatchMovesInProgressCardBackToPreviousActiveList() {
+        // given
+<span class="nc" id="L728">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L729">        var config = config(</span>
+<span class="nc" id="L730">                &quot;input&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Todo&quot;, &quot;In Progress&quot;), &quot;in_progress_state&quot;, &quot;In Progress&quot;));</span>
+<span class="nc" id="L731">        Card inProgressCard =</span>
+<span class="nc" id="L732">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;In Progress&quot;, &quot;list-progress&quot;, null, BigDecimal.ONE);</span>
+
+        // when
+<span class="nc" id="L735">        client.releaseFromDispatch(config, inProgressCard);</span>
+
+        // then
+<span class="nc" id="L738">        assertThat(writeRequests).containsExactly(&quot;PUT /1/cards/000000000000000000000107/idList?value=list-todo&quot;);</span>
+<span class="nc" id="L739">    }</span>
+
+    @Test
+    void releaseFromDispatchReturnsToSourceStateListWhenSeveralQueuesPrecedeInProgress() {
+        // given
+<span class="nc" id="L744">        configureMultiQueueBoard();</span>
+<span class="nc" id="L745">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L746">        var config = config(</span>
+                &quot;input&quot;,
+<span class="nc" id="L748">                Map.of(</span>
+                        &quot;active_states&quot;,
+<span class="nc" id="L750">                        List.of(&quot;Normal Queue&quot;, &quot;Priority Queue&quot;, &quot;In Progress&quot;),</span>
+                        &quot;in_progress_state&quot;,
+                        &quot;In Progress&quot;));
+<span class="nc" id="L753">        Card sourceCard =</span>
+<span class="nc" id="L754">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;Normal Queue&quot;, &quot;list-normal&quot;, null, BigDecimal.ONE);</span>
+<span class="nc" id="L755">        Card inProgressCard =</span>
+<span class="nc" id="L756">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;In Progress&quot;, &quot;list-progress&quot;, null, BigDecimal.ONE);</span>
+
+        // when
+<span class="nc" id="L759">        client.releaseFromDispatch(config, inProgressCard, sourceCard);</span>
+
+        // then
+<span class="nc" id="L762">        assertThat(writeRequests).containsExactly(&quot;PUT /1/cards/000000000000000000000107/idList?value=list-normal&quot;);</span>
+<span class="nc" id="L763">    }</span>
+
+    @Test
+    void releaseFromDispatchReturnsToSourceListIdWhenSeveralConfiguredListsPrecedeInProgress() {
+        // given
+<span class="nc" id="L768">        configureMultiQueueBoard();</span>
+<span class="nc" id="L769">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L770">        var config = config(</span>
+                &quot;input&quot;,
+<span class="nc" id="L772">                Map.of(</span>
+                        &quot;active_states&quot;,
+<span class="nc" id="L774">                        List.of(&quot;Normal Queue&quot;, &quot;Priority Queue&quot;, &quot;In Progress&quot;),</span>
+                        &quot;active_list_ids&quot;,
+<span class="nc" id="L776">                        List.of(&quot;list-normal&quot;, &quot;list-priority&quot;, &quot;list-progress&quot;),</span>
+                        &quot;in_progress_state&quot;,
+                        &quot;In Progress&quot;));
+<span class="nc" id="L779">        Card sourceCard =</span>
+<span class="nc" id="L780">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;Normal Queue&quot;, &quot;list-normal&quot;, null, BigDecimal.ONE);</span>
+<span class="nc" id="L781">        Card inProgressCard =</span>
+<span class="nc" id="L782">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;In Progress&quot;, &quot;list-progress&quot;, null, BigDecimal.ONE);</span>
+
+        // when
+<span class="nc" id="L785">        client.releaseFromDispatch(config, inProgressCard, sourceCard);</span>
+
+        // then
+<span class="nc" id="L788">        assertThat(writeRequests).containsExactly(&quot;PUT /1/cards/000000000000000000000107/idList?value=list-normal&quot;);</span>
+<span class="nc" id="L789">    }</span>
+
+    @Test
+    void releaseFromDispatchDoesNotPromoteWhenSourceListCannotBeResolved() {
+        // given
+<span class="nc" id="L794">        configureMultiQueueBoardWithoutNormalQueue();</span>
+<span class="nc" id="L795">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L796">        var config = config(</span>
+                &quot;input&quot;,
+<span class="nc" id="L798">                Map.of(</span>
+                        &quot;active_states&quot;,
+<span class="nc" id="L800">                        List.of(&quot;Normal Queue&quot;, &quot;Priority Queue&quot;, &quot;In Progress&quot;),</span>
+                        &quot;in_progress_state&quot;,
+                        &quot;In Progress&quot;));
+<span class="nc" id="L803">        Card sourceCard =</span>
+<span class="nc" id="L804">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;Normal Queue&quot;, &quot;list-normal&quot;, null, BigDecimal.ONE);</span>
+<span class="nc" id="L805">        Card inProgressCard =</span>
+<span class="nc" id="L806">                card(&quot;000000000000000000000107&quot;, &quot;TRELLO-pickup&quot;, &quot;In Progress&quot;, &quot;list-progress&quot;, null, BigDecimal.ONE);</span>
+
+        // when
+<span class="nc" id="L809">        client.releaseFromDispatch(config, inProgressCard, sourceCard);</span>
+
+        // then
+<span class="nc" id="L812">        assertThat(writeRequests).isEmpty();</span>
+<span class="nc" id="L813">    }</span>
+
+    @Test
+    void fetchCandidateCardsPopulatesBlockersFromPrerequisiteChecklistAndWritesOneWaitingComment() {
+        // given
+<span class="nc" id="L818">        configureDependencyBoard(&quot;Todo&quot;);</span>
+<span class="nc" id="L819">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L820">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L821">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+
+        // when
+<span class="nc" id="L824">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L827">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L828">            assertThat(card.checklists())</span>
+<span class="nc" id="L829">                    .containsExactly(new Card.Checklist(</span>
+                            &quot;checklist-1&quot;,
+                            &quot;Must finish first&quot;,
+<span class="nc" id="L832">                            List.of(new Card.ChecklistItem(&quot;item-1&quot;, cardUrl(&quot;PREREQ01&quot;), false))));</span>
+<span class="nc" id="L833">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; {</span>
+<span class="nc" id="L834">                assertThat(blocker.identifier()).isEqualTo(&quot;TRELLO-PREREQ01&quot;);</span>
+<span class="nc" id="L835">                assertThat(blocker.state()).isEqualTo(&quot;Todo&quot;);</span>
+<span class="nc" id="L836">            });</span>
+<span class="nc" id="L837">            assertThat(card.prerequisiteProblems()).isEmpty();</span>
+<span class="nc" id="L838">        });</span>
+<span class="nc" id="L839">        assertThat(readRequests)</span>
+<span class="nc" id="L840">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/PREREQ01?&quot;))</span>
+<span class="nc" id="L841">                .hasSize(1);</span>
+<span class="nc" id="L842">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L843">                .startsWith(&quot;POST /1/cards/waiting-card/actions/comments?&quot;)</span>
+<span class="nc" id="L844">                .contains(&quot;Symphony+Prerequisite+Status&quot;)</span>
+<span class="nc" id="L845">                .contains(&quot;Status%3A+waiting+for+prerequisites&quot;));</span>
+<span class="nc" id="L846">    }</span>
+
+    @Test
+    void fetchCandidateCardsLeavesCurrentPrerequisiteWaitingCommentUnchanged() throws Exception {
+        // given
+<span class="nc" id="L851">        configureDependencyBoard(&quot;Todo&quot;);</span>
+<span class="nc" id="L852">        configureWaitingCardWithManagedComment(waitingTextForPrerequisite(&quot;TRELLO-PREREQ01&quot;, &quot;Todo&quot;));</span>
+
+        // when
+<span class="nc" id="L855">        List&lt;Card&gt; cards = fetchDependencyCandidates();</span>
+
+        // then
+<span class="nc" id="L858">        assertWaitingBlockedWithoutProblems(cards);</span>
+<span class="nc" id="L859">        assertThat(writeRequests).isEmpty();</span>
+<span class="nc" id="L860">    }</span>
+
+    @Test
+    void fetchCandidateCardsDoesNotFetchChecklistsForInactiveOpenCards() {
+        // given
+<span class="nc" id="L865">        trello.remove(&quot;/1/boards/board-1/cards/open&quot;);</span>
+<span class="nc" id="L866">        trello.on(&quot;/1/boards/board-1/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L867">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L868">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;inactive-card&quot;,&quot;name&quot;:&quot;Inactive&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-progress&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;inactive&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1},
+                      {&quot;id&quot;:&quot;active-card&quot;,&quot;name&quot;:&quot;Active&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;active&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:2}
+                    ]
+                    &quot;&quot;&quot;);
+<span class="nc" id="L876">        });</span>
+<span class="nc" id="L877">        trello.on(&quot;/1/cards/inactive-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L878">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L879">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L880">        });</span>
+<span class="nc" id="L881">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L882">        var config = config(&quot;input&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Todo&quot;)));</span>
+
+        // when
+<span class="nc" id="L885">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L888">        assertThat(cards).singleElement().satisfies(card -&gt; assertThat(card.id())</span>
+<span class="nc" id="L889">                .isEqualTo(&quot;active-card&quot;));</span>
+<span class="nc" id="L890">        assertThat(readRequests).noneMatch(request -&gt; request.startsWith(&quot;GET /1/cards/inactive-card/checklists&quot;));</span>
+<span class="nc" id="L891">    }</span>
+
+    @Test
+    void fetchCandidateCardsClearsStaleWaitingMarkerWhenPrerequisiteItemsAreRemoved() {
+        // given
+<span class="nc" id="L896">        trello.remove(&quot;/1/boards/board-1/cards/open&quot;);</span>
+<span class="nc" id="L897">        trello.on(&quot;/1/boards/board-1/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L898">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L899">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;no-prereq-card&quot;,&quot;name&quot;:&quot;Ready&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;ready&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0,&quot;comments&quot;:1},&quot;pos&quot;:1}
+                    ]
+                    &quot;&quot;&quot;);
+<span class="nc" id="L906">        });</span>
+<span class="nc" id="L907">        trello.on(&quot;/1/cards/no-prereq-card&quot;, exchange -&gt; {</span>
+<span class="nc" id="L908">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L909">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;no-prereq-card&quot;,&quot;name&quot;:&quot;Ready&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;ready&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[{&quot;id&quot;:&quot;waiting-comment&quot;,&quot;date&quot;:&quot;2026-02-25T20:11:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;%s\\n\\nOld waiting text&quot;},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;codex&quot;}}],&quot;badges&quot;:{&quot;checkItems&quot;:0,&quot;comments&quot;:1},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L914">                            .formatted(TrelloClient.WAITING_COMMENT_MARKER));</span>
+<span class="nc" id="L915">        });</span>
+<span class="nc" id="L916">        trello.on(&quot;/1/actions/waiting-comment/text&quot;, exchange -&gt; {</span>
+<span class="nc" id="L917">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L918">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment\&quot;}&quot;);</span>
+<span class="nc" id="L919">        });</span>
+<span class="nc" id="L920">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L921">        var config =</span>
+<span class="nc" id="L922">                config(&quot;input&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Todo&quot;), &quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)));</span>
+
+        // when
+<span class="nc" id="L925">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L928">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L929">            assertThat(card.blockedBy()).isEmpty();</span>
+<span class="nc" id="L930">            assertThat(card.prerequisiteProblems()).isEmpty();</span>
+<span class="nc" id="L931">        });</span>
+<span class="nc" id="L932">        assertThat(readRequests).anySatisfy(request -&gt; assertThat(request)</span>
+<span class="nc" id="L933">                .startsWith(&quot;GET /1/cards/no-prereq-card?&quot;)</span>
+<span class="nc" id="L934">                .contains(&quot;actions_limit=1000&quot;));</span>
+<span class="nc" id="L935">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L936">                .startsWith(&quot;PUT /1/actions/waiting-comment/text?&quot;));</span>
+<span class="nc" id="L937">        assertThat(queryValue(writeRequests.getFirst(), &quot;value&quot;))</span>
+<span class="nc" id="L938">                .contains(&quot;Status: prerequisites resolved&quot;)</span>
+<span class="nc" id="L939">                .doesNotStartWith(TrelloClient.WAITING_COMMENT_MARKER)</span>
+<span class="nc" id="L940">                .doesNotContain(TrelloClient.WAITING_COMMENT_MARKER);</span>
+<span class="nc" id="L941">        assertThat(writeRequests)</span>
+<span class="nc" id="L942">                .noneMatch(request -&gt; request.startsWith(&quot;POST /1/cards/no-prereq-card/actions/comments&quot;));</span>
+<span class="nc" id="L943">    }</span>
+
+    @Test
+    void fetchCandidateCardsUpdatesFirstManagedPrerequisiteStatusCommentWhenSeveralExist() {
+        // given
+<span class="nc" id="L948">        trello.remove(&quot;/1/boards/board-1/cards/open&quot;);</span>
+<span class="nc" id="L949">        trello.on(&quot;/1/boards/board-1/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L950">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L951">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;no-prereq-card&quot;,&quot;name&quot;:&quot;Ready&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;ready&quot;,&quot;shortUrl&quot;:&quot;u&quot;,&quot;url&quot;:&quot;u&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0,&quot;comments&quot;:2},&quot;pos&quot;:1}
+                    ]
+                    &quot;&quot;&quot;);
+<span class="nc" id="L958">        });</span>
+<span class="nc" id="L959">        trello.on(&quot;/1/cards/no-prereq-card&quot;, exchange -&gt; {</span>
+<span class="nc" id="L960">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L961">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;no-prereq-card&quot;,&quot;name&quot;:&quot;Ready&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;ready&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[
+                      {&quot;id&quot;:&quot;waiting-comment-newest&quot;,&quot;date&quot;:&quot;2026-02-25T20:12:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;%s\\n\\nNewest waiting text&quot;},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;codex&quot;}},
+                      {&quot;id&quot;:&quot;waiting-comment-older&quot;,&quot;date&quot;:&quot;2026-02-25T20:11:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;%s\\n\\nOlder waiting text&quot;},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;codex&quot;}}
+                    ],&quot;badges&quot;:{&quot;checkItems&quot;:0,&quot;comments&quot;:2},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L969">                            .formatted(</span>
+                                    TrelloClient.WAITING_COMMENT_MARKER,
+                                    TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER));
+<span class="nc" id="L972">        });</span>
+<span class="nc" id="L973">        trello.on(&quot;/1/actions/waiting-comment-newest/text&quot;, exchange -&gt; {</span>
+<span class="nc" id="L974">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L975">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment-newest\&quot;}&quot;);</span>
+<span class="nc" id="L976">        });</span>
+<span class="nc" id="L977">        trello.on(&quot;/1/actions/waiting-comment-older/text&quot;, exchange -&gt; {</span>
+<span class="nc" id="L978">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L979">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment-older\&quot;}&quot;);</span>
+<span class="nc" id="L980">        });</span>
+<span class="nc" id="L981">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L982">        var config =</span>
+<span class="nc" id="L983">                config(&quot;input&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Todo&quot;), &quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)));</span>
+
+        // when
+<span class="nc" id="L986">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L989">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L990">            assertThat(card.blockedBy()).isEmpty();</span>
+<span class="nc" id="L991">            assertThat(card.prerequisiteProblems()).isEmpty();</span>
+<span class="nc" id="L992">        });</span>
+<span class="nc" id="L993">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L994">                .startsWith(&quot;PUT /1/actions/waiting-comment-newest/text?&quot;));</span>
+<span class="nc" id="L995">        assertThat(writeRequests).noneMatch(request -&gt; request.startsWith(&quot;PUT /1/actions/waiting-comment-older/text&quot;));</span>
+<span class="nc" id="L996">    }</span>
+
+    @Test
+    void resolvedPrerequisiteStatusCommentIsUpdatedInPlaceWhenCardBecomesBlockedAgain() throws Exception {
+        // given
+<span class="nc" id="L1001">        configureDependencyBoard(&quot;Todo&quot;);</span>
+<span class="nc" id="L1002">        String resolvedStatus = String.join(</span>
+                &quot;\n&quot;,
+                TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER,
+                &quot;&quot;,
+                &quot;Status: prerequisites resolved.&quot;,
+                &quot;&quot;,
+                &quot;Symphony may start this Trello card when other dispatch rules allow.&quot;);
+<span class="nc" id="L1009">        configureWaitingCardWithManagedComment(resolvedStatus);</span>
+<span class="nc" id="L1010">        trello.on(&quot;/1/actions/waiting-comment/text&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1011">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1012">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment\&quot;}&quot;);</span>
+<span class="nc" id="L1013">        });</span>
+
+        // when
+<span class="nc" id="L1016">        List&lt;Card&gt; cards = fetchDependencyCandidates();</span>
+
+        // then
+<span class="nc" id="L1019">        assertWaitingBlockedWithoutProblems(cards);</span>
+<span class="nc" id="L1020">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1021">                .startsWith(&quot;PUT /1/actions/waiting-comment/text?&quot;));</span>
+<span class="nc" id="L1022">        assertThat(queryValue(writeRequests.getFirst(), &quot;value&quot;))</span>
+<span class="nc" id="L1023">                .startsWith(TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER)</span>
+<span class="nc" id="L1024">                .contains(&quot;Status: waiting for prerequisites&quot;)</span>
+<span class="nc" id="L1025">                .contains(&quot;TRELLO-PREREQ01&quot;);</span>
+<span class="nc" id="L1026">        assertThat(writeRequests).noneMatch(request -&gt; request.startsWith(&quot;POST /1/cards/waiting-card&quot;));</span>
+<span class="nc" id="L1027">    }</span>
+
+    @Test
+    void duplicatePrerequisiteReferencesAreDeduplicatedForLookupAndBlockerState() {
+        // given
+<span class="nc" id="L1032">        configureDependencyBoard(&quot;Todo&quot;);</span>
+<span class="nc" id="L1033">        trello.remove(&quot;/1/cards/waiting-card/checklists&quot;);</span>
+<span class="nc" id="L1034">        trello.on(&quot;/1/cards/waiting-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1035">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1036">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;checklist-1&quot;,&quot;name&quot;:&quot;Must finish first&quot;,&quot;checkItems&quot;:[
+                        {&quot;id&quot;:&quot;item-1&quot;,&quot;name&quot;:&quot;%s&quot;,&quot;state&quot;:&quot;incomplete&quot;},
+                        {&quot;id&quot;:&quot;item-2&quot;,&quot;name&quot;:&quot;PREREQ01&quot;,&quot;state&quot;:&quot;incomplete&quot;}
+                      ]}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1046">                            .formatted(cardUrl(&quot;PREREQ01&quot;)));</span>
+<span class="nc" id="L1047">        });</span>
+<span class="nc" id="L1048">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1049">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1050">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1053">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1056">        assertThat(cards).singleElement().satisfies(card -&gt; assertThat(card.blockedBy())</span>
+<span class="nc" id="L1057">                .singleElement()</span>
+<span class="nc" id="L1058">                .satisfies(blocker -&gt; assertThat(blocker.identifier()).isEqualTo(&quot;TRELLO-PREREQ01&quot;)));</span>
+<span class="nc" id="L1059">        assertThat(readRequests)</span>
+<span class="nc" id="L1060">                .filteredOn(request -&gt; request.startsWith(&quot;GET /1/cards/PREREQ01?&quot;))</span>
+<span class="nc" id="L1061">                .hasSize(1);</span>
+<span class="nc" id="L1062">    }</span>
+
+    @Test
+    void missingPrerequisiteUnchecksCompletedItemAndShowsWaitingGuidance() {
+        // given
+<span class="nc" id="L1067">        configureDependencyBoard(&quot;Todo&quot;, &quot;complete&quot;);</span>
+<span class="nc" id="L1068">        trello.remove(&quot;/1/cards/PREREQ01&quot;);</span>
+<span class="nc" id="L1069">        trello.on(&quot;/1/cards/PREREQ01&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1070">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1071">            respond(exchange, 404, &quot;{}&quot;);</span>
+<span class="nc" id="L1072">        });</span>
+<span class="nc" id="L1073">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1074">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1075">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1078">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1081">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1082">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.identifier())</span>
+<span class="nc" id="L1083">                    .isEqualTo(&quot;Missing prerequisite&quot;));</span>
+<span class="nc" id="L1084">            assertThat(card.prerequisiteProblems()).singleElement().satisfies(problem -&gt; assertThat(problem.code())</span>
+<span class="nc" id="L1085">                    .isEqualTo(&quot;trello_prerequisite_missing&quot;));</span>
+<span class="nc" id="L1086">        });</span>
+<span class="nc" id="L1087">        assertThat(writeRequests)</span>
+<span class="nc" id="L1088">                .anySatisfy(request -&gt;</span>
+<span class="nc" id="L1089">                        assertThat(request).isEqualTo(&quot;PUT /1/cards/waiting-card/checkItem/item-1?state=incomplete&quot;))</span>
+<span class="nc" id="L1090">                .anySatisfy(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1091">                        .startsWith(&quot;POST /1/cards/waiting-card/actions/comments?&quot;)</span>
+<span class="nc" id="L1092">                        .contains(&quot;Missing+prerequisite&quot;));</span>
+<span class="nc" id="L1093">    }</span>
+
+    @Test
+    void selfPrerequisiteBlocksWithVisibleGuidance() {
+        // given
+<span class="nc" id="L1098">        configureDependencyBoard(&quot;Todo&quot;);</span>
+<span class="nc" id="L1099">        trello.remove(&quot;/1/cards/waiting-card/checklists&quot;);</span>
+<span class="nc" id="L1100">        trello.on(&quot;/1/cards/waiting-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1101">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1102">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;checklist-1&quot;,&quot;name&quot;:&quot;Must finish first&quot;,&quot;checkItems&quot;:[{&quot;id&quot;:&quot;item-1&quot;,&quot;name&quot;:&quot;%s&quot;,&quot;state&quot;:&quot;incomplete&quot;}]}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1109">                            .formatted(cardUrl(&quot;WAITING1&quot;)));</span>
+<span class="nc" id="L1110">        });</span>
+<span class="nc" id="L1111">        trello.on(&quot;/1/cards/WAITING1&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1112">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1113">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;waiting-card&quot;,&quot;name&quot;:&quot;Waiting&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;dep-todo&quot;,&quot;idBoard&quot;:&quot;dependency-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;WAITING1&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L1118">                            .formatted(cardUrl(&quot;WAITING1&quot;), cardUrl(&quot;WAITING1&quot;)));</span>
+<span class="nc" id="L1119">        });</span>
+<span class="nc" id="L1120">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1121">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1122">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1125">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1128">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1129">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.identifier())</span>
+<span class="nc" id="L1130">                    .isEqualTo(&quot;Self prerequisite&quot;));</span>
+<span class="nc" id="L1131">            assertThat(card.prerequisiteProblems()).singleElement().satisfies(problem -&gt; assertThat(problem.code())</span>
+<span class="nc" id="L1132">                    .isEqualTo(&quot;trello_prerequisite_self_reference&quot;));</span>
+<span class="nc" id="L1133">        });</span>
+<span class="nc" id="L1134">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1135">                .startsWith(&quot;POST /1/cards/waiting-card/actions/comments?&quot;)</span>
+<span class="nc" id="L1136">                .contains(&quot;cannot+use+itself+as+a+prerequisite&quot;));</span>
+<span class="nc" id="L1137">    }</span>
+
+    @Test
+    void terminalPrerequisiteSyncsChecklistItemCompleteWithoutBlockingCandidate() {
+        // given
+<span class="nc" id="L1142">        configureDependencyBoard(&quot;Done&quot;);</span>
+<span class="nc" id="L1143">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1144">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1145">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1148">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1151">        assertDonePrerequisiteWithoutProblems(cards);</span>
+<span class="nc" id="L1152">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1153">                .isEqualTo(&quot;PUT /1/cards/waiting-card/checkItem/item-1?state=complete&quot;));</span>
+<span class="nc" id="L1154">    }</span>
+
+    @Test
+    void ambiguousPrerequisiteChecklistBlocksCandidateWithVisibleGuidance() {
+        // given
+<span class="nc" id="L1159">        configureAmbiguousPrerequisiteBoard();</span>
+<span class="nc" id="L1160">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1161">        var config = config(&quot;ambiguous-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1162">                .withResolvedBoardId(&quot;ambiguous-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1165">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1168">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1169">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.identifier())</span>
+<span class="nc" id="L1170">                    .isEqualTo(&quot;Ambiguous prerequisite checklist&quot;));</span>
+<span class="nc" id="L1171">            assertThat(card.prerequisiteProblems()).singleElement().satisfies(problem -&gt; assertThat(problem.code())</span>
+<span class="nc" id="L1172">                    .isEqualTo(TrelloChecklistClassifier.AMBIGUOUS_PREREQUISITE_CODE));</span>
+<span class="nc" id="L1173">        });</span>
+<span class="nc" id="L1174">        assertThat(readRequests).noneMatch(request -&gt; request.startsWith(&quot;GET /1/cards/AMBIG001?&quot;));</span>
+<span class="nc" id="L1175">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1176">                .startsWith(&quot;POST /1/cards/ambiguous-card/actions/comments?&quot;)</span>
+<span class="nc" id="L1177">                .contains(&quot;Checklist+contains+a+Trello+card+reference&quot;)</span>
+<span class="nc" id="L1178">                .contains(&quot;Markdown+links&quot;));</span>
+<span class="nc" id="L1179">    }</span>
+
+    @Test
+    void mixedExactAndProseChecklistBlocksWithoutResolvingOrSyncingExactItem() {
+        // given
+<span class="nc" id="L1184">        configureMixedPrerequisiteBoard(List.of(</span>
+                &quot;&quot;&quot;
+                {&quot;id&quot;:&quot;item-exact&quot;,&quot;name&quot;:&quot;%s&quot;,&quot;state&quot;:&quot;incomplete&quot;}
+                &quot;&quot;&quot;
+<span class="nc" id="L1188">                        .formatted(cardUrl(&quot;MIXED01&quot;)),</span>
+                &quot;&quot;&quot;
+                {&quot;id&quot;:&quot;item-note&quot;,&quot;name&quot;:&quot;Update docs&quot;,&quot;state&quot;:&quot;incomplete&quot;}
+                &quot;&quot;&quot;));
+<span class="nc" id="L1192">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1193">        var config = config(&quot;mixed-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1194">                .withResolvedBoardId(&quot;mixed-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1197">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1200">        assertMixedChecklistBlocksWithoutSchedulerLookupOrSync(cards, &quot;MIXED01&quot;);</span>
+<span class="nc" id="L1201">    }</span>
+
+    @Test
+    void mixedExactAndMarkdownChecklistBlocksWithoutResolvingOrSyncingExactItem() {
+        // given
+<span class="nc" id="L1206">        configureMixedPrerequisiteBoard(List.of(</span>
+                &quot;&quot;&quot;
+                {&quot;id&quot;:&quot;item-exact&quot;,&quot;name&quot;:&quot;%s&quot;,&quot;state&quot;:&quot;incomplete&quot;}
+                &quot;&quot;&quot;
+<span class="nc" id="L1210">                        .formatted(cardUrl(&quot;MIXED02&quot;)),</span>
+                &quot;&quot;&quot;
+                {&quot;id&quot;:&quot;item-markdown&quot;,&quot;name&quot;:&quot;related to [the card](%s)&quot;,&quot;state&quot;:&quot;incomplete&quot;}
+                &quot;&quot;&quot;
+<span class="nc" id="L1214">                        .formatted(cardUrl(&quot;CTXMARK2&quot;))));</span>
+<span class="nc" id="L1215">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1216">        var config = config(&quot;mixed-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1217">                .withResolvedBoardId(&quot;mixed-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1220">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1223">        assertMixedChecklistBlocksWithoutSchedulerLookupOrSync(cards, &quot;MIXED02&quot;);</span>
+<span class="nc" id="L1224">        assertThat(readRequests).noneMatch(request -&gt; request.startsWith(&quot;GET /1/cards/CTXMARK2?&quot;));</span>
+<span class="nc" id="L1225">    }</span>
+
+    @Test
+    void prerequisiteChecklistSyncFailureKeepsCardVisibleAsWaiting() {
+        // given
+<span class="nc" id="L1230">        configureDependencyBoard(&quot;Done&quot;);</span>
+<span class="nc" id="L1231">        trello.remove(&quot;/1/cards/waiting-card/checkItem/item-1&quot;);</span>
+<span class="nc" id="L1232">        trello.on(&quot;/1/cards/waiting-card/checkItem/item-1&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1233">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1234">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L1235">        });</span>
+<span class="nc" id="L1236">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1237">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1238">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+
+        // when
+<span class="nc" id="L1241">        List&lt;Card&gt; cards = client.fetchCandidateCards(config);</span>
+
+        // then
+<span class="nc" id="L1244">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1245">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.state())</span>
+<span class="nc" id="L1246">                    .isEqualTo(&quot;Done&quot;));</span>
+<span class="nc" id="L1247">            assertThat(card.prerequisiteProblems()).singleElement().satisfies(problem -&gt; assertThat(problem.code())</span>
+<span class="nc" id="L1248">                    .isEqualTo(&quot;trello_prerequisite_checklist_sync_failed&quot;));</span>
+<span class="nc" id="L1249">        });</span>
+<span class="nc" id="L1250">        assertThat(writeRequests)</span>
+<span class="nc" id="L1251">                .anySatisfy(request -&gt;</span>
+<span class="nc" id="L1252">                        assertThat(request).isEqualTo(&quot;PUT /1/cards/waiting-card/checkItem/item-1?state=complete&quot;))</span>
+<span class="nc" id="L1253">                .anySatisfy(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1254">                        .startsWith(&quot;POST /1/cards/waiting-card/actions/comments?&quot;)</span>
+<span class="nc" id="L1255">                        .contains(&quot;Could+not+update+a+prerequisite+checklist+item&quot;));</span>
+<span class="nc" id="L1256">    }</span>
+
+    @Test
+    void resolveBoardIdRejectsClosedBoard() {
+        // given
+<span class="nc" id="L1261">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1262">        var config = config(&quot;closed-input&quot;, Map.of());</span>
+
+        // when
+<span class="nc" id="L1265">        Throwable thrown = catchThrowable(() -&gt; client.resolveBoardId(config));</span>
+
+        // then
+<span class="nc" id="L1268">        assertThat(thrown).isInstanceOfSatisfying(TrelloException.class, exception -&gt; assertThat(exception.code())</span>
+<span class="nc" id="L1269">                .isEqualTo(&quot;trello_board_closed&quot;));</span>
+<span class="nc" id="L1270">    }</span>
+
+    @Test
+    void activeTerminalAndDispatchOrderingHonorListConfiguration() {
+        // given
+<span class="nc" id="L1275">        var config = config(</span>
+<span class="nc" id="L1276">                &quot;board-1&quot;, Map.of(&quot;active_list_ids&quot;, List.of(&quot;ready&quot;, &quot;review&quot;), &quot;terminal_list_ids&quot;, List.of(&quot;done&quot;)));</span>
+<span class="nc" id="L1277">        Card lowPriorityReview = card(&quot;card-3&quot;, &quot;TRELLO-c&quot;, &quot;Review&quot;, &quot;review&quot;, 2, BigDecimal.ONE);</span>
+<span class="nc" id="L1278">        Card highPriorityReview = card(&quot;card-1&quot;, &quot;TRELLO-a&quot;, &quot;Review&quot;, &quot;review&quot;, 1, BigDecimal.TEN);</span>
+<span class="nc" id="L1279">        Card highPriorityReady = card(&quot;card-2&quot;, &quot;TRELLO-b&quot;, &quot;Ready&quot;, &quot;ready&quot;, 1, BigDecimal.ZERO);</span>
+<span class="nc" id="L1280">        Card done = card(&quot;card-4&quot;, &quot;TRELLO-d&quot;, &quot;Done&quot;, &quot;done&quot;, null, BigDecimal.ONE);</span>
+<span class="nc" id="L1281">        var outOfScope = new Card(</span>
+                &quot;card-5&quot;,
+                &quot;TRELLO-e&quot;,
+                &quot;Out of scope&quot;,
+                &quot;&quot;,
+                null,
+                &quot;Ready&quot;,
+                &quot;list&quot;,
+                &quot;ready&quot;,
+                &quot;Ready&quot;,
+<span class="nc" id="L1291">                false,</span>
+                &quot;other-board&quot;,
+<span class="nc" id="L1293">                false,</span>
+                false,
+                null,
+                &quot;e&quot;,
+                null,
+                null,
+                null,
+<span class="nc" id="L1300">                List.of(),</span>
+<span class="nc" id="L1301">                List.of(),</span>
+<span class="nc" id="L1302">                List.of(),</span>
+<span class="nc" id="L1303">                List.of(),</span>
+<span class="nc" id="L1304">                List.of(),</span>
+<span class="nc" id="L1305">                List.of(),</span>
+<span class="nc" id="L1306">                List.of(),</span>
+<span class="nc" id="L1307">                List.of(),</span>
+<span class="nc" id="L1308">                List.of(),</span>
+<span class="nc" id="L1309">                Instant.parse(&quot;2026-01-04T00:00:00Z&quot;),</span>
+<span class="nc" id="L1310">                Instant.parse(&quot;2026-01-04T00:00:00Z&quot;),</span>
+                null,
+                null,
+                BigDecimal.ONE);
+
+        // when
+<span class="nc" id="L1316">        List&lt;Card&gt; sorted = List.of(lowPriorityReview, highPriorityReady, highPriorityReview).stream()</span>
+<span class="nc" id="L1317">                .sorted(TrelloClient.dispatchComparator(config))</span>
+<span class="nc" id="L1318">                .toList();</span>
+
+        // then
+<span class="nc" id="L1321">        assertThat(TrelloClient.isActive(highPriorityReady, config))</span>
+<span class="nc" id="L1322">                .as(&quot;the high-priority ready card is active&quot;)</span>
+<span class="nc" id="L1323">                .isTrue();</span>
+<span class="nc" id="L1324">        assertThat(TrelloClient.isTerminal(done, config))</span>
+<span class="nc" id="L1325">                .as(&quot;the done card is terminal&quot;)</span>
+<span class="nc" id="L1326">                .isTrue();</span>
+<span class="nc" id="L1327">        assertThat(TrelloClient.isActive(done, config))</span>
+<span class="nc" id="L1328">                .as(&quot;the done card is not active&quot;)</span>
+<span class="nc" id="L1329">                .isFalse();</span>
+<span class="nc" id="L1330">        assertThat(TrelloClient.isActive(outOfScope, config))</span>
+<span class="nc" id="L1331">                .as(&quot;the out-of-scope card is not active&quot;)</span>
+<span class="nc" id="L1332">                .isFalse();</span>
+<span class="nc" id="L1333">        assertThat(sorted).extracting(Card::identifier).containsExactly(&quot;TRELLO-a&quot;, &quot;TRELLO-c&quot;, &quot;TRELLO-b&quot;);</span>
+<span class="nc" id="L1334">    }</span>
+
+    @Test
+    void dispatchOrderingPrioritizesLaterConfiguredActiveStatesBeforePriority() {
+        // given
+<span class="nc" id="L1339">        var config = config(&quot;board-1&quot;, Map.of(&quot;active_states&quot;, List.of(&quot;Ready for Codex&quot;, &quot;In Progress&quot;, &quot;Merging&quot;)));</span>
+<span class="nc" id="L1340">        Card highPriorityReady = card(&quot;card-1&quot;, &quot;TRELLO-a&quot;, &quot;Ready for Codex&quot;, null, 1, BigDecimal.ZERO);</span>
+<span class="nc" id="L1341">        Card lowPriorityMerging = card(&quot;card-2&quot;, &quot;TRELLO-b&quot;, &quot;Merging&quot;, null, 3, BigDecimal.TEN);</span>
+<span class="nc" id="L1342">        Card inProgress = card(&quot;card-3&quot;, &quot;TRELLO-c&quot;, &quot;In Progress&quot;, null, 2, BigDecimal.ONE);</span>
+<span class="nc" id="L1343">        Card sameLaneHigherPriority = card(&quot;card-4&quot;, &quot;TRELLO-d&quot;, &quot;Merging&quot;, null, 1, BigDecimal.TEN);</span>
+
+        // when
+<span class="nc" id="L1346">        List&lt;Card&gt; sorted = List.of(highPriorityReady, lowPriorityMerging, inProgress, sameLaneHigherPriority).stream()</span>
+<span class="nc" id="L1347">                .sorted(TrelloClient.dispatchComparator(config))</span>
+<span class="nc" id="L1348">                .toList();</span>
+
+        // then
+<span class="nc" id="L1351">        assertThat(sorted).extracting(Card::identifier).containsExactly(&quot;TRELLO-d&quot;, &quot;TRELLO-b&quot;, &quot;TRELLO-c&quot;, &quot;TRELLO-a&quot;);</span>
+<span class="nc" id="L1352">    }</span>
+
+    @MethodSource(&quot;specialTerminalCards&quot;)
+    @ParameterizedTest(name = &quot;{0} remains terminal even with terminal list IDs configured&quot;)
+    void terminalListIdsDoNotOverrideSpecialTerminalStates(String displayName, Card card) {
+        // given
+<span class="nc" id="L1358">        var config = config(&quot;board-1&quot;, Map.of(&quot;terminal_list_ids&quot;, List.of(&quot;done&quot;)));</span>
+
+        // when
+<span class="nc" id="L1361">        boolean terminal = TrelloClient.isTerminal(card, config);</span>
+
+        // then
+<span class="nc" id="L1364">        assertThat(terminal).as(displayName).isTrue();</span>
+<span class="nc" id="L1365">    }</span>
+
+    private EffectiveConfig config(String boardId, Map&lt;String, Object&gt; trackerOverrides) {
+<span class="nc" id="L1368">        Map&lt;String, Object&gt; tracker = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L1369">        tracker.put(&quot;kind&quot;, &quot;trello&quot;);</span>
+<span class="nc" id="L1370">        tracker.put(&quot;endpoint&quot;, trello.endpoint());</span>
+<span class="nc" id="L1371">        tracker.put(&quot;api_key&quot;, &quot;key&quot;);</span>
+<span class="nc" id="L1372">        tracker.put(&quot;api_token&quot;, &quot;token&quot;);</span>
+<span class="nc" id="L1373">        tracker.put(&quot;board_id&quot;, boardId);</span>
+<span class="nc" id="L1374">        tracker.put(&quot;active_states&quot;, List.of(&quot;Todo&quot;, &quot;Review&quot;, &quot;Ready&quot;));</span>
+<span class="nc" id="L1375">        tracker.put(&quot;terminal_states&quot;, List.of(&quot;Done&quot;, &quot;Archived&quot;, &quot;ArchivedList&quot;, &quot;ArchivedBoard&quot;, &quot;Deleted&quot;));</span>
+<span class="nc" id="L1376">        tracker.put(&quot;priority_labels&quot;, Map.of(&quot;P1&quot;, 1, &quot;P2&quot;, 2));</span>
+<span class="nc" id="L1377">        tracker.putAll(trackerOverrides);</span>
+<span class="nc" id="L1378">        return new ConfigResolver()</span>
+<span class="nc" id="L1379">                .resolve(new WorkflowDefinition(tempDir.resolve(&quot;WORKFLOW.md&quot;), Map.of(&quot;tracker&quot;, tracker), &quot;&quot;))</span>
+<span class="nc bnc" id="L1380" title="All 2 branches missed.">                .withResolvedBoardId(boardId.equals(&quot;input&quot;) ? &quot;board-1&quot; : boardId);</span>
+    }
+
+    private void configureMultiQueueBoard() {
+<span class="nc" id="L1384">        trello.remove(&quot;/1/boards/board-1/lists&quot;);</span>
+<span class="nc" id="L1385">        trello.on(</span>
+                &quot;/1/boards/board-1/lists&quot;,
+<span class="nc" id="L1387">                exchange -&gt; respond(</span>
+                        exchange,
+<span class="nc" id="L1389">                        listsJson(</span>
+<span class="nc" id="L1390">                                trelloList(&quot;list-normal&quot;, &quot;Normal Queue&quot;, 1),</span>
+<span class="nc" id="L1391">                                trelloList(&quot;list-priority&quot;, &quot;Priority Queue&quot;, 2),</span>
+<span class="nc" id="L1392">                                trelloList(&quot;list-progress&quot;, &quot;In Progress&quot;, 3))));</span>
+<span class="nc" id="L1393">    }</span>
+
+    private void configureMultiQueueBoardWithoutNormalQueue() {
+<span class="nc" id="L1396">        trello.remove(&quot;/1/boards/board-1/lists&quot;);</span>
+<span class="nc" id="L1397">        trello.on(</span>
+                &quot;/1/boards/board-1/lists&quot;,
+<span class="nc" id="L1399">                exchange -&gt; respond(</span>
+                        exchange,
+<span class="nc" id="L1401">                        listsJson(</span>
+<span class="nc" id="L1402">                                trelloList(&quot;list-priority&quot;, &quot;Priority Queue&quot;, 2),</span>
+<span class="nc" id="L1403">                                trelloList(&quot;list-progress&quot;, &quot;In Progress&quot;, 3))));</span>
+<span class="nc" id="L1404">    }</span>
+
+    private void configureDependencyBoard(String prerequisiteState) {
+<span class="nc" id="L1407">        configureDependencyBoard(prerequisiteState, &quot;incomplete&quot;);</span>
+<span class="nc" id="L1408">    }</span>
+
+    private void configureDependencyBoard(String prerequisiteState, String checkItemState) {
+<span class="nc bnc" id="L1411" title="All 2 branches missed.">        String prerequisiteList = &quot;Done&quot;.equals(prerequisiteState) ? &quot;dep-done&quot; : &quot;dep-todo&quot;;</span>
+<span class="nc" id="L1412">        trello.on(</span>
+                &quot;/1/boards/dependency-input&quot;,
+<span class="nc" id="L1414">                exchange -&gt; respond(exchange, boardJson(&quot;dependency-board&quot;, &quot;Dependency board&quot;, false)));</span>
+<span class="nc" id="L1415">        trello.on(</span>
+                &quot;/1/boards/dependency-board/lists&quot;,
+<span class="nc" id="L1417">                exchange -&gt; respond(</span>
+<span class="nc" id="L1418">                        exchange, listsJson(trelloList(&quot;dep-todo&quot;, &quot;Todo&quot;, 1), trelloList(&quot;dep-done&quot;, &quot;Done&quot;, 2))));</span>
+<span class="nc" id="L1419">        trello.on(&quot;/1/boards/dependency-board/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1420">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1421">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;waiting-card&quot;,&quot;name&quot;:&quot;Waiting&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;dep-todo&quot;,&quot;idBoard&quot;:&quot;dependency-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;WAITING1&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1428">                            .formatted(cardUrl(&quot;WAITING1&quot;), cardUrl(&quot;WAITING1&quot;)));</span>
+<span class="nc" id="L1429">        });</span>
+<span class="nc" id="L1430">        trello.on(&quot;/1/cards/waiting-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1431">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1432">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;checklist-1&quot;,&quot;name&quot;:&quot;Must finish first&quot;,&quot;checkItems&quot;:[{&quot;id&quot;:&quot;item-1&quot;,&quot;name&quot;:&quot;%s&quot;,&quot;state&quot;:&quot;%s&quot;}]}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1439">                            .formatted(cardUrl(&quot;PREREQ01&quot;), checkItemState));</span>
+<span class="nc" id="L1440">        });</span>
+<span class="nc" id="L1441">        trello.on(&quot;/1/cards/PREREQ01&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1442">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1443">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;prereq-card&quot;,&quot;name&quot;:&quot;Prerequisite&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;%s&quot;,&quot;idBoard&quot;:&quot;dependency-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;PREREQ01&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:0},&quot;pos&quot;:2}
+                    &quot;&quot;&quot;
+<span class="nc" id="L1448">                            .formatted(prerequisiteList, cardUrl(&quot;PREREQ01&quot;), cardUrl(&quot;PREREQ01&quot;)));</span>
+<span class="nc" id="L1449">        });</span>
+<span class="nc" id="L1450">        trello.on(&quot;/1/cards/waiting-card&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1451">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1452">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;waiting-card&quot;,&quot;name&quot;:&quot;Waiting&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;dep-todo&quot;,&quot;idBoard&quot;:&quot;dependency-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;WAITING1&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L1457">                            .formatted(cardUrl(&quot;WAITING1&quot;), cardUrl(&quot;WAITING1&quot;)));</span>
+<span class="nc" id="L1458">        });</span>
+<span class="nc" id="L1459">        trello.on(&quot;/1/cards/waiting-card/actions/comments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1460">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1461">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment\&quot;}&quot;);</span>
+<span class="nc" id="L1462">        });</span>
+<span class="nc" id="L1463">        trello.on(&quot;/1/cards/waiting-card/checkItem/item-1&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1464">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1465">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;item-1\&quot;}&quot;);</span>
+<span class="nc" id="L1466">        });</span>
+<span class="nc" id="L1467">    }</span>
+
+    private void configureAmbiguousPrerequisiteBoard() {
+<span class="nc" id="L1470">        trello.on(</span>
+                &quot;/1/boards/ambiguous-input&quot;,
+<span class="nc" id="L1472">                exchange -&gt; respond(exchange, boardJson(&quot;ambiguous-board&quot;, &quot;Ambiguous board&quot;, false)));</span>
+<span class="nc" id="L1473">        trello.on(</span>
+                &quot;/1/boards/ambiguous-board/lists&quot;,
+<span class="nc" id="L1475">                exchange -&gt; respond(</span>
+                        exchange,
+<span class="nc" id="L1477">                        listsJson(trelloList(&quot;ambiguous-todo&quot;, &quot;Todo&quot;, 1), trelloList(&quot;ambiguous-done&quot;, &quot;Done&quot;, 2))));</span>
+<span class="nc" id="L1478">        trello.on(&quot;/1/boards/ambiguous-board/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1479">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1480">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;ambiguous-card&quot;,&quot;name&quot;:&quot;Ambiguous&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;ambiguous-todo&quot;,&quot;idBoard&quot;:&quot;ambiguous-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;AMBIGWAIT&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1487">                            .formatted(cardUrl(&quot;AMBIGWAIT&quot;), cardUrl(&quot;AMBIGWAIT&quot;)));</span>
+<span class="nc" id="L1488">        });</span>
+<span class="nc" id="L1489">        trello.on(&quot;/1/cards/ambiguous-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1490">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1491">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;ambiguous-checklist&quot;,&quot;name&quot;:&quot;Must finish first&quot;,&quot;checkItems&quot;:[{&quot;id&quot;:&quot;ambiguous-item&quot;,&quot;name&quot;:&quot;Wait for %s&quot;,&quot;state&quot;:&quot;incomplete&quot;}]}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1498">                            .formatted(cardUrl(&quot;AMBIG001&quot;)));</span>
+<span class="nc" id="L1499">        });</span>
+<span class="nc" id="L1500">        trello.on(&quot;/1/cards/ambiguous-card&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1501">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1502">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;ambiguous-card&quot;,&quot;name&quot;:&quot;Ambiguous&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;ambiguous-todo&quot;,&quot;idBoard&quot;:&quot;ambiguous-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;AMBIGWAIT&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L1507">                            .formatted(cardUrl(&quot;AMBIGWAIT&quot;), cardUrl(&quot;AMBIGWAIT&quot;)));</span>
+<span class="nc" id="L1508">        });</span>
+<span class="nc" id="L1509">        trello.on(&quot;/1/cards/ambiguous-card/actions/comments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1510">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1511">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment\&quot;}&quot;);</span>
+<span class="nc" id="L1512">        });</span>
+<span class="nc" id="L1513">    }</span>
+
+    private void configureMixedPrerequisiteBoard(List&lt;String&gt; checkItems) {
+<span class="nc" id="L1516">        trello.on(</span>
+<span class="nc" id="L1517">                &quot;/1/boards/mixed-input&quot;, exchange -&gt; respond(exchange, boardJson(&quot;mixed-board&quot;, &quot;Mixed board&quot;, false)));</span>
+<span class="nc" id="L1518">        trello.on(</span>
+                &quot;/1/boards/mixed-board/lists&quot;,
+<span class="nc" id="L1520">                exchange -&gt; respond(</span>
+<span class="nc" id="L1521">                        exchange, listsJson(trelloList(&quot;mixed-todo&quot;, &quot;Todo&quot;, 1), trelloList(&quot;mixed-done&quot;, &quot;Done&quot;, 2))));</span>
+<span class="nc" id="L1522">        trello.on(&quot;/1/boards/mixed-board/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1523">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1524">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;mixed-card&quot;,&quot;name&quot;:&quot;Mixed&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;mixed-todo&quot;,&quot;idBoard&quot;:&quot;mixed-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;MIXWAIT&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:2},&quot;pos&quot;:1}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1531">                            .formatted(cardUrl(&quot;MIXWAIT&quot;), cardUrl(&quot;MIXWAIT&quot;)));</span>
+<span class="nc" id="L1532">        });</span>
+<span class="nc" id="L1533">        trello.on(&quot;/1/cards/mixed-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1534">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1535">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    [
+                      {&quot;id&quot;:&quot;mixed-checklist&quot;,&quot;name&quot;:&quot;Must finish first&quot;,&quot;checkItems&quot;:[%s]}
+                    ]
+                    &quot;&quot;&quot;
+<span class="nc" id="L1542">                            .formatted(String.join(&quot;,&quot;, checkItems)));</span>
+<span class="nc" id="L1543">        });</span>
+<span class="nc" id="L1544">        trello.on(&quot;/1/cards/MIXED01&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1545">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1546">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L1547">        });</span>
+<span class="nc" id="L1548">        trello.on(&quot;/1/cards/MIXED02&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1549">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1550">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L1551">        });</span>
+<span class="nc" id="L1552">        trello.on(&quot;/1/cards/CTXMARK2&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1553">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1554">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L1555">        });</span>
+<span class="nc" id="L1556">        trello.on(&quot;/1/cards/mixed-card&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1557">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1558">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;mixed-card&quot;,&quot;name&quot;:&quot;Mixed&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;mixed-todo&quot;,&quot;idBoard&quot;:&quot;mixed-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;MIXWAIT&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:2},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L1563">                            .formatted(cardUrl(&quot;MIXWAIT&quot;), cardUrl(&quot;MIXWAIT&quot;)));</span>
+<span class="nc" id="L1564">        });</span>
+<span class="nc" id="L1565">        trello.on(&quot;/1/cards/mixed-card/actions/comments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1566">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1567">            respond(exchange, &quot;{\&quot;id\&quot;:\&quot;waiting-comment\&quot;}&quot;);</span>
+<span class="nc" id="L1568">        });</span>
+<span class="nc" id="L1569">        trello.on(&quot;/1/cards/mixed-card/checkItem/item-exact&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1570">            writeRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1571">            respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L1572">        });</span>
+<span class="nc" id="L1573">    }</span>
+
+    private static void assertDonePrerequisiteWithoutProblems(List&lt;Card&gt; cards) {
+<span class="nc" id="L1576">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1577">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.state())</span>
+<span class="nc" id="L1578">                    .isEqualTo(&quot;Done&quot;));</span>
+<span class="nc" id="L1579">            assertThat(card.prerequisiteProblems()).isEmpty();</span>
+<span class="nc" id="L1580">        });</span>
+<span class="nc" id="L1581">    }</span>
+
+    private static HttpResponse&lt;String&gt; responseWithRetryAfter(String value) {
+<span class="nc" id="L1584">        HttpResponse&lt;String&gt; response = mock();</span>
+<span class="nc" id="L1585">        when(response.headers())</span>
+<span class="nc" id="L1586">                .thenReturn(HttpHeaders.of(Map.of(&quot;Retry-After&quot;, List.of(value)), (name, headerValue) -&gt; true));</span>
+<span class="nc" id="L1587">        return response;</span>
+    }
+
+    private List&lt;Card&gt; fetchDependencyCandidates() {
+<span class="nc" id="L1591">        var client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L1592">        var config = config(&quot;dependency-input&quot;, Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))</span>
+<span class="nc" id="L1593">                .withResolvedBoardId(&quot;dependency-board&quot;);</span>
+<span class="nc" id="L1594">        return client.fetchCandidateCards(config);</span>
+    }
+
+    private void configureWaitingCardWithManagedComment(String text) throws Exception {
+<span class="nc" id="L1598">        String textJson = new ObjectMapper().writeValueAsString(text);</span>
+<span class="nc" id="L1599">        trello.remove(&quot;/1/cards/waiting-card&quot;);</span>
+<span class="nc" id="L1600">        trello.on(&quot;/1/cards/waiting-card&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1601">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1602">            respond(</span>
+                    exchange,
+                    &quot;&quot;&quot;
+                    {&quot;id&quot;:&quot;waiting-card&quot;,&quot;name&quot;:&quot;Waiting&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;dep-todo&quot;,&quot;idBoard&quot;:&quot;dependency-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;WAITING1&quot;,&quot;shortUrl&quot;:&quot;%s&quot;,&quot;url&quot;:&quot;%s&quot;,&quot;labels&quot;:[],&quot;actions&quot;:[{&quot;id&quot;:&quot;waiting-comment&quot;,&quot;date&quot;:&quot;2026-02-25T20:11:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:%s},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;codex&quot;}}],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+                    &quot;&quot;&quot;
+<span class="nc" id="L1607">                            .formatted(cardUrl(&quot;WAITING1&quot;), cardUrl(&quot;WAITING1&quot;), textJson));</span>
+<span class="nc" id="L1608">        });</span>
+<span class="nc" id="L1609">    }</span>
+
+    private void configureWriteCardChecklists(String response) {
+<span class="nc" id="L1612">        trello.remove(&quot;/1/cards/write-card/checklists&quot;);</span>
+<span class="nc" id="L1613">        trello.on(&quot;/1/cards/write-card/checklists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L1614">            readRequests.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L1615">            assertThat(exchange.getRequestMethod()).isEqualTo(&quot;GET&quot;);</span>
+<span class="nc" id="L1616">            respond(exchange, response);</span>
+<span class="nc" id="L1617">        });</span>
+<span class="nc" id="L1618">    }</span>
+
+    private void assertWriteCardChecklistsRead() {
+<span class="nc" id="L1621">        assertThat(readRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1622">                .startsWith(&quot;GET /1/cards/write-card/checklists?&quot;)</span>
+<span class="nc" id="L1623">                .contains(&quot;fields=id%2Cname&quot;)</span>
+<span class="nc" id="L1624">                .contains(&quot;checkItem_fields=id%2Cname%2Cstate&quot;));</span>
+<span class="nc" id="L1625">    }</span>
+
+    private static void assertWaitingBlockedWithoutProblems(List&lt;Card&gt; cards) {
+<span class="nc" id="L1628">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1629">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.identifier())</span>
+<span class="nc" id="L1630">                    .isEqualTo(&quot;TRELLO-PREREQ01&quot;));</span>
+<span class="nc" id="L1631">            assertThat(card.prerequisiteProblems()).isEmpty();</span>
+<span class="nc" id="L1632">        });</span>
+<span class="nc" id="L1633">    }</span>
+
+    private void assertMixedChecklistBlocksWithoutSchedulerLookupOrSync(List&lt;Card&gt; cards, String exactLookupId) {
+<span class="nc" id="L1636">        assertThat(cards).singleElement().satisfies(card -&gt; {</span>
+<span class="nc" id="L1637">            assertThat(card.blockedBy()).singleElement().satisfies(blocker -&gt; assertThat(blocker.identifier())</span>
+<span class="nc" id="L1638">                    .isEqualTo(&quot;Ambiguous prerequisite checklist&quot;));</span>
+<span class="nc" id="L1639">            assertThat(card.prerequisiteProblems()).singleElement().satisfies(problem -&gt; assertThat(problem.code())</span>
+<span class="nc" id="L1640">                    .isEqualTo(TrelloChecklistClassifier.MIXED_PREREQUISITE_CODE));</span>
+<span class="nc" id="L1641">        });</span>
+<span class="nc" id="L1642">        assertThat(readRequests).noneMatch(request -&gt; request.startsWith(&quot;GET /1/cards/&quot; + exactLookupId + &quot;?&quot;));</span>
+<span class="nc" id="L1643">        assertThat(writeRequests).singleElement().satisfies(request -&gt; assertThat(request)</span>
+<span class="nc" id="L1644">                .startsWith(&quot;POST /1/cards/mixed-card/actions/comments?&quot;)</span>
+<span class="nc" id="L1645">                .contains(&quot;Checklist+mixes+prerequisite+references&quot;));</span>
+<span class="nc" id="L1646">        assertThat(writeRequests).noneMatch(request -&gt; request.startsWith(&quot;PUT /1/cards/mixed-card/checkItem/&quot;));</span>
+<span class="nc" id="L1647">    }</span>
+
+    private static String waitingTextForPrerequisite(String identifier, String state) {
+<span class="nc" id="L1650">        return String.join(</span>
+                &quot;\n&quot;,
+                TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER,
+                &quot;&quot;,
+                &quot;Status: waiting for prerequisites.&quot;,
+                &quot;&quot;,
+                &quot;Symphony has not started this Trello card because prerequisite checklists are not resolved.&quot;,
+                &quot;&quot;,
+                &quot;Waiting for:&quot;,
+                &quot;- &quot; + identifier + &quot; (&quot; + state + &quot;)&quot;,
+                &quot;&quot;,
+                &quot;Fix by making prerequisite checklist items exactly one bare Trello card reference each, moving notes to a separate checklist, or writing non-prerequisite Trello references as Markdown links.&quot;);
+    }
+
+    private static String cardUrl(String shortLink) {
+<span class="nc" id="L1665">        return TRELLO_CARD_URL_PREFIX + shortLink;</span>
+    }
+
+    private static String queryValue(String request, String name) {
+<span class="nc" id="L1669">        int queryStart = request.indexOf('?');</span>
+<span class="nc" id="L1670">        assertThat(queryStart).as(&quot;request has query&quot;).isNotNegative();</span>
+<span class="nc bnc" id="L1671" title="All 2 branches missed.">        for (String part : Splitter.on('&amp;').split(request.substring(queryStart + 1))) {</span>
+<span class="nc" id="L1672">            int separator = part.indexOf('=');</span>
+<span class="nc bnc" id="L1673" title="All 2 branches missed.">            String key = separator &lt; 0 ? part : part.substring(0, separator);</span>
+<span class="nc bnc" id="L1674" title="All 2 branches missed.">            if (key.equals(name)) {</span>
+<span class="nc bnc" id="L1675" title="All 2 branches missed.">                String value = separator &lt; 0 ? &quot;&quot; : part.substring(separator + 1);</span>
+<span class="nc" id="L1676">                return URLDecoder.decode(value, StandardCharsets.UTF_8);</span>
+            }
+<span class="nc" id="L1678">        }</span>
+<span class="nc" id="L1679">        throw new AssertionError(&quot;Missing query parameter: &quot; + name);</span>
+    }
+
+    private static Card card(
+            String id, String identifier, String state, String listId, Integer priority, BigDecimal position) {
+<span class="nc" id="L1684">        return new Card(</span>
+                id,
+                identifier,
+                identifier,
+                &quot;&quot;,
+                priority,
+                state,
+                &quot;list&quot;,
+                listId,
+                state,
+<span class="nc" id="L1694">                false,</span>
+                &quot;board-1&quot;,
+<span class="nc" id="L1696">                false,</span>
+                false,
+                null,
+                identifier,
+                null,
+                null,
+                null,
+<span class="nc" id="L1703">                List.of(),</span>
+<span class="nc" id="L1704">                List.of(),</span>
+<span class="nc" id="L1705">                List.of(),</span>
+<span class="nc" id="L1706">                List.of(),</span>
+<span class="nc" id="L1707">                List.of(),</span>
+<span class="nc" id="L1708">                List.of(),</span>
+<span class="nc" id="L1709">                List.of(),</span>
+<span class="nc" id="L1710">                List.of(),</span>
+<span class="nc" id="L1711">                List.of(),</span>
+<span class="nc" id="L1712">                Instant.parse(&quot;2026-01-0%sT00:00:00Z&quot;.formatted(id.charAt(id.length() - 1))),</span>
+<span class="nc" id="L1713">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
+                null,
+                null,
+                position);
+    }
+
+    private static Stream&lt;Arguments&gt; specialTerminalCards() {
+<span class="nc" id="L1720">        return Stream.of(</span>
+<span class="nc" id="L1721">                Arguments.of(</span>
+                        &quot;archived card&quot;,
+<span class="nc" id="L1723">                        card(</span>
+                                &quot;card-6&quot;,
+                                &quot;TRELLO-archived&quot;,
+                                &quot;Archived&quot;,
+                                &quot;card_closed&quot;,
+                                &quot;todo&quot;,
+                                &quot;Todo&quot;,
+<span class="nc" id="L1730">                                false,</span>
+<span class="nc" id="L1731">                                false,</span>
+                                true)),
+<span class="nc" id="L1733">                Arguments.of(</span>
+                        &quot;card in archived list&quot;,
+<span class="nc" id="L1735">                        card(</span>
+                                &quot;card-7&quot;,
+                                &quot;TRELLO-archived-list&quot;,
+                                &quot;ArchivedList&quot;,
+                                &quot;list_closed&quot;,
+                                &quot;todo&quot;,
+                                &quot;Todo&quot;,
+<span class="nc" id="L1742">                                true,</span>
+<span class="nc" id="L1743">                                false,</span>
+                                false)),
+<span class="nc" id="L1745">                Arguments.of(</span>
+                        &quot;card in archived board&quot;,
+<span class="nc" id="L1747">                        card(</span>
+                                &quot;card-8&quot;,
+                                &quot;TRELLO-archived-board&quot;,
+                                &quot;ArchivedBoard&quot;,
+                                &quot;board_closed&quot;,
+                                &quot;todo&quot;,
+                                &quot;Todo&quot;,
+<span class="nc" id="L1754">                                false,</span>
+<span class="nc" id="L1755">                                true,</span>
+                                false)),
+<span class="nc" id="L1757">                Arguments.of(</span>
+                        &quot;deleted card snapshot&quot;,
+<span class="nc" id="L1759">                        card(&quot;card-9&quot;, &quot;TRELLO-deleted&quot;, &quot;Deleted&quot;, &quot;deleted&quot;, &quot;todo&quot;, &quot;Todo&quot;, false, false, false)));</span>
+    }
+
+    private static Card card(
+            String id,
+            String identifier,
+            String state,
+            String stateSource,
+            String listId,
+            String listName,
+            Boolean listClosed,
+            Boolean boardClosed,
+            boolean closed) {
+<span class="nc" id="L1772">        return new Card(</span>
+                id,
+                identifier,
+                identifier,
+                &quot;&quot;,
+                null,
+                state,
+                stateSource,
+                listId,
+                listName,
+                listClosed,
+                &quot;board-1&quot;,
+                boardClosed,
+                closed,
+                null,
+                identifier,
+                null,
+                null,
+                null,
+<span class="nc" id="L1791">                List.of(),</span>
+<span class="nc" id="L1792">                List.of(),</span>
+<span class="nc" id="L1793">                List.of(),</span>
+<span class="nc" id="L1794">                List.of(),</span>
+<span class="nc" id="L1795">                List.of(),</span>
+<span class="nc" id="L1796">                List.of(),</span>
+<span class="nc" id="L1797">                List.of(),</span>
+<span class="nc" id="L1798">                List.of(),</span>
+<span class="nc" id="L1799">                List.of(),</span>
+<span class="nc" id="L1800">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
+<span class="nc" id="L1801">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
+                null,
+                null,
+                BigDecimal.ONE);
+    }
+
+    private static String cardWithActions(String cardId, String actionsJson) {
+<span class="nc" id="L1808">        return &quot;&quot;&quot;</span>
+                {&quot;id&quot;:&quot;%s&quot;,&quot;name&quot;:&quot;Found&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;found&quot;,&quot;labels&quot;:[],&quot;actions&quot;:%s}
+                &quot;&quot;&quot;
+<span class="nc" id="L1811">                .formatted(cardId, actionsJson);</span>
+    }
+
+    private static String cardWithIdShort(String cardId, String idShortToken) {
+<span class="nc" id="L1815">        return &quot;&quot;&quot;</span>
+                {&quot;id&quot;:&quot;%s&quot;,&quot;name&quot;:&quot;Found&quot;,&quot;idList&quot;:&quot;lookup-review&quot;,&quot;idBoard&quot;:&quot;lookup-board&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;found&quot;,&quot;idShort&quot;:%s,&quot;labels&quot;:[],&quot;actions&quot;:[]}
+                &quot;&quot;&quot;
+<span class="nc" id="L1818">                .formatted(cardId, idShortToken);</span>
+    }
+
+    private static String idShortToken(String scenario) {
+        // Raw JSON token for each idShort scenario. Strings are quoted so non-numeric input reaches the
+        // client as a JSON string, exactly as a malformed Trello payload would deliver it.
+<span class="nc bnc" id="L1824" title="All 6 branches missed.">        return switch (scenario) {</span>
+<span class="nc" id="L1825">            case &quot;whole&quot; -&gt; &quot;7&quot;;</span>
+<span class="nc" id="L1826">            case &quot;whole-float&quot; -&gt; &quot;7.0&quot;;</span>
+<span class="nc" id="L1827">            case &quot;fractional&quot; -&gt; &quot;7.5&quot;;</span>
+<span class="nc" id="L1828">            case &quot;out-of-range&quot; -&gt; &quot;9999999999&quot;;</span>
+<span class="nc" id="L1829">            case &quot;non-numeric&quot; -&gt; &quot;\&quot;abc\&quot;&quot;;</span>
+<span class="nc" id="L1830">            default -&gt; throw new IllegalArgumentException(&quot;Unknown idShort scenario: &quot; + scenario);</span>
+        };
+    }
+
+    private static String oldWorkpadActions() {
+<span class="nc" id="L1835">        return &quot;[&quot; + workpadAction() + &quot;,&quot; + regularActions(20).substring(1);</span>
+    }
+
+    private static String workpadAction() {
+<span class="nc" id="L1839">        return &quot;&quot;&quot;</span>
+                {&quot;id&quot;:&quot;comment-workpad&quot;,&quot;date&quot;:&quot;2026-02-25T20:00:00.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;## Codex Workpad\\n\\nOlder plan&quot;},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;codex&quot;}}
+                &quot;&quot;&quot;;
+    }
+
+    private static String regularActions(int count) {
+<span class="nc" id="L1845">        return IntStream.range(0, count)</span>
+<span class="nc" id="L1846">                .mapToObj(index -&gt;</span>
+<span class="nc" id="L1847">                        &quot;&quot;&quot;</span>
+                        {&quot;id&quot;:&quot;regular-%d&quot;,&quot;date&quot;:&quot;2026-02-25T20:11:12.000Z&quot;,&quot;data&quot;:{&quot;text&quot;:&quot;Regular comment %d&quot;},&quot;memberCreator&quot;:{&quot;username&quot;:&quot;reviewer&quot;}}
+                        &quot;&quot;&quot;
+<span class="nc" id="L1850">                                .formatted(index, index))</span>
+<span class="nc" id="L1851">                .collect(Collectors.joining(&quot;,&quot;, &quot;[&quot;, &quot;]&quot;));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

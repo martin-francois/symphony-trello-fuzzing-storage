@@ -1,0 +1,1027 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LiveTrelloE2eIT.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.live</a> &gt; <span class="el_source">LiveTrelloE2eIT.java</span></div><h1>LiveTrelloE2eIT.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.live;
+
+import static com.google.common.base.Preconditions.checkState;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.ImportBoardRequest;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.NewBoardRequest;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.TrelloCredentials;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.Test;
+
+<span class="nc" id="L41">final class LiveTrelloE2eIT {</span>
+<span class="nc" id="L42">    private static final URI TRELLO_ENDPOINT = TrelloBoardSetup.DEFAULT_ENDPOINT;</span>
+<span class="nc" id="L43">    private static final Path QUARKUS_RUNNER = Path.of(&quot;target/quarkus-app/quarkus-run.jar&quot;);</span>
+<span class="nc" id="L44">    private static final Duration STARTUP_TIMEOUT = Duration.ofSeconds(90);</span>
+<span class="nc" id="L45">    private static final Duration RUNNING_TIMEOUT = Duration.ofSeconds(90);</span>
+<span class="nc" id="L46">    private static final Duration HANDOFF_TIMEOUT = Duration.ofMinutes(3);</span>
+<span class="nc" id="L47">    private static final Duration LIVE_POLL_INTERVAL = Duration.ofMillis(500);</span>
+<span class="nc" id="L48">    private static final DateTimeFormatter RUN_ID_FORMAT =</span>
+<span class="nc" id="L49">            DateTimeFormatter.ofPattern(&quot;yyyyMMdd-HHmmss&quot;).withZone(ZoneOffset.UTC);</span>
+<span class="nc" id="L50">    private static final TypeReference&lt;Map&lt;String, Object&gt;&gt; MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L51">    private static final TypeReference&lt;List&lt;Map&lt;String, Object&gt;&gt;&gt; LIST_MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+
+<span class="nc" id="L53">    private final ObjectMapper json = new ObjectMapper();</span>
+<span class="nc" id="L54">    private final HttpClient http =</span>
+<span class="nc" id="L55">            HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();</span>
+
+    @Test
+    void deterministicFakeCodexCoversLiveTrelloSetupConcurrencyAndImports() throws Exception {
+        // given
+<span class="nc" id="L60">        assumeTrue(liveE2eEnabled(), &quot;Set SYMPHONY_RUN_LIVE_E2E=1 to run live Trello E2E checks.&quot;);</span>
+<span class="nc" id="L61">        TrelloCredentials credentials = credentialsOrFail();</span>
+<span class="nc" id="L62">        assertThat(QUARKUS_RUNNER)</span>
+<span class="nc" id="L63">                .as(&quot;Run this through Maven verify so the Quarkus runner exists.&quot;)</span>
+<span class="nc" id="L64">                .isRegularFile();</span>
+
+<span class="nc" id="L66">        String runId = &quot;live-e2e-it-&quot; + RUN_ID_FORMAT.format(now()) + &quot;-&quot;</span>
+<span class="nc" id="L67">                + UUID.randomUUID().toString().substring(0, 8);</span>
+<span class="nc" id="L68">        Path runDir = Path.of(&quot;target/live-e2e-it&quot;, runId);</span>
+<span class="nc" id="L69">        Path workspaceRoot = runDir.resolve(&quot;workspaces&quot;);</span>
+<span class="nc" id="L70">        Files.createDirectories(runDir);</span>
+<span class="nc" id="L71">        var trello = new LiveTrelloClient(credentials);</span>
+<span class="nc" id="L72">        String workspaceId = workspaceIdOrFail(credentials);</span>
+<span class="nc" id="L73">        List&lt;String&gt; disposableBoardIds = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L74">        Throwable bodyFailure = null;</span>
+
+        try {
+<span class="nc" id="L77">            var setup = new TrelloBoardSetup(json);</span>
+<span class="nc" id="L78">            Path boardAWorkflow = runDir.resolve(&quot;board-a.WORKFLOW.md&quot;);</span>
+<span class="nc" id="L79">            Path importedAWorkflow = runDir.resolve(&quot;imported-a.WORKFLOW.md&quot;);</span>
+<span class="nc" id="L80">            Path boardBWorkflow = runDir.resolve(&quot;board-b.WORKFLOW.md&quot;);</span>
+<span class="nc" id="L81">            Path customWorkflow = runDir.resolve(&quot;custom-import.WORKFLOW.md&quot;);</span>
+<span class="nc" id="L82">            Path completions = runDir.resolve(&quot;fake-codex-completions.log&quot;);</span>
+
+<span class="nc" id="L84">            var boardA = setup.createRecommendedBoard(</span>
+<span class="nc" id="L85">                    newBoard(runId + &quot; A&quot;, credentials, workspaceId, boardAWorkflow, workspaceRoot, 1));</span>
+<span class="nc" id="L86">            disposableBoardIds.add(boardA.boardId());</span>
+<span class="nc" id="L87">            var boardB = setup.createRecommendedBoard(</span>
+<span class="nc" id="L88">                    newBoard(runId + &quot; B&quot;, credentials, workspaceId, boardBWorkflow, workspaceRoot, 2));</span>
+<span class="nc" id="L89">            disposableBoardIds.add(boardB.boardId());</span>
+<span class="nc" id="L90">            setup.importExistingBoard(importBoard(</span>
+                    credentials,
+<span class="nc" id="L92">                    boardA.boardId(),</span>
+<span class="nc" id="L93">                    List.of(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+<span class="nc" id="L94">                    List.of(&quot;Done&quot;),</span>
+                    TrelloBoardSetup.RECOMMENDED_BLOCKED_STATE,
+                    importedAWorkflow,
+                    workspaceRoot,
+                    1,
+                    true));
+<span class="nc" id="L100">            String customBoardId = trello.createBoard(runId + &quot; custom existing structure&quot;, workspaceId);</span>
+<span class="nc" id="L101">            disposableBoardIds.add(customBoardId);</span>
+<span class="nc" id="L102">            Map&lt;String, String&gt; customLists = trello.createLists(</span>
+                    customBoardId,
+<span class="nc" id="L104">                    List.of(</span>
+                            &quot;Intake&quot;,
+                            &quot;Queue for Codex&quot;,
+                            &quot;Escalated for Codex&quot;,
+                            &quot;Review&quot;,
+                            &quot;Blocked Work&quot;,
+                            &quot;Released&quot;,
+                            &quot;Parked&quot;));
+<span class="nc" id="L112">            setup.importExistingBoard(importBoard(</span>
+                    credentials,
+                    customBoardId,
+<span class="nc" id="L115">                    List.of(&quot;Queue for Codex&quot;, &quot;Escalated for Codex&quot;),</span>
+<span class="nc" id="L116">                    List.of(&quot;Released&quot;, &quot;Parked&quot;),</span>
+                    &quot;Blocked Work&quot;,
+                    customWorkflow,
+                    workspaceRoot,
+                    2,
+                    true));
+
+<span class="nc" id="L123">            patchWorkflow(boardAWorkflow, completions, TrelloBoardSetup.RECOMMENDED_REVIEW_STATE, 1, 7_000);</span>
+<span class="nc" id="L124">            patchWorkflow(importedAWorkflow, completions, TrelloBoardSetup.RECOMMENDED_REVIEW_STATE, 1, 250);</span>
+<span class="nc" id="L125">            patchWorkflow(boardBWorkflow, completions, TrelloBoardSetup.RECOMMENDED_REVIEW_STATE, 2, 7_000);</span>
+<span class="nc" id="L126">            patchWorkflow(customWorkflow, completions, &quot;Review&quot;, 2, 7_000);</span>
+
+<span class="nc" id="L128">            Map&lt;String, String&gt; boardALists = trello.listIdsByName(boardA.boardId());</span>
+<span class="nc" id="L129">            Map&lt;String, String&gt; boardBLists = trello.listIdsByName(boardB.boardId());</span>
+<span class="nc" id="L130">            CardRef boardAOlder = trello.createCard(</span>
+<span class="nc" id="L131">                    boardALists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; sequential older&quot;,
+                    &quot;Disposable live E2E card that should wait after Trello reordering.&quot;);
+<span class="nc" id="L134">            CardRef boardALater = trello.createCard(</span>
+<span class="nc" id="L135">                    boardALists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; sequential later moved first&quot;,
+                    &quot;Disposable live E2E card created later, then moved to the top of the active list.&quot;);
+<span class="nc" id="L138">            trello.moveCardToTop(boardALater.id());</span>
+<span class="nc" id="L139">            waitForCardAbove(</span>
+<span class="nc" id="L140">                    trello, boardALists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE), boardALater, boardAOlder);</span>
+
+<span class="nc" id="L142">            CardRef boardBFirst = trello.createCard(</span>
+<span class="nc" id="L143">                    boardBLists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; concurrent first&quot;,
+                    &quot;Disposable live E2E concurrency card.&quot;);
+<span class="nc" id="L146">            CardRef boardBSecond = trello.createCard(</span>
+<span class="nc" id="L147">                    boardBLists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; concurrent second&quot;,
+                    &quot;Disposable live E2E concurrency card.&quot;);
+<span class="nc" id="L150">            CardRef boardBThird = trello.createCard(</span>
+<span class="nc" id="L151">                    boardBLists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; concurrent waiting third&quot;,
+                    &quot;Disposable live E2E card that should wait while the first two run.&quot;);
+
+            // when
+<span class="nc" id="L156">            try (SymphonyProcess processA = startProcess(runDir, boardAWorkflow, freePort());</span>
+<span class="nc" id="L157">                    SymphonyProcess processB = startProcess(runDir, boardBWorkflow, freePort())) {</span>
+<span class="nc" id="L158">                waitForStateEndpoint(processA);</span>
+<span class="nc" id="L159">                waitForStateEndpoint(processB);</span>
+<span class="nc" id="L160">                refresh(processA);</span>
+<span class="nc" id="L161">                refresh(processB);</span>
+
+<span class="nc" id="L163">                waitForRunningCards(processA, 1, List.of(boardALater.id()));</span>
+<span class="nc" id="L164">                waitForRunningCards(processB, 2, List.of(boardBFirst.id(), boardBSecond.id()));</span>
+
+                // then
+<span class="nc" id="L167">                assertCardList(trello, boardAOlder, boardALists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE));</span>
+<span class="nc" id="L168">                assertCardList(trello, boardBThird, boardBLists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE));</span>
+
+<span class="nc" id="L170">                waitForHandoff(trello, boardALater, boardALists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L171">                waitForHandoff(trello, boardBFirst, boardBLists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L172">                waitForHandoff(trello, boardBSecond, boardBLists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L173">                waitForSuccessfulFakeCodexTurns(completions, 3);</span>
+
+<span class="nc" id="L175">                refresh(processA);</span>
+<span class="nc" id="L176">                refresh(processB);</span>
+
+<span class="nc" id="L178">                waitForHandoff(trello, boardAOlder, boardALists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L179">                waitForHandoff(trello, boardBThird, boardBLists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L180">                waitForSuccessfulFakeCodexTurns(completions, 5);</span>
+<span class="nc" id="L181">                assertStateDrained(processA);</span>
+<span class="nc" id="L182">                assertStateDrained(processB);</span>
+<span class="nc" id="L183">                assertSuccessfulFakeCodexTurns(completions, 5);</span>
+            }
+
+<span class="nc" id="L186">            CardRef importedCard = trello.createCard(</span>
+<span class="nc" id="L187">                    boardALists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; imported generated board&quot;,
+                    &quot;Disposable live E2E card for an imported generated board workflow.&quot;);
+<span class="nc" id="L190">            try (SymphonyProcess importedProcess = startProcess(runDir, importedAWorkflow, freePort())) {</span>
+<span class="nc" id="L191">                waitForStateEndpoint(importedProcess);</span>
+<span class="nc" id="L192">                refresh(importedProcess);</span>
+
+<span class="nc" id="L194">                waitForHandoff(trello, importedCard, boardALists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L195">                waitForSuccessfulFakeCodexTurns(completions, 6);</span>
+<span class="nc" id="L196">                assertStateDrained(importedProcess);</span>
+<span class="nc" id="L197">                assertSuccessfulFakeCodexTurns(completions, 6);</span>
+            }
+
+<span class="nc" id="L200">            CardRef customQueue = trello.createCard(</span>
+<span class="nc" id="L201">                    customLists.get(&quot;Queue for Codex&quot;),</span>
+                    runId + &quot; custom queue&quot;,
+                    &quot;Disposable live E2E card for custom active list one.&quot;);
+<span class="nc" id="L204">            CardRef customEscalated = trello.createCard(</span>
+<span class="nc" id="L205">                    customLists.get(&quot;Escalated for Codex&quot;),</span>
+                    runId + &quot; custom escalated&quot;,
+                    &quot;Disposable live E2E card for custom active list two.&quot;);
+<span class="nc" id="L208">            try (SymphonyProcess customProcess = startProcess(runDir, customWorkflow, freePort())) {</span>
+<span class="nc" id="L209">                waitForStateEndpoint(customProcess);</span>
+<span class="nc" id="L210">                refresh(customProcess);</span>
+<span class="nc" id="L211">                waitForRunningCount(customProcess, 2);</span>
+
+<span class="nc" id="L213">                waitForHandoff(trello, customQueue, customLists.get(&quot;Review&quot;));</span>
+<span class="nc" id="L214">                waitForHandoff(trello, customEscalated, customLists.get(&quot;Review&quot;));</span>
+<span class="nc" id="L215">                waitForSuccessfulFakeCodexTurns(completions, 8);</span>
+<span class="nc" id="L216">                assertStateDrained(customProcess);</span>
+<span class="nc" id="L217">                assertSuccessfulFakeCodexTurns(completions, 8);</span>
+            }
+<span class="nc" id="L219">        } catch (Exception e) {</span>
+<span class="nc" id="L220">            bodyFailure = e;</span>
+<span class="nc" id="L221">            throw e;</span>
+<span class="nc" id="L222">        } catch (AssertionError e) {</span>
+<span class="nc" id="L223">            bodyFailure = e;</span>
+<span class="nc" id="L224">            throw e;</span>
+        } finally {
+<span class="nc" id="L226">            cleanupDisposableBoardsAfterTest(trello, workspaceId, runId, disposableBoardIds, bodyFailure);</span>
+        }
+<span class="nc" id="L228">    }</span>
+
+    @Test
+    void deterministicFakeCodexCoversLongExternalDockerProjectLifecycle() throws Exception {
+        // given
+<span class="nc" id="L233">        assumeTrue(liveE2eEnabled(), &quot;Set SYMPHONY_RUN_LIVE_E2E=1 to run live Trello E2E checks.&quot;);</span>
+<span class="nc" id="L234">        TrelloCredentials credentials = credentialsOrFail();</span>
+<span class="nc" id="L235">        assertThat(QUARKUS_RUNNER)</span>
+<span class="nc" id="L236">                .as(&quot;Run this through Maven verify so the Quarkus runner exists.&quot;)</span>
+<span class="nc" id="L237">                .isRegularFile();</span>
+
+<span class="nc" id="L239">        String runId = &quot;live-e2e-external-&quot; + RUN_ID_FORMAT.format(now()) + &quot;-&quot;</span>
+<span class="nc" id="L240">                + UUID.randomUUID().toString().substring(0, 8);</span>
+<span class="nc" id="L241">        Path runDir = Path.of(&quot;target/live-e2e-it&quot;, runId);</span>
+<span class="nc" id="L242">        Path workspaceRoot = runDir.resolve(&quot;workspaces&quot;);</span>
+<span class="nc" id="L243">        Path externalProject = runDir.resolve(&quot;external-docker-project&quot;);</span>
+<span class="nc" id="L244">        Files.createDirectories(runDir);</span>
+<span class="nc" id="L245">        createExternalDockerProject(externalProject, runId);</span>
+<span class="nc" id="L246">        var trello = new LiveTrelloClient(credentials);</span>
+<span class="nc" id="L247">        String workspaceId = workspaceIdOrFail(credentials);</span>
+<span class="nc" id="L248">        List&lt;String&gt; disposableBoardIds = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L249">        Throwable bodyFailure = null;</span>
+
+        try {
+<span class="nc" id="L252">            var setup = new TrelloBoardSetup(json);</span>
+<span class="nc" id="L253">            Path workflow = runDir.resolve(&quot;external-docker.WORKFLOW.md&quot;);</span>
+<span class="nc" id="L254">            Path completions = runDir.resolve(&quot;fake-codex-external-completions.log&quot;);</span>
+
+<span class="nc" id="L256">            var board = setup.createRecommendedBoard(</span>
+<span class="nc" id="L257">                    newBoard(runId + &quot; external docker&quot;, credentials, workspaceId, workflow, workspaceRoot, 1));</span>
+<span class="nc" id="L258">            disposableBoardIds.add(board.boardId());</span>
+<span class="nc" id="L259">            patchWorkflow(workflow, completions, TrelloBoardSetup.RECOMMENDED_REVIEW_STATE, 1, 30_000);</span>
+
+<span class="nc" id="L261">            Map&lt;String, String&gt; lists = trello.listIdsByName(board.boardId());</span>
+<span class="nc" id="L262">            CardRef card = trello.createCard(</span>
+<span class="nc" id="L263">                    lists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; long external docker task&quot;,
+<span class="nc" id="L265">                    externalDockerDescription(externalProject, runId));</span>
+
+            // when
+<span class="nc" id="L268">            try (SymphonyProcess process = startProcess(runDir, workflow, freePort())) {</span>
+<span class="nc" id="L269">                waitForStateEndpoint(process);</span>
+<span class="nc" id="L270">                refresh(process);</span>
+
+<span class="nc" id="L272">                waitForRunningCards(process, 1, List.of(card.id()));</span>
+
+                // then
+<span class="nc" id="L275">                assertCardList(trello, card, lists.get(TrelloBoardSetup.RECOMMENDED_IN_PROGRESS_STATE));</span>
+<span class="nc" id="L276">                waitForHandoff(trello, card, lists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L277">                waitForSuccessfulFakeCodexTurns(completions, 1);</span>
+<span class="nc" id="L278">                assertStateDrained(process);</span>
+<span class="nc" id="L279">                assertSuccessfulFakeCodexTurns(completions, 1);</span>
+            }
+<span class="nc" id="L281">        } catch (Exception e) {</span>
+<span class="nc" id="L282">            bodyFailure = e;</span>
+<span class="nc" id="L283">            throw e;</span>
+<span class="nc" id="L284">        } catch (AssertionError e) {</span>
+<span class="nc" id="L285">            bodyFailure = e;</span>
+<span class="nc" id="L286">            throw e;</span>
+        } finally {
+<span class="nc" id="L288">            cleanupDisposableBoardsAfterTest(trello, workspaceId, runId, disposableBoardIds, bodyFailure);</span>
+        }
+<span class="nc" id="L290">    }</span>
+
+    @Test
+    void realCodexCanRunLongExternalDockerProjectWhenExplicitlyEnabled() throws Exception {
+        // given
+<span class="nc" id="L295">        assumeTrue(</span>
+<span class="nc" id="L296">                realCodexDockerE2eEnabled(),</span>
+                &quot;Set SYMPHONY_RUN_REAL_CODEX_DOCKER_E2E=1 to run the real Codex/Docker live E2E check.&quot;);
+<span class="nc" id="L298">        assumeTrue(commandSucceeds(&quot;codex&quot;, &quot;--version&quot;), &quot;Codex CLI must be available on PATH.&quot;);</span>
+<span class="nc" id="L299">        assumeTrue(commandSucceeds(&quot;docker&quot;, &quot;version&quot;), &quot;Docker must be installed and usable by this user.&quot;);</span>
+<span class="nc" id="L300">        TrelloCredentials credentials = credentialsOrFail();</span>
+<span class="nc" id="L301">        assertThat(QUARKUS_RUNNER)</span>
+<span class="nc" id="L302">                .as(&quot;Run this through Maven verify so the Quarkus runner exists.&quot;)</span>
+<span class="nc" id="L303">                .isRegularFile();</span>
+
+<span class="nc" id="L305">        String runId = &quot;real-codex-docker-&quot; + RUN_ID_FORMAT.format(now()) + &quot;-&quot;</span>
+<span class="nc" id="L306">                + UUID.randomUUID().toString().substring(0, 8);</span>
+<span class="nc" id="L307">        Path runDir = Path.of(&quot;target/live-e2e-it&quot;, runId);</span>
+<span class="nc" id="L308">        Path workspaceRoot = runDir.resolve(&quot;workspaces&quot;);</span>
+<span class="nc" id="L309">        Path externalProject = runDir.resolve(&quot;external-docker-project&quot;);</span>
+<span class="nc" id="L310">        Path expectedOutput = externalProject.resolve(&quot;docker-output.txt&quot;);</span>
+<span class="nc" id="L311">        Files.createDirectories(runDir);</span>
+<span class="nc" id="L312">        createExternalDockerProject(externalProject, runId);</span>
+<span class="nc" id="L313">        var trello = new LiveTrelloClient(credentials);</span>
+<span class="nc" id="L314">        String workspaceId = workspaceIdOrFail(credentials);</span>
+<span class="nc" id="L315">        List&lt;String&gt; disposableBoardIds = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L316">        Throwable bodyFailure = null;</span>
+
+        try {
+<span class="nc" id="L319">            var setup = new TrelloBoardSetup(json);</span>
+<span class="nc" id="L320">            Path workflow = runDir.resolve(&quot;real-codex-docker.WORKFLOW.md&quot;);</span>
+
+<span class="nc" id="L322">            var board = setup.createRecommendedBoard(</span>
+<span class="nc" id="L323">                    newBoard(runId + &quot; real codex docker&quot;, credentials, workspaceId, workflow, workspaceRoot, 1));</span>
+<span class="nc" id="L324">            disposableBoardIds.add(board.boardId());</span>
+<span class="nc" id="L325">            patchWorkflowForRealCodexDocker(workflow, externalProject);</span>
+
+<span class="nc" id="L327">            Map&lt;String, String&gt; lists = trello.listIdsByName(board.boardId());</span>
+<span class="nc" id="L328">            CardRef card = trello.createCard(</span>
+<span class="nc" id="L329">                    lists.get(TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE),</span>
+                    runId + &quot; real codex docker task&quot;,
+<span class="nc" id="L331">                    realCodexDockerDescription(externalProject, runId));</span>
+
+            // when
+<span class="nc" id="L334">            try (SymphonyProcess process =</span>
+<span class="nc" id="L335">                    startProcess(runDir, workflow, freePort(), Map.of(&quot;SYMPHONY_CODEX_DANGER_FULL_ACCESS&quot;, &quot;true&quot;))) {</span>
+<span class="nc" id="L336">                waitForStateEndpoint(process);</span>
+<span class="nc" id="L337">                refresh(process);</span>
+
+<span class="nc" id="L339">                waitForRunningCards(process, 1, List.of(card.id()));</span>
+
+                // then
+<span class="nc" id="L342">                assertCardList(trello, card, lists.get(TrelloBoardSetup.RECOMMENDED_IN_PROGRESS_STATE));</span>
+<span class="nc" id="L343">                waitForHandoff(trello, card, lists.get(TrelloBoardSetup.RECOMMENDED_REVIEW_STATE));</span>
+<span class="nc" id="L344">                assertStateDrained(process);</span>
+<span class="nc" id="L345">                assertThat(expectedOutput).content(StandardCharsets.UTF_8).contains(runId);</span>
+            }
+<span class="nc" id="L347">        } catch (Exception e) {</span>
+<span class="nc" id="L348">            bodyFailure = e;</span>
+<span class="nc" id="L349">            throw e;</span>
+<span class="nc" id="L350">        } catch (AssertionError e) {</span>
+<span class="nc" id="L351">            bodyFailure = e;</span>
+<span class="nc" id="L352">            throw e;</span>
+        } finally {
+<span class="nc" id="L354">            cleanupDisposableBoardsAfterTest(trello, workspaceId, runId, disposableBoardIds, bodyFailure);</span>
+        }
+<span class="nc" id="L356">    }</span>
+
+    private void cleanupDisposableBoardsAfterTest(
+            LiveTrelloClient trello,
+            String workspaceId,
+            String runId,
+            List&lt;String&gt; disposableBoardIds,
+            Throwable bodyFailure) {
+        try {
+<span class="nc" id="L365">            cleanupDisposableBoards(trello, workspaceId, runId, disposableBoardIds);</span>
+<span class="nc" id="L366">        } catch (AssertionError e) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (bodyFailure != null) {</span>
+<span class="nc" id="L368">                bodyFailure.addSuppressed(e);</span>
+<span class="nc" id="L369">                return;</span>
+            }
+<span class="nc" id="L371">            throw e;</span>
+<span class="nc" id="L372">        }</span>
+<span class="nc" id="L373">    }</span>
+
+    private TrelloCredentials credentialsOrFail() {
+<span class="nc" id="L376">        String apiKey = LocalEnvironment.get(&quot;TRELLO_API_KEY&quot;).orElse(null);</span>
+<span class="nc" id="L377">        String apiToken = LocalEnvironment.get(&quot;TRELLO_API_TOKEN&quot;).orElse(null);</span>
+<span class="nc" id="L378">        assertThat(apiKey).as(&quot;TRELLO_API_KEY is required for live Trello E2E.&quot;).isNotBlank();</span>
+<span class="nc" id="L379">        assertThat(apiToken)</span>
+<span class="nc" id="L380">                .as(&quot;TRELLO_API_TOKEN is required for live Trello E2E.&quot;)</span>
+<span class="nc" id="L381">                .isNotBlank();</span>
+<span class="nc" id="L382">        return new TrelloCredentials(apiKey, apiToken);</span>
+    }
+
+    private static boolean liveE2eEnabled() {
+<span class="nc" id="L386">        return LocalEnvironment.get(&quot;SYMPHONY_RUN_LIVE_E2E&quot;)</span>
+<span class="nc bnc" id="L387" title="All 4 branches missed.">                .map(value -&gt; value.equals(&quot;1&quot;) || Boolean.parseBoolean(value))</span>
+<span class="nc" id="L388">                .orElse(false);</span>
+    }
+
+    private static boolean realCodexDockerE2eEnabled() {
+<span class="nc" id="L392">        return LocalEnvironment.get(&quot;SYMPHONY_RUN_REAL_CODEX_DOCKER_E2E&quot;)</span>
+<span class="nc bnc" id="L393" title="All 4 branches missed.">                .map(value -&gt; value.equals(&quot;1&quot;) || Boolean.parseBoolean(value))</span>
+<span class="nc" id="L394">                .orElse(false);</span>
+    }
+
+    private String workspaceIdOrFail(TrelloCredentials credentials) {
+<span class="nc" id="L398">        String configured =</span>
+<span class="nc" id="L399">                LocalEnvironment.get(&quot;SYMPHONY_LIVE_E2E_TRELLO_WORKSPACE_ID&quot;).orElse(null);</span>
+<span class="nc bnc" id="L400" title="All 4 branches missed.">        if (configured != null &amp;&amp; !configured.isBlank()) {</span>
+<span class="nc" id="L401">            return configured;</span>
+        }
+<span class="nc" id="L403">        var workspaces = new TrelloBoardSetup(json)</span>
+<span class="nc" id="L404">                .listWorkspaces(new TrelloBoardSetup.WorkspaceListRequest(TRELLO_ENDPOINT, credentials));</span>
+<span class="nc" id="L405">        assertThat(workspaces)</span>
+<span class="nc" id="L406">                .as(&quot;A Trello Workspace is required for live E2E board creation.&quot;)</span>
+<span class="nc" id="L407">                .isNotEmpty();</span>
+<span class="nc" id="L408">        assertThat(workspaces)</span>
+<span class="nc" id="L409">                .as(&quot;Set SYMPHONY_LIVE_E2E_TRELLO_WORKSPACE_ID when the token can access multiple Workspaces.&quot;)</span>
+<span class="nc" id="L410">                .hasSize(1);</span>
+<span class="nc" id="L411">        return workspaces.getFirst().id();</span>
+    }
+
+    private static NewBoardRequest newBoard(
+            String name,
+            TrelloCredentials credentials,
+            String workspaceId,
+            Path workflow,
+            Path workspaceRoot,
+            int maxConcurrentAgents) {
+<span class="nc" id="L421">        return new NewBoardRequest(</span>
+                TRELLO_ENDPOINT,
+                credentials,
+                name,
+                workspaceId,
+                workflow,
+                workspaceRoot,
+                maxConcurrentAgents,
+                false,
+                false);
+    }
+
+    private static ImportBoardRequest importBoard(
+            TrelloCredentials credentials,
+            String boardId,
+            List&lt;String&gt; activeStates,
+            List&lt;String&gt; terminalStates,
+            String blockedState,
+            Path workflow,
+            Path workspaceRoot,
+            int maxConcurrentAgents,
+            boolean force) {
+<span class="nc" id="L443">        return new ImportBoardRequest(</span>
+                TRELLO_ENDPOINT,
+                credentials,
+                boardId,
+                activeStates,
+                terminalStates,
+                blockedState,
+                workflow,
+                workspaceRoot,
+                maxConcurrentAgents,
+                force);
+    }
+
+    private static void patchWorkflow(
+            Path workflow, Path completions, String reviewState, int maxConcurrentAgents, int sleepMs)
+            throws IOException {
+<span class="nc" id="L459">        Path java = Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, executable(&quot;java&quot;))</span>
+<span class="nc" id="L460">                .toAbsolutePath();</span>
+<span class="nc" id="L461">        Path fakeCodex = Path.of(&quot;scripts/FakeCodexAppServer.java&quot;).toAbsolutePath();</span>
+<span class="nc" id="L462">        String command =</span>
+                &quot;SYMPHONY_FAKE_CODEX_SLEEP_MS=%d SYMPHONY_FAKE_CODEX_COMPLETIONS_FILE=%s SYMPHONY_FAKE_CODEX_REVIEW_STATE=%s %s --source 25 %s&quot;
+<span class="nc" id="L464">                        .formatted(</span>
+<span class="nc" id="L465">                                sleepMs,</span>
+<span class="nc" id="L466">                                shellQuote(completions.toAbsolutePath().toString()),</span>
+<span class="nc" id="L467">                                shellQuote(reviewState),</span>
+<span class="nc" id="L468">                                shellQuote(java.toString()),</span>
+<span class="nc" id="L469">                                shellQuote(fakeCodex.toString()));</span>
+<span class="nc" id="L470">        String patched = Files.readString(workflow)</span>
+<span class="nc" id="L471">                .replaceFirst(&quot;(?m)^  max_concurrent_agents: \\d+$&quot;, &quot;  max_concurrent_agents: &quot; + maxConcurrentAgents)</span>
+<span class="nc" id="L472">                .replaceFirst(&quot;(?m)^  command: codex app-server$&quot;, &quot;  command: &quot; + yamlScalar(command));</span>
+<span class="nc" id="L473">        Files.writeString(workflow, patched);</span>
+<span class="nc" id="L474">    }</span>
+
+    private static void patchWorkflowForRealCodexDocker(Path workflow, Path externalProject) throws IOException {
+<span class="nc" id="L477">        String patched = Files.readString(workflow)</span>
+<span class="nc" id="L478">                .replaceFirst(&quot;(?m)^  max_concurrent_agents: \\d+$&quot;, &quot;  max_concurrent_agents: 1&quot;)</span>
+<span class="nc" id="L479">                .replaceFirst(</span>
+                        &quot;(?m)^  command: codex app-server$&quot;,
+                        &quot;  command: codex app-server\n  additional_writable_roots:\n    - &quot;
+<span class="nc" id="L482">                                + yamlScalar(externalProject</span>
+<span class="nc" id="L483">                                        .toAbsolutePath()</span>
+<span class="nc" id="L484">                                        .normalize()</span>
+<span class="nc" id="L485">                                        .toString()))</span>
+<span class="nc" id="L486">                .replaceFirst(&quot;(?m)^  read_timeout_ms: 5000$&quot;, &quot;  read_timeout_ms: 60000&quot;)</span>
+<span class="nc" id="L487">                .replaceFirst(&quot;(?m)^  stall_timeout_ms: 300000$&quot;, &quot;  stall_timeout_ms: 900000&quot;);</span>
+<span class="nc" id="L488">        Files.writeString(workflow, patched);</span>
+<span class="nc" id="L489">    }</span>
+
+    private static void createExternalDockerProject(Path project, String runId) throws IOException {
+<span class="nc" id="L492">        Files.createDirectories(project);</span>
+<span class="nc" id="L493">        Files.writeString(</span>
+<span class="nc" id="L494">                project.resolve(&quot;Dockerfile&quot;),</span>
+                &quot;&quot;&quot;
+                FROM alpine:3.22
+                RUN sleep 30
+                COPY expected.txt /expected.txt
+                CMD [&quot;cat&quot;, &quot;/expected.txt&quot;]
+                &quot;&quot;&quot;);
+<span class="nc" id="L501">        Files.writeString(project.resolve(&quot;expected.txt&quot;), runId + System.lineSeparator());</span>
+<span class="nc" id="L502">        Files.writeString(</span>
+<span class="nc" id="L503">                project.resolve(&quot;README.md&quot;),</span>
+                &quot;&quot;&quot;
+                # Disposable Symphony Trello Live E2E Fixture
+
+                This directory is generated by the live E2E test. It intentionally lives outside the
+                Symphony workspace root so the test exercises external-project instructions without
+                depending on any private repository.
+                &quot;&quot;&quot;);
+<span class="nc" id="L511">    }</span>
+
+    private static String externalDockerDescription(Path externalProject, String runId) {
+<span class="nc" id="L514">        return &quot;&quot;&quot;</span>
+                Disposable live E2E task.
+
+                External project path:
+                `%s`
+
+                This fixture contains a minimal Dockerfile whose build includes a 30-second operation.
+                The deterministic fake Codex server will not run Docker, but Symphony must still move
+                this card from Ready for Codex to In Progress while the long operation is simulated,
+                then move it to Human Review.
+
+                Run id: `%s`
+                &quot;&quot;&quot;
+<span class="nc" id="L527">                .formatted(externalProject.toAbsolutePath().normalize(), runId);</span>
+    }
+
+    private static String realCodexDockerDescription(Path externalProject, String runId) {
+<span class="nc" id="L531">        return &quot;&quot;&quot;</span>
+                Goal:
+                - Work only in this disposable external project path: `%s`
+                - From that directory, run: `docker build -t symphony-trello-live-e2e-%s .`
+                - Then run: `docker run --rm symphony-trello-live-e2e-%s &gt; docker-output.txt`
+                - Verify that `docker-output.txt` contains `%s`.
+                - Do not use or mention any private repositories or host-specific project names.
+                - Add/update the Trello workpad with the commands and verification.
+                - Add a concise Trello handoff comment.
+                - Move this card to Human Review only after the Docker command and file verification succeed.
+
+                The Dockerfile intentionally contains `RUN sleep 30` so the card should be visible in
+                In Progress while the run is underway.
+                &quot;&quot;&quot;
+<span class="nc" id="L545">                .formatted(</span>
+<span class="nc" id="L546">                        externalProject.toAbsolutePath().normalize(),</span>
+<span class="nc" id="L547">                        dockerTagSuffix(runId),</span>
+<span class="nc" id="L548">                        dockerTagSuffix(runId),</span>
+                        runId);
+    }
+
+    private static String dockerTagSuffix(String runId) {
+<span class="nc" id="L553">        return runId.toLowerCase(Locale.ROOT).replaceAll(&quot;[^a-z0-9_.-]&quot;, &quot;-&quot;);</span>
+    }
+
+    private static boolean commandSucceeds(String... command) {
+        try {
+<span class="nc" id="L558">            Process process = new ProcessBuilder(command)</span>
+<span class="nc" id="L559">                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)</span>
+<span class="nc" id="L560">                    .redirectError(ProcessBuilder.Redirect.DISCARD)</span>
+<span class="nc" id="L561">                    .start();</span>
+<span class="nc bnc" id="L562" title="All 4 branches missed.">            return process.waitFor(Duration.ofSeconds(30)) &amp;&amp; process.exitValue() == 0;</span>
+<span class="nc" id="L563">        } catch (IOException e) {</span>
+<span class="nc" id="L564">            return false;</span>
+<span class="nc" id="L565">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L566">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L567">            return false;</span>
+        }
+    }
+
+    private static String executable(String name) {
+<span class="nc bnc" id="L572" title="All 2 branches missed.">        return System.getProperty(&quot;os.name&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;) ? name + &quot;.exe&quot; : name;</span>
+    }
+
+    private static String yamlScalar(String value) {
+<span class="nc" id="L576">        return &quot;\&quot;&quot; + value.replace(&quot;\\&quot;, &quot;\\\\&quot;).replace(&quot;\&quot;&quot;, &quot;\\\&quot;&quot;) + &quot;\&quot;&quot;;</span>
+    }
+
+    private static String shellQuote(String value) {
+<span class="nc" id="L580">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;'\&quot;'\&quot;'&quot;) + &quot;'&quot;;</span>
+    }
+
+    private void waitForStateEndpoint(SymphonyProcess process) {
+<span class="nc bnc" id="L584" title="All 4 branches missed.">        waitUntil(STARTUP_TIMEOUT, () -&gt; process.isAlive() &amp;&amp; process.state().isObject(), &quot;state endpoint starts&quot;);</span>
+<span class="nc" id="L585">    }</span>
+
+    private void waitForRunningCards(SymphonyProcess process, int expectedCount, List&lt;String&gt; expectedCardIds) {
+<span class="nc" id="L588">        waitUntil(</span>
+                RUNNING_TIMEOUT,
+                () -&gt; {
+<span class="nc" id="L591">                    JsonNode state = process.state();</span>
+<span class="nc" id="L592">                    List&lt;String&gt; runningCardIds = runningCardIds(state);</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">                    return state.path(&quot;counts&quot;).path(&quot;running&quot;).asInt() == expectedCount</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">                            &amp;&amp; runningCardIds.containsAll(expectedCardIds);</span>
+                },
+                &quot;expected running card ids &quot; + expectedCardIds);
+<span class="nc" id="L597">    }</span>
+
+    private void waitForRunningCount(SymphonyProcess process, int expectedCount) {
+<span class="nc" id="L600">        waitUntil(</span>
+                RUNNING_TIMEOUT,
+<span class="nc bnc" id="L602" title="All 2 branches missed.">                () -&gt; process.state().path(&quot;counts&quot;).path(&quot;running&quot;).asInt() == expectedCount,</span>
+                &quot;expected running count &quot; + expectedCount);
+<span class="nc" id="L604">    }</span>
+
+    private void waitForHandoff(LiveTrelloClient trello, CardRef card, String expectedListId) {
+<span class="nc" id="L607">        waitUntil(</span>
+                HANDOFF_TIMEOUT,
+                () -&gt; {
+<span class="nc" id="L610">                    CardState state = trello.cardState(card.id());</span>
+<span class="nc bnc" id="L611" title="All 2 branches missed.">                    return state.commentCount() &gt;= 2</span>
+<span class="nc bnc" id="L612" title="All 2 branches missed.">                            &amp;&amp; state.workpadCount() == 1</span>
+<span class="nc bnc" id="L613" title="All 2 branches missed.">                            &amp;&amp; expectedListId.equals(state.listId());</span>
+                },
+                &quot;card reaches expected handoff list with one workpad and one handoff comment&quot;);
+<span class="nc" id="L616">    }</span>
+
+    private void waitForCardAbove(LiveTrelloClient trello, String listId, CardRef higherCard, CardRef lowerCard) {
+<span class="nc" id="L619">        waitUntil(</span>
+                STARTUP_TIMEOUT,
+                () -&gt; {
+<span class="nc" id="L622">                    List&lt;String&gt; cardIds = trello.cardIdsInList(listId);</span>
+<span class="nc bnc" id="L623" title="All 2 branches missed.">                    return cardIds.contains(higherCard.id())</span>
+<span class="nc bnc" id="L624" title="All 2 branches missed.">                            &amp;&amp; cardIds.contains(lowerCard.id())</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">                            &amp;&amp; cardIds.indexOf(higherCard.id()) &lt; cardIds.indexOf(lowerCard.id());</span>
+                },
+                &quot;moved Trello card reaches the expected list order&quot;);
+<span class="nc" id="L628">    }</span>
+
+    private void waitForSuccessfulFakeCodexTurns(Path completions, int expectedCount) {
+<span class="nc" id="L631">        waitUntil(</span>
+                HANDOFF_TIMEOUT,
+                () -&gt; {
+<span class="nc" id="L634">                    long count = successfulFakeCodexTurnCount(completions);</span>
+<span class="nc" id="L635">                    assertThat(count)</span>
+<span class="nc" id="L636">                            .as(</span>
+                                    &quot;fake Codex should not complete duplicate turns before reaching %s completions&quot;,
+<span class="nc" id="L638">                                    expectedCount)</span>
+<span class="nc" id="L639">                            .isLessThanOrEqualTo(expectedCount);</span>
+<span class="nc bnc" id="L640" title="All 2 branches missed.">                    return count == expectedCount;</span>
+                },
+                &quot;fake Codex reports &quot; + expectedCount + &quot; successful completed turns&quot;);
+<span class="nc" id="L643">    }</span>
+
+    private static void assertSuccessfulFakeCodexTurns(Path completions, int expectedCount) {
+<span class="nc" id="L646">        assertThat(successfulFakeCodexTurnCount(completions))</span>
+<span class="nc" id="L647">                .as(&quot;fake Codex successful completed turns&quot;)</span>
+<span class="nc" id="L648">                .isEqualTo(expectedCount);</span>
+<span class="nc" id="L649">    }</span>
+
+    private static long successfulFakeCodexTurnCount(Path completions) {
+<span class="nc bnc" id="L652" title="All 2 branches missed.">        if (!Files.isRegularFile(completions)) {</span>
+<span class="nc" id="L653">            return 0;</span>
+        }
+<span class="nc" id="L655">        try (var lines = Files.lines(completions)) {</span>
+<span class="nc" id="L656">            return lines.count();</span>
+<span class="nc" id="L657">        } catch (IOException e) {</span>
+<span class="nc" id="L658">            throw new AssertionError(&quot;Could not read fake Codex completion log&quot;, e);</span>
+        }
+    }
+
+    private void assertStateDrained(SymphonyProcess process) {
+<span class="nc" id="L663">        waitUntil(</span>
+                HANDOFF_TIMEOUT,
+                () -&gt; {
+<span class="nc" id="L666">                    JsonNode state = process.state();</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">                    return state.path(&quot;counts&quot;).path(&quot;running&quot;).asInt() == 0</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">                            &amp;&amp; state.path(&quot;counts&quot;).path(&quot;retrying&quot;).asInt() == 0;</span>
+                },
+                &quot;state drains to zero running and retrying entries&quot;);
+<span class="nc" id="L671">    }</span>
+
+    private void assertCardList(LiveTrelloClient trello, CardRef card, String expectedListId) {
+<span class="nc" id="L674">        assertThat(trello.cardState(card.id()).listId()).isEqualTo(expectedListId);</span>
+<span class="nc" id="L675">    }</span>
+
+    private void refresh(SymphonyProcess process) {
+<span class="nc" id="L678">        process.refresh();</span>
+<span class="nc" id="L679">    }</span>
+
+    private static List&lt;String&gt; runningCardIds(JsonNode state) {
+<span class="nc" id="L682">        List&lt;String&gt; cardIds = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L683">        state.path(&quot;running&quot;).forEach(row -&gt; cardIds.add(row.path(&quot;card_id&quot;).asText()));</span>
+<span class="nc" id="L684">        return cardIds;</span>
+    }
+
+    private static void waitUntil(Duration timeout, BooleanSupplier condition, String description) {
+<span class="nc" id="L688">        Instant deadline = now().plus(timeout);</span>
+<span class="nc" id="L689">        AssertionError lastFailure = null;</span>
+<span class="nc bnc" id="L690" title="All 2 branches missed.">        while (now().isBefore(deadline)) {</span>
+            try {
+<span class="nc bnc" id="L692" title="All 2 branches missed.">                if (condition.getAsBoolean()) {</span>
+<span class="nc" id="L693">                    return;</span>
+                }
+<span class="nc" id="L695">            } catch (AssertionError e) {</span>
+<span class="nc" id="L696">                lastFailure = e;</span>
+<span class="nc" id="L697">            } catch (RuntimeException ignored) {</span>
+                // Poll again; live Trello and the local status endpoint may be briefly unavailable.
+<span class="nc" id="L699">            }</span>
+<span class="nc" id="L700">            pollDelayForBoundedLiveWait();</span>
+        }
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        if (lastFailure != null) {</span>
+<span class="nc" id="L703">            throw lastFailure;</span>
+        }
+<span class="nc" id="L705">        throw new AssertionError(&quot;Timed out waiting for &quot; + description);</span>
+    }
+
+    private static void pollDelayForBoundedLiveWait() {
+        try {
+<span class="nc" id="L710">            Thread.sleep(LIVE_POLL_INTERVAL);</span>
+<span class="nc" id="L711">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L712">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L713">            throw new AssertionError(&quot;Interrupted while waiting for live E2E condition&quot;, e);</span>
+<span class="nc" id="L714">        }</span>
+<span class="nc" id="L715">    }</span>
+
+    private static void cleanupDisposableBoards(
+            LiveTrelloClient trello, String workspaceId, String runId, List&lt;String&gt; disposableBoardIds) {
+<span class="nc" id="L719">        List&lt;String&gt; boardIds = new ArrayList&lt;&gt;(disposableBoardIds);</span>
+<span class="nc" id="L720">        List&lt;Throwable&gt; failures = new ArrayList&lt;&gt;();</span>
+        try {
+<span class="nc" id="L722">            trello.openBoardIdsByNamePrefix(workspaceId, runId).stream()</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">                    .filter(boardId -&gt; !boardIds.contains(boardId))</span>
+<span class="nc" id="L724">                    .forEach(boardIds::add);</span>
+<span class="nc" id="L725">        } catch (AssertionError | RuntimeException e) {</span>
+<span class="nc" id="L726">            failures.add(e);</span>
+<span class="nc" id="L727">        }</span>
+
+<span class="nc bnc" id="L729" title="All 2 branches missed.">        for (String boardId : boardIds.reversed()) {</span>
+            try {
+<span class="nc" id="L731">                trello.archiveBoard(boardId);</span>
+<span class="nc" id="L732">            } catch (AssertionError | RuntimeException e) {</span>
+<span class="nc" id="L733">                failures.add(e);</span>
+<span class="nc" id="L734">            }</span>
+<span class="nc" id="L735">        }</span>
+
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        if (!failures.isEmpty()) {</span>
+<span class="nc" id="L738">            var cleanupFailure = new AssertionError(&quot;Live E2E cleanup could not archive every disposable board&quot;);</span>
+<span class="nc" id="L739">            failures.forEach(cleanupFailure::addSuppressed);</span>
+<span class="nc" id="L740">            throw cleanupFailure;</span>
+        }
+<span class="nc" id="L742">    }</span>
+
+    private static int freePort() {
+<span class="nc" id="L745">        try (var socket = new ServerSocket(0)) {</span>
+<span class="nc" id="L746">            return socket.getLocalPort();</span>
+<span class="nc" id="L747">        } catch (IOException e) {</span>
+<span class="nc" id="L748">            throw new AssertionError(&quot;Could not allocate a free local port&quot;, e);</span>
+        }
+    }
+
+    private SymphonyProcess startProcess(Path runDir, Path workflow, int port) throws IOException {
+<span class="nc" id="L753">        return startProcess(runDir, workflow, port, Map.of());</span>
+    }
+
+    private SymphonyProcess startProcess(Path runDir, Path workflow, int port, Map&lt;String, String&gt; environment)
+            throws IOException {
+<span class="nc" id="L758">        Path stdout = runDir.resolve(&quot;symphony-&quot; + port + &quot;.out.log&quot;);</span>
+<span class="nc" id="L759">        Path stderr = runDir.resolve(&quot;symphony-&quot; + port + &quot;.err.log&quot;);</span>
+<span class="nc" id="L760">        ProcessBuilder builder = new ProcessBuilder(List.of(</span>
+<span class="nc" id="L761">                        Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, executable(&quot;java&quot;))</span>
+<span class="nc" id="L762">                                .toString(),</span>
+                        &quot;-jar&quot;,
+<span class="nc" id="L764">                        QUARKUS_RUNNER.toString(),</span>
+<span class="nc" id="L765">                        workflow.toString(),</span>
+                        &quot;--port&quot;,
+<span class="nc" id="L767">                        Integer.toString(port)))</span>
+<span class="nc" id="L768">                .directory(Path.of(&quot;&quot;).toAbsolutePath().toFile())</span>
+<span class="nc" id="L769">                .redirectOutput(stdout.toFile())</span>
+<span class="nc" id="L770">                .redirectError(stderr.toFile());</span>
+<span class="nc" id="L771">        builder.environment().putAll(environment);</span>
+<span class="nc" id="L772">        Process process = builder.start();</span>
+<span class="nc" id="L773">        return new SymphonyProcess(process, port);</span>
+    }
+
+    private final class LiveTrelloClient {
+        private final TrelloCredentials credentials;
+
+<span class="nc" id="L779">        private LiveTrelloClient(TrelloCredentials credentials) {</span>
+<span class="nc" id="L780">            this.credentials = credentials;</span>
+<span class="nc" id="L781">        }</span>
+
+        String createBoard(String name, String workspaceId) {
+<span class="nc" id="L784">            Map&lt;String, String&gt; query = orderedMap(&quot;name&quot;, name, &quot;defaultLists&quot;, &quot;false&quot;, &quot;defaultLabels&quot;, &quot;false&quot;);</span>
+<span class="nc" id="L785">            query.put(&quot;idOrganization&quot;, workspaceId);</span>
+<span class="nc" id="L786">            Map&lt;String, Object&gt; board = postMap(&quot;boards&quot;, query);</span>
+<span class="nc" id="L787">            return requiredText(board, &quot;id&quot;);</span>
+        }
+
+        Map&lt;String, String&gt; createLists(String boardId, List&lt;String&gt; names) {
+<span class="nc" id="L791">            Map&lt;String, String&gt; created = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L792" title="All 2 branches missed.">            for (String name : names) {</span>
+<span class="nc" id="L793">                Map&lt;String, Object&gt; list =</span>
+<span class="nc" id="L794">                        postMap(&quot;lists&quot;, orderedMap(&quot;name&quot;, name, &quot;idBoard&quot;, boardId, &quot;pos&quot;, &quot;bottom&quot;));</span>
+<span class="nc" id="L795">                created.put(name, requiredText(list, &quot;id&quot;));</span>
+<span class="nc" id="L796">            }</span>
+<span class="nc" id="L797">            return created;</span>
+        }
+
+        Map&lt;String, String&gt; listIdsByName(String boardId) {
+<span class="nc" id="L801">            return getList(</span>
+<span class="nc" id="L802">                            &quot;boards/&quot; + encodeSegment(boardId) + &quot;/lists&quot;,</span>
+<span class="nc" id="L803">                            Map.of(&quot;filter&quot;, &quot;open&quot;, &quot;fields&quot;, &quot;id,name,closed&quot;))</span>
+<span class="nc" id="L804">                    .stream()</span>
+<span class="nc bnc" id="L805" title="All 2 branches missed.">                    .filter(list -&gt; !Boolean.parseBoolean(Objects.toString(list.get(&quot;closed&quot;), &quot;false&quot;)))</span>
+<span class="nc" id="L806">                    .collect(Collectors.toMap(</span>
+<span class="nc" id="L807">                            list -&gt; requiredText(list, &quot;name&quot;),</span>
+<span class="nc" id="L808">                            list -&gt; requiredText(list, &quot;id&quot;),</span>
+<span class="nc" id="L809">                            (left, right) -&gt; left,</span>
+                            LinkedHashMap::new));
+        }
+
+        List&lt;String&gt; openBoardIdsByNamePrefix(String workspaceId, String namePrefix) {
+<span class="nc" id="L814">            return getList(</span>
+<span class="nc" id="L815">                            &quot;organizations/&quot; + encodeSegment(workspaceId) + &quot;/boards&quot;,</span>
+<span class="nc" id="L816">                            Map.of(&quot;filter&quot;, &quot;open&quot;, &quot;fields&quot;, &quot;id,name&quot;))</span>
+<span class="nc" id="L817">                    .stream()</span>
+<span class="nc" id="L818">                    .filter(board -&gt; requiredText(board, &quot;name&quot;).startsWith(namePrefix))</span>
+<span class="nc" id="L819">                    .map(board -&gt; requiredText(board, &quot;id&quot;))</span>
+<span class="nc" id="L820">                    .toList();</span>
+        }
+
+        CardRef createCard(String listId, String name, String description) {
+<span class="nc" id="L824">            Map&lt;String, Object&gt; card =</span>
+<span class="nc" id="L825">                    postMap(&quot;cards&quot;, orderedMap(&quot;idList&quot;, listId, &quot;name&quot;, name, &quot;desc&quot;, description));</span>
+<span class="nc" id="L826">            return new CardRef(requiredText(card, &quot;id&quot;));</span>
+        }
+
+        void moveCardToTop(String cardId) {
+<span class="nc" id="L830">            putMap(&quot;cards/&quot; + encodeSegment(cardId), Map.of(&quot;pos&quot;, &quot;top&quot;));</span>
+<span class="nc" id="L831">        }</span>
+
+        List&lt;String&gt; cardIdsInList(String listId) {
+<span class="nc" id="L834">            return getList(&quot;lists/&quot; + encodeSegment(listId) + &quot;/cards&quot;, Map.of(&quot;fields&quot;, &quot;id,pos&quot;)).stream()</span>
+<span class="nc" id="L835">                    .map(card -&gt; requiredText(card, &quot;id&quot;))</span>
+<span class="nc" id="L836">                    .toList();</span>
+        }
+
+        CardState cardState(String cardId) {
+<span class="nc" id="L840">            Map&lt;String, Object&gt; card = getMap(</span>
+<span class="nc" id="L841">                    &quot;cards/&quot; + encodeSegment(cardId),</span>
+<span class="nc" id="L842">                    Map.of(</span>
+                            &quot;fields&quot;,
+                            &quot;idList,name&quot;,
+                            &quot;actions&quot;,
+                            &quot;commentCard&quot;,
+                            &quot;actions_limit&quot;,
+<span class="nc" id="L848">                            Integer.toString(TrelloClient.RECENT_COMMENT_ACTION_LIMIT)));</span>
+<span class="nc" id="L849">            Object actions = card.get(&quot;actions&quot;);</span>
+<span class="nc bnc" id="L850" title="All 2 branches missed.">            List&lt;?&gt; comments = actions instanceof List&lt;?&gt; values ? values : List.of();</span>
+<span class="nc" id="L851">            long workpadCount =</span>
+<span class="nc" id="L852">                    comments.stream().filter(LiveTrelloClient::isWorkpadComment).count();</span>
+<span class="nc" id="L853">            return new CardState(requiredText(card, &quot;idList&quot;), comments.size(), workpadCount);</span>
+        }
+
+        private static boolean isWorkpadComment(Object action) {
+<span class="nc bnc" id="L857" title="All 2 branches missed.">            if (!(action instanceof Map&lt;?, ?&gt; actionMap)) {</span>
+<span class="nc" id="L858">                return false;</span>
+            }
+<span class="nc" id="L860">            Object data = actionMap.get(&quot;data&quot;);</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">            if (!(data instanceof Map&lt;?, ?&gt; dataMap)) {</span>
+<span class="nc" id="L862">                return false;</span>
+            }
+<span class="nc" id="L864">            Object text = dataMap.get(&quot;text&quot;);</span>
+<span class="nc bnc" id="L865" title="All 4 branches missed.">            return text != null &amp;&amp; text.toString().startsWith(&quot;## Codex Workpad&quot;);</span>
+        }
+
+        void archiveBoard(String boardId) {
+<span class="nc" id="L869">            putMap(&quot;boards/&quot; + encodeSegment(boardId) + &quot;/closed&quot;, Map.of(&quot;value&quot;, &quot;true&quot;));</span>
+<span class="nc" id="L870">        }</span>
+
+        private Map&lt;String, Object&gt; getMap(String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L873">            return request(&quot;GET&quot;, path, query, MAP_TYPE);</span>
+        }
+
+        private List&lt;Map&lt;String, Object&gt;&gt; getList(String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L877">            return request(&quot;GET&quot;, path, query, LIST_MAP_TYPE);</span>
+        }
+
+        private Map&lt;String, Object&gt; postMap(String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L881">            return request(&quot;POST&quot;, path, query, MAP_TYPE);</span>
+        }
+
+        private Map&lt;String, Object&gt; putMap(String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L885">            return request(&quot;PUT&quot;, path, query, MAP_TYPE);</span>
+        }
+
+        private &lt;T&gt; T request(String method, String path, Map&lt;String, String&gt; query, TypeReference&lt;T&gt; type) {
+<span class="nc" id="L889">            HttpRequest.Builder builder = HttpRequest.newBuilder(uri(path, query))</span>
+<span class="nc" id="L890">                    .timeout(Duration.ofSeconds(30))</span>
+<span class="nc" id="L891">                    .header(&quot;Accept&quot;, &quot;application/json&quot;)</span>
+<span class="nc" id="L892">                    .header(&quot;Authorization&quot;, TrelloClient.authorization(credentials.apiKey(), credentials.apiToken()));</span>
+            HttpRequest request =
+<span class="nc bnc" id="L894" title="All 4 branches missed.">                    switch (method) {</span>
+<span class="nc" id="L895">                        case &quot;GET&quot; -&gt; builder.GET().build();</span>
+                        case &quot;POST&quot; -&gt;
+<span class="nc" id="L897">                            builder.POST(HttpRequest.BodyPublishers.noBody()).build();</span>
+                        case &quot;PUT&quot; -&gt;
+<span class="nc" id="L899">                            builder.PUT(HttpRequest.BodyPublishers.noBody()).build();</span>
+<span class="nc" id="L900">                        default -&gt; throw new IllegalArgumentException(&quot;Unsupported Trello method: &quot; + method);</span>
+                    };
+            try {
+<span class="nc" id="L903">                HttpResponse&lt;String&gt; response = http.send(request, HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L904" title="All 4 branches missed.">                if (response.statusCode() &lt; 200 || response.statusCode() &gt;= 300) {</span>
+<span class="nc" id="L905">                    throw new AssertionError(&quot;Trello live E2E request failed with HTTP &quot; + response.statusCode());</span>
+                }
+<span class="nc" id="L907">                return json.readValue(response.body(), type);</span>
+<span class="nc" id="L908">            } catch (IOException e) {</span>
+<span class="nc" id="L909">                throw new AssertionError(&quot;Trello live E2E request failed&quot;, e);</span>
+<span class="nc" id="L910">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L911">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L912">                throw new AssertionError(&quot;Trello live E2E request interrupted&quot;, e);</span>
+            }
+        }
+    }
+
+    private final class SymphonyProcess implements AutoCloseable {
+        private final Process process;
+        private final int port;
+
+<span class="nc" id="L921">        private SymphonyProcess(Process process, int port) {</span>
+<span class="nc" id="L922">            this.process = process;</span>
+<span class="nc" id="L923">            this.port = port;</span>
+<span class="nc" id="L924">        }</span>
+
+        JsonNode state() {
+<span class="nc" id="L927">            return getJson(&quot;http://127.0.0.1:&quot; + port + &quot;/api/v1/state&quot;);</span>
+        }
+
+        void refresh() {
+<span class="nc" id="L931">            post(&quot;http://127.0.0.1:&quot; + port + &quot;/api/v1/refresh&quot;);</span>
+<span class="nc" id="L932">        }</span>
+
+        boolean isAlive() {
+<span class="nc" id="L935">            return process.isAlive();</span>
+        }
+
+        @Override
+        public void close() {
+<span class="nc" id="L940">            process.destroy();</span>
+            try {
+<span class="nc bnc" id="L942" title="All 2 branches missed.">                if (!process.waitFor(Duration.ofSeconds(10))) {</span>
+<span class="nc" id="L943">                    process.destroyForcibly();</span>
+<span class="nc" id="L944">                    process.waitFor();</span>
+                }
+<span class="nc" id="L946">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L947">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L948">                process.destroyForcibly();</span>
+<span class="nc" id="L949">            }</span>
+<span class="nc" id="L950">        }</span>
+    }
+
+    private JsonNode getJson(String url) {
+        try {
+<span class="nc" id="L955">            HttpResponse&lt;String&gt; response = http.send(</span>
+<span class="nc" id="L956">                    HttpRequest.newBuilder(URI.create(url))</span>
+<span class="nc" id="L957">                            .timeout(Duration.ofSeconds(5))</span>
+<span class="nc" id="L958">                            .GET()</span>
+<span class="nc" id="L959">                            .build(),</span>
+<span class="nc" id="L960">                    HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L961" title="All 4 branches missed.">            if (response.statusCode() &gt;= 200 &amp;&amp; response.statusCode() &lt; 300) {</span>
+<span class="nc" id="L962">                return json.readTree(response.body());</span>
+            }
+<span class="nc" id="L964">            throw new IllegalStateException(&quot;HTTP &quot; + response.statusCode());</span>
+<span class="nc" id="L965">        } catch (IOException e) {</span>
+<span class="nc" id="L966">            throw new IllegalStateException(&quot;Status request failed&quot;, e);</span>
+<span class="nc" id="L967">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L968">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L969">            throw new IllegalStateException(&quot;Status request interrupted&quot;, e);</span>
+        }
+    }
+
+    private void post(String url) {
+        try {
+<span class="nc" id="L975">            HttpResponse&lt;String&gt; response = http.send(</span>
+<span class="nc" id="L976">                    HttpRequest.newBuilder(URI.create(url))</span>
+<span class="nc" id="L977">                            .timeout(Duration.ofSeconds(5))</span>
+<span class="nc" id="L978">                            .POST(HttpRequest.BodyPublishers.noBody())</span>
+<span class="nc" id="L979">                            .build(),</span>
+<span class="nc" id="L980">                    HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L981" title="All 4 branches missed.">            checkState(response.statusCode() &gt;= 200 &amp;&amp; response.statusCode() &lt; 300, &quot;HTTP %s&quot;, response.statusCode());</span>
+<span class="nc" id="L982">        } catch (IOException e) {</span>
+<span class="nc" id="L983">            throw new IllegalStateException(&quot;Status refresh failed&quot;, e);</span>
+<span class="nc" id="L984">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L985">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L986">            throw new IllegalStateException(&quot;Status refresh interrupted&quot;, e);</span>
+<span class="nc" id="L987">        }</span>
+<span class="nc" id="L988">    }</span>
+
+    private static URI uri(String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L991">        String queryString = query.entrySet().stream()</span>
+<span class="nc" id="L992">                .map(entry -&gt; encode(entry.getKey()) + &quot;=&quot; + encode(entry.getValue()))</span>
+<span class="nc" id="L993">                .collect(Collectors.joining(&quot;&amp;&quot;));</span>
+<span class="nc bnc" id="L994" title="All 2 branches missed.">        return URI.create(TRELLO_ENDPOINT + &quot;/&quot; + path + (queryString.isBlank() ? &quot;&quot; : &quot;?&quot; + queryString));</span>
+    }
+
+    private static Instant now() {
+<span class="nc" id="L998">        return Instant.ofEpochMilli(System.currentTimeMillis());</span>
+    }
+
+    private static Map&lt;String, String&gt; orderedMap(String... entries) {
+<span class="nc" id="L1002">        Map&lt;String, String&gt; values = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L1003" title="All 2 branches missed.">        for (int index = 0; index &lt; entries.length; index += 2) {</span>
+<span class="nc" id="L1004">            values.put(entries[index], entries[index + 1]);</span>
+        }
+<span class="nc" id="L1006">        return values;</span>
+    }
+
+    private static String requiredText(Map&lt;String, Object&gt; value, String key) {
+<span class="nc" id="L1010">        Object raw = value.get(key);</span>
+<span class="nc" id="L1011">        assertThat(raw).as(&quot;Trello response should contain %s&quot;, key).isNotNull();</span>
+<span class="nc" id="L1012">        return raw.toString();</span>
+    }
+
+    private static String encodeSegment(String value) {
+<span class="nc" id="L1016">        return encode(value).replace(&quot;+&quot;, &quot;%20&quot;);</span>
+    }
+
+    private static String encode(String value) {
+<span class="nc" id="L1020">        return URLEncoder.encode(value, StandardCharsets.UTF_8);</span>
+    }
+
+<span class="nc" id="L1023">    private record CardRef(String id) {}</span>
+
+<span class="nc" id="L1025">    private record CardState(String listId, int commentCount, long workpadCount) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

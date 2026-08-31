@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConnectedBoardRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">ConnectedBoardRepository.java</span></div><h1>ConnectedBoardRepository.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.StreamSupport;
+
+final class ConnectedBoardRepository {
+    private final ObjectMapper json;
+    private final Path manifestPath;
+
+    ConnectedBoardRepository(Path manifestPath) {
+<span class="nc" id="L21">        this(manifestPath, jsonMapper());</span>
+<span class="nc" id="L22">    }</span>
+
+<span class="nc" id="L24">    ConnectedBoardRepository(Path manifestPath, ObjectMapper json) {</span>
+<span class="nc" id="L25">        this.manifestPath = manifestPath;</span>
+<span class="nc" id="L26">        this.json = json;</span>
+<span class="nc" id="L27">    }</span>
+
+    ConnectedBoardManifest load() throws IOException {
+<span class="nc bnc" id="L30" title="All 2 branches missed.">        if (!Files.isRegularFile(manifestPath)) {</span>
+<span class="nc" id="L31">            return new ConnectedBoardManifest(List.of());</span>
+        }
+        try {
+<span class="nc" id="L34">            ConnectedBoardManifest manifest = json.readValue(manifestPath.toFile(), ConnectedBoardManifest.class);</span>
+<span class="nc bnc" id="L35" title="All 2 branches missed.">            if (manifest == null) {</span>
+                // A literal null document is valid JSON, so readValue returns null instead of
+                // failing; callers must never have to null-check an expected config problem.
+<span class="nc" id="L38">                throw invalidManifestContent(List.of(&quot;Connected-board manifest must be a JSON object.&quot;));</span>
+            }
+<span class="nc" id="L40">            return manifest;</span>
+<span class="nc" id="L41">        } catch (JsonProcessingException e) {</span>
+            // A hand-edited or corrupted manifest is an expected local configuration problem, not
+            // an unexpected failure that needs a troubleshooting report or a raw parser message.
+<span class="nc" id="L44">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_manifest_unavailable&quot;,
+                    &quot;Connected-board manifest is not valid JSON:\n  &quot;
+<span class="nc" id="L47">                            + manifestPath.toAbsolutePath().normalize()</span>
+                            + &quot;\nRepair or remove &quot;
+                            + ConnectedBoardManifest.FILE_NAME
+                            + &quot;, then rerun the command.&quot;,
+                    e);
+        }
+    }
+
+    ManifestLoadResult loadForCheck() throws IOException {
+<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (!Files.isRegularFile(manifestPath)) {</span>
+<span class="nc" id="L57">            return new ManifestLoadResult(new ConnectedBoardManifest(List.of()), List.of());</span>
+        }
+        JsonNode root;
+        try {
+<span class="nc" id="L61">            root = json.readTree(manifestPath.toFile());</span>
+<span class="nc" id="L62">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L63">            return new ManifestLoadResult(</span>
+<span class="nc" id="L64">                    new ConnectedBoardManifest(List.of()),</span>
+<span class="nc" id="L65">                    List.of(&quot;Connected-board manifest is not valid JSON.&quot;),</span>
+                    false);
+<span class="nc" id="L67">        }</span>
+<span class="nc" id="L68">        List&lt;String&gt; warnings = manifestShapeWarnings(root);</span>
+<span class="nc bnc" id="L69" title="All 6 branches missed.">        if (root == null || !root.isObject() || !root.path(&quot;boards&quot;).isArray()) {</span>
+<span class="nc" id="L70">            return new ManifestLoadResult(new ConnectedBoardManifest(List.of()), warnings, false);</span>
+        }
+        // Reject non-object rows before treeToValue: Jackson maps a null row to a null list
+        // element, and downstream board iteration must never see a null board.
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (hasNonObjectBoardRow(root)) {</span>
+<span class="nc" id="L75">            return new ManifestLoadResult(new ConnectedBoardManifest(List.of()), unloadable(warnings), false);</span>
+        }
+        try {
+<span class="nc" id="L78">            return new ManifestLoadResult(json.treeToValue(root, ConnectedBoardManifest.class), warnings);</span>
+<span class="nc" id="L79">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L80">            return new ManifestLoadResult(new ConnectedBoardManifest(List.of()), unloadable(warnings), false);</span>
+        }
+    }
+
+    private static List&lt;String&gt; unloadable(List&lt;String&gt; warnings) {
+<span class="nc" id="L85">        return append(warnings, &quot;Connected-board manifest contains invalid values and could not be loaded for checks.&quot;);</span>
+    }
+
+    /// Strict load for lifecycle and setup commands: any invalid manifest shape or incomplete board
+    /// row is an expected local configuration error here, never a null dereference deeper in the
+    /// command. Only diagnostics and setup-local check load more leniently, via loadForCheck().
+    ConnectedBoardManifest loadForLifecycle() throws IOException {
+<span class="nc" id="L92">        ConnectedBoardManifest manifest = load();</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (!Files.isRegularFile(manifestPath)) {</span>
+<span class="nc" id="L94">            return manifest;</span>
+        }
+<span class="nc" id="L96">        List&lt;String&gt; warnings = loadForCheck().warnings();</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        if (!warnings.isEmpty()) {</span>
+<span class="nc" id="L98">            throw invalidManifestContent(warnings);</span>
+        }
+<span class="nc" id="L100">        return manifest;</span>
+    }
+
+    private TrelloBoardSetupException invalidManifestContent(List&lt;String&gt; warnings) {
+<span class="nc" id="L104">        return new TrelloBoardSetupException(</span>
+                &quot;setup_manifest_unavailable&quot;,
+                &quot;Connected-board manifest is not valid connected-board JSON:\n  &quot;
+<span class="nc" id="L107">                        + manifestPath.toAbsolutePath().normalize()</span>
+<span class="nc" id="L108">                        + &quot;\n  - &quot; + String.join(&quot;\n  - &quot;, warnings)</span>
+                        + &quot;\nRepair or remove &quot;
+                        + ConnectedBoardManifest.FILE_NAME
+                        + &quot;, then rerun the command.&quot;);
+    }
+
+    void save(ConnectedBoardManifest manifest) throws IOException {
+<span class="nc" id="L115">        Path parent = manifestPath.toAbsolutePath().normalize().getParent();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (parent != null) {</span>
+<span class="nc" id="L117">            Files.createDirectories(parent);</span>
+        }
+<span class="nc" id="L119">        json.writerWithDefaultPrettyPrinter().writeValue(manifestPath.toFile(), manifest);</span>
+<span class="nc" id="L120">    }</span>
+
+    void validateWritable() throws IOException {
+<span class="nc" id="L123">        Path absolute = manifestPath.toAbsolutePath().normalize();</span>
+<span class="nc bnc" id="L124" title="All 4 branches missed.">        if (Files.exists(absolute) &amp;&amp; !Files.isRegularFile(absolute)) {</span>
+<span class="nc" id="L125">            throw new IOException(&quot;Connected-board manifest path is not a regular file.&quot;);</span>
+        }
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (Files.isRegularFile(absolute)) {</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            try (FileChannel ignored = FileChannel.open(absolute, StandardOpenOption.WRITE)) {</span>
+<span class="nc" id="L129">                return;</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            }</span>
+        }
+<span class="nc" id="L132">        Path parent = absolute.getParent();</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L134">            return;</span>
+        }
+<span class="nc" id="L136">        Files.createDirectories(parent);</span>
+<span class="nc" id="L137">        Path probe = Files.createTempFile(parent, &quot;.connected-boards-write-probe-&quot;, &quot;.tmp&quot;);</span>
+<span class="nc" id="L138">        Files.deleteIfExists(probe);</span>
+<span class="nc" id="L139">    }</span>
+
+    static void validateManifestPathForCheck(Path manifestPath) {
+<span class="nc" id="L142">        CliInputValidation.rejectDirectoryPath(&quot;--manifest&quot;, manifestPath);</span>
+<span class="nc" id="L143">        rejectNonDirectoryManifestParent(manifestPath);</span>
+<span class="nc" id="L144">    }</span>
+
+    static void validateManifestPathForSetup(Path manifestPath) {
+<span class="nc" id="L147">        validateManifestPathForCheck(manifestPath);</span>
+<span class="nc bnc" id="L148" title="All 4 branches missed.">        if (Files.exists(manifestPath) &amp;&amp; !Files.isRegularFile(manifestPath)) {</span>
+<span class="nc" id="L149">            throw invalidManifestPath();</span>
+        }
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (!Files.isRegularFile(manifestPath)) {</span>
+<span class="nc" id="L152">            return;</span>
+        }
+        try {
+<span class="nc" id="L155">            ManifestLoadResult loadResult = new ConnectedBoardRepository(manifestPath).loadForCheck();</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (!loadResult.warnings().isEmpty()) {</span>
+<span class="nc" id="L157">                throw invalidManifestPath();</span>
+            }
+<span class="nc" id="L159">        } catch (IOException e) {</span>
+<span class="nc" id="L160">            throw invalidManifestPath(e);</span>
+<span class="nc" id="L161">        }</span>
+<span class="nc" id="L162">    }</span>
+
+    Path manifestPath() {
+<span class="nc" id="L165">        return manifestPath;</span>
+    }
+
+    private static TrelloBoardSetupException invalidManifestPath() {
+<span class="nc" id="L169">        return new TrelloBoardSetupException(</span>
+                &quot;setup_invalid_arguments&quot;, &quot;--manifest must be a readable connected-board manifest JSON file.&quot;);
+    }
+
+    private static TrelloBoardSetupException invalidManifestPath(IOException cause) {
+<span class="nc" id="L174">        return new TrelloBoardSetupException(</span>
+                &quot;setup_invalid_arguments&quot;, &quot;--manifest must be a readable connected-board manifest JSON file.&quot;, cause);
+    }
+
+    private static void rejectNonDirectoryManifestParent(Path manifestPath) {
+<span class="nc" id="L179">        Path parent = manifestPath.toAbsolutePath().normalize().getParent();</span>
+<span class="nc bnc" id="L180" title="All 6 branches missed.">        if (parent != null &amp;&amp; Files.exists(parent) &amp;&amp; !Files.isDirectory(parent)) {</span>
+<span class="nc" id="L181">            throw invalidManifestPath();</span>
+        }
+<span class="nc" id="L183">    }</span>
+
+    private static boolean hasNonObjectBoardRow(JsonNode root) {
+<span class="nc" id="L186">        JsonNode boards = root.path(&quot;boards&quot;);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        return StreamSupport.stream(boards.spliterator(), false).anyMatch(board -&gt; !board.isObject());</span>
+    }
+
+    private static List&lt;String&gt; manifestShapeWarnings(JsonNode root) {
+<span class="nc bnc" id="L191" title="All 4 branches missed.">        if (root == null || !root.isObject()) {</span>
+<span class="nc" id="L192">            return List.of(&quot;Connected-board manifest must be a JSON object.&quot;);</span>
+        }
+<span class="nc" id="L194">        JsonNode boards = root.path(&quot;boards&quot;);</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (!boards.isArray()) {</span>
+<span class="nc" id="L196">            return List.of(&quot;Connected-board manifest field boards must be an array.&quot;);</span>
+        }
+<span class="nc" id="L198">        List&lt;String&gt; warnings = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">        for (int index = 0; index &lt; boards.size(); index++) {</span>
+<span class="nc" id="L200">            JsonNode board = boards.get(index);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (!board.isObject()) {</span>
+<span class="nc" id="L202">                warnings.add(&quot;Connected-board manifest entry &quot; + (index + 1) + &quot; must be an object.&quot;);</span>
+<span class="nc" id="L203">                continue;</span>
+            }
+<span class="nc" id="L205">            String label = boardLabel(board, index);</span>
+<span class="nc" id="L206">            requireText(board, &quot;boardId&quot;, label, warnings);</span>
+<span class="nc" id="L207">            requireText(board, &quot;boardKey&quot;, label, warnings);</span>
+<span class="nc" id="L208">            requireText(board, &quot;boardName&quot;, label, warnings);</span>
+<span class="nc" id="L209">            requireText(board, &quot;boardUrl&quot;, label, warnings);</span>
+<span class="nc" id="L210">            requireText(board, &quot;workflowPath&quot;, label, warnings);</span>
+<span class="nc" id="L211">            requireText(board, &quot;envPath&quot;, label, warnings);</span>
+<span class="nc" id="L212">            requireText(board, &quot;workspaceRoot&quot;, label, warnings);</span>
+<span class="nc" id="L213">            requireBooleanIfPresent(board, &quot;githubEnabled&quot;, label, warnings);</span>
+<span class="nc" id="L214">            requireBooleanIfPresent(board, &quot;dangerFullAccess&quot;, label, warnings);</span>
+<span class="nc" id="L215">            requireServerPort(board, label, warnings);</span>
+<span class="nc" id="L216">            requireWritableRoots(board, label, warnings);</span>
+        }
+<span class="nc" id="L218">        return warnings;</span>
+    }
+
+    private static void requireText(JsonNode board, String field, String label, List&lt;String&gt; warnings) {
+<span class="nc" id="L222">        JsonNode value = board.get(field);</span>
+<span class="nc bnc" id="L223" title="All 6 branches missed.">        if (value == null || !value.isTextual() || value.asText().isBlank()) {</span>
+<span class="nc" id="L224">            warnings.add(</span>
+                    &quot;Connected-board manifest entry &quot; + label + &quot; field &quot; + field + &quot; must be a non-blank string.&quot;);
+        }
+<span class="nc" id="L227">    }</span>
+
+    private static void requireBooleanIfPresent(JsonNode board, String field, String label, List&lt;String&gt; warnings) {
+<span class="nc" id="L230">        JsonNode value = board.get(field);</span>
+<span class="nc bnc" id="L231" title="All 4 branches missed.">        if (value != null &amp;&amp; !value.isBoolean()) {</span>
+<span class="nc" id="L232">            warnings.add(&quot;Connected-board manifest entry &quot; + label + &quot; field &quot; + field + &quot; must be true or false.&quot;);</span>
+        }
+<span class="nc" id="L234">    }</span>
+
+    private static void requireServerPort(JsonNode board, String label, List&lt;String&gt; warnings) {
+<span class="nc" id="L237">        JsonNode value = board.get(&quot;serverPort&quot;);</span>
+<span class="nc bnc" id="L238" title="All 4 branches missed.">        if (value == null || !value.isIntegralNumber()) {</span>
+<span class="nc" id="L239">            warnings.add(&quot;Connected-board manifest entry &quot; + label + &quot; field serverPort must be a JSON number from &quot;</span>
+                    + LocalPort.MIN + &quot; to &quot; + LocalPort.MAX + &quot;.&quot;);
+<span class="nc" id="L241">            return;</span>
+        }
+<span class="nc" id="L243">        int port = value.asInt();</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (!LocalPort.isValid(port)) {</span>
+<span class="nc" id="L245">            warnings.add(&quot;Connected-board manifest entry &quot; + label + &quot; field serverPort must be between &quot;</span>
+                    + LocalPort.MIN + &quot; and &quot; + LocalPort.MAX + &quot;.&quot;);
+        }
+<span class="nc" id="L248">    }</span>
+
+    private static void requireWritableRoots(JsonNode board, String label, List&lt;String&gt; warnings) {
+<span class="nc" id="L251">        JsonNode roots = board.get(&quot;additionalWritableRoots&quot;);</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        if (roots == null) {</span>
+<span class="nc" id="L253">            return;</span>
+        }
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (!roots.isArray()) {</span>
+<span class="nc" id="L256">            warnings.add(&quot;Connected-board manifest entry &quot; + label</span>
+                    + &quot; field additionalWritableRoots must be an array of path strings.&quot;);
+<span class="nc" id="L258">            return;</span>
+        }
+<span class="nc" id="L260">        boolean hasInvalidRoot = StreamSupport.stream(roots.spliterator(), false)</span>
+<span class="nc bnc" id="L261" title="All 4 branches missed.">                .anyMatch(root -&gt; !root.isTextual() || root.asText().isBlank());</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">        if (hasInvalidRoot) {</span>
+<span class="nc" id="L263">            warnings.add(&quot;Connected-board manifest entry &quot; + label</span>
+                    + &quot; field additionalWritableRoots must contain only non-blank path strings.&quot;);
+        }
+<span class="nc" id="L266">    }</span>
+
+    private static String boardLabel(JsonNode board, int index) {
+<span class="nc" id="L269">        JsonNode boardName = board.get(&quot;boardName&quot;);</span>
+<span class="nc bnc" id="L270" title="All 6 branches missed.">        return boardName != null &amp;&amp; boardName.isTextual() &amp;&amp; !boardName.asText().isBlank()</span>
+<span class="nc" id="L271">                ? DisplayNames.quotedName(boardName.asText())</span>
+<span class="nc" id="L272">                : String.valueOf(index + 1);</span>
+    }
+
+    private static List&lt;String&gt; append(List&lt;String&gt; warnings, String warning) {
+<span class="nc" id="L276">        List&lt;String&gt; appended = new ArrayList&lt;&gt;(warnings);</span>
+<span class="nc" id="L277">        appended.add(warning);</span>
+<span class="nc" id="L278">        return List.copyOf(appended);</span>
+    }
+
+    static ObjectMapper jsonMapper() {
+<span class="nc" id="L282">        SimpleModule module = new SimpleModule()</span>
+<span class="nc" id="L283">                .addSerializer(Path.class, new PathJsonSerializer())</span>
+<span class="nc" id="L284">                .addDeserializer(Path.class, new PathJsonDeserializer());</span>
+<span class="nc" id="L285">        return new ObjectMapper().registerModule(module);</span>
+    }
+
+    record ManifestLoadResult(ConnectedBoardManifest manifest, List&lt;String&gt; warnings, boolean usableRows) {
+        ManifestLoadResult(ConnectedBoardManifest manifest, List&lt;String&gt; warnings) {
+<span class="nc" id="L290">            this(manifest, warnings, true);</span>
+<span class="nc" id="L291">        }</span>
+
+<span class="nc" id="L293">        ManifestLoadResult {</span>
+<span class="nc" id="L294">            warnings = List.copyOf(warnings);</span>
+<span class="nc" id="L295">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

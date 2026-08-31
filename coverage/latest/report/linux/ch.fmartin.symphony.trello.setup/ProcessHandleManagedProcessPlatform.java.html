@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProcessHandleManagedProcessPlatform.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">ProcessHandleManagedProcessPlatform.java</span></div><h1>ProcessHandleManagedProcessPlatform.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+
+<span class="nc" id="L14">abstract class ProcessHandleManagedProcessPlatform implements ManagedProcessPlatform {</span>
+    @Override
+    public ManagedProcessHandle start(
+            List&lt;String&gt; command, Path workingDirectory, Map&lt;String, String&gt; environment, Path stdout, Path stderr)
+            throws IOException {
+<span class="nc" id="L19">        createParentDirectories(stdout);</span>
+<span class="nc" id="L20">        createParentDirectories(stderr);</span>
+<span class="nc" id="L21">        ProcessBuilder builder = new ProcessBuilder(launchCommand(command))</span>
+<span class="nc" id="L22">                .directory(workingDirectory.toFile())</span>
+<span class="nc" id="L23">                .redirectOutput(ProcessBuilder.Redirect.appendTo(stdout.toFile()))</span>
+<span class="nc" id="L24">                .redirectError(ProcessBuilder.Redirect.appendTo(stderr.toFile()));</span>
+<span class="nc" id="L25">        standardInputRedirect().ifPresent(input -&gt; builder.redirectInput(ProcessBuilder.Redirect.from(input.toFile())));</span>
+<span class="nc" id="L26">        configureWorkerEnvironment(builder.environment(), environment);</span>
+<span class="nc" id="L27">        return new ManagedProcessHandle(builder.start().pid());</span>
+    }
+
+    static void configureWorkerEnvironment(
+            Map&lt;String, String&gt; inheritedEnvironment, Map&lt;String, String&gt; configuredEnvironment) {
+<span class="nc" id="L32">        inheritedEnvironment.putAll(withoutInstallerCompletionEnvironment(configuredEnvironment));</span>
+<span class="nc" id="L33">        inheritedEnvironment.remove(LocalSetup.INSTALLER_COMPLETION_ENV);</span>
+<span class="nc" id="L34">    }</span>
+
+    static Map&lt;String, String&gt; withoutInstallerCompletionEnvironment(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L37">        Map&lt;String, String&gt; sanitized = new LinkedHashMap&lt;&gt;(environment);</span>
+<span class="nc" id="L38">        sanitized.remove(LocalSetup.INSTALLER_COMPLETION_ENV);</span>
+<span class="nc" id="L39">        return Map.copyOf(sanitized);</span>
+    }
+
+    @Override
+    public boolean isAlive(long pid) {
+<span class="nc" id="L44">        return ProcessHandle.of(pid).filter(ProcessHandle::isAlive).isPresent();</span>
+    }
+
+    @Override
+    public boolean isManaged(long pid, Path appHome) {
+<span class="nc" id="L49">        return commandArguments(pid)</span>
+<span class="nc" id="L50">                .filter(arguments -&gt; isManagedCommand(arguments, appHome, Optional.empty()))</span>
+<span class="nc" id="L51">                .isPresent();</span>
+    }
+
+    @Override
+    public boolean isManaged(long pid, Path appHome, Path workflowPath) {
+<span class="nc" id="L56">        return commandArguments(pid)</span>
+<span class="nc" id="L57">                .filter(arguments -&gt; isManagedCommand(arguments, appHome, Optional.of(workflowPath)))</span>
+<span class="nc" id="L58">                .isPresent();</span>
+    }
+
+    static boolean isManagedCommand(List&lt;String&gt; arguments, Path appHome, Optional&lt;Path&gt; workflowPath) {
+<span class="nc" id="L62">        String marker =</span>
+<span class="nc" id="L63">                &quot;-Dsymphony.trello.managed.app_home=&quot; + appHome.toAbsolutePath().normalize();</span>
+<span class="nc" id="L64">        String jar = appHome.toAbsolutePath()</span>
+<span class="nc" id="L65">                .normalize()</span>
+<span class="nc" id="L66">                .resolve(&quot;target/quarkus-app/quarkus-run.jar&quot;)</span>
+<span class="nc" id="L67">                .toString();</span>
+<span class="nc bnc" id="L68" title="All 4 branches missed.">        boolean matchesInstall = arguments.contains(marker) &amp;&amp; arguments.contains(jar);</span>
+<span class="nc" id="L69">        return workflowPath</span>
+<span class="nc" id="L70">                .map(Path::toAbsolutePath)</span>
+<span class="nc" id="L71">                .map(Path::normalize)</span>
+<span class="nc" id="L72">                .map(Path::toString)</span>
+<span class="nc bnc" id="L73" title="All 4 branches missed.">                .map(workflow -&gt; matchesInstall &amp;&amp; arguments.contains(workflow))</span>
+<span class="nc" id="L74">                .orElse(matchesInstall);</span>
+    }
+
+    @Override
+    public boolean stop(long pid, Duration gracefulTimeout, Duration forcedTimeout) {
+<span class="nc" id="L79">        return ProcessHandle.of(pid)</span>
+<span class="nc" id="L80">                .map(handle -&gt; stopHandle(handle, gracefulTimeout, forcedTimeout))</span>
+<span class="nc" id="L81">                .orElse(true);</span>
+    }
+
+    private boolean stopHandle(ProcessHandle handle, Duration gracefulTimeout, Duration forcedTimeout) {
+<span class="nc bnc" id="L85" title="All 2 branches missed.">        if (!handle.isAlive()) {</span>
+<span class="nc" id="L86">            return true;</span>
+        }
+<span class="nc" id="L88">        handle.descendants()</span>
+<span class="nc" id="L89">                .sorted(Comparator.comparingLong(ProcessHandle::pid).reversed())</span>
+<span class="nc" id="L90">                .forEach(ProcessHandle::destroy);</span>
+<span class="nc" id="L91">        handle.destroy();</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        if (waitForExit(handle, gracefulTimeout)) {</span>
+<span class="nc" id="L93">            return true;</span>
+        }
+<span class="nc" id="L95">        handle.descendants()</span>
+<span class="nc" id="L96">                .sorted(Comparator.comparingLong(ProcessHandle::pid).reversed())</span>
+<span class="nc" id="L97">                .forEach(ProcessHandle::destroyForcibly);</span>
+<span class="nc" id="L98">        handle.destroyForcibly();</span>
+<span class="nc" id="L99">        return waitForExit(handle, forcedTimeout);</span>
+    }
+
+    protected List&lt;String&gt; launchCommand(List&lt;String&gt; command) {
+<span class="nc" id="L103">        return command;</span>
+    }
+
+    protected Optional&lt;Path&gt; standardInputRedirect() {
+<span class="nc" id="L107">        return Optional.empty();</span>
+    }
+
+    private static void createParentDirectories(Path path) throws IOException {
+<span class="nc" id="L111">        Path parent = path.toAbsolutePath().normalize().getParent();</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (parent != null) {</span>
+<span class="nc" id="L113">            Files.createDirectories(parent);</span>
+        }
+<span class="nc" id="L115">    }</span>
+
+    private static Optional&lt;List&lt;String&gt;&gt; commandArguments(long pid) {
+<span class="nc" id="L118">        return ProcessHandle.of(pid)</span>
+<span class="nc" id="L119">                .flatMap(handle -&gt; handle.info().arguments())</span>
+<span class="nc" id="L120">                .map(List::of);</span>
+    }
+
+    private static boolean waitForExit(ProcessHandle handle, Duration timeout) {
+        try {
+<span class="nc" id="L125">            handle.onExit().get(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L126">            return true;</span>
+<span class="nc" id="L127">        } catch (Exception ignored) {</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">            return !handle.isAlive();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

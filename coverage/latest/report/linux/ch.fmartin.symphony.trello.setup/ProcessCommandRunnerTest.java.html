@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProcessCommandRunnerTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">ProcessCommandRunnerTest.java</span></div><h1>ProcessCommandRunnerTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import com.google.common.base.CharMatcher;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+<span class="nc" id="L17">final class ProcessCommandRunnerTest {</span>
+    private static final String BASH = &quot;/bin/bash&quot;;
+<span class="nc" id="L19">    private static final CharMatcher BMP_DIGIT = CharMatcher.forPredicate(Character::isDigit);</span>
+
+    @BeforeAll
+    static void assumeBash() {
+<span class="nc" id="L23">        assumeTrue(Files.isExecutable(Path.of(BASH)));</span>
+<span class="nc" id="L24">    }</span>
+
+    @Test
+    void runCapturesLargeOutputWithoutBlockingOnProcessPipe() {
+        // given
+<span class="nc" id="L29">        var runner = new ProcessCommandRunner(Duration.ofSeconds(2));</span>
+
+        // when
+<span class="nc" id="L32">        CommandResult result = runner.run(BASH, &quot;-lc&quot;, &quot;yes output | head -c 200000&quot;);</span>
+
+        // then
+<span class="nc" id="L35">        assertThat(result.exitCode()).isZero();</span>
+<span class="nc" id="L36">        assertThat(result.output()).hasSize(200000);</span>
+<span class="nc" id="L37">    }</span>
+
+    @Test
+    void runTimesOutHungCommands() {
+        // given
+<span class="nc" id="L42">        var runner = new ProcessCommandRunner(Duration.ofMillis(50));</span>
+
+        // when
+<span class="nc" id="L45">        CommandResult result = runner.run(BASH, &quot;-lc&quot;, &quot;while :; do :; done&quot;);</span>
+
+        // then
+<span class="nc" id="L48">        assertThat(result.exitCode()).isEqualTo(CommandResult.TIMED_OUT_EXIT_CODE);</span>
+<span class="nc" id="L49">    }</span>
+
+    @Test
+    void runDestroysChildProcessWhenInterrupted() throws Exception {
+        // given
+<span class="nc" id="L54">        Path pidFile = Files.createTempFile(&quot;symphony-trello-command-pid-&quot;, &quot;.txt&quot;);</span>
+<span class="nc" id="L55">        Files.deleteIfExists(pidFile);</span>
+        try {
+<span class="nc" id="L57">            var runner = new ProcessCommandRunner(Duration.ofSeconds(30));</span>
+<span class="nc" id="L58">            var result = new AtomicReference&lt;CommandResult&gt;();</span>
+<span class="nc" id="L59">            var runThread = new Thread(</span>
+<span class="nc" id="L60">                    () -&gt; result.set(runner.run(</span>
+<span class="nc" id="L61">                            BASH, &quot;-lc&quot;, &quot;echo $$ &gt; &quot; + shellQuote(pidFile) + &quot;; while :; do sleep 1; done&quot;)),</span>
+                    &quot;process-command-runner-interrupt-test&quot;);
+
+            // when
+<span class="nc" id="L65">            runThread.start();</span>
+<span class="nc" id="L66">            long childPid = waitForPid(pidFile);</span>
+<span class="nc" id="L67">            runThread.interrupt();</span>
+<span class="nc" id="L68">            assertThat(runThread.join(Duration.ofSeconds(5)))</span>
+<span class="nc" id="L69">                    .as(&quot;the interrupted command-runner thread terminates within 5 seconds&quot;)</span>
+<span class="nc" id="L70">                    .isTrue();</span>
+
+            // then
+<span class="nc" id="L73">            assertThat(result.get().exitCode()).isEqualTo(CommandResult.INTERRUPTED_EXIT_CODE);</span>
+<span class="nc" id="L74">            assertThat(processIsAlive(childPid))</span>
+<span class="nc" id="L75">                    .as(&quot;the interrupted command runner terminates its child process&quot;)</span>
+<span class="nc" id="L76">                    .isFalse();</span>
+        } finally {
+<span class="nc" id="L78">            Files.deleteIfExists(pidFile);</span>
+        }
+<span class="nc" id="L80">    }</span>
+
+    @CsvSource(
+            delimiter = '|',
+            value = {&quot;1|true&quot;, &quot;00123|true&quot;, &quot;١٢٣|true&quot;, &quot;''|false&quot;, &quot;12a|false&quot;, &quot;-1|false&quot;, &quot;12 3|false&quot;, &quot;𝟙|false&quot;})
+    @ParameterizedTest(name = &quot;[{index}] PID candidate &lt;{0}&gt; is numeric: {1}&quot;)
+    void numericPidMatchesBmpDigitContract(String pid, boolean expected) {
+        // given
+
+        // when
+<span class="nc" id="L90">        boolean numeric = isNumericPid(pid);</span>
+
+        // then
+<span class="nc" id="L93">        assertThat(numeric).as(&quot;PID candidate &lt;%s&gt; numeric classification&quot;, pid).isEqualTo(expected);</span>
+<span class="nc" id="L94">    }</span>
+
+    private static long waitForPid(Path pidFile) throws Exception {
+<span class="nc" id="L97">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (Files.isRegularFile(pidFile)) {</span>
+<span class="nc" id="L100">                String pid = Files.readString(pidFile).trim();</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">                if (isNumericPid(pid)) {</span>
+<span class="nc" id="L102">                    return Long.parseLong(pid);</span>
+                }
+            }
+<span class="nc" id="L105">            Thread.sleep(10);</span>
+        }
+<span class="nc" id="L107">        throw new AssertionError(&quot;command did not write a pid file&quot;);</span>
+    }
+
+    private static boolean isNumericPid(String pid) {
+<span class="nc bnc" id="L111" title="All 4 branches missed.">        return !pid.isEmpty() &amp;&amp; BMP_DIGIT.matchesAllOf(pid);</span>
+    }
+
+    private static boolean processIsAlive(long pid) throws InterruptedException {
+<span class="nc" id="L115">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
+<span class="nc" id="L117">            boolean alive = ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            if (!alive) {</span>
+<span class="nc" id="L119">                return false;</span>
+            }
+<span class="nc" id="L121">            Thread.sleep(10);</span>
+<span class="nc" id="L122">        }</span>
+<span class="nc" id="L123">        return true;</span>
+    }
+
+    private static String shellQuote(Path path) {
+<span class="nc" id="L127">        return &quot;'&quot; + path.toString().replace(&quot;'&quot;, &quot;'\&quot;'\&quot;'&quot;) + &quot;'&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

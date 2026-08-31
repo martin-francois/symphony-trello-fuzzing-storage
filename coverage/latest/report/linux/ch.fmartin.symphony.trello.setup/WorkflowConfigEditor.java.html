@@ -1,0 +1,935 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowConfigEditor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">WorkflowConfigEditor.java</span></div><h1>WorkflowConfigEditor.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.config.ConfigException;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.EnvironmentReferences;
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import ch.fmartin.symphony.trello.config.TrelloListRoleValidator;
+import ch.fmartin.symphony.trello.config.TypedWorkflowConfig;
+import ch.fmartin.symphony.trello.config.WorkflowConfigIngestion;
+import ch.fmartin.symphony.trello.config.WorkflowIntegerSetting;
+import ch.fmartin.symphony.trello.config.WorkflowServerPortClassification;
+import ch.fmartin.symphony.trello.workflow.CodexSandboxPolicy;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import ch.fmartin.symphony.trello.workflow.WorkflowException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
+import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.SequencedMap;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.regex.Pattern;
+
+<span class="nc" id="L36">final class WorkflowConfigEditor {</span>
+<span class="nc" id="L37">    private static final ObjectMapper YAML = new ObjectMapper(YAMLFactory.builder()</span>
+<span class="nc" id="L38">            .disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER)</span>
+<span class="nc" id="L39">            .build());</span>
+<span class="nc" id="L40">    private static final TypeReference&lt;SequencedMap&lt;String, Object&gt;&gt; YAML_MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L41">    private static final Pattern FRONT_MATTER =</span>
+<span class="nc" id="L42">            Pattern.compile(&quot;\\A---\\R(?&lt;yaml&gt;.*?)\\R---\\R(?&lt;body&gt;.*)\\z&quot;, Pattern.DOTALL);</span>
+<span class="nc" id="L43">    private static final Set&lt;PosixFilePermission&gt; POSIX_WRITE_PERMISSIONS =</span>
+<span class="nc" id="L44">            Set.of(PosixFilePermission.OWNER_WRITE, PosixFilePermission.GROUP_WRITE, PosixFilePermission.OTHERS_WRITE);</span>
+
+    WorkflowValidation validate(ConnectedBoard board) {
+<span class="nc" id="L47">        return validate(board, LocalEnvironment::get);</span>
+    }
+
+    WorkflowValidation validate(ConnectedBoard board, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc bnc" id="L51" title="All 2 branches missed.">        if (board.workflowPath() == null) {</span>
+<span class="nc" id="L52">            return WorkflowValidation.warn(&quot;Workflow path for &quot; + DisplayNames.quotedName(board.boardName())</span>
+                    + &quot; is missing from &quot;
+                    + ConnectedBoardManifest.FILE_NAME
+                    + &quot;.&quot;);
+        }
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if (!Files.isRegularFile(board.workflowPath())) {</span>
+<span class="nc" id="L58">            return WorkflowValidation.warn(&quot;Workflow file is missing for &quot; + DisplayNames.quotedName(board.boardName())</span>
+<span class="nc" id="L59">                    + &quot;: &quot; + board.workflowPath());</span>
+        }
+        try {
+<span class="nc" id="L62">            FrontMatter frontMatter = read(board.workflowPath());</span>
+<span class="nc" id="L63">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(frontMatter);</span>
+<span class="nc" id="L64">            WorkflowValidation boardIdValidation = boardId(yaml, environmentResolver)</span>
+<span class="nc" id="L65">                    .map(configuredBoardId -&gt; validateBoardId(board, configuredBoardId))</span>
+<span class="nc" id="L66">                    .orElseGet(() -&gt; WorkflowValidation.warn(&quot;Workflow file is missing tracker.board_id for &quot;</span>
+<span class="nc" id="L67">                            + DisplayNames.quotedName(board.boardName()) + &quot;: &quot; + board.workflowPath()));</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if (!boardIdValidation.ok()) {</span>
+<span class="nc" id="L69">                return boardIdValidation;</span>
+            }
+<span class="nc" id="L71">            WorkflowValidation serverPortValidation = serverPort(yaml, environmentResolver)</span>
+<span class="nc" id="L72">                    .map(configuredServerPort -&gt; validateServerPort(board, configuredServerPort))</span>
+<span class="nc" id="L73">                    .orElseGet(() -&gt; WorkflowValidation.warn(&quot;Workflow file is missing server.port for &quot;</span>
+<span class="nc" id="L74">                            + DisplayNames.quotedName(board.boardName()) + &quot;: &quot; + board.workflowPath()));</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            if (!serverPortValidation.ok()) {</span>
+<span class="nc" id="L76">                return serverPortValidation;</span>
+            }
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (invalidListRoleOverlap(yaml, frontMatter.body())) {</span>
+<span class="nc" id="L79">                return WorkflowValidation.warn(&quot;Workflow tracker list roles overlap for &quot;</span>
+<span class="nc" id="L80">                        + DisplayNames.quotedName(board.boardName()) + &quot;: overlapping tracker list roles&quot;);</span>
+            }
+<span class="nc" id="L82">            return WorkflowValidation.valid();</span>
+<span class="nc" id="L83">        } catch (IOException | TrelloBoardSetupException e) {</span>
+<span class="nc" id="L84">            return WorkflowValidation.warn(&quot;Workflow file is not readable or has invalid YAML for &quot;</span>
+<span class="nc" id="L85">                    + DisplayNames.quotedName(board.boardName()) + &quot;: &quot; + board.workflowPath() + &quot; (&quot; + e.getMessage()</span>
+                    + &quot;)&quot;);
+        }
+    }
+
+    private static WorkflowValidation validateBoardId(ConnectedBoard board, String configuredBoardId) {
+<span class="nc bnc" id="L91" title="All 4 branches missed.">        if (!configuredBoardId.equals(board.boardId()) &amp;&amp; !configuredBoardId.equals(board.boardKey())) {</span>
+<span class="nc" id="L92">            return WorkflowValidation.warn(&quot;Workflow tracker.board_id does not match the connected board for &quot;</span>
+<span class="nc" id="L93">                    + DisplayNames.quotedName(board.boardName()) + &quot;: expected &quot; + board.boardId() + &quot; or &quot;</span>
+<span class="nc" id="L94">                    + board.boardKey() + &quot; but found &quot; + configuredBoardId);</span>
+        }
+<span class="nc" id="L96">        return WorkflowValidation.valid();</span>
+    }
+
+    private static WorkflowValidation validateServerPort(ConnectedBoard board, int configuredServerPort) {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (configuredServerPort != board.serverPort()) {</span>
+<span class="nc" id="L101">            return WorkflowValidation.warn(&quot;Workflow server.port does not match the connected board for &quot;</span>
+<span class="nc" id="L102">                    + DisplayNames.quotedName(board.boardName()) + &quot;: expected &quot; + board.serverPort() + &quot; but found &quot;</span>
+                    + configuredServerPort);
+        }
+<span class="nc" id="L105">        return WorkflowValidation.valid();</span>
+    }
+
+    Optional&lt;Integer&gt; serverPort(Path workflowPath) {
+<span class="nc" id="L109">        return serverPortSetting(workflowPath).value();</span>
+    }
+
+    Optional&lt;Integer&gt; serverPort(Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L113">        return serverPortSetting(workflowPath, environmentResolver).value();</span>
+    }
+
+    WorkflowIntegerSetting serverPortSetting(Path workflowPath) {
+        try {
+<span class="nc" id="L118">            return serverPortSetting(parseYaml(read(workflowPath)));</span>
+<span class="nc" id="L119">        } catch (IOException | RuntimeException ignored) {</span>
+<span class="nc" id="L120">            return WorkflowIntegerSetting.omitted();</span>
+        }
+    }
+
+    WorkflowIntegerSetting serverPortSetting(
+            Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+        try {
+<span class="nc" id="L127">            return serverPortSetting(parseYaml(read(workflowPath)), environmentResolver);</span>
+<span class="nc" id="L128">        } catch (IOException | RuntimeException ignored) {</span>
+<span class="nc" id="L129">            return WorkflowIntegerSetting.omitted();</span>
+        }
+    }
+
+    WorkflowServerPortClassification classifyServerPortForDiagnostics(Path workflowPath) {
+<span class="nc" id="L134">        return classifyServerPortForDiagnostics(workflowPath, ignored -&gt; Optional.empty());</span>
+    }
+
+    /// Classifies the effective workflow server.port for diagnostics health probing, resolving
+    /// environment references through the given resolver. A reference the resolver cannot satisfy
+    /// classifies as omitted: diagnostics without the board environment cannot know the real port,
+    /// so the manifest fallback covers it like a missing setting.
+    WorkflowServerPortClassification classifyServerPortForDiagnostics(
+            Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+        SequencedMap&lt;String, Object&gt; yaml;
+        try {
+<span class="nc" id="L145">            yaml = parseYaml(read(workflowPath));</span>
+<span class="nc" id="L146">        } catch (IOException | TrelloBoardSetupException ignored) {</span>
+            // An unreadable file or invalid front matter is already reported by the workflow
+            // summary; probing falls back to the manifest port like a missing setting.
+<span class="nc" id="L149">            return WorkflowServerPortClassification.unreadable();</span>
+<span class="nc" id="L150">        }</span>
+<span class="nc" id="L151">        return typedConfig(yaml, environmentResolver).serverPortClassification();</span>
+    }
+
+    Optional&lt;String&gt; boardId(Path workflowPath) {
+<span class="nc" id="L155">        return boardId(workflowPath, ignored -&gt; Optional.empty());</span>
+    }
+
+    Optional&lt;String&gt; boardId(Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+        try {
+<span class="nc" id="L160">            return boardId(parseYaml(read(workflowPath)), environmentResolver);</span>
+<span class="nc" id="L161">        } catch (IOException | TrelloBoardSetupException ignored) {</span>
+<span class="nc" id="L162">            return Optional.empty();</span>
+        }
+    }
+
+    void validateStartEnvironmentReferences(Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L167">        validateStartEnvironmentReferences(workflowPath, environmentResolver, true);</span>
+<span class="nc" id="L168">    }</span>
+
+    void validateStartEnvironmentReferences(
+            Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver, boolean validateServerPort) {
+        SequencedMap&lt;String, Object&gt; yaml;
+        try {
+<span class="nc" id="L174">            yaml = parseYaml(read(workflowPath));</span>
+<span class="nc" id="L175">        } catch (IOException e) {</span>
+<span class="nc" id="L176">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_workflow_read_failed&quot;, &quot;Workflow file cannot be read before worker start.&quot;, e);
+<span class="nc" id="L178">        } catch (TrelloBoardSetupException e) {</span>
+            // This method only runs on the start launch path, which reports every
+            // workflow-content failure, including missing front matter, through the
+            // setup_workflow_invalid classification with the underlying cause.
+<span class="nc" id="L182">            throw invalidWorkflowForLaunch(workflowPath, e);</span>
+<span class="nc" id="L183">        }</span>
+        try {
+<span class="nc" id="L185">            validateStartEnvironmentReferences(yaml, environmentResolver, validateServerPort);</span>
+<span class="nc" id="L186">        } catch (ConfigException | TrelloBoardSetupException e) {</span>
+<span class="nc" id="L187">            throw invalidWorkflowForLaunch(workflowPath, e);</span>
+<span class="nc" id="L188">        }</span>
+<span class="nc" id="L189">    }</span>
+
+    private void validateStartEnvironmentReferences(
+            SequencedMap&lt;String, Object&gt; yaml,
+            Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver,
+            boolean validateServerPort) {
+<span class="nc" id="L195">        validateResolvedTextReference(yaml, &quot;tracker&quot;, &quot;board_id&quot;, &quot;tracker.board_id&quot;, environmentResolver);</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (validateServerPort) {</span>
+<span class="nc" id="L197">            validateServerPortReference(yaml, environmentResolver);</span>
+<span class="nc" id="L198">            validateLaunchServerPort(yaml, environmentResolver);</span>
+        }
+<span class="nc" id="L200">    }</span>
+
+    /// Rejects literal server.port values outside the local port range before a worker launch.
+    /// Environment-reference problems are reported by validateServerPortReference first, so this
+    /// check only flags literal values such as 70000, -1, or fractional YAML numbers.
+    private void validateLaunchServerPort(
+            SequencedMap&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc bnc" id="L207" title="All 2 branches missed.">        if (invalidServerPortSetting(yaml, environmentResolver)) {</span>
+<span class="nc" id="L208">            throw new ConfigException(</span>
+                    &quot;invalid_server_port&quot;, &quot;server.port must be an integer between 0 and &quot; + LocalPort.MAX + &quot;.&quot;);
+        }
+<span class="nc" id="L211">    }</span>
+
+    Optional&lt;TrackerCredentialReferences&gt; trackerCredentialReferences(Path workflowPath) {
+        try {
+<span class="nc" id="L215">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(read(workflowPath));</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (!(yaml.get(&quot;tracker&quot;) instanceof Map&lt;?, ?&gt; tracker)) {</span>
+<span class="nc" id="L217">                return Optional.empty();</span>
+            }
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (!isTrelloTracker(tracker)) {</span>
+<span class="nc" id="L220">                return Optional.empty();</span>
+            }
+<span class="nc" id="L222">            return Optional.of(new TrackerCredentialReferences(</span>
+<span class="nc" id="L223">                    optionalString(tracker.get(&quot;api_key&quot;)), optionalString(tracker.get(&quot;api_token&quot;))));</span>
+<span class="nc" id="L224">        } catch (IOException | TrelloBoardSetupException ignored) {</span>
+<span class="nc" id="L225">            return Optional.empty();</span>
+        }
+    }
+
+    Optional&lt;Integer&gt; maxAgents(Path workflowPath) {
+<span class="nc" id="L230">        return maxAgentsSetting(workflowPath).value();</span>
+    }
+
+    TrelloBoardSetup.RepositoryDefaults repositoryDefaults(Path workflowPath) {
+        try {
+<span class="nc" id="L235">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(read(workflowPath));</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            if (!(yaml.get(&quot;repository&quot;) instanceof Map&lt;?, ?&gt; repository)) {</span>
+<span class="nc" id="L237">                return TrelloBoardSetup.RepositoryDefaults.empty();</span>
+            }
+<span class="nc" id="L239">            return TrelloBoardSetup.RepositoryDefaults.preserved(</span>
+<span class="nc" id="L240">                    optionalString(repository.get(&quot;default_url&quot;)).orElse(null),</span>
+<span class="nc" id="L241">                    optionalString(repository.get(&quot;default_path&quot;)).orElse(null));</span>
+<span class="nc" id="L242">        } catch (IOException | RuntimeException ignored) {</span>
+<span class="nc" id="L243">            return TrelloBoardSetup.RepositoryDefaults.empty();</span>
+        }
+    }
+
+    WorkflowIntegerSetting maxAgentsSetting(Path workflowPath) {
+        try {
+<span class="nc" id="L249">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(read(workflowPath));</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (!(yaml.get(&quot;agent&quot;) instanceof Map&lt;?, ?&gt; agent)) {</span>
+<span class="nc" id="L251">                return WorkflowIntegerSetting.omitted();</span>
+            }
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if (!agent.containsKey(&quot;max_concurrent_agents&quot;)) {</span>
+<span class="nc" id="L254">                return WorkflowIntegerSetting.omitted();</span>
+            }
+<span class="nc" id="L256">            return typedConfig(yaml).agentMaxConcurrentAgents();</span>
+<span class="nc" id="L257">        } catch (IOException | RuntimeException ignored) {</span>
+<span class="nc" id="L258">            return WorkflowIntegerSetting.omitted();</span>
+        }
+    }
+
+    WorkflowListConfiguration listConfiguration(Path workflowPath) {
+        try {
+<span class="nc" id="L264">            FrontMatter frontMatter = read(workflowPath);</span>
+<span class="nc" id="L265">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(frontMatter);</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (!(yaml.get(&quot;tracker&quot;) instanceof Map&lt;?, ?&gt; tracker)) {</span>
+<span class="nc" id="L267">                return WorkflowListConfiguration.empty();</span>
+            }
+<span class="nc" id="L269">            return new WorkflowListConfiguration(</span>
+<span class="nc" id="L270">                    stringList(tracker.get(&quot;active_states&quot;)),</span>
+<span class="nc" id="L271">                    stringList(tracker.get(&quot;terminal_states&quot;)),</span>
+<span class="nc" id="L272">                    optionalString(tracker.get(&quot;in_progress_state&quot;)),</span>
+<span class="nc" id="L273">                    optionalString(tracker.get(&quot;blocked_state&quot;))</span>
+<span class="nc" id="L274">                            .or(() -&gt; blockedStateFromWorkflowBody(frontMatter.body())),</span>
+<span class="nc" id="L275">                    invalidListSetting(tracker, &quot;active_states&quot;),</span>
+<span class="nc" id="L276">                    invalidListSetting(tracker, &quot;terminal_states&quot;));</span>
+<span class="nc" id="L277">        } catch (IOException | RuntimeException ignored) {</span>
+<span class="nc" id="L278">            return WorkflowListConfiguration.empty();</span>
+        }
+    }
+
+    Optional&lt;String&gt; diagnosticsWarning(Path workflowPath) {
+<span class="nc" id="L283">        return diagnosticsWarning(workflowPath, LocalEnvironment::get);</span>
+    }
+
+    Optional&lt;String&gt; diagnosticsWarning(Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L287">        WorkflowValidation validation = diagnosticsValidation(workflowPath, environmentResolver);</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        return validation.ok() ? Optional.empty() : Optional.of(validation.message());</span>
+    }
+
+    WorkflowValidation diagnosticsValidation(Path workflowPath) {
+<span class="nc" id="L292">        return diagnosticsValidation(workflowPath, LocalEnvironment::get);</span>
+    }
+
+    WorkflowValidation diagnosticsValidation(
+            Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L297">        return diagnosticsValidation(workflowPath, environmentResolver, true);</span>
+    }
+
+    EffectiveConfig resolveLaunchConfig(Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L301">        return prepareLaunchWorkflow(workflowPath, environmentResolver, true);</span>
+    }
+
+    EffectiveConfig prepareLaunchWorkflow(
+            Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver, boolean validateServerPort) {
+<span class="nc" id="L306">        return prepareLaunchWorkflow(workflowPath, environmentResolver, validateServerPort, Optional.empty());</span>
+    }
+
+    EffectiveConfig prepareLaunchWorkflow(
+            Path workflowPath,
+            Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver,
+            boolean validateServerPort,
+            Path diagnosticsConfigDir) {
+<span class="nc" id="L314">        return prepareLaunchWorkflow(</span>
+                workflowPath,
+                environmentResolver,
+                validateServerPort,
+<span class="nc" id="L318">                Optional.of(diagnosticsConfigDir.toAbsolutePath().normalize()));</span>
+    }
+
+    private EffectiveConfig prepareLaunchWorkflow(
+            Path workflowPath,
+            Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver,
+            boolean validateServerPort,
+            Optional&lt;Path&gt; diagnosticsConfigDir) {
+<span class="nc" id="L326">        requireLaunchableWorkflowFile(workflowPath);</span>
+<span class="nc" id="L327">        ReadWorkflow readWorkflow = readWorkflowForLaunch(workflowPath);</span>
+        try {
+<span class="nc" id="L329">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(readWorkflow.frontMatter());</span>
+<span class="nc" id="L330">            var workflow = new WorkflowDefinition(</span>
+<span class="nc" id="L331">                    workflowPath.toAbsolutePath().normalize(),</span>
+                    yaml,
+<span class="nc" id="L333">                    readWorkflow.frontMatter().body().trim());</span>
+<span class="nc" id="L334">            EffectiveConfig config = new ConfigResolver(environmentResolver).resolve(workflow);</span>
+<span class="nc" id="L335">            validateStartEnvironmentReferences(yaml, environmentResolver, validateServerPort);</span>
+<span class="nc" id="L336">            return config;</span>
+<span class="nc" id="L337">        } catch (IOException e) {</span>
+<span class="nc" id="L338">            throw invalidWorkflowForLaunch(</span>
+                    workflowPath,
+                    new TrelloBoardSetupException(
+                            &quot;setup_workflow_yaml_invalid&quot;, &quot;Workflow front matter is invalid YAML.&quot;, e),
+                    diagnosticsConfigDir);
+<span class="nc" id="L343">        } catch (WorkflowException</span>
+                | ConfigException
+                | TrelloBoardSetupException
+                | IllegalArgumentException
+                | ClassCastException e) {
+<span class="nc" id="L348">            throw invalidWorkflowForLaunch(workflowPath, e, diagnosticsConfigDir);</span>
+        }
+    }
+
+    /// Rejects workflow paths that cannot possibly launch, with the same expected
+    /// setup_workflow_invalid classification as unusable workflow content.
+    void requireLaunchableWorkflowFile(Path workflowPath) {
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if (Files.isRegularFile(workflowPath)) {</span>
+<span class="nc" id="L356">            return;</span>
+        }
+        String problem =
+<span class="nc bnc" id="L359" title="All 2 branches missed.">                Files.exists(workflowPath) ? &quot;workflow path is not a regular workflow file&quot; : &quot;missing workflow file&quot;;</span>
+<span class="nc" id="L360">        throw invalidWorkflowForLaunch(workflowPath, new ConfigException(&quot;workflow_file_unusable&quot;, problem));</span>
+    }
+
+    private ReadWorkflow readWorkflowForLaunch(Path workflowPath) {
+        try {
+<span class="nc" id="L365">            return readWorkflow(workflowPath);</span>
+<span class="nc" id="L366">        } catch (IOException e) {</span>
+<span class="nc" id="L367">            throw invalidWorkflowForLaunch(</span>
+                    workflowPath,
+                    new TrelloBoardSetupException(
+                            &quot;setup_workflow_read_failed&quot;, &quot;Workflow file cannot be read before worker start.&quot;, e));
+<span class="nc" id="L371">        } catch (TrelloBoardSetupException e) {</span>
+<span class="nc" id="L372">            throw invalidWorkflowForLaunch(workflowPath, e);</span>
+        }
+    }
+
+    void validateLaunchDispatch(Path workflowPath, EffectiveConfig launchConfig) {
+        try {
+<span class="nc" id="L378">            new ConfigResolver().validateForDispatch(launchConfig);</span>
+<span class="nc" id="L379">        } catch (ConfigException e) {</span>
+<span class="nc" id="L380">            throw invalidWorkflowForLaunch(workflowPath, e);</span>
+<span class="nc" id="L381">        }</span>
+<span class="nc" id="L382">    }</span>
+
+    private static TrelloBoardSetupException invalidWorkflowForLaunch(Path workflowPath, RuntimeException cause) {
+<span class="nc" id="L385">        return invalidWorkflowForLaunch(workflowPath, cause, Optional.empty());</span>
+    }
+
+    private static TrelloBoardSetupException invalidWorkflowForLaunch(
+            Path workflowPath, RuntimeException cause, Optional&lt;Path&gt; diagnosticsConfigDir) {
+<span class="nc" id="L390">        return new TrelloBoardSetupException(</span>
+                &quot;setup_workflow_invalid&quot;,
+                &quot;Invalid workflow configuration: &quot;
+<span class="nc" id="L393">                        + publicWorkflowLaunchProblem(workflowPath, cause, diagnosticsConfigDir)</span>
+                        + &quot;\nWorkflow file:\n  selected workflow file&quot;
+<span class="nc" id="L395">                        + &quot;\n&quot; + publicWorkflowLaunchNextStep(cause),</span>
+                cause);
+    }
+
+    private static String publicWorkflowLaunchProblem(
+            Path workflowPath, RuntimeException cause, Optional&lt;Path&gt; diagnosticsConfigDir) {
+<span class="nc bnc" id="L401" title="All 2 branches missed.">        if (cause instanceof ConfigException config) {</span>
+<span class="nc" id="L402">            return publicConfigProblem(workflowPath, config, diagnosticsConfigDir);</span>
+        }
+<span class="nc bnc" id="L404" title="All 2 branches missed.">        if (cause instanceof WorkflowException workflow) {</span>
+<span class="nc" id="L405">            return publicWorkflowProblem(workflow);</span>
+        }
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (cause instanceof TrelloBoardSetupException setup) {</span>
+<span class="nc" id="L408">            return publicSetupProblem(setup);</span>
+        }
+<span class="nc bnc" id="L410" title="All 4 branches missed.">        if (cause instanceof IllegalArgumentException || cause instanceof ClassCastException) {</span>
+<span class="nc" id="L411">            return &quot;Workflow front matter contains invalid values.&quot;;</span>
+        }
+<span class="nc" id="L413">        return &quot;Workflow front matter is invalid.&quot;;</span>
+    }
+
+    private static String publicConfigProblem(
+            Path workflowPath, ConfigException failure, Optional&lt;Path&gt; diagnosticsConfigDir) {
+<span class="nc bnc" id="L418" title="All 17 branches missed.">        return switch (failure.code()) {</span>
+<span class="nc" id="L419">            case &quot;invalid_server_port&quot; -&gt; &quot;server.port must be an integer between 0 and &quot; + LocalPort.MAX + &quot;.&quot;;</span>
+<span class="nc" id="L420">            case &quot;config_value_error&quot; -&gt; publicConfigValueProblem(failure);</span>
+<span class="nc" id="L421">            case &quot;config_type_error&quot; -&gt; publicConfigTypeProblem(failure);</span>
+<span class="nc" id="L422">            case &quot;unsupported_tracker_kind&quot; -&gt; &quot;tracker.kind must be trello.&quot;;</span>
+<span class="nc" id="L423">            case &quot;invalid_tracker_endpoint&quot; -&gt; &quot;tracker.endpoint must be an absolute http(s) URL with a host.&quot;;</span>
+<span class="nc" id="L424">            case &quot;missing_tracker_api_key&quot; -&gt; &quot;tracker.api_key is required.&quot;;</span>
+<span class="nc" id="L425">            case &quot;missing_tracker_api_token&quot; -&gt; &quot;tracker.api_token is required.&quot;;</span>
+<span class="nc" id="L426">            case &quot;missing_tracker_board_id&quot; -&gt; &quot;tracker.board_id is required.&quot;;</span>
+<span class="nc" id="L427">            case &quot;missing_codex_command&quot; -&gt; &quot;codex.command is required.&quot;;</span>
+<span class="nc" id="L428">            case &quot;overlapping_tracker_list_roles&quot; -&gt; &quot;tracker list roles must use distinct Trello lists.&quot;;</span>
+            case &quot;invalid_in_progress_state&quot; -&gt;
+<span class="nc" id="L430">                &quot;tracker.in_progress_state must also be listed in tracker.active_states.&quot;;</span>
+            case &quot;secret_file_too_large&quot; -&gt;
+<span class="nc" id="L432">                publicSecretFileProblem(diagnosticsConfigDir, failure, &quot;secret file is too large.&quot;);</span>
+            case &quot;secret_file_read_error&quot; -&gt;
+<span class="nc" id="L434">                publicSecretFileProblem(diagnosticsConfigDir, failure, &quot;secret file cannot be read.&quot;);</span>
+<span class="nc" id="L435">            case &quot;codex_sandbox_policy_invalid&quot; -&gt; publicCodexSandboxPolicyProblem(failure);</span>
+<span class="nc" id="L436">            case &quot;workflow_file_unusable&quot; -&gt; publicWorkflowFileProblem(failure);</span>
+<span class="nc" id="L437">            case &quot;workflow_yaml_invalid&quot; -&gt; &quot;Workflow front matter is invalid YAML.&quot;;</span>
+<span class="nc" id="L438">            default -&gt; &quot;Workflow configuration is invalid.&quot;;</span>
+        };
+    }
+
+    private static String publicConfigValueProblem(ConfigException failure) {
+<span class="nc" id="L443">        String message = failure.getMessage();</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (message == null) {</span>
+<span class="nc" id="L445">            return &quot;A numeric workflow setting is invalid.&quot;;</span>
+        }
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (message.startsWith(&quot;server.port &quot;)</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                || message.startsWith(&quot;max_concurrent_agents &quot;)</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">                || message.startsWith(&quot;agent.max_concurrent_agents &quot;)</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">                || message.startsWith(&quot;interval_ms &quot;)</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                || message.startsWith(&quot;request_timeout_ms &quot;)</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                || message.startsWith(&quot;api_retry_base_delay_ms &quot;)</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">                || message.startsWith(&quot;max_retry_backoff_ms &quot;)</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">                || message.startsWith(&quot;turn_timeout_ms &quot;)</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                || message.startsWith(&quot;read_timeout_ms &quot;)</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">                || message.startsWith(&quot;stall_timeout_ms &quot;)</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">                || message.startsWith(&quot;timeout_ms &quot;)</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                || message.startsWith(&quot;max_turns &quot;)) {</span>
+<span class="nc" id="L459">            return message;</span>
+        }
+<span class="nc" id="L461">        return &quot;A numeric workflow setting is invalid.&quot;;</span>
+    }
+
+    private static String publicConfigTypeProblem(ConfigException failure) {
+<span class="nc" id="L465">        String message = failure.getMessage();</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">        if (message != null</span>
+<span class="nc bnc" id="L467" title="All 2 branches missed.">                &amp;&amp; (message.endsWith(&quot; must be an object&quot;)</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                        || message.endsWith(&quot; must be a list&quot;)</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                        || message.endsWith(&quot; must be a string&quot;))) {</span>
+<span class="nc" id="L470">            return message;</span>
+        }
+<span class="nc" id="L472">        return &quot;Workflow front matter has an invalid value type.&quot;;</span>
+    }
+
+    private static String publicSecretFileProblem(
+            Optional&lt;Path&gt; diagnosticsConfigDir, ConfigException failure, String suffix) {
+<span class="nc" id="L477">        String message = failure.getMessage();</span>
+<span class="nc" id="L478">        String tokenHint = secretFileTokenHint(diagnosticsConfigDir, failure)</span>
+<span class="nc" id="L479">                .map(&quot; &quot;::concat)</span>
+<span class="nc" id="L480">                .orElse(&quot;&quot;);</span>
+<span class="nc bnc" id="L481" title="All 4 branches missed.">        if (message != null &amp;&amp; message.startsWith(&quot;tracker.api_key &quot;)) {</span>
+<span class="nc" id="L482">            return &quot;tracker.api_key &quot; + suffix + tokenHint;</span>
+        }
+<span class="nc bnc" id="L484" title="All 4 branches missed.">        if (message != null &amp;&amp; message.startsWith(&quot;tracker.api_token &quot;)) {</span>
+<span class="nc" id="L485">            return &quot;tracker.api_token &quot; + suffix + tokenHint;</span>
+        }
+<span class="nc" id="L487">        return &quot;A configured secret file &quot; + suffix + tokenHint;</span>
+    }
+
+    private static Optional&lt;String&gt; secretFileTokenHint(Optional&lt;Path&gt; diagnosticsConfigDir, ConfigException failure) {
+<span class="nc" id="L491">        return diagnosticsConfigDir.flatMap(</span>
+<span class="nc" id="L492">                configDir -&gt; secretPathFromConfigFailure(failure).map(path -&gt; {</span>
+<span class="nc" id="L493">                    String token = PrivateContextTokens.pathToken(configDir, path);</span>
+<span class="nc" id="L494">                    return &quot;secret_file_token=&quot; + token + PrivateContextTokens.lookupHint(token);</span>
+                }));
+    }
+
+    private static Optional&lt;Path&gt; secretPathFromConfigFailure(ConfigException failure) {
+<span class="nc" id="L499">        String message = failure.getMessage();</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">        if (message == null) {</span>
+<span class="nc" id="L501">            return Optional.empty();</span>
+        }
+<span class="nc" id="L503">        int separator = message.lastIndexOf(&quot;: &quot;);</span>
+<span class="nc bnc" id="L504" title="All 4 branches missed.">        if (separator &lt; 0 || separator + 2 &gt;= message.length()) {</span>
+<span class="nc" id="L505">            return Optional.empty();</span>
+        }
+        try {
+<span class="nc" id="L508">            return Optional.of(Path.of(message.substring(separator + 2)));</span>
+<span class="nc" id="L509">        } catch (InvalidPathException ignored) {</span>
+            // If the underlying private path cannot be parsed on this host, keep the public
+            // message sanitized and omit only the optional lookup token.
+<span class="nc" id="L512">            return Optional.empty();</span>
+        }
+    }
+
+    private static String publicCodexSandboxPolicyProblem(ConfigException failure) {
+<span class="nc" id="L517">        String message = failure.getMessage();</span>
+<span class="nc bnc" id="L518" title="All 2 branches missed.">        if (message != null</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">                &amp;&amp; (message.startsWith(&quot;codex.turn_sandbox_policy&quot;)</span>
+<span class="nc bnc" id="L520" title="All 2 branches missed.">                        || message.startsWith(&quot;codex.additional_writable_roots&quot;))) {</span>
+<span class="nc" id="L521">            return message;</span>
+        }
+<span class="nc" id="L523">        return &quot;codex.turn_sandbox_policy is invalid.&quot;;</span>
+    }
+
+    private static String publicWorkflowFileProblem(ConfigException failure) {
+<span class="nc" id="L527">        String message = failure.getMessage();</span>
+<span class="nc bnc" id="L528" title="All 4 branches missed.">        if (&quot;missing workflow file&quot;.equals(message) || &quot;workflow path is not a regular workflow file&quot;.equals(message)) {</span>
+<span class="nc" id="L529">            return message;</span>
+        }
+<span class="nc" id="L531">        return &quot;Workflow file cannot be read.&quot;;</span>
+    }
+
+    private static String publicWorkflowProblem(WorkflowException failure) {
+<span class="nc bnc" id="L535" title="All 4 branches missed.">        return switch (failure.code()) {</span>
+<span class="nc" id="L536">            case &quot;missing_workflow_file&quot; -&gt; &quot;Workflow file cannot be read.&quot;;</span>
+<span class="nc" id="L537">            case &quot;workflow_front_matter_not_a_map&quot; -&gt; &quot;Workflow front matter must be a YAML map.&quot;;</span>
+<span class="nc" id="L538">            case &quot;workflow_parse_error&quot; -&gt; &quot;Workflow front matter is invalid YAML.&quot;;</span>
+<span class="nc" id="L539">            default -&gt; &quot;Workflow front matter is invalid.&quot;;</span>
+        };
+    }
+
+    private static String publicSetupProblem(TrelloBoardSetupException failure) {
+<span class="nc bnc" id="L544" title="All 7 branches missed.">        return switch (failure.code()) {</span>
+<span class="nc" id="L545">            case &quot;setup_workflow_frontmatter_missing&quot; -&gt; &quot;Workflow has no YAML front matter.&quot;;</span>
+<span class="nc" id="L546">            case &quot;setup_workflow_frontmatter_not_map&quot; -&gt; &quot;Workflow front matter must be a YAML map.&quot;;</span>
+<span class="nc" id="L547">            case &quot;setup_workflow_read_failed&quot; -&gt; &quot;Workflow file cannot be read.&quot;;</span>
+<span class="nc" id="L548">            case &quot;setup_workflow_yaml_invalid&quot; -&gt; &quot;Workflow front matter is invalid YAML.&quot;;</span>
+<span class="nc" id="L549">            case &quot;setup_workflow_unresolved_environment&quot; -&gt; publicUnresolvedEnvironmentProblem(failure);</span>
+            case &quot;setup_invalid_server_port&quot; -&gt;
+<span class="nc" id="L551">                &quot;server.port must resolve to an integer between 0 and &quot; + LocalPort.MAX + &quot;.&quot;;</span>
+<span class="nc" id="L552">            default -&gt; &quot;Workflow setup state is invalid.&quot;;</span>
+        };
+    }
+
+    private static String publicUnresolvedEnvironmentProblem(TrelloBoardSetupException failure) {
+<span class="nc" id="L557">        String message = failure.getMessage();</span>
+<span class="nc bnc" id="L558" title="All 2 branches missed.">        if (message != null</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">                &amp;&amp; message.startsWith(&quot;Workflow tracker.board_id references missing environment variable&quot;)) {</span>
+<span class="nc" id="L560">            return &quot;tracker.board_id references a missing environment variable.&quot;;</span>
+        }
+<span class="nc bnc" id="L562" title="All 4 branches missed.">        if (message != null &amp;&amp; message.startsWith(&quot;Workflow server.port references missing environment variable&quot;)) {</span>
+<span class="nc" id="L563">            return &quot;server.port references a missing environment variable.&quot;;</span>
+        }
+<span class="nc" id="L565">        return &quot;Workflow front matter references a missing environment variable.&quot;;</span>
+    }
+
+    private static String publicWorkflowLaunchNextStep(RuntimeException cause) {
+<span class="nc bnc" id="L569" title="All 4 branches missed.">        if (cause instanceof TrelloBoardSetupException setup &amp;&amp; &quot;setup_workflow_read_failed&quot;.equals(setup.code())) {</span>
+<span class="nc" id="L570">            return &quot;Make sure the selected workflow file exists and can be read, then rerun symphony-trello start.&quot;;</span>
+        }
+<span class="nc" id="L572">        return &quot;Fix the workflow front matter, then rerun symphony-trello start.&quot;;</span>
+    }
+
+    WorkflowValidation diagnosticsValidation(
+            Path workflowPath, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver, boolean validateServerPort) {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">        if (!Files.isRegularFile(workflowPath)) {</span>
+<span class="nc" id="L578">            return WorkflowValidation.warn(&quot;missing workflow file&quot;);</span>
+        }
+        try {
+<span class="nc" id="L581">            FrontMatter frontMatter = read(workflowPath);</span>
+<span class="nc" id="L582">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(frontMatter);</span>
+<span class="nc bnc" id="L583" title="All 4 branches missed.">            if (validateServerPort &amp;&amp; invalidServerPortSetting(yaml, environmentResolver)) {</span>
+<span class="nc" id="L584">                return WorkflowValidation.warn(&quot;invalid server.port&quot;);</span>
+            }
+<span class="nc bnc" id="L586" title="All 2 branches missed.">            if (invalidListRoleOverlap(yaml, frontMatter.body())) {</span>
+<span class="nc" id="L587">                return WorkflowValidation.warn(&quot;overlapping tracker list roles&quot;);</span>
+            }
+<span class="nc" id="L589">            return WorkflowValidation.valid();</span>
+<span class="nc" id="L590">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L591">            return WorkflowValidation.warn(&quot;unreadable or invalid workflow configuration&quot;);</span>
+        }
+    }
+
+    WorkflowValidation diagnosticsConnectedBoardValidation(
+            ConnectedBoard board, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc bnc" id="L597" title="All 4 branches missed.">        if (board.workflowPath() == null || !Files.isRegularFile(board.workflowPath())) {</span>
+<span class="nc" id="L598">            return WorkflowValidation.warn(&quot;missing workflow file&quot;);</span>
+        }
+        try {
+<span class="nc" id="L601">            FrontMatter frontMatter = read(board.workflowPath());</span>
+<span class="nc" id="L602">            SequencedMap&lt;String, Object&gt; yaml = parseYaml(frontMatter);</span>
+<span class="nc" id="L603">            WorkflowValidation boardIdValidation = boardId(yaml, environmentResolver)</span>
+<span class="nc" id="L604">                    .map(configuredBoardId -&gt; validateBoardId(board, configuredBoardId))</span>
+<span class="nc" id="L605">                    .orElseGet(() -&gt; WorkflowValidation.warn(&quot;missing tracker.board_id&quot;));</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">            if (!boardIdValidation.ok()) {</span>
+<span class="nc" id="L607">                return boardIdValidation;</span>
+            }
+<span class="nc bnc" id="L609" title="All 2 branches missed.">            if (invalidServerPortSetting(yaml, environmentResolver)) {</span>
+<span class="nc" id="L610">                return WorkflowValidation.warn(&quot;invalid server.port&quot;);</span>
+            }
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            if (invalidListRoleOverlap(yaml, frontMatter.body())) {</span>
+<span class="nc" id="L613">                return WorkflowValidation.warn(&quot;overlapping tracker list roles&quot;);</span>
+            }
+<span class="nc" id="L615">            return WorkflowValidation.valid();</span>
+<span class="nc" id="L616">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L617">            return WorkflowValidation.warn(&quot;unreadable or invalid workflow configuration&quot;);</span>
+        }
+    }
+
+    void updateServerPort(Path workflowPath, int port) throws IOException {
+<span class="nc" id="L622">        ReadWorkflow readWorkflow = readWorkflow(workflowPath);</span>
+<span class="nc" id="L623">        SequencedMap&lt;String, Object&gt; yaml = parseYaml(readWorkflow.frontMatter());</span>
+<span class="nc" id="L624">        Object serverValue = yaml.get(&quot;server&quot;);</span>
+<span class="nc" id="L625">        SequencedMap&lt;String, Object&gt; server = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">        if (serverValue instanceof Map&lt;?, ?&gt; existingServer) {</span>
+<span class="nc" id="L627">            existingServer.forEach((key, value) -&gt; server.put(String.valueOf(key), value));</span>
+        }
+<span class="nc" id="L629">        server.put(&quot;port&quot;, port);</span>
+<span class="nc" id="L630">        yaml.put(&quot;server&quot;, server);</span>
+<span class="nc" id="L631">        write(</span>
+                workflowPath,
+<span class="nc" id="L633">                readWorkflow.content(),</span>
+                yaml,
+<span class="nc" id="L635">                readWorkflow.frontMatter().body());</span>
+<span class="nc" id="L636">    }</span>
+
+    void applyCodexAccess(Path workflowPath, List&lt;Path&gt; additionalWritableRoots, boolean dangerFullAccess)
+            throws IOException {
+<span class="nc bnc" id="L640" title="All 4 branches missed.">        if (additionalWritableRoots.isEmpty() &amp;&amp; !dangerFullAccess) {</span>
+<span class="nc" id="L641">            return;</span>
+        }
+<span class="nc" id="L643">        ReadWorkflow readWorkflow = readWorkflow(workflowPath);</span>
+<span class="nc" id="L644">        SequencedMap&lt;String, Object&gt; yaml = parseYaml(readWorkflow.frontMatter());</span>
+<span class="nc" id="L645">        Object codexValue = yaml.get(&quot;codex&quot;);</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">        if (!(codexValue instanceof Map&lt;?, ?&gt; existingCodex)) {</span>
+<span class="nc" id="L647">            throw new TrelloBoardSetupException(&quot;setup_workflow_codex_missing&quot;, &quot;Workflow has no codex section.&quot;);</span>
+        }
+<span class="nc" id="L649">        SequencedMap&lt;String, Object&gt; codex = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L650">        existingCodex.forEach((key, value) -&gt; codex.put(String.valueOf(key), value));</span>
+<span class="nc bnc" id="L651" title="All 2 branches missed.">        if (!additionalWritableRoots.isEmpty()) {</span>
+<span class="nc" id="L652">            codex.put(</span>
+                    &quot;additional_writable_roots&quot;,
+<span class="nc" id="L654">                    additionalWritableRoots.stream().map(Path::toString).toList());</span>
+        }
+<span class="nc bnc" id="L656" title="All 2 branches missed.">        if (dangerFullAccess) {</span>
+<span class="nc" id="L657">            codex.put(&quot;turn_sandbox_policy&quot;, Map.of(&quot;type&quot;, &quot;dangerFullAccess&quot;));</span>
+        }
+<span class="nc" id="L659">        yaml.put(&quot;codex&quot;, codex);</span>
+        try {
+<span class="nc" id="L661">            CodexSandboxPolicy.validateCodexSection(codex);</span>
+<span class="nc" id="L662">            CodexSandboxPolicy.validateResolvedPolicy(</span>
+<span class="nc" id="L663">                    codex.get(CodexSandboxPolicy.TURN_SANDBOX_POLICY), additionalWritableRoots, dangerFullAccess);</span>
+<span class="nc" id="L664">        } catch (CodexSandboxPolicy.InvalidPolicyException e) {</span>
+<span class="nc" id="L665">            throw new TrelloBoardSetupException(</span>
+<span class="nc" id="L666">                    &quot;setup_workflow_invalid&quot;, &quot;Cannot update Codex access because &quot; + e.getMessage(), e);</span>
+<span class="nc" id="L667">        }</span>
+<span class="nc" id="L668">        write(</span>
+                workflowPath,
+<span class="nc" id="L670">                readWorkflow.content(),</span>
+                yaml,
+<span class="nc" id="L672">                readWorkflow.frontMatter().body());</span>
+<span class="nc" id="L673">    }</span>
+
+    private static FrontMatter read(Path workflowPath) throws IOException {
+<span class="nc" id="L676">        return readWorkflow(workflowPath).frontMatter();</span>
+    }
+
+    private static ReadWorkflow readWorkflow(Path workflowPath) throws IOException {
+<span class="nc bnc" id="L680" title="All 2 branches missed.">        if (!Files.isRegularFile(workflowPath)) {</span>
+<span class="nc" id="L681">            throw new IOException(&quot;Workflow path is not a regular file.&quot;);</span>
+        }
+<span class="nc" id="L683">        String content = Files.readString(workflowPath);</span>
+<span class="nc" id="L684">        return new ReadWorkflow(content, FrontMatter.parse(content));</span>
+    }
+
+    private static SequencedMap&lt;String, Object&gt; parseYaml(FrontMatter frontMatter) throws IOException {
+<span class="nc" id="L688">        SequencedMap&lt;String, Object&gt; yaml = YAML.readValue(frontMatter.yaml(), YAML_MAP_TYPE);</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">        if (yaml == null) {</span>
+<span class="nc" id="L690">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_workflow_frontmatter_not_map&quot;, &quot;Workflow front matter must be a YAML map.&quot;);
+        }
+<span class="nc" id="L693">        return yaml;</span>
+    }
+
+    private static void write(Path workflowPath, String expectedContent, SequencedMap&lt;String, Object&gt; yaml, String body)
+            throws IOException {
+<span class="nc" id="L698">        writeAtomically(workflowPath, expectedContent, &quot;---\n&quot; + YAML.writeValueAsString(yaml) + &quot;---\n&quot; + body);</span>
+<span class="nc" id="L699">    }</span>
+
+    private static void writeAtomically(Path workflowPath, String expectedContent, String content) throws IOException {
+<span class="nc bnc" id="L702" title="All 2 branches missed.">        Path target = Files.isSymbolicLink(workflowPath)</span>
+<span class="nc" id="L703">                ? workflowPath.toRealPath()</span>
+<span class="nc" id="L704">                : workflowPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L705">        Path parent = target.getParent();</span>
+<span class="nc bnc" id="L706" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L707">            throw new IOException(&quot;Workflow path has no parent directory.&quot;);</span>
+        }
+<span class="nc" id="L709">        Optional&lt;Set&lt;PosixFilePermission&gt;&gt; permissions = readPosixPermissions(target);</span>
+<span class="nc" id="L710">        requireWritableTarget(target, permissions);</span>
+<span class="nc" id="L711">        requireUnchangedTarget(target, expectedContent);</span>
+<span class="nc" id="L712">        Path temporary = Files.createTempFile(parent, temporaryPrefix(target), &quot;.tmp&quot;);</span>
+        try {
+<span class="nc" id="L714">            Files.writeString(temporary, content);</span>
+<span class="nc bnc" id="L715" title="All 2 branches missed.">            if (permissions.isPresent()) {</span>
+<span class="nc" id="L716">                Files.setPosixFilePermissions(temporary, permissions.get());</span>
+            }
+<span class="nc" id="L718">            requireUnchangedTarget(target, expectedContent);</span>
+<span class="nc" id="L719">            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);</span>
+<span class="nc" id="L720">        } catch (AtomicMoveNotSupportedException e) {</span>
+<span class="nc" id="L721">            throw new IOException(&quot;Atomic workflow replacement is not supported.&quot;, e);</span>
+        } finally {
+<span class="nc" id="L723">            Files.deleteIfExists(temporary);</span>
+        }
+<span class="nc" id="L725">    }</span>
+
+    private static String temporaryPrefix(Path target) {
+<span class="nc" id="L728">        String prefix = &quot;.&quot; + target.getFileName();</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">        return prefix.length() &gt;= 3 ? prefix : prefix + &quot;.&quot;.repeat(3 - prefix.length());</span>
+    }
+
+    private static void requireUnchangedTarget(Path target, String expectedContent) throws IOException {
+<span class="nc bnc" id="L733" title="All 2 branches missed.">        if (!Files.readString(target).equals(expectedContent)) {</span>
+<span class="nc" id="L734">            throw new IOException(&quot;Workflow file changed while preparing the update.&quot;);</span>
+        }
+<span class="nc" id="L736">    }</span>
+
+    private static void requireWritableTarget(Path target, Optional&lt;Set&lt;PosixFilePermission&gt;&gt; permissions)
+            throws IOException {
+<span class="nc bnc" id="L740" title="All 2 branches missed.">        if (!Files.isWritable(target)</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">                || permissions.map(WorkflowConfigEditor::lacksPosixWriteBit).orElse(false)) {</span>
+<span class="nc" id="L742">            throw new IOException(&quot;Workflow file cannot be updated.&quot;);</span>
+        }
+<span class="nc" id="L744">    }</span>
+
+    private static boolean lacksPosixWriteBit(Set&lt;PosixFilePermission&gt; permissions) {
+<span class="nc" id="L747">        return POSIX_WRITE_PERMISSIONS.stream().noneMatch(permissions::contains);</span>
+    }
+
+    private static Optional&lt;Set&lt;PosixFilePermission&gt;&gt; readPosixPermissions(Path target) {
+        try {
+<span class="nc" id="L752">            return Optional.of(Files.getPosixFilePermissions(target));</span>
+<span class="nc" id="L753">        } catch (IOException | UnsupportedOperationException ignored) {</span>
+            // Preserving POSIX permissions is best effort; the write path itself remains strict.
+<span class="nc" id="L755">            return Optional.empty();</span>
+        }
+    }
+
+    private static Optional&lt;Integer&gt; serverPort(
+            Map&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L761">        return serverPortSetting(yaml, environmentResolver).value();</span>
+    }
+
+    private static WorkflowIntegerSetting serverPortSetting(Map&lt;String, Object&gt; yaml) {
+<span class="nc" id="L765">        return serverPortSetting(yaml, ignored -&gt; Optional.empty());</span>
+    }
+
+    private static WorkflowIntegerSetting serverPortSetting(
+            Map&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L770">        return typedConfig(yaml, environmentResolver).localServerPortSetting();</span>
+    }
+
+    private static Optional&lt;String&gt; boardId(
+            Map&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L775">        Object trackerValue = yaml.get(&quot;tracker&quot;);</span>
+<span class="nc bnc" id="L776" title="All 2 branches missed.">        if (!(trackerValue instanceof Map&lt;?, ?&gt; tracker)) {</span>
+<span class="nc" id="L777">            return Optional.empty();</span>
+        }
+<span class="nc" id="L779">        Object boardId = tracker.get(&quot;board_id&quot;);</span>
+<span class="nc" id="L780">        return optionalString(boardId)</span>
+<span class="nc" id="L781">                .map(String::trim)</span>
+<span class="nc bnc" id="L782" title="All 2 branches missed.">                .filter(value -&gt; !value.isBlank())</span>
+<span class="nc" id="L783">                .flatMap(value -&gt; environmentReferenceName(value)</span>
+<span class="nc" id="L784">                        .flatMap(environmentResolver)</span>
+<span class="nc" id="L785">                        .map(String::trim)</span>
+<span class="nc bnc" id="L786" title="All 2 branches missed.">                        .filter(resolved -&gt; !resolved.isBlank())</span>
+<span class="nc" id="L787">                        .or(() -&gt; Optional.of(value)));</span>
+    }
+
+    private static boolean invalidServerPortSetting(
+            Map&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L792">        Object serverValue = yaml.get(&quot;server&quot;);</span>
+<span class="nc bnc" id="L793" title="All 4 branches missed.">        if (!(serverValue instanceof Map&lt;?, ?&gt; server) || !server.containsKey(&quot;port&quot;)) {</span>
+<span class="nc" id="L794">            return false;</span>
+        }
+<span class="nc" id="L796">        return serverPortSetting(yaml, environmentResolver).invalid();</span>
+    }
+
+    private static boolean invalidListRoleOverlap(Map&lt;String, Object&gt; yaml, String body) {
+<span class="nc" id="L800">        Object trackerValue = yaml.get(&quot;tracker&quot;);</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        if (!(trackerValue instanceof Map&lt;?, ?&gt; tracker)) {</span>
+<span class="nc" id="L802">            return false;</span>
+        }
+<span class="nc" id="L804">        List&lt;String&gt; activeListIds = stringList(tracker.get(&quot;active_list_ids&quot;));</span>
+<span class="nc" id="L805">        List&lt;String&gt; terminalListIds = stringList(tracker.get(&quot;terminal_list_ids&quot;));</span>
+<span class="nc" id="L806">        return TrelloListRoleValidator.firstOverlap(activeListIds, terminalListIds, null, null)</span>
+<span class="nc" id="L807">                .or(() -&gt; TrelloListRoleValidator.firstOverlap(</span>
+<span class="nc bnc" id="L808" title="All 2 branches missed.">                        activeListIds.isEmpty() ? stringList(tracker.get(&quot;active_states&quot;)) : List.of(),</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">                        terminalListIds.isEmpty() ? stringList(tracker.get(&quot;terminal_states&quot;)) : List.of(),</span>
+<span class="nc" id="L810">                        optionalString(tracker.get(&quot;in_progress_state&quot;)).orElse(null),</span>
+<span class="nc" id="L811">                        optionalString(tracker.get(&quot;blocked_state&quot;))</span>
+<span class="nc" id="L812">                                .or(() -&gt; blockedStateFromWorkflowBody(body))</span>
+<span class="nc" id="L813">                                .orElse(null)))</span>
+<span class="nc" id="L814">                .isPresent();</span>
+    }
+
+    private static void validateResolvedTextReference(
+            Map&lt;String, Object&gt; yaml,
+            String sectionName,
+            String key,
+            String displayName,
+            Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L823">        Object sectionValue = yaml.get(sectionName);</span>
+<span class="nc bnc" id="L824" title="All 2 branches missed.">        if (!(sectionValue instanceof Map&lt;?, ?&gt; section)) {</span>
+<span class="nc" id="L825">            return;</span>
+        }
+<span class="nc" id="L827">        environmentReferenceName(section.get(key))</span>
+<span class="nc" id="L828">                .filter(name -&gt; environmentResolver</span>
+<span class="nc" id="L829">                        .apply(name)</span>
+<span class="nc" id="L830">                        .map(String::trim)</span>
+<span class="nc bnc" id="L831" title="All 2 branches missed.">                        .filter(value -&gt; !value.isBlank())</span>
+<span class="nc" id="L832">                        .isEmpty())</span>
+<span class="nc" id="L833">                .ifPresent(name -&gt; {</span>
+<span class="nc" id="L834">                    throw unresolvedEnvironmentReference(displayName, name);</span>
+                });
+<span class="nc" id="L836">    }</span>
+
+    private static void validateServerPortReference(
+            Map&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L840">        Object serverValue = yaml.get(&quot;server&quot;);</span>
+<span class="nc bnc" id="L841" title="All 2 branches missed.">        if (!(serverValue instanceof Map&lt;?, ?&gt; server)) {</span>
+<span class="nc" id="L842">            return;</span>
+        }
+<span class="nc" id="L844">        environmentReferenceName(server.get(&quot;port&quot;)).ifPresent(name -&gt; {</span>
+<span class="nc" id="L845">            environmentResolver</span>
+<span class="nc" id="L846">                    .apply(name)</span>
+<span class="nc" id="L847">                    .map(String::trim)</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">                    .filter(value -&gt; !value.isBlank())</span>
+<span class="nc" id="L849">                    .ifPresentOrElse(value -&gt; validateResolvedServerPort(value, name), () -&gt; {</span>
+<span class="nc" id="L850">                        throw unresolvedEnvironmentReference(&quot;server.port&quot;, name);</span>
+                    });
+<span class="nc" id="L852">        });</span>
+<span class="nc" id="L853">    }</span>
+
+    private static void validateResolvedServerPort(String value, String environmentName) {
+<span class="nc" id="L856">        if (typedConfig(Map.of(&quot;server&quot;, Map.of(&quot;port&quot;, value)))</span>
+<span class="nc" id="L857">                .localServerPortSetting()</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">                .invalid()) {</span>
+<span class="nc" id="L859">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_server_port&quot;,
+                    &quot;Workflow server.port environment variable &quot; + environmentName
+                            + &quot; must resolve to an integer between 0 and &quot; + LocalPort.MAX + &quot;.&quot;);
+        }
+<span class="nc" id="L864">    }</span>
+
+    private static Optional&lt;String&gt; environmentReferenceName(Object value) {
+<span class="nc" id="L867">        return optionalString(value).flatMap(EnvironmentReferences::referenceName);</span>
+    }
+
+    private static TrelloBoardSetupException unresolvedEnvironmentReference(String displayName, String name) {
+<span class="nc" id="L871">        return new TrelloBoardSetupException(</span>
+                &quot;setup_workflow_unresolved_environment&quot;,
+                &quot;Workflow &quot; + displayName + &quot; references missing environment variable &quot; + name + &quot;.&quot;);
+    }
+
+    private static TypedWorkflowConfig typedConfig(Map&lt;String, Object&gt; yaml) {
+<span class="nc" id="L877">        return typedConfig(yaml, ignored -&gt; Optional.empty());</span>
+    }
+
+    private static TypedWorkflowConfig typedConfig(
+            Map&lt;String, Object&gt; yaml, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc bnc" id="L882" title="All 2 branches missed.">        return WorkflowConfigIngestion.collect(yaml == null ? Map.of() : yaml, environmentResolver);</span>
+    }
+
+    private static Optional&lt;String&gt; blockedStateFromWorkflowBody(String body) {
+<span class="nc" id="L886">        var matcher =</span>
+<span class="nc" id="L887">                Pattern.compile(&quot;(?m)^- \&quot;(?&lt;name&gt;[^\&quot;]+)\&quot;: blocked work\\.&quot;).matcher(body);</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">        return matcher.find() ? Optional.of(matcher.group(&quot;name&quot;)) : Optional.empty();</span>
+    }
+
+    private static List&lt;String&gt; stringList(Object value) {
+<span class="nc bnc" id="L892" title="All 2 branches missed.">        if (!(value instanceof List&lt;?&gt; list)) {</span>
+<span class="nc" id="L893">            return List.of();</span>
+        }
+<span class="nc" id="L895">        return list.stream()</span>
+<span class="nc" id="L896">                .map(String::valueOf)</span>
+<span class="nc bnc" id="L897" title="All 2 branches missed.">                .filter(valueText -&gt; !valueText.isBlank())</span>
+<span class="nc" id="L898">                .toList();</span>
+    }
+
+    private static boolean invalidListSetting(Map&lt;?, ?&gt; root, String key) {
+<span class="nc bnc" id="L902" title="All 2 branches missed.">        if (!root.containsKey(key)) {</span>
+<span class="nc" id="L903">            return false;</span>
+        }
+<span class="nc bnc" id="L905" title="All 2 branches missed.">        if (!(root.get(key) instanceof List&lt;?&gt; list)) {</span>
+<span class="nc" id="L906">            return true;</span>
+        }
+<span class="nc bnc" id="L908" title="All 8 branches missed.">        return list.isEmpty() || list.stream().anyMatch(value -&gt; !(value instanceof String text) || text.isBlank());</span>
+    }
+
+    private static Optional&lt;String&gt; optionalString(Object value) {
+<span class="nc bnc" id="L912" title="All 2 branches missed.">        String text = value == null ? null : String.valueOf(value);</span>
+<span class="nc bnc" id="L913" title="All 4 branches missed.">        return text == null || text.isBlank() ? Optional.empty() : Optional.of(text);</span>
+    }
+
+    private static boolean isTrelloTracker(Map&lt;?, ?&gt; tracker) {
+<span class="nc" id="L917">        return optionalString(tracker.get(&quot;kind&quot;)).map(&quot;trello&quot;::equals).orElse(false);</span>
+    }
+
+<span class="nc" id="L920">    record FrontMatter(String yaml, String body) {</span>
+        static FrontMatter parse(String workflow) {
+<span class="nc" id="L922">            var matcher = FRONT_MATTER.matcher(workflow);</span>
+<span class="nc bnc" id="L923" title="All 2 branches missed.">            if (!matcher.matches()) {</span>
+<span class="nc" id="L924">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_workflow_frontmatter_missing&quot;, &quot;Workflow has no YAML front matter.&quot;);
+            }
+<span class="nc" id="L927">            return new FrontMatter(matcher.group(&quot;yaml&quot;), matcher.group(&quot;body&quot;));</span>
+        }
+    }
+
+<span class="nc" id="L931">    record ReadWorkflow(String content, FrontMatter frontMatter) {}</span>
+
+<span class="nc" id="L933">    record TrackerCredentialReferences(Optional&lt;String&gt; apiKey, Optional&lt;String&gt; apiToken) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloClientChaosTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">TrelloClientChaosTest.java</span></div><h1>TrelloClientChaosTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.boardJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.listsJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.respond;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.trelloList;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+
+import ch.fmartin.symphony.trello.config.ConfigDefaults;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L32">final class TrelloClientChaosTest {</span>
+    private static final String CARD_ID = &quot;000000000000000000000101&quot;;
+    private static final String CHECKLIST_BODY =
+            &quot;&quot;&quot;
+            [
+              {&quot;id&quot;:&quot;checklist-1&quot;,&quot;name&quot;:&quot;Prerequisites&quot;,&quot;checkItems&quot;:[{&quot;id&quot;:&quot;item-1&quot;,&quot;name&quot;:&quot;https://trello.com/c/SYNTH103&quot;,&quot;state&quot;:&quot;incomplete&quot;}]}
+            ]
+            &quot;&quot;&quot;;
+<span class="nc" id="L40">    private static final String OPEN_CARDS_BODY =</span>
+            &quot;&quot;&quot;
+            [
+              {&quot;id&quot;:&quot;%s&quot;,&quot;name&quot;:&quot;A&quot;,&quot;desc&quot;:&quot;&quot;,&quot;idList&quot;:&quot;list-todo&quot;,&quot;idBoard&quot;:&quot;board-1&quot;,&quot;closed&quot;:false,&quot;shortLink&quot;:&quot;abc&quot;,&quot;shortUrl&quot;:&quot;https://trello.com/c/abc&quot;,&quot;url&quot;:&quot;https://trello.com/c/abc/card&quot;,&quot;labels&quot;:[],&quot;badges&quot;:{&quot;checkItems&quot;:1},&quot;pos&quot;:1}
+            ]
+            &quot;&quot;&quot;
+<span class="nc" id="L46">                    .formatted(CARD_ID);</span>
+
+<span class="nc" id="L48">    private final TrelloClient client = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L49">    private final List&lt;String&gt; writes = new ArrayList&lt;&gt;();</span>
+
+    private FakeTrelloServer trello;
+
+    @TempDir
+    Path tempDir;
+
+    @BeforeEach
+    void startServer() throws Exception {
+<span class="nc" id="L58">        trello = new FakeTrelloServer();</span>
+<span class="nc" id="L59">        trello.startEmpty();</span>
+<span class="nc" id="L60">    }</span>
+
+    @AfterEach
+    void stopServer() {
+<span class="nc" id="L64">        trello.stop();</span>
+<span class="nc" id="L65">    }</span>
+
+    @MethodSource(&quot;readFaults&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void readFaultsFailWithoutTrelloWrites(String scenario, FaultPoint faultPoint) throws IOException {
+        // given
+<span class="nc" id="L71">        configureCandidateRoutes(faultPoint);</span>
+
+        // when
+<span class="nc" id="L74">        TrelloException failure = catchThrowableOfType(</span>
+<span class="nc" id="L75">                () -&gt; client.fetchCandidateCards(config(Map.of(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;)))),</span>
+                TrelloException.class);
+
+        // then
+<span class="nc" id="L79">        assertThat(failure).as(scenario).isNotNull();</span>
+<span class="nc" id="L80">        assertThat(failure.code()).as(scenario).isNotBlank();</span>
+<span class="nc" id="L81">        assertThat(writes).as(scenario).isEmpty();</span>
+<span class="nc" id="L82">    }</span>
+
+    private static Stream&lt;Arguments&gt; readFaults() {
+<span class="nc" id="L85">        return Stream.of(</span>
+<span class="nc" id="L86">                Arguments.of(&quot;board lookup returns HTTP 500&quot;, FaultPoint.BOARD_STATUS),</span>
+<span class="nc" id="L87">                Arguments.of(&quot;board list lookup returns malformed JSON&quot;, FaultPoint.LISTS_MALFORMED_JSON),</span>
+<span class="nc" id="L88">                Arguments.of(&quot;candidate card lookup returns an object instead of a list&quot;, FaultPoint.CARDS_WRONG_SHAPE),</span>
+<span class="nc" id="L89">                Arguments.of(&quot;checklist lookup returns HTTP 429 without retries&quot;, FaultPoint.CHECKLIST_RATE_LIMITED));</span>
+    }
+
+    @MethodSource(&quot;attachmentPayloadFaults&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void malformedAttachmentResponsesReportUnknownPayloadWithoutRetry(String scenario, String responseBody) {
+        // given
+<span class="nc" id="L96">        trello.on(&quot;/1/cards/write-card/attachments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L97">            writes.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L98">            respond(exchange, responseBody);</span>
+<span class="nc" id="L99">        });</span>
+
+        // when
+<span class="nc" id="L102">        TrelloException failure = catchThrowableOfType(</span>
+<span class="nc" id="L103">                () -&gt; client.addUrlAttachment(config(Map.of()), &quot;write-card&quot;, &quot;https://example.invalid/pr/1&quot;, &quot;PR&quot;),</span>
+                TrelloException.class);
+
+        // then
+<span class="nc" id="L107">        assertThat(failure).as(scenario).isNotNull();</span>
+<span class="nc" id="L108">        assertThat(failure.code()).as(scenario).isEqualTo(&quot;trello_unknown_payload&quot;);</span>
+<span class="nc" id="L109">        assertThat(writes)</span>
+<span class="nc" id="L110">                .as(scenario)</span>
+<span class="nc" id="L111">                .containsExactly(</span>
+                        &quot;POST /1/cards/write-card/attachments?url=https%3A%2F%2Fexample.invalid%2Fpr%2F1&amp;name=PR&quot;);
+<span class="nc" id="L113">    }</span>
+
+    private static Stream&lt;Arguments&gt; attachmentPayloadFaults() {
+<span class="nc" id="L116">        return Stream.of(</span>
+<span class="nc" id="L117">                Arguments.of(&quot;empty response body&quot;, &quot;&quot;),</span>
+<span class="nc" id="L118">                Arguments.of(&quot;array response without an attachment object&quot;, &quot;[]&quot;),</span>
+<span class="nc" id="L119">                Arguments.of(&quot;object response without id&quot;, &quot;{\&quot;name\&quot;:\&quot;Pull request\&quot;}&quot;),</span>
+<span class="nc" id="L120">                Arguments.of(&quot;non-object response&quot;, &quot;\&quot;attachment-1\&quot;&quot;));</span>
+    }
+
+    @Test
+    void readRateLimitRetriesButWriteRateLimitDoesNotRetry() throws IOException {
+        // given
+<span class="nc" id="L126">        var board = new CountingResponse(429, boardJson(&quot;board-1&quot;, &quot;Board&quot;, false));</span>
+<span class="nc" id="L127">        trello.on(&quot;/1/boards/input&quot;, board::respond);</span>
+<span class="nc" id="L128">        trello.on(</span>
+                &quot;/1/boards/board-1/lists&quot;,
+<span class="nc" id="L130">                exchange -&gt; respond(exchange, listsJson(trelloList(&quot;list-todo&quot;, &quot;Todo&quot;, 1))));</span>
+<span class="nc" id="L131">        trello.on(&quot;/1/boards/board-1/cards/open&quot;, exchange -&gt; respond(exchange, &quot;[]&quot;));</span>
+<span class="nc" id="L132">        trello.on(&quot;/1/cards/write-card/actions/comments&quot;, exchange -&gt; {</span>
+<span class="nc" id="L133">            writes.add(exchange.getRequestMethod() + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L134">            respond(exchange, 429, &quot;{}&quot;);</span>
+<span class="nc" id="L135">        });</span>
+<span class="nc" id="L136">        EffectiveConfig config = config(Map.of(&quot;max_api_retries&quot;, 1, &quot;api_retry_base_delay_ms&quot;, 1));</span>
+
+        // when
+<span class="nc" id="L139">        List&lt;?&gt; cards = client.fetchCandidateCards(config);</span>
+<span class="nc" id="L140">        TrelloException writeFailure =</span>
+<span class="nc" id="L141">                catchThrowableOfType(() -&gt; client.addComment(config, &quot;write-card&quot;, &quot;hello&quot;), TrelloException.class);</span>
+
+        // then
+<span class="nc" id="L144">        assertThat(cards).isEmpty();</span>
+<span class="nc" id="L145">        assertThat(board.requests()).isEqualTo(2);</span>
+<span class="nc" id="L146">        assertThat(writeFailure.code()).isEqualTo(&quot;trello_api_rate_limited&quot;);</span>
+<span class="nc" id="L147">        assertThat(writes).containsExactly(&quot;POST /1/cards/write-card/actions/comments?text=hello&quot;);</span>
+<span class="nc" id="L148">    }</span>
+
+    private void configureCandidateRoutes(FaultPoint faultPoint) throws IOException {
+<span class="nc" id="L151">        trello.on(&quot;/1/boards/input&quot;, exchange -&gt; {</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (faultPoint == FaultPoint.BOARD_STATUS) {</span>
+<span class="nc" id="L153">                respond(exchange, 500, &quot;{}&quot;);</span>
+<span class="nc" id="L154">                return;</span>
+            }
+<span class="nc" id="L156">            respond(exchange, boardJson(&quot;board-1&quot;, &quot;Board&quot;, false));</span>
+<span class="nc" id="L157">        });</span>
+<span class="nc" id="L158">        trello.on(&quot;/1/boards/board-1/lists&quot;, exchange -&gt; {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            if (faultPoint == FaultPoint.LISTS_MALFORMED_JSON) {</span>
+<span class="nc" id="L160">                respond(exchange, &quot;{&quot;);</span>
+<span class="nc" id="L161">                return;</span>
+            }
+<span class="nc" id="L163">            respond(exchange, listsJson(trelloList(&quot;list-todo&quot;, &quot;Todo&quot;, 1)));</span>
+<span class="nc" id="L164">        });</span>
+<span class="nc" id="L165">        trello.on(&quot;/1/boards/board-1/cards/open&quot;, exchange -&gt; {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (faultPoint == FaultPoint.CARDS_WRONG_SHAPE) {</span>
+<span class="nc" id="L167">                respond(exchange, &quot;{}&quot;);</span>
+<span class="nc" id="L168">                return;</span>
+            }
+<span class="nc" id="L170">            respond(exchange, OPEN_CARDS_BODY);</span>
+<span class="nc" id="L171">        });</span>
+<span class="nc" id="L172">        trello.on(&quot;/1/cards/&quot; + CARD_ID + &quot;/checklists&quot;, exchange -&gt; {</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">            if (faultPoint == FaultPoint.CHECKLIST_RATE_LIMITED) {</span>
+<span class="nc" id="L174">                respond(exchange, 429, &quot;{}&quot;);</span>
+<span class="nc" id="L175">                return;</span>
+            }
+<span class="nc" id="L177">            respond(exchange, CHECKLIST_BODY);</span>
+<span class="nc" id="L178">        });</span>
+<span class="nc" id="L179">    }</span>
+
+    private EffectiveConfig config(Map&lt;String, Object&gt; trackerOverrides) {
+<span class="nc" id="L182">        Map&lt;String, Object&gt; tracker = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L183">        tracker.put(&quot;kind&quot;, &quot;trello&quot;);</span>
+<span class="nc" id="L184">        tracker.put(&quot;endpoint&quot;, trello.endpoint());</span>
+<span class="nc" id="L185">        tracker.put(&quot;api_key&quot;, &quot;key&quot;);</span>
+<span class="nc" id="L186">        tracker.put(&quot;api_token&quot;, &quot;token&quot;);</span>
+<span class="nc" id="L187">        tracker.put(&quot;board_id&quot;, &quot;input&quot;);</span>
+<span class="nc" id="L188">        tracker.put(&quot;active_states&quot;, List.of(&quot;Todo&quot;));</span>
+<span class="nc" id="L189">        tracker.put(&quot;terminal_states&quot;, List.of(&quot;Done&quot;, &quot;Archived&quot;, &quot;ArchivedList&quot;, &quot;ArchivedBoard&quot;, &quot;Deleted&quot;));</span>
+<span class="nc" id="L190">        tracker.put(&quot;max_api_retries&quot;, 0);</span>
+<span class="nc" id="L191">        tracker.put(&quot;api_retry_base_delay_ms&quot;, ConfigDefaults.DEFAULT_TRACKER_API_RETRY_BASE_DELAY_MS);</span>
+<span class="nc" id="L192">        tracker.putAll(trackerOverrides);</span>
+<span class="nc" id="L193">        return new ConfigResolver()</span>
+<span class="nc" id="L194">                .resolve(new WorkflowDefinition(tempDir.resolve(&quot;WORKFLOW.md&quot;), Map.of(&quot;tracker&quot;, tracker), &quot;&quot;))</span>
+<span class="nc" id="L195">                .withResolvedBoardId(&quot;board-1&quot;);</span>
+    }
+
+<span class="nc" id="L198">    private enum FaultPoint {</span>
+<span class="nc" id="L199">        BOARD_STATUS,</span>
+<span class="nc" id="L200">        LISTS_MALFORMED_JSON,</span>
+<span class="nc" id="L201">        CARDS_WRONG_SHAPE,</span>
+<span class="nc" id="L202">        CHECKLIST_RATE_LIMITED</span>
+    }
+
+    private static final class CountingResponse {
+        private final int firstStatus;
+        private final String successBody;
+        private int requests;
+
+<span class="nc" id="L210">        private CountingResponse(int firstStatus, String successBody) {</span>
+<span class="nc" id="L211">            this.firstStatus = firstStatus;</span>
+<span class="nc" id="L212">            this.successBody = successBody;</span>
+<span class="nc" id="L213">        }</span>
+
+        private void respond(HttpExchange exchange) throws IOException {
+<span class="nc" id="L216">            requests++;</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">            if (requests == 1) {</span>
+<span class="nc" id="L218">                FakeTrelloServer.respond(exchange, firstStatus, &quot;{}&quot;);</span>
+<span class="nc" id="L219">                return;</span>
+            }
+<span class="nc" id="L221">            FakeTrelloServer.respond(exchange, successBody);</span>
+<span class="nc" id="L222">        }</span>
+
+        private int requests() {
+<span class="nc" id="L225">            return requests;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

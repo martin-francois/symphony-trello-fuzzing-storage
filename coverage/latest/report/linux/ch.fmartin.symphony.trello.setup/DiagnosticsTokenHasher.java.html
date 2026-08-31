@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DiagnosticsTokenHasher.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">DiagnosticsTokenHasher.java</span></div><h1>DiagnosticsTokenHasher.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static java.util.Objects.requireNonNullElseGet;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.HexFormat;
+import java.util.Optional;
+import java.util.Set;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+final class DiagnosticsTokenHasher {
+    static final String KEY_FILE_NAME = &quot;.symphony-trello-diagnostics-key&quot;;
+
+    private static final String ALGORITHM = &quot;HmacSHA3-256&quot;;
+    private static final int KEY_BYTES = 32;
+    private static final int DISPLAY_BYTES = 6;
+<span class="nc" id="L28">    private static final SecureRandom RANDOM = new SecureRandom();</span>
+
+    private final SecretKeySpec key;
+    private final boolean persisted;
+
+<span class="nc" id="L33">    private DiagnosticsTokenHasher(byte[] key, boolean persisted) {</span>
+<span class="nc" id="L34">        this.key = new SecretKeySpec(key.clone(), ALGORITHM);</span>
+<span class="nc" id="L35">        this.persisted = persisted;</span>
+<span class="nc" id="L36">    }</span>
+
+    static DiagnosticsTokenHasher load(Path configDir) {
+<span class="nc" id="L39">        Path keyPath = configDir.resolve(KEY_FILE_NAME);</span>
+<span class="nc" id="L40">        return readKey(keyPath).orElseGet(() -&gt; createKey(keyPath).orElseGet(DiagnosticsTokenHasher::ephemeral));</span>
+    }
+
+    static DiagnosticsTokenHasher loadExisting(Path configDir) {
+<span class="nc" id="L44">        Path keyPath = configDir.resolve(KEY_FILE_NAME);</span>
+<span class="nc" id="L45">        return readKey(keyPath).orElseGet(DiagnosticsTokenHasher::ephemeral);</span>
+    }
+
+    static DiagnosticsTokenHasher ephemeral() {
+<span class="nc" id="L49">        return temporary(randomKey());</span>
+    }
+
+    boolean persisted() {
+<span class="nc" id="L53">        return persisted;</span>
+    }
+
+    String token(String value) {
+<span class="nc bnc" id="L57" title="All 4 branches missed.">        if (value == null || value.isBlank()) {</span>
+<span class="nc" id="L58">            return &quot;&quot;;</span>
+        }
+        try {
+<span class="nc" id="L61">            Mac mac = Mac.getInstance(ALGORITHM);</span>
+<span class="nc" id="L62">            mac.init(key);</span>
+<span class="nc" id="L63">            byte[] bytes = mac.doFinal(value.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L64">            return HexFormat.of().formatHex(bytes, 0, DISPLAY_BYTES);</span>
+<span class="nc" id="L65">        } catch (NoSuchAlgorithmException e) {</span>
+<span class="nc" id="L66">            throw new IllegalStateException(ALGORITHM + &quot; is unavailable&quot;, e);</span>
+<span class="nc" id="L67">        } catch (InvalidKeyException e) {</span>
+<span class="nc" id="L68">            throw new IllegalStateException(&quot;Diagnostics token key is invalid&quot;, e);</span>
+        }
+    }
+
+    private static Optional&lt;DiagnosticsTokenHasher&gt; readKey(Path keyPath) {
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (!Files.isRegularFile(keyPath)) {</span>
+<span class="nc" id="L74">            return Optional.empty();</span>
+        }
+        try {
+<span class="nc" id="L77">            return parseKey(Files.readString(keyPath)).map(DiagnosticsTokenHasher::persisted);</span>
+<span class="nc" id="L78">        } catch (IOException ignored) {</span>
+<span class="nc" id="L79">            return Optional.empty();</span>
+        }
+    }
+
+    private static Optional&lt;DiagnosticsTokenHasher&gt; createKey(Path keyPath) {
+<span class="nc" id="L84">        byte[] key = randomKey();</span>
+        try {
+<span class="nc" id="L86">            Path parent = keyPath.getParent();</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            if (parent != null) {</span>
+<span class="nc" id="L88">                Files.createDirectories(parent);</span>
+            }
+<span class="nc" id="L90">            createKeyFile(keyPath, key);</span>
+<span class="nc" id="L91">            return Optional.of(persisted(key));</span>
+<span class="nc" id="L92">        } catch (FileAlreadyExistsException ignored) {</span>
+<span class="nc" id="L93">            return readKey(keyPath);</span>
+<span class="nc" id="L94">        } catch (IOException ignored) {</span>
+<span class="nc" id="L95">            return Optional.of(temporary(key));</span>
+        }
+    }
+
+    private static void createKeyFile(Path keyPath, byte[] key) throws IOException {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (supportsPosixFilePermissions(keyPath)) {</span>
+<span class="nc" id="L101">            Files.createFile(keyPath, PosixFilePermissions.asFileAttribute(ownerOnlyKeyPermissions()));</span>
+<span class="nc" id="L102">            Files.writeString(keyPath, HexFormat.of().formatHex(key) + &quot;\n&quot;);</span>
+        } else {
+<span class="nc" id="L104">            Files.writeString(</span>
+                    keyPath,
+<span class="nc" id="L106">                    HexFormat.of().formatHex(key) + &quot;\n&quot;,</span>
+                    StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.WRITE);
+        }
+<span class="nc" id="L110">    }</span>
+
+    private static boolean supportsPosixFilePermissions(Path path) throws IOException {
+<span class="nc" id="L113">        Path existing = requireNonNullElseGet(</span>
+<span class="nc" id="L114">                path.getParent(), () -&gt; path.toAbsolutePath().normalize());</span>
+<span class="nc" id="L115">        return Files.getFileStore(existing).supportsFileAttributeView(&quot;posix&quot;);</span>
+    }
+
+    private static Set&lt;PosixFilePermission&gt; ownerOnlyKeyPermissions() {
+<span class="nc" id="L119">        return Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);</span>
+    }
+
+    private static Optional&lt;byte[]&gt; parseKey(String value) {
+<span class="nc" id="L123">        String hex = value.strip();</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (hex.length() != KEY_BYTES * 2) {</span>
+<span class="nc" id="L125">            return Optional.empty();</span>
+        }
+        try {
+<span class="nc" id="L128">            return Optional.of(HexFormat.of().parseHex(hex));</span>
+<span class="nc" id="L129">        } catch (IllegalArgumentException ignored) {</span>
+<span class="nc" id="L130">            return Optional.empty();</span>
+        }
+    }
+
+    private static byte[] randomKey() {
+<span class="nc" id="L135">        byte[] key = new byte[KEY_BYTES];</span>
+<span class="nc" id="L136">        RANDOM.nextBytes(key);</span>
+<span class="nc" id="L137">        return key;</span>
+    }
+
+    private static DiagnosticsTokenHasher persisted(byte[] key) {
+<span class="nc" id="L141">        return new DiagnosticsTokenHasher(key, true);</span>
+    }
+
+    private static DiagnosticsTokenHasher temporary(byte[] key) {
+<span class="nc" id="L145">        return new DiagnosticsTokenHasher(key, false);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

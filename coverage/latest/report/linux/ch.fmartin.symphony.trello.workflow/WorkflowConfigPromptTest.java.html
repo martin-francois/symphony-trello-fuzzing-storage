@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowConfigPromptTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.workflow</a> &gt; <span class="el_source">WorkflowConfigPromptTest.java</span></div><h1>WorkflowConfigPromptTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.workflow;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.config.ConfigDefaults;
+import ch.fmartin.symphony.trello.config.ConfigException;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.StateNames;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+<span class="nc" id="L19">final class WorkflowConfigPromptTest {</span>
+<span class="nc" id="L20">    private final WorkflowLoader loader = new WorkflowLoader();</span>
+<span class="nc" id="L21">    private final ConfigResolver configs = new ConfigResolver();</span>
+<span class="nc" id="L22">    private final PromptRenderer prompts = new PromptRenderer();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void parsesFrontMatterAppliesDefaultsAndRendersStrictPrompt() throws Exception {
+        // given
+<span class="nc" id="L30">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L31">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                  priority_labels:
+                    Urgent: 1
+                    invalid: nope
+                workspace:
+                  root: workspaces
+                agent:
+                  max_concurrent_agents_by_state:
+                    &quot;Ready   For Codex&quot;: 2
+                    ignored: 0
+                    invalid: nope
+                codex:
+                  command: &quot;codex app-server --listen stdio://&quot;
+                  model: gpt-5.5
+                  reasoning_effort: xhigh
+                ---
+                Work on {{ card.identifier }} / {{ issue.identifier }} attempt={{ attempt }}.
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L59">        WorkflowDefinition definition = loader.load(workflow);</span>
+<span class="nc" id="L60">        var config = configs.resolve(definition);</span>
+<span class="nc" id="L61">        String renderedPrompt =</span>
+<span class="nc" id="L62">                prompts.render(definition.promptTemplate(), TestCards.card(&quot;1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;), 3);</span>
+
+        // then
+<span class="nc" id="L65">        assertThat(config.tracker().activeStates()).containsExactly(&quot;Todo&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L66">        assertThat(config.tracker().priorityLabels())</span>
+<span class="nc" id="L67">                .containsEntry(&quot;p1&quot;, 1)</span>
+<span class="nc" id="L68">                .containsEntry(&quot;urgent&quot;, 1)</span>
+<span class="nc" id="L69">                .doesNotContainKey(&quot;invalid&quot;);</span>
+<span class="nc" id="L70">        assertThat(config.agent().maxConcurrentAgentsByState())</span>
+<span class="nc" id="L71">                .containsEntry(&quot;ready for codex&quot;, 2)</span>
+<span class="nc" id="L72">                .hasSize(1)</span>
+<span class="nc" id="L73">                .doesNotContainKeys(&quot;ignored&quot;, &quot;invalid&quot;);</span>
+<span class="nc" id="L74">        assertThat(config.agent().maxConcurrentAgents()).isEqualTo(ConfigDefaults.DEFAULT_MAX_CONCURRENT_AGENTS);</span>
+<span class="nc" id="L75">        assertThat(config.polling().interval()).isEqualTo(ConfigDefaults.DEFAULT_POLLING_INTERVAL);</span>
+<span class="nc" id="L76">        assertThat(config.codex().model()).isEqualTo(&quot;gpt-5.5&quot;);</span>
+<span class="nc" id="L77">        assertThat(config.codex().reasoningEffort()).isEqualTo(&quot;xhigh&quot;);</span>
+<span class="nc" id="L78">        assertThat(config.workspace().root())</span>
+<span class="nc" id="L79">                .isEqualTo(tempDir.resolve(&quot;workspaces&quot;).toAbsolutePath().normalize());</span>
+<span class="nc" id="L80">        assertThat(renderedPrompt).contains(&quot;TRELLO-abc / TRELLO-abc attempt=3&quot;);</span>
+<span class="nc" id="L81">    }</span>
+
+    @Test
+    void readsFileBackedTrackerSecrets() throws Exception {
+        // given
+<span class="nc" id="L86">        Path secretDirectory = tempDir.resolve(&quot;secrets&quot;);</span>
+<span class="nc" id="L87">        Files.createDirectories(secretDirectory);</span>
+<span class="nc" id="L88">        Files.writeString(secretDirectory.resolve(&quot;trello-api-key&quot;), &quot;key-from-file\n&quot;);</span>
+<span class="nc" id="L89">        Files.writeString(secretDirectory.resolve(&quot;trello-api-token&quot;), &quot;token-from-file\r\n&quot;);</span>
+<span class="nc" id="L90">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L91">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: file:secrets/trello-api-key
+                  api_token: file:secrets/trello-api-token
+                  board_id: board-1
+                ---
+                Do the work.
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L105">        var config = configs.resolve(loader.load(workflow));</span>
+
+        // then
+<span class="nc" id="L108">        assertThat(config.tracker().apiKey()).isEqualTo(&quot;key-from-file&quot;);</span>
+<span class="nc" id="L109">        assertThat(config.tracker().apiToken()).isEqualTo(&quot;token-from-file&quot;);</span>
+<span class="nc" id="L110">    }</span>
+
+    @Test
+    void rejectsInProgressStateThatIsNotDispatchActive() throws Exception {
+        // given
+<span class="nc" id="L115">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L116">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                  active_states: [Ready for Codex]
+                  in_progress_state: In Progress
+                codex:
+                  command: fake
+                ---
+                Do the work.
+                &quot;&quot;&quot;);
+<span class="nc" id="L132">        var config = configs.resolve(loader.load(workflow));</span>
+
+        // when
+<span class="nc" id="L135">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; configs.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L138">        assertThat(error.code()).isEqualTo(&quot;invalid_in_progress_state&quot;);</span>
+<span class="nc" id="L139">        assertThat(error).hasMessageContaining(&quot;tracker.in_progress_state&quot;);</span>
+<span class="nc" id="L140">    }</span>
+
+    @Test
+    void exampleWorkflowEnforcesBlockersForEveryActiveState() {
+        // given
+<span class="nc" id="L145">        Path workflow = Path.of(&quot;WORKFLOW.example.md&quot;);</span>
+
+        // when
+<span class="nc" id="L148">        WorkflowDefinition definition = loader.load(workflow);</span>
+<span class="nc" id="L149">        var config = configs.resolve(definition);</span>
+
+        // then
+<span class="nc" id="L152">        assertThat(config.tracker().blockerEnforcedStates())</span>
+<span class="nc" id="L153">                .containsAll(config.tracker().activeStates().stream()</span>
+<span class="nc" id="L154">                        .map(StateNames::normalize)</span>
+<span class="nc" id="L155">                        .toList());</span>
+<span class="nc" id="L156">        assertThat(config.codex().turnSandboxPolicy())</span>
+<span class="nc" id="L157">                .isEqualTo(Map.of(&quot;type&quot;, &quot;workspaceWrite&quot;, &quot;networkAccess&quot;, true));</span>
+<span class="nc" id="L158">        assertThat(definition.promptTemplate())</span>
+<span class="nc" id="L159">                .containsIgnoringWhitespaces(</span>
+                        &quot;A Symphony-managed recheck status ends with the exact `Managed by Symphony` footer and a link to the qualifying blocker comment on the current card.&quot;)
+<span class="nc" id="L161">                .containsIgnoringWhitespaces(</span>
+                        &quot;Similar visible text, or a link to another card, remains an ordinary comment.&quot;)
+<span class="nc" id="L163">                .containsIgnoringWhitespaces(</span>
+                        &quot;The newest ordinary `Blocked:` or `Blocked by ...` comment is the comment being rechecked; leave it unchanged. Call `checking` to create or update a separate Symphony-managed status comment.&quot;)
+<span class="nc" id="L165">                .containsIgnoringWhitespaces(</span>
+                        &quot;The rendered prompt contains only recent Trello comments, so do not use it to decide whether a stale blocker exists&quot;)
+<span class="nc" id="L167">                .containsIgnoringWhitespaces(</span>
+                        &quot;Before changing code, always call trello_update_blocker_recheck_status with status `checking`&quot;)
+<span class="nc" id="L169">                .containsIgnoringWhitespaces(</span>
+                        &quot;When the tool returns `blocker_recheck_not_needed`, continue without creating a managed status&quot;)
+<span class="nc" id="L171">                .containsIgnoringWhitespaces(</span>
+                        &quot;If the initial `checking` call returns a tool failure, including `trello_blocker_recheck_refresh_failed` or `trello_blocker_recheck_card_missing`, stop the current attempt&quot;)
+<span class="nc" id="L173">                .containsIgnoringWhitespaces(&quot;Do not test the blocker, call `resumed`, or request another Trello write&quot;)</span>
+<span class="nc" id="L174">                .containsIgnoringWhitespaces(&quot;the next dispatched retry must begin with `checking` again&quot;)</span>
+<span class="nc" id="L175">                .containsIgnoringWhitespaces(</span>
+                        &quot;Symphony's automatic pre-dispatch move may already have happened before Codex starts&quot;)
+<span class="nc" id="L177">                .containsIgnoringWhitespaces(</span>
+                        &quot;After the required initial `checking` call classifies the deep comment window, open or create the workpad&quot;)
+<span class="nc" id="L179">                .containsIgnoringWhitespaces(</span>
+                        &quot;The comment qualifies only when its first non-blank line starts with `Blocked:` or `Blocked by ...`, matched without case sensitivity&quot;)
+<span class="nc" id="L181">                .containsIgnoringWhitespaces(</span>
+                        &quot;The absence of an existing managed recheck comment is not a reason to skip this call; `checking` creates the managed comment.&quot;)
+<span class="nc" id="L183">                .containsIgnoringWhitespaces(</span>
+                        &quot;If the `resumed` call returns any tool failure, including `trello_blocker_recheck_stale`, `trello_blocker_recheck_not_started`, `trello_blocker_recheck_refresh_failed`, or `trello_blocker_recheck_card_missing`, stop the current attempt&quot;)
+<span class="nc" id="L185">                .containsIgnoringWhitespaces(</span>
+                        &quot;Do not claim that work resumed, use the ordinary blocked handoff, or request another Trello write&quot;)
+<span class="nc" id="L187">                .containsIgnoringWhitespaces(</span>
+                        &quot;A stale result means the newly qualifying blocker must enter its own `checking` episode before it can resume&quot;)
+<span class="nc" id="L189">                .containsIgnoringWhitespaces(&quot;If the recheck fails or the card is still blocked, do not call `resumed`&quot;)</span>
+<span class="nc" id="L190">                .containsIgnoringWhitespaces(</span>
+                        &quot;An already-resumed retry for the same blocker comment retains its last-confirmed resumed state. A new qualifying blocker comment starts a new action-bound recheck episode and must enter `checking` before it can resume.&quot;);
+<span class="nc" id="L192">    }</span>
+
+    @Test
+    void fileBackedTrackerSecretFailureDoesNotExposeSecretValues() throws Exception {
+        // given
+<span class="nc" id="L197">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L198">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: file:secrets/missing-api-key
+                  api_token: literal-token
+                  board_id: board-1
+                ---
+                Do the work.
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L212">        ConfigException error =</span>
+<span class="nc" id="L213">                catchThrowableOfType(ConfigException.class, () -&gt; configs.resolve(loader.load(workflow)));</span>
+
+        // then
+<span class="nc" id="L216">        assertThat(error.code()).isEqualTo(&quot;secret_file_read_error&quot;);</span>
+<span class="nc" id="L217">        assertThat(error)</span>
+<span class="nc" id="L218">                .hasMessageContaining(&quot;tracker.api_key&quot;)</span>
+<span class="nc" id="L219">                .hasMessageContaining(&quot;missing-api-key&quot;)</span>
+<span class="nc" id="L220">                .hasMessageNotContaining(&quot;literal-token&quot;);</span>
+<span class="nc" id="L221">    }</span>
+
+    @Test
+    void missingWorkflowAndUnknownTemplateVariablesUseTypedErrors() {
+        // given
+<span class="nc" id="L226">        ThrowingCallable missingWorkflow = () -&gt; loader.load(tempDir.resolve(&quot;missing.md&quot;));</span>
+<span class="nc" id="L227">        ThrowingCallable unknownTemplateVariable =</span>
+<span class="nc" id="L228">                () -&gt; prompts.render(&quot;{{ card.nope }}&quot;, TestCards.card(&quot;1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;), null);</span>
+
+        // when
+<span class="nc" id="L231">        WorkflowException missingWorkflowError = catchThrowableOfType(WorkflowException.class, missingWorkflow);</span>
+<span class="nc" id="L232">        WorkflowException unknownTemplateVariableError =</span>
+<span class="nc" id="L233">                catchThrowableOfType(WorkflowException.class, unknownTemplateVariable);</span>
+
+        // then
+<span class="nc" id="L236">        assertThat(missingWorkflowError.code()).isEqualTo(&quot;missing_workflow_file&quot;);</span>
+<span class="nc" id="L237">        assertThat(unknownTemplateVariableError.code()).isEqualTo(&quot;template_render_error&quot;);</span>
+<span class="nc" id="L238">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

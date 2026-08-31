@@ -1,0 +1,1982 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestratorTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestratorTest.java</span></div><h1>SymphonyOrchestratorTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.Sha3;
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.agent.AgentEvent;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.domain.BlockerRef;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.workflow.WorkflowException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.IntStream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+<span class="nc" id="L53">final class SymphonyOrchestratorTest {</span>
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void dispatchesEligibleCardAndQueuesContinuationRetryAfterNormalExit() throws Exception {
+        // given
+<span class="nc" id="L60">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L61">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L62">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L63">        AgentRunner runner = mock();</span>
+<span class="nc" id="L64">        when(runner.run(any())).thenReturn(AgentRunResult.ok());</span>
+<span class="nc" id="L65">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L68">        orchestrator.start();</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L70">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L71">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L74">        assertThat(snapshot.counts().retrying()).isOne();</span>
+<span class="nc" id="L75">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; {</span>
+<span class="nc" id="L76">            assertThat(row.cardIdentifier()).isEqualTo(&quot;TRELLO-abc&quot;);</span>
+<span class="nc" id="L77">            assertThat(row.attempt()).isOne();</span>
+<span class="nc" id="L78">        });</span>
+<span class="nc" id="L79">        assertThat(snapshot.routing().activeLists()).containsExactly(&quot;Todo&quot;);</span>
+<span class="nc" id="L80">        assertThat(snapshot.routing().terminalLists()).contains(&quot;done&quot;);</span>
+<span class="nc" id="L81">    }</span>
+
+    @Test
+    void doesNotQueueContinuationRetryAfterSuccessfulHandoffMovesCardOutOfActiveList() throws Exception {
+        // given
+<span class="nc" id="L86">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L87">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L88">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L89">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L90">        AgentRunner runner = mock();</span>
+<span class="nc" id="L91">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L92">            runs.incrementAndGet();</span>
+<span class="nc" id="L93">            tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Human Review&quot;));</span>
+<span class="nc" id="L94">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L96">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L99">        RuntimeSnapshot snapshot = runOnceAndSnapshotIdle(orchestrator, runs);</span>
+
+        // then
+<span class="nc" id="L102">        assertThat(snapshot.counts().running()).isZero();</span>
+<span class="nc" id="L103">        assertThat(snapshot.counts().retrying()).isZero();</span>
+<span class="nc" id="L104">        assertThat(tracker.cardState(&quot;card-1&quot;).state()).isEqualTo(&quot;Human Review&quot;);</span>
+<span class="nc" id="L105">    }</span>
+
+    @Test
+    void doesNotDispatchCardsFromNonActiveLists() throws Exception {
+        // given
+<span class="nc" id="L110">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L111">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L112">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Human Review&quot;)));</span>
+<span class="nc" id="L113">        AgentRunner runner = mock();</span>
+<span class="nc" id="L114">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L117">        orchestrator.start();</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt;= 1);</span>
+<span class="nc" id="L119">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L120">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L123">        assertThat(snapshot.counts().running()).isZero();</span>
+<span class="nc" id="L124">        assertThat(snapshot.counts().retrying()).isZero();</span>
+<span class="nc" id="L125">        assertThat(tracker.promptStateFetches.get()).isZero();</span>
+<span class="nc" id="L126">    }</span>
+
+    @Test
+    void dispatchRequiresAllConfiguredLabelsUsingNormalizedMatching() throws Exception {
+        // given
+<span class="nc" id="L131">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L132">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo]
+                  required_labels:
+                    - &quot; Ready For Codex &quot;
+                    - &quot;Customer Blocked&quot;
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.title }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L154">        var tracker = new FakeTracker(List.of(</span>
+<span class="nc" id="L155">                TestCards.cardWithLabels(</span>
+<span class="nc" id="L156">                        &quot;card-1&quot;, &quot;TRELLO-match&quot;, &quot;Todo&quot;, List.of(&quot;ready for codex&quot;, &quot; customer blocked &quot;)),</span>
+<span class="nc" id="L157">                TestCards.cardWithLabels(&quot;card-2&quot;, &quot;TRELLO-missing&quot;, &quot;Todo&quot;, List.of(&quot;ready for codex&quot;))));</span>
+<span class="nc" id="L158">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L159">        AgentRunner runner = mock();</span>
+<span class="nc" id="L160">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L161">            runs.incrementAndGet();</span>
+<span class="nc" id="L162">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L164">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L167">        orchestrator.start();</span>
+<span class="nc bnc" id="L168" title="All 4 branches missed.">        waitUntil(() -&gt; runs.get() == 1 &amp;&amp; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L169">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L170">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L173">        assertThat(runs).hasValue(1);</span>
+<span class="nc" id="L174">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
+<span class="nc" id="L175">                .isEqualTo(&quot;TRELLO-match&quot;));</span>
+<span class="nc" id="L176">        assertThat(tracker.promptStateFetches.get()).isOne();</span>
+<span class="nc" id="L177">    }</span>
+
+    @Test
+    void blankRequiredLabelMakesNoCardDispatchEligible() throws Exception {
+        // given
+<span class="nc" id="L182">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L183">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo]
+                  required_labels:
+                    - &quot;&quot;
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.title }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L204">        var tracker =</span>
+<span class="nc" id="L205">                new FakeTracker(List.of(TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;, List.of(&quot;any&quot;))));</span>
+<span class="nc" id="L206">        AgentRunner runner = mock();</span>
+<span class="nc" id="L207">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L210">        orchestrator.start();</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt; 0);</span>
+<span class="nc" id="L212">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L213">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L216">        assertThat(snapshot.counts().running()).isZero();</span>
+<span class="nc" id="L217">        assertThat(snapshot.counts().retrying()).isZero();</span>
+<span class="nc" id="L218">        assertThat(tracker.promptStateFetches.get()).isZero();</span>
+<span class="nc" id="L219">    }</span>
+
+    @Test
+    void refreshesSelectedCardBeforeRenderingPrompt() throws Exception {
+        // given
+<span class="nc" id="L224">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L225">        writeWorkflow(</span>
+                workflow,
+                &quot;60000&quot;,
+                &quot;&quot;,
+                &quot;&quot;&quot;
+                {% for comment in card.comments %}{{ comment.text }}{% endfor %}
+                &quot;&quot;&quot;);
+<span class="nc" id="L232">        Card listedCard = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L233">        Card refreshedCard = TestCards.cardWithComments(</span>
+                &quot;card-1&quot;,
+                &quot;TRELLO-abc&quot;,
+                &quot;Todo&quot;,
+<span class="nc" id="L237">                List.of(new Card.Comment(&quot;comment-1&quot;, &quot;Review the edge case.&quot;, &quot;Reviewer&quot;, COMMENT_TIME)));</span>
+<span class="nc" id="L238">        var tracker = new FakeTracker(List.of(listedCard));</span>
+<span class="nc" id="L239">        tracker.setCardState(refreshedCard);</span>
+<span class="nc" id="L240">        var prompt = new AtomicReference&lt;String&gt;();</span>
+<span class="nc" id="L241">        AgentRunner runner = mock();</span>
+<span class="nc" id="L242">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L243">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L244">                    prompt.set(request.prompt());</span>
+<span class="nc" id="L245">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L247">                .when(runner)</span>
+<span class="nc" id="L248">                .run(any());</span>
+<span class="nc" id="L249">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L252">        orchestrator.start();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        waitUntil(() -&gt; prompt.get() != null);</span>
+<span class="nc" id="L254">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L257">        assertThat(prompt.get()).contains(&quot;Review the edge case.&quot;);</span>
+<span class="nc" id="L258">        assertThat(tracker.promptStateFetches.get()).isPositive();</span>
+<span class="nc" id="L259">    }</span>
+
+    @Test
+    void preparesCardForDispatchBeforeRenderingPromptAndStartingAgent() throws Exception {
+        // given
+<span class="nc" id="L264">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L265">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo, In Progress]
+                  in_progress_state: In Progress
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.state }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L285">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L286">        tracker.preparedCard = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L287">        var request = new AtomicReference&lt;AgentRunner.AgentRunRequest&gt;();</span>
+<span class="nc" id="L288">        AgentRunner runner = mock();</span>
+<span class="nc" id="L289">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L290">                    request.set(invocation.getArgument(0));</span>
+<span class="nc" id="L291">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L293">                .when(runner)</span>
+<span class="nc" id="L294">                .run(any());</span>
+<span class="nc" id="L295">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L298">        orchestrator.start();</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        waitUntil(() -&gt; request.get() != null);</span>
+<span class="nc" id="L300">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L303">        assertThat(tracker.prepareForDispatchCalls.get()).isOne();</span>
+<span class="nc" id="L304">        assertThat(request.get().card().state()).isEqualTo(&quot;In Progress&quot;);</span>
+<span class="nc" id="L305">        assertThat(request.get().prompt()).isEqualTo(&quot;In Progress&quot;);</span>
+<span class="nc" id="L306">    }</span>
+
+    @Test
+    void retriesCardFromInProgressWhenAgentRunFailsAfterPickupMove() throws Exception {
+        // given
+<span class="nc" id="L311">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L312">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo, In Progress]
+                  in_progress_state: In Progress
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                agent:
+                  max_retry_backoff_ms: 10
+                codex:
+                  command: fake
+                ---
+                {{ card.state }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L334">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L335">        tracker.preparedCard = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L336">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L337">        List&lt;String&gt; requestedStates = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L338">        AgentRunner runner = mock();</span>
+<span class="nc" id="L339">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L340">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L341">                    requestedStates.add(request.card().state());</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                    return runs.incrementAndGet() == 1 ? AgentRunResult.fail(&quot;codex failed&quot;) : AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L344">                .when(runner)</span>
+<span class="nc" id="L345">                .run(any());</span>
+<span class="nc" id="L346">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L349">        orchestrator.start();</span>
+<span class="nc bnc" id="L350" title="All 4 branches missed.">        waitUntil(() -&gt; runs.get() &gt;= 2 &amp;&amp; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L351">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L352">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L355">        assertThat(runs.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L356">        assertThat(requestedStates).containsSubsequence(&quot;In Progress&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L357">        assertThat(tracker.prepareForDispatchCalls.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L358">        assertThat(snapshot.retrying())</span>
+<span class="nc" id="L359">                .anySatisfy(row -&gt; assertThat(row.cardIdentifier()).isEqualTo(&quot;TRELLO-abc&quot;));</span>
+<span class="nc" id="L360">    }</span>
+
+    @Test
+    void releasesIdleInProgressCardsWhenConcurrencyIsFull() throws Exception {
+        // given
+<span class="nc" id="L365">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L366">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo, In Progress]
+                  in_progress_state: In Progress
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                agent:
+                  max_concurrent_agents: 1
+                codex:
+                  command: fake
+                ---
+                {{ card.state }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L388">        Card first = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L389">        Card second = TestCards.card(&quot;card-2&quot;, &quot;TRELLO-second&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L390">        var tracker = new FakeTracker(List.of(first, second));</span>
+<span class="nc" id="L391">        var workerStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L392">        var releaseWorker = new CountDownLatch(1);</span>
+<span class="nc" id="L393">        AgentRunner runner = mock();</span>
+<span class="nc" id="L394">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L395">                    workerStarted.countDown();</span>
+<span class="nc" id="L396">                    releaseWorker.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L397">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L399">                .when(runner)</span>
+<span class="nc" id="L400">                .run(any());</span>
+<span class="nc" id="L401">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L404">        orchestrator.start();</span>
+<span class="nc" id="L405">        assertThat(workerStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L406">                .as(&quot;the active worker should start within 5 seconds before idle-card reconciliation&quot;)</span>
+<span class="nc" id="L407">                .isTrue();</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.releasedCards.size() == 1);</span>
+<span class="nc" id="L409">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L410">        releaseWorker.countDown();</span>
+<span class="nc" id="L411">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L414">        assertThat(snapshot.running()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
+<span class="nc" id="L415">                .isEqualTo(&quot;TRELLO-first&quot;));</span>
+<span class="nc" id="L416">        assertThat(tracker.releasedCards).containsExactly(&quot;TRELLO-second&quot;);</span>
+<span class="nc" id="L417">    }</span>
+
+    @Test
+    void releasesFailedInProgressCardBeforeRetryBackoff() throws Exception {
+        // given
+<span class="nc" id="L422">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L423">        writeRetryableInProgressWorkflow(workflow);</span>
+<span class="nc" id="L424">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L425">        tracker.preparedCard = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L426">        AgentRunner runner = mock();</span>
+<span class="nc" id="L427">        when(runner.run(any())).thenReturn(AgentRunResult.fail(&quot;codex failed&quot;));</span>
+<span class="nc" id="L428">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L431">        orchestrator.start();</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L433">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L434">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L437">        assertCardReleasedForRetry(snapshot, tracker);</span>
+<span class="nc" id="L438">    }</span>
+
+    @Test
+    void releasesFailedInProgressCardUsingDispatchSourceBeforeRetryBackoff() throws Exception {
+        // given
+<span class="nc" id="L443">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L444">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Normal Queue, Priority Queue, In Progress]
+                  in_progress_state: In Progress
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                agent:
+                  max_retry_backoff_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.state }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L466">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Normal Queue&quot;)));</span>
+<span class="nc" id="L467">        tracker.preparedCard = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L468">        AgentRunner runner = mock();</span>
+<span class="nc" id="L469">        when(runner.run(any())).thenReturn(AgentRunResult.fail(&quot;codex failed&quot;));</span>
+<span class="nc" id="L470">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L473">        orchestrator.start();</span>
+<span class="nc bnc" id="L474" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L475">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L476">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L479">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
+<span class="nc" id="L480">                .isEqualTo(&quot;TRELLO-abc&quot;));</span>
+<span class="nc" id="L481">        assertThat(tracker.releases).singleElement().isEqualTo(new ReleaseRecord(&quot;In Progress&quot;, &quot;Normal Queue&quot;));</span>
+<span class="nc" id="L482">        assertThat(tracker.cardState(&quot;card-1&quot;).state()).isEqualTo(&quot;Normal Queue&quot;);</span>
+<span class="nc" id="L483">    }</span>
+
+    @Test
+    void releasesCurrentCardWhenPrepareForDispatchFailsAfterPickupMove() throws Exception {
+        // given
+<span class="nc" id="L488">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L489">        writeRetryableInProgressWorkflow(workflow);</span>
+<span class="nc" id="L490">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L491">        tracker.preparedCard = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L492">        tracker.prepareForDispatchFailure = new IllegalStateException(&quot;post-move refresh failed&quot;);</span>
+<span class="nc" id="L493">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, mock(AgentRunner.class));</span>
+
+        // when
+<span class="nc" id="L496">        orchestrator.start();</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L498">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L499">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L502">        assertCardReleasedForRetry(snapshot, tracker);</span>
+<span class="nc" id="L503">    }</span>
+
+    @Test
+    void doesNotRetryFailedCardThatAlreadyMovedOutOfInProgress() throws Exception {
+        // given
+<span class="nc" id="L508">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L509">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo, In Progress]
+                  in_progress_state: In Progress
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                agent:
+                  max_retry_backoff_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.state }}
+        &quot;&quot;&quot;);
+<span class="nc" id="L531">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;)));</span>
+<span class="nc" id="L532">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L533">        AgentRunner runner = mock();</span>
+<span class="nc" id="L534">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L535">            runs.incrementAndGet();</span>
+<span class="nc" id="L536">            tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Blocked&quot;));</span>
+<span class="nc" id="L537">            return AgentRunResult.fail(&quot;handoff failed after move&quot;);</span>
+        });
+<span class="nc" id="L539">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L542">        RuntimeSnapshot snapshot = runOnceAndSnapshotIdle(orchestrator, runs);</span>
+
+        // then
+<span class="nc" id="L545">        assertThat(snapshot.counts().running()).isZero();</span>
+<span class="nc" id="L546">        assertThat(snapshot.counts().retrying()).isZero();</span>
+<span class="nc" id="L547">        assertThat(tracker.releasedCards).isEmpty();</span>
+<span class="nc" id="L548">        assertThat(tracker.cardState(&quot;card-1&quot;).state()).isEqualTo(&quot;Blocked&quot;);</span>
+<span class="nc" id="L549">    }</span>
+
+    @Test
+    void workflowWatcherQueuesRefreshWhenWorkflowFileChanges() throws Exception {
+        // given
+<span class="nc" id="L554">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L555">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L556">        var tracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L557">        AgentRunner runner = mock();</span>
+<span class="nc" id="L558">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L561">        orchestrator.start();</span>
+<span class="nc bnc" id="L562" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt;= 1);</span>
+<span class="nc" id="L563">        writeWorkflow(workflow, &quot;60001&quot;);</span>
+<span class="nc bnc" id="L564" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt;= 2);</span>
+<span class="nc" id="L565">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L568">        assertThat(tracker.candidateFetches.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L569">    }</span>
+
+    @Test
+    void periodicPollingPicksUpCardAddedAfterIdleStartup() throws Exception {
+        // given
+<span class="nc" id="L574">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L575">        writeWorkflow(workflow, &quot;50&quot;);</span>
+<span class="nc" id="L576">        var tracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L577">        AgentRunner runner = mock();</span>
+<span class="nc" id="L578">        var pickedUpCard = new AtomicReference&lt;String&gt;();</span>
+<span class="nc" id="L579">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L580">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L581">                    pickedUpCard.set(request.card().identifier());</span>
+<span class="nc" id="L582">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L584">                .when(runner)</span>
+<span class="nc" id="L585">                .run(any());</span>
+<span class="nc" id="L586">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L589">        orchestrator.start();</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt;= 1);</span>
+<span class="nc" id="L591">        tracker.setCandidates(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-late&quot;, &quot;Todo&quot;)));</span>
+<span class="nc bnc" id="L592" title="All 2 branches missed.">        waitUntil(() -&gt; pickedUpCard.get() != null);</span>
+<span class="nc" id="L593">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L596">        assertThat(pickedUpCard.get()).isEqualTo(&quot;TRELLO-late&quot;);</span>
+<span class="nc" id="L597">        assertThat(tracker.candidateFetches.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L598">    }</span>
+
+    @Test
+    void refreshRequestedDuringActiveTickRunsImmediatelyAfterTickCompletes() throws Exception {
+        // given
+<span class="nc" id="L603">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L604">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L605">        var tracker = new BlockingTracker();</span>
+<span class="nc" id="L606">        AgentRunner runner = mock();</span>
+<span class="nc" id="L607">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L610">        orchestrator.start();</span>
+<span class="nc" id="L611">        assertThat(tracker.firstFetchStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L612">                .as(&quot;the active tick should enter its first tracker fetch within 5 seconds&quot;)</span>
+<span class="nc" id="L613">                .isTrue();</span>
+<span class="nc" id="L614">        orchestrator.requestRefresh();</span>
+<span class="nc" id="L615">        tracker.releaseFirstFetch.countDown();</span>
+<span class="nc bnc" id="L616" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt;= 2);</span>
+<span class="nc" id="L617">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L620">        assertThat(tracker.candidateFetches.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L621">    }</span>
+
+    @Test
+    void statusReadsAnswerWhileTickIsBlockedInsideTrelloFetch() throws Exception {
+        // given
+<span class="nc" id="L626">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L627">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L628">        var tracker = new BlockingTracker();</span>
+<span class="nc" id="L629">        AgentRunner runner = mock();</span>
+<span class="nc" id="L630">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L633">        orchestrator.start();</span>
+<span class="nc" id="L634">        assertThat(tracker.firstFetchStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L635">                .as(&quot;the blocked tick should enter its first tracker fetch within 5 seconds&quot;)</span>
+<span class="nc" id="L636">                .isTrue();</span>
+<span class="nc" id="L637">        CompletableFuture&lt;String&gt; boardId = CompletableFuture.supplyAsync(orchestrator::selectedBoardId);</span>
+<span class="nc" id="L638">        CompletableFuture&lt;String&gt; configuredBoardId =</span>
+<span class="nc" id="L639">                CompletableFuture.supplyAsync(orchestrator::selectedConfiguredBoardId);</span>
+<span class="nc" id="L640">        CompletableFuture&lt;Path&gt; workflowPath = CompletableFuture.supplyAsync(orchestrator::selectedWorkflowPath);</span>
+<span class="nc" id="L641">        CompletableFuture&lt;RuntimeSnapshot&gt; snapshot = CompletableFuture.supplyAsync(orchestrator::snapshot);</span>
+
+        // then
+        try {
+<span class="nc" id="L645">            assertThat(boardId)</span>
+<span class="nc" id="L646">                    .as(&quot;local-status board id read must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L647">                    .succeedsWithin(Duration.ofSeconds(2))</span>
+<span class="nc" id="L648">                    .isEqualTo(&quot;board-1&quot;);</span>
+<span class="nc" id="L649">            assertThat(configuredBoardId)</span>
+<span class="nc" id="L650">                    .as(&quot;local-status configured board id read must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L651">                    .succeedsWithin(Duration.ofSeconds(2));</span>
+<span class="nc" id="L652">            assertThat(workflowPath)</span>
+<span class="nc" id="L653">                    .as(&quot;local-status workflow path read must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L654">                    .succeedsWithin(Duration.ofSeconds(2))</span>
+<span class="nc" id="L655">                    .isEqualTo(workflow.toAbsolutePath().normalize());</span>
+<span class="nc" id="L656">            assertThat(snapshot)</span>
+<span class="nc" id="L657">                    .as(&quot;state snapshot must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L658">                    .succeedsWithin(Duration.ofSeconds(2));</span>
+        } finally {
+<span class="nc" id="L660">            tracker.releaseFirstFetch.countDown();</span>
+<span class="nc" id="L661">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L663">    }</span>
+
+    @Test
+    void refreshAtTickCompletionBoundaryIsNotOverwrittenByIntervalSchedule() throws Exception {
+        // given
+<span class="nc" id="L668">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L669">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L670">        var tracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L671">        AgentRunner runner = mock();</span>
+<span class="nc" id="L672">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L673">        var boundaryRefreshInjected = new AtomicBoolean();</span>
+<span class="nc" id="L674">        orchestrator.tickCompletionHookForTests = () -&gt; {</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">            if (!boundaryRefreshInjected.compareAndSet(false, true)) {</span>
+<span class="nc" id="L676">                return;</span>
+            }
+<span class="nc" id="L678">            var refresher = new Thread(orchestrator::requestRefresh);</span>
+<span class="nc" id="L679">            refresher.start();</span>
+            try {
+<span class="nc" id="L681">                refresher.join(1_000);</span>
+<span class="nc" id="L682">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L683">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L684">            }</span>
+<span class="nc" id="L685">        };</span>
+
+        // when
+<span class="nc" id="L688">        orchestrator.start();</span>
+<span class="nc bnc" id="L689" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt;= 2);</span>
+<span class="nc" id="L690">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L693">        assertThat(tracker.candidateFetches.get())</span>
+<span class="nc" id="L694">                .as(&quot;a refresh at the tick completion boundary must schedule the next tick &quot;</span>
+                        + &quot;immediately instead of waiting for the 60s polling interval&quot;)
+<span class="nc" id="L696">                .isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L697">    }</span>
+
+    @Test
+    void refreshAfterTerminalReconcileCleanupFailureSchedulesNextTick() throws Exception {
+        // given
+<span class="nc" id="L702">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L703">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L704">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L705">        AgentRunner runner = mock();</span>
+<span class="nc" id="L706">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L707">        var workspaces = new ThrowingWorkspaceManager();</span>
+<span class="nc" id="L708">        var tickCompletions = new AtomicInteger();</span>
+<span class="nc" id="L709">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, workspaces);</span>
+<span class="nc" id="L710">        orchestrator.tickCompletionHookForTests = tickCompletions::incrementAndGet;</span>
+
+<span class="nc" id="L712">        orchestrator.start();</span>
+<span class="nc" id="L713">        assertThat(blockingRun.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L714">                .as(&quot;the agent run should start within 5 seconds before terminal reconciliation&quot;)</span>
+<span class="nc" id="L715">                .isTrue();</span>
+<span class="nc" id="L716">        int completedTicksBeforeFailure = tickCompletions.get();</span>
+<span class="nc" id="L717">        tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;done&quot;));</span>
+
+        // when
+<span class="nc" id="L720">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L721" title="All 4 branches missed.">        waitUntil(() -&gt; workspaces.removalAttempts.get() == 1 &amp;&amp; tickCompletions.get() &gt; completedTicksBeforeFailure);</span>
+<span class="nc" id="L722">        int candidateFetchesAfterFailedTick = tracker.candidateFetches.get();</span>
+<span class="nc" id="L723">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L724" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt; candidateFetchesAfterFailedTick);</span>
+<span class="nc" id="L725">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L728">        assertThat(blockingRun.cancelled()).hasValue(1);</span>
+<span class="nc" id="L729">        assertThat(workspaces.removalAttempts).hasValue(1);</span>
+<span class="nc" id="L730">    }</span>
+
+    @Test
+    void refreshRequestedDuringAndAfterStopIsANoOpAndDoesNotThrow() throws Exception {
+        // given
+<span class="nc" id="L735">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L736">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L737">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L738">        var agentStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L739">        var orchestratorReference = new AtomicReference&lt;SymphonyOrchestrator&gt;();</span>
+<span class="nc" id="L740">        var refreshDuringStopFailure = new AtomicReference&lt;Throwable&gt;();</span>
+<span class="nc" id="L741">        AgentRunner runner = mock();</span>
+<span class="nc" id="L742">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L743">                    agentStarted.countDown();</span>
+                    try {
+<span class="nc" id="L745">                        blockUntilInterruptedOrTimedOut(Duration.ofSeconds(5));</span>
+<span class="nc" id="L746">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L747">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L748">                    }</span>
+<span class="nc" id="L749">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L751">                .when(runner)</span>
+<span class="nc" id="L752">                .run(any());</span>
+<span class="nc" id="L753">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L754">                    refreshDuringStopFailure.set(</span>
+<span class="nc" id="L755">                            catchThrowable(() -&gt; orchestratorReference.get().requestRefresh()));</span>
+<span class="nc" id="L756">                    return null;</span>
+                })
+<span class="nc" id="L758">                .when(runner)</span>
+<span class="nc" id="L759">                .cancel(any());</span>
+<span class="nc" id="L760">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L761">        orchestratorReference.set(orchestrator);</span>
+<span class="nc" id="L762">        orchestrator.start();</span>
+<span class="nc" id="L763">        assertThat(agentStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L764">                .as(&quot;the agent should start within 5 seconds before refresh and stop requests&quot;)</span>
+<span class="nc" id="L765">                .isTrue();</span>
+<span class="nc" id="L766">        int fetchesBeforeStop = tracker.candidateFetches.get();</span>
+
+        // when
+<span class="nc" id="L769">        orchestrator.stop();</span>
+<span class="nc" id="L770">        Throwable refreshAfterStopFailure = catchThrowable(orchestrator::requestRefresh);</span>
+
+        // then
+<span class="nc" id="L773">        assertThat(refreshDuringStopFailure.get())</span>
+<span class="nc" id="L774">                .as(&quot;requestRefresh during stop must be a no-op instead of throwing&quot;)</span>
+<span class="nc" id="L775">                .isNull();</span>
+<span class="nc" id="L776">        assertThat(refreshAfterStopFailure)</span>
+<span class="nc" id="L777">                .as(&quot;requestRefresh after stop must not schedule against the shut-down scheduler&quot;)</span>
+<span class="nc" id="L778">                .isNull();</span>
+<span class="nc" id="L779">        assertThat(tracker.candidateFetches.get()).isEqualTo(fetchesBeforeStop);</span>
+<span class="nc" id="L780">    }</span>
+
+    @Test
+    void refreshAtExecutorShutdownBoundaryIsANoOp() throws Exception {
+        // given
+<span class="nc" id="L785">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L786">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L787">        SymphonyOrchestrator orchestrator = orchestrator(workflow, new FakeTracker(List.of()), mock());</span>
+<span class="nc" id="L788">        var refreshFailure = new AtomicReference&lt;Throwable&gt;();</span>
+<span class="nc" id="L789">        orchestrator.executorsStoppedHookForTests =</span>
+<span class="nc" id="L790">                () -&gt; refreshFailure.set(catchThrowable(orchestrator::requestRefresh));</span>
+<span class="nc" id="L791">        orchestrator.start();</span>
+
+        // when
+<span class="nc" id="L794">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L797">        assertThat(refreshFailure)</span>
+<span class="nc" id="L798">                .as(&quot;refresh at the executor shutdown boundary must observe the stopped lifecycle state&quot;)</span>
+<span class="nc" id="L799">                .hasValue(null);</span>
+<span class="nc" id="L800">    }</span>
+
+    @Test
+    void workflowPathCannotChangeOnceStartHasBegun() throws Exception {
+        // given
+<span class="nc" id="L805">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L806">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L807">        var tracker = new StartBlockingTracker();</span>
+<span class="nc" id="L808">        AgentRunner runner = mock();</span>
+<span class="nc" id="L809">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L810">        var starter = new Thread(orchestrator::start);</span>
+<span class="nc" id="L811">        starter.start();</span>
+<span class="nc" id="L812">        assertThat(tracker.terminalFetchStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L813">                .as(&quot;startup should enter terminal-card fetching within 5 seconds&quot;)</span>
+<span class="nc" id="L814">                .isTrue();</span>
+
+        // when
+<span class="nc" id="L817">        var changeAttempted = new CountDownLatch(1);</span>
+<span class="nc" id="L818">        CompletableFuture&lt;Throwable&gt; rejection = CompletableFuture.supplyAsync(() -&gt; {</span>
+<span class="nc" id="L819">            changeAttempted.countDown();</span>
+<span class="nc" id="L820">            return catchThrowable(() -&gt; orchestrator.setWorkflowPath(tempDir.resolve(&quot;WORKFLOW.other.md&quot;)));</span>
+        });
+<span class="nc" id="L822">        assertThat(changeAttempted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L823">                .as(&quot;the concurrent workflow-path change should be attempted within 5 seconds&quot;)</span>
+<span class="nc" id="L824">                .isTrue();</span>
+<span class="nc" id="L825">        waitForBoundedQuietPeriod(rejection);</span>
+<span class="nc" id="L826">        tracker.releaseTerminalFetch.countDown();</span>
+<span class="nc" id="L827">        assertThat(starter.join(Duration.ofSeconds(5)))</span>
+<span class="nc" id="L828">                .as(&quot;the orchestrator startup thread terminates after the terminal fetch is released&quot;)</span>
+<span class="nc" id="L829">                .isTrue();</span>
+
+        // then
+<span class="nc" id="L832">        assertThat(rejection)</span>
+<span class="nc" id="L833">                .as(&quot;a workflow path change racing startup must wait for the operation boundary and be rejected&quot;)</span>
+<span class="nc" id="L834">                .succeedsWithin(Duration.ofSeconds(5))</span>
+<span class="nc" id="L835">                .isInstanceOf(IllegalStateException.class);</span>
+<span class="nc" id="L836">        assertThat(orchestrator.selectedWorkflowPath())</span>
+<span class="nc" id="L837">                .isEqualTo(workflow.toAbsolutePath().normalize());</span>
+<span class="nc" id="L838">        orchestrator.stop();</span>
+<span class="nc" id="L839">    }</span>
+
+    @Test
+    void duplicateWorkflowRuntimeFailsBeforeTrelloResolution() throws Exception {
+        // given
+<span class="nc" id="L844">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L845">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L846">        var ownerTracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L847">        SymphonyOrchestrator owner = orchestrator(workflow, ownerTracker, mock());</span>
+<span class="nc" id="L848">        owner.start();</span>
+
+<span class="nc" id="L850">        var duplicateTracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L851">        SymphonyOrchestrator duplicate = orchestrator(workflow, duplicateTracker, mock());</span>
+
+        try {
+
+            // when
+<span class="nc" id="L856">            Throwable failure = catchThrowable(duplicate::start);</span>
+
+            // then
+<span class="nc" id="L859">            assertThat(failure).isInstanceOfSatisfying(WorkflowException.class, exception -&gt; {</span>
+<span class="nc" id="L860">                assertThat(exception.code()).isEqualTo(&quot;workflow_already_running&quot;);</span>
+<span class="nc" id="L861">                assertThat(exception).hasMessageContaining(&quot;already using this workflow file&quot;);</span>
+<span class="nc" id="L862">            });</span>
+<span class="nc" id="L863">            assertThat(duplicateTracker.boardResolutions).hasValue(0);</span>
+        } finally {
+<span class="nc" id="L865">            owner.stop();</span>
+        }
+
+<span class="nc" id="L868">        var restartedTracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L869">        SymphonyOrchestrator restarted = orchestrator(workflow, restartedTracker, mock());</span>
+<span class="nc" id="L870">        restarted.start();</span>
+<span class="nc" id="L871">        restarted.stop();</span>
+<span class="nc" id="L872">        assertThat(restartedTracker.boardResolutions).hasValue(1);</span>
+<span class="nc" id="L873">    }</span>
+
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    @Test
+    void workflowRuntimeLockUsesWorkflowLocalNamespaceWhenRuntimeDirectoriesDiffer() throws Exception {
+        // given
+<span class="nc" id="L879">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L880">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L881">        Path stateHome = tempDir.resolve(&quot;state&quot;);</span>
+<span class="nc" id="L882">        Path firstTmp = tempDir.resolve(&quot;first-tmp&quot;);</span>
+<span class="nc" id="L883">        Path secondTmp = tempDir.resolve(&quot;second-tmp&quot;);</span>
+<span class="nc" id="L884">        Files.createDirectories(firstTmp);</span>
+<span class="nc" id="L885">        Files.createDirectories(secondTmp);</span>
+<span class="nc" id="L886">        String previousStateHome = System.getProperty(&quot;symphony.trello.installed.state.home&quot;);</span>
+<span class="nc" id="L887">        String previousTmp = System.getProperty(&quot;java.io.tmpdir&quot;);</span>
+<span class="nc" id="L888">        SymphonyOrchestrator owner = orchestrator(workflow, new FakeTracker(List.of()), mock());</span>
+        try {
+<span class="nc" id="L890">            System.setProperty(&quot;symphony.trello.installed.state.home&quot;, stateHome.toString());</span>
+<span class="nc" id="L891">            System.setProperty(&quot;java.io.tmpdir&quot;, firstTmp.toString());</span>
+<span class="nc" id="L892">            owner.start();</span>
+
+<span class="nc" id="L894">            var duplicateTracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L895">            SymphonyOrchestrator duplicate = orchestrator(workflow, duplicateTracker, mock());</span>
+
+            // when
+<span class="nc" id="L898">            System.clearProperty(&quot;symphony.trello.installed.state.home&quot;);</span>
+<span class="nc" id="L899">            System.setProperty(&quot;java.io.tmpdir&quot;, secondTmp.toString());</span>
+<span class="nc" id="L900">            Throwable failure = catchThrowable(duplicate::start);</span>
+
+            // then
+<span class="nc" id="L903">            assertThat(failure).isInstanceOfSatisfying(WorkflowException.class, exception -&gt; {</span>
+<span class="nc" id="L904">                assertThat(exception.code()).isEqualTo(&quot;workflow_already_running&quot;);</span>
+<span class="nc" id="L905">                assertThat(exception).hasMessageContaining(&quot;already using this workflow file&quot;);</span>
+<span class="nc" id="L906">            });</span>
+<span class="nc" id="L907">            assertThat(duplicateTracker.boardResolutions).hasValue(0);</span>
+<span class="nc" id="L908">            assertThat(workflow.getParent().resolve(&quot;.symphony-trello-locks&quot;).resolve(workflowLockFileName(workflow)))</span>
+<span class="nc" id="L909">                    .isRegularFile();</span>
+<span class="nc" id="L910">            assertThat(stateHome.resolve(&quot;workflow-locks&quot;)).doesNotExist();</span>
+<span class="nc" id="L911">            assertThat(firstTmp.resolve(&quot;symphony-trello-workflow-locks&quot;)).doesNotExist();</span>
+<span class="nc" id="L912">            assertThat(secondTmp.resolve(&quot;symphony-trello-workflow-locks&quot;)).doesNotExist();</span>
+        } finally {
+<span class="nc" id="L914">            owner.stop();</span>
+<span class="nc" id="L915">            restoreProperty(&quot;symphony.trello.installed.state.home&quot;, previousStateHome);</span>
+<span class="nc" id="L916">            restoreProperty(&quot;java.io.tmpdir&quot;, previousTmp);</span>
+        }
+<span class="nc" id="L918">    }</span>
+
+    @Test
+    void workflowRuntimeLockFailsWhenWorkflowLockDirectoryCannotBeCreated() throws Exception {
+        // given
+<span class="nc" id="L923">        Path workflowDirectory = tempDir.resolve(&quot;readonly-workflow&quot;);</span>
+<span class="nc" id="L924">        Files.createDirectories(workflowDirectory);</span>
+<span class="nc" id="L925">        Path workflow = workflowDirectory.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L926">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+        Set&lt;PosixFilePermission&gt; originalPermissions;
+        try {
+<span class="nc" id="L929">            originalPermissions = Files.getPosixFilePermissions(workflowDirectory);</span>
+<span class="nc" id="L930">        } catch (UnsupportedOperationException e) {</span>
+<span class="nc" id="L931">            assumeTrue(false, &quot;POSIX permissions are not available on this filesystem.&quot;);</span>
+<span class="nc" id="L932">            return;</span>
+<span class="nc" id="L933">        }</span>
+<span class="nc" id="L934">        var tracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L935">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, mock());</span>
+        try {
+<span class="nc" id="L937">            Files.setPosixFilePermissions(workflowDirectory, PosixFilePermissions.fromString(&quot;r-x------&quot;));</span>
+<span class="nc" id="L938">            assumeFalse(Files.isWritable(workflowDirectory), &quot;The current user can still write to the test directory.&quot;);</span>
+
+            // when
+<span class="nc" id="L941">            Throwable failure = catchThrowable(orchestrator::start);</span>
+
+            // then
+<span class="nc" id="L944">            assertThat(failure).isInstanceOfSatisfying(WorkflowException.class, exception -&gt; {</span>
+<span class="nc" id="L945">                assertThat(exception.code()).isEqualTo(&quot;workflow_lock_unavailable&quot;);</span>
+<span class="nc" id="L946">                assertThat(exception).hasMessageContaining(&quot;Workflow runtime lock cannot be acquired&quot;);</span>
+<span class="nc" id="L947">            });</span>
+<span class="nc" id="L948">            assertThat(tracker.boardResolutions).hasValue(0);</span>
+        } finally {
+<span class="nc" id="L950">            Files.setPosixFilePermissions(workflowDirectory, originalPermissions);</span>
+<span class="nc" id="L951">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L953">    }</span>
+
+    @Test
+    void workflowRuntimeLockIsReleasedWhenStartupFailsAfterAcquiringIt() throws Exception {
+        // given
+<span class="nc" id="L958">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L959">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L960">        var failingTracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L961">        failingTracker.resolveBoardIdFailure = new IllegalStateException(&quot;board lookup failed&quot;);</span>
+<span class="nc" id="L962">        SymphonyOrchestrator failing = orchestrator(workflow, failingTracker, mock());</span>
+
+        // when
+<span class="nc" id="L965">        Throwable failure = catchThrowable(failing::start);</span>
+
+        // then
+<span class="nc" id="L968">        assertThat(failure).isInstanceOf(IllegalStateException.class).hasMessageContaining(&quot;board lookup failed&quot;);</span>
+
+<span class="nc" id="L970">        var restartedTracker = new FakeTracker(List.of());</span>
+<span class="nc" id="L971">        SymphonyOrchestrator restarted = orchestrator(workflow, restartedTracker, mock());</span>
+<span class="nc" id="L972">        restarted.start();</span>
+<span class="nc" id="L973">        restarted.stop();</span>
+<span class="nc" id="L974">        assertThat(restartedTracker.boardResolutions).hasValue(1);</span>
+<span class="nc" id="L975">    }</span>
+
+    /// Gives a racing change that does not block (the old bug) time to complete while startup is
+    /// still latched; a correctly blocking change leaves the future incomplete and this returns
+    /// after the bound.
+    private static void waitForBoundedQuietPeriod(CompletableFuture&lt;Throwable&gt; future) throws Exception {
+<span class="nc" id="L981">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);</span>
+<span class="nc bnc" id="L982" title="All 4 branches missed.">        while (System.nanoTime() &lt; deadline &amp;&amp; !future.isDone()) {</span>
+<span class="nc" id="L983">            pollDelayForBoundedConditionWait();</span>
+        }
+<span class="nc" id="L985">    }</span>
+
+    private static String workflowLockFileName(Path workflow) throws Exception {
+<span class="nc" id="L988">        String canonicalWorkflowPath = workflow.toRealPath().toString();</span>
+<span class="nc" id="L989">        return Sha3.sha3_256(canonicalWorkflowPath) + &quot;.lock&quot;;</span>
+    }
+
+    private static void restoreProperty(String name, String value) {
+<span class="nc bnc" id="L993" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L994">            System.clearProperty(name);</span>
+        } else {
+<span class="nc" id="L996">            System.setProperty(name, value);</span>
+        }
+<span class="nc" id="L998">    }</span>
+
+    @Test
+    void gracefulStopAccountsActiveRuntimeExactlyOnce() throws Exception {
+        // given
+<span class="nc" id="L1003">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1004">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L1005">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1006">        var clock = new MutableClock(now);</span>
+<span class="nc" id="L1007">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1008">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1009">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L1010">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+
+        // when
+<span class="nc" id="L1013">        orchestrator.start();</span>
+<span class="nc" id="L1014">        assertThat(blockingRun.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1015">                .as(&quot;the accounted agent run should start within 5 seconds before graceful stop&quot;)</span>
+<span class="nc" id="L1016">                .isTrue();</span>
+<span class="nc" id="L1017">        clock.advance(Duration.ofSeconds(12));</span>
+<span class="nc" id="L1018">        orchestrator.stop();</span>
+<span class="nc" id="L1019">        RuntimeSnapshot stopped = orchestrator.snapshot();</span>
+<span class="nc" id="L1020">        clock.advance(Duration.ofSeconds(8));</span>
+<span class="nc" id="L1021">        orchestrator.stop();</span>
+<span class="nc" id="L1022">        RuntimeSnapshot stoppedAgain = orchestrator.snapshot();</span>
+
+        // then
+<span class="nc" id="L1025">        assertThat(blockingRun.cancelled()).hasValue(1);</span>
+<span class="nc" id="L1026">        assertThat(stopped.counts().running()).isZero();</span>
+<span class="nc" id="L1027">        assertThat(stopped.codexTotals().secondsRunning()).isEqualTo(12.0);</span>
+<span class="nc" id="L1028">        assertThat(stoppedAgain.codexTotals().secondsRunning()).isEqualTo(12.0);</span>
+<span class="nc" id="L1029">    }</span>
+
+    @Test
+    void tokenTotalsUseAbsoluteSnapshotsAcrossMultipleTurnEvents() throws Exception {
+        // given
+<span class="nc" id="L1034">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1035">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L1036">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1037">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1038">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1039">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L1040">                    request.listener()</span>
+<span class="nc" id="L1041">                            .onEvent(new AgentEvent(</span>
+                                    &quot;thread/tokenUsage/updated&quot;,
+                                    COMMENT_TIME,
+<span class="nc" id="L1044">                                    request.workerIdentity(),</span>
+<span class="nc" id="L1045">                                    123L,</span>
+                                    &quot;thread-1&quot;,
+                                    &quot;turn-1&quot;,
+                                    &quot;first turn usage&quot;,
+<span class="nc" id="L1049">                                    Map.of(&quot;input_tokens&quot;, 10L, &quot;output_tokens&quot;, 3L, &quot;total_tokens&quot;, 13L),</span>
+<span class="nc" id="L1050">                                    new ObjectMapper().createObjectNode()));</span>
+<span class="nc" id="L1051">                    request.listener()</span>
+<span class="nc" id="L1052">                            .onEvent(new AgentEvent(</span>
+                                    &quot;thread/tokenUsage/updated&quot;,
+                                    COMMENT_TIME,
+<span class="nc" id="L1055">                                    request.workerIdentity(),</span>
+<span class="nc" id="L1056">                                    123L,</span>
+                                    &quot;thread-1&quot;,
+                                    &quot;turn-2&quot;,
+                                    &quot;second turn usage&quot;,
+<span class="nc" id="L1060">                                    Map.of(&quot;input_tokens&quot;, 14L, &quot;output_tokens&quot;, 5L, &quot;total_tokens&quot;, 19L),</span>
+<span class="nc" id="L1061">                                    new ObjectMapper().createObjectNode()));</span>
+<span class="nc" id="L1062">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L1064">                .when(runner)</span>
+<span class="nc" id="L1065">                .run(any());</span>
+<span class="nc" id="L1066">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1069">        orchestrator.start();</span>
+<span class="nc bnc" id="L1070" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1071">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1072">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1075">        assertThat(snapshot.codexTotals().inputTokens()).isEqualTo(14);</span>
+<span class="nc" id="L1076">        assertThat(snapshot.codexTotals().outputTokens()).isEqualTo(5);</span>
+<span class="nc" id="L1077">        assertThat(snapshot.codexTotals().totalTokens()).isEqualTo(19);</span>
+<span class="nc" id="L1078">    }</span>
+
+    @Test
+    void runningSnapshotCountsContinuationTurns() throws Exception {
+        // given
+<span class="nc" id="L1083">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1084">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L1085">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1086">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1087">        var eventsEmitted = new CountDownLatch(1);</span>
+<span class="nc" id="L1088">        var releaseWorker = new CountDownLatch(1);</span>
+<span class="nc" id="L1089">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1090">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L1091">                    request.listener()</span>
+<span class="nc" id="L1092">                            .onEvent(new AgentEvent(</span>
+                                    &quot;session_started&quot;,
+                                    COMMENT_TIME,
+<span class="nc" id="L1095">                                    request.workerIdentity(),</span>
+<span class="nc" id="L1096">                                    123L,</span>
+                                    &quot;thread-1&quot;,
+                                    &quot;turn-1&quot;,
+                                    null,
+<span class="nc" id="L1100">                                    Map.of(),</span>
+<span class="nc" id="L1101">                                    new ObjectMapper().createObjectNode()));</span>
+<span class="nc" id="L1102">                    request.listener()</span>
+<span class="nc" id="L1103">                            .onEvent(new AgentEvent(</span>
+                                    &quot;session_continued&quot;,
+                                    COMMENT_TIME,
+<span class="nc" id="L1106">                                    request.workerIdentity(),</span>
+<span class="nc" id="L1107">                                    123L,</span>
+                                    &quot;thread-1&quot;,
+                                    &quot;turn-2&quot;,
+                                    null,
+<span class="nc" id="L1111">                                    Map.of(),</span>
+<span class="nc" id="L1112">                                    new ObjectMapper().createObjectNode()));</span>
+<span class="nc" id="L1113">                    eventsEmitted.countDown();</span>
+<span class="nc" id="L1114">                    releaseWorker.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1115">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L1117">                .when(runner)</span>
+<span class="nc" id="L1118">                .run(any());</span>
+<span class="nc" id="L1119">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1122">        orchestrator.start();</span>
+<span class="nc" id="L1123">        assertThat(eventsEmitted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1124">                .as(&quot;the running agent should emit both continuation events within 5 seconds&quot;)</span>
+<span class="nc" id="L1125">                .isTrue();</span>
+<span class="nc" id="L1126">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1127">        releaseWorker.countDown();</span>
+<span class="nc" id="L1128">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1131">        assertThat(snapshot.running()).singleElement().satisfies(row -&gt; assertThat(row.turnCount())</span>
+<span class="nc" id="L1132">                .isEqualTo(2));</span>
+<span class="nc" id="L1133">    }</span>
+
+    @Test
+    void failedAgentRunSchedulesRetryAndExposesTokenUsageAndCardDetails() throws Exception {
+        // given
+<span class="nc" id="L1138">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1139">        writeWorkflow(workflow, &quot;60000&quot;, &quot;&quot;);</span>
+<span class="nc" id="L1140">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1141">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1142">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1143">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L1144">                    request.listener()</span>
+<span class="nc" id="L1145">                            .onEvent(new AgentEvent(</span>
+                                    &quot;turn/started&quot;,
+                                    COMMENT_TIME,
+<span class="nc" id="L1148">                                    request.workerIdentity(),</span>
+<span class="nc" id="L1149">                                    123L,</span>
+                                    &quot;thread-1&quot;,
+                                    &quot;turn-1&quot;,
+                                    &quot;started&quot;,
+<span class="nc" id="L1153">                                    Map.of(&quot;input_tokens&quot;, 10L, &quot;output_tokens&quot;, 3L, &quot;total_tokens&quot;, 13L),</span>
+<span class="nc" id="L1154">                                    new ObjectMapper().createObjectNode()));</span>
+<span class="nc" id="L1155">                    return AgentRunResult.fail(&quot;boom&quot;);</span>
+                })
+<span class="nc" id="L1157">                .when(runner)</span>
+<span class="nc" id="L1158">                .run(any());</span>
+<span class="nc" id="L1159">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1162">        orchestrator.start();</span>
+<span class="nc bnc" id="L1163" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1164">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1165">        var details = orchestrator.cardDetails(&quot;TRELLO-abc&quot;);</span>
+<span class="nc" id="L1166">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1169">        assertThat(snapshot.codexTotals().inputTokens()).isEqualTo(10);</span>
+<span class="nc" id="L1170">        assertThat(snapshot.codexTotals().outputTokens()).isEqualTo(3);</span>
+<span class="nc" id="L1171">        assertThat(snapshot.codexTotals().totalTokens()).isEqualTo(13);</span>
+<span class="nc" id="L1172">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.error())</span>
+<span class="nc" id="L1173">                .isEqualTo(&quot;boom&quot;));</span>
+<span class="nc" id="L1174">        assertThat(details).hasValueSatisfying(detail -&gt; {</span>
+<span class="nc" id="L1175">            assertThat(detail.status()).isEqualTo(&quot;retrying&quot;);</span>
+<span class="nc" id="L1176">            assertThat(detail.lastError()).isEqualTo(&quot;boom&quot;);</span>
+<span class="nc" id="L1177">            assertThat(detail.recentEvents())</span>
+<span class="nc" id="L1178">                    .extracting(CardDebugDetails.EventInfo::event)</span>
+<span class="nc" id="L1179">                    .contains(&quot;turn/started&quot;);</span>
+<span class="nc" id="L1180">        });</span>
+<span class="nc" id="L1181">    }</span>
+
+    @Test
+    void cardDetailsRetainOnlyTheNewestFiftyAgentEventsInOrder() throws Exception {
+        // given
+<span class="nc" id="L1186">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1187">        writeWorkflow(workflow, &quot;60000&quot;, &quot;&quot;);</span>
+<span class="nc" id="L1188">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1189">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1190">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1191">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc bnc" id="L1192" title="All 2 branches missed.">                    for (int index = 0; index &lt; 55; index++) {</span>
+<span class="nc" id="L1193">                        request.listener()</span>
+<span class="nc" id="L1194">                                .onEvent(new AgentEvent(</span>
+                                        &quot;event-&quot; + index,
+                                        COMMENT_TIME,
+<span class="nc" id="L1197">                                        request.workerIdentity(),</span>
+<span class="nc" id="L1198">                                        123L,</span>
+                                        &quot;thread-1&quot;,
+                                        &quot;turn-1&quot;,
+                                        &quot;message-&quot; + index,
+<span class="nc" id="L1202">                                        Map.of(),</span>
+<span class="nc" id="L1203">                                        new ObjectMapper().createObjectNode()));</span>
+                    }
+<span class="nc" id="L1205">                    return AgentRunResult.fail(&quot;boom&quot;);</span>
+                })
+<span class="nc" id="L1207">                .when(runner)</span>
+<span class="nc" id="L1208">                .run(any());</span>
+<span class="nc" id="L1209">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1212">        orchestrator.start();</span>
+<span class="nc bnc" id="L1213" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1214">        var details = orchestrator.cardDetails(&quot;TRELLO-abc&quot;);</span>
+<span class="nc" id="L1215">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1218">        List&lt;String&gt; expectedEvents =</span>
+<span class="nc" id="L1219">                IntStream.range(5, 55).mapToObj(index -&gt; &quot;event-&quot; + index).toList();</span>
+<span class="nc" id="L1220">        assertThat(details).hasValueSatisfying(detail -&gt; assertThat(detail.recentEvents())</span>
+<span class="nc" id="L1221">                .hasSize(50)</span>
+<span class="nc" id="L1222">                .extracting(CardDebugDetails.EventInfo::event)</span>
+<span class="nc" id="L1223">                .containsExactlyElementsOf(expectedEvents));</span>
+<span class="nc" id="L1224">    }</span>
+
+    @Test
+    void runningSnapshotRowIncludesCardUrl() throws Exception {
+        // given
+<span class="nc" id="L1229">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1230">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L1231">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1232">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1233">        var started = new CountDownLatch(1);</span>
+<span class="nc" id="L1234">        var releaseWorker = new CountDownLatch(1);</span>
+<span class="nc" id="L1235">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1236">                    started.countDown();</span>
+<span class="nc" id="L1237">                    releaseWorker.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1238">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L1240">                .when(runner)</span>
+<span class="nc" id="L1241">                .run(any());</span>
+<span class="nc" id="L1242">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1245">        orchestrator.start();</span>
+<span class="nc" id="L1246">        assertThat(started.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1247">                .as(&quot;the card worker should start within 5 seconds before its snapshot row is inspected&quot;)</span>
+<span class="nc" id="L1248">                .isTrue();</span>
+<span class="nc" id="L1249">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1250">        releaseWorker.countDown();</span>
+<span class="nc" id="L1251">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1254">        assertThat(snapshot.running()).singleElement().satisfies(row -&gt; assertThat(row.cardUrl())</span>
+<span class="nc" id="L1255">                .isEqualTo(&quot;https://trello.com/c/SYNTH101&quot;));</span>
+<span class="nc" id="L1256">    }</span>
+
+    @CsvSource(
+            nullValues = &quot;null&quot;,
+            value = {
+                // prefers the short URL when present
+                &quot;https://trello.com/c/SYNTH001,https://trello.com/c/SYNTH001/full-title,https://trello.com/c/SYNTH001&quot;,
+                // falls back to the full URL when no short URL is known
+                &quot;null,https://trello.com/c/SYNTH002/full-title,https://trello.com/c/SYNTH002/full-title&quot;,
+                // omits the URL when neither is known
+                &quot;null,null,null&quot;
+            })
+    @ParameterizedTest(name = &quot;shortUrl={0} url={1} -&gt; cardUrl={2}&quot;)
+    void retrySnapshotRowCarriesCardUrlPreferringShortUrl(String shortUrl, String url, String expectedCardUrl)
+            throws Exception {
+        // given
+<span class="nc" id="L1272">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1273">        writeWorkflow(workflow, &quot;60000&quot;, &quot;&quot;);</span>
+<span class="nc" id="L1274">        Card card = TestCards.cardWithUrls(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;, shortUrl, url);</span>
+<span class="nc" id="L1275">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L1276">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1277">        when(runner.run(any())).thenReturn(AgentRunResult.fail(&quot;boom&quot;));</span>
+<span class="nc" id="L1278">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1281">        orchestrator.start();</span>
+<span class="nc bnc" id="L1282" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1283">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1284">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1287">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardUrl())</span>
+<span class="nc" id="L1288">                .isEqualTo(expectedCardUrl));</span>
+<span class="nc" id="L1289">    }</span>
+
+    @Test
+    void retryTimerDispatchesAgainWhenCardRemainsEligible() throws Exception {
+        // given
+<span class="nc" id="L1294">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1295">        writeWorkflow(</span>
+                workflow,
+                &quot;60000&quot;,
+                &quot;&quot;&quot;
+                agent:
+                  max_retry_backoff_ms: 500
+                &quot;&quot;&quot;);
+<span class="nc" id="L1302">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L1303">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L1304">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L1305">        var retryingSnapshot = new AtomicReference&lt;RuntimeSnapshot&gt;();</span>
+<span class="nc" id="L1306">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1307">        doAnswer(invocation -&gt;</span>
+<span class="nc bnc" id="L1308" title="All 2 branches missed.">                        runs.incrementAndGet() == 1 ? AgentRunResult.fail(&quot;temporary failure&quot;) : AgentRunResult.ok())</span>
+<span class="nc" id="L1309">                .when(runner)</span>
+<span class="nc" id="L1310">                .run(any());</span>
+<span class="nc" id="L1311">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+        try {
+<span class="nc" id="L1315">            orchestrator.start();</span>
+<span class="nc" id="L1316">            waitUntil(() -&gt; {</span>
+<span class="nc" id="L1317">                RuntimeSnapshot current = orchestrator.snapshot();</span>
+<span class="nc bnc" id="L1318" title="All 2 branches missed.">                if (containsRetryingCard(current, &quot;TRELLO-abc&quot;)) {</span>
+<span class="nc" id="L1319">                    retryingSnapshot.set(current);</span>
+<span class="nc" id="L1320">                    return true;</span>
+                }
+<span class="nc" id="L1322">                return false;</span>
+            });
+<span class="nc bnc" id="L1324" title="All 2 branches missed.">            waitUntil(() -&gt; runs.get() &gt;= 2);</span>
+        } finally {
+<span class="nc" id="L1326">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L1328">        RuntimeSnapshot snapshot = retryingSnapshot.get();</span>
+
+        // then
+<span class="nc" id="L1331">        assertThat(runs.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L1332">        assertThat(tracker.promptStateFetches.get()).isGreaterThanOrEqualTo(2);</span>
+<span class="nc" id="L1333">        assertThat(snapshot.retrying())</span>
+<span class="nc" id="L1334">                .anySatisfy(row -&gt; assertThat(row.cardIdentifier()).isEqualTo(&quot;TRELLO-abc&quot;));</span>
+<span class="nc" id="L1335">    }</span>
+
+    @Test
+    void retryTimerReleasesAndRequeuesCardWhenItLosesRequiredLabel() throws Exception {
+        // given
+<span class="nc" id="L1340">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1341">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo, In Progress]
+                  in_progress_state: In Progress
+                  required_labels: [Ready for Codex]
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.title }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1362">        Card card = TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;, List.of(&quot;ready for codex&quot;));</span>
+<span class="nc" id="L1363">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L1364">        tracker.preparedCard =</span>
+<span class="nc" id="L1365">                TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;, List.of(&quot;ready for codex&quot;));</span>
+<span class="nc" id="L1366">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L1367">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1368">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1369">            runs.incrementAndGet();</span>
+<span class="nc" id="L1370">            tracker.preparedCard = null;</span>
+<span class="nc" id="L1371">            tracker.setCardState(TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;, List.of()));</span>
+<span class="nc" id="L1372">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L1374">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1377">        orchestrator.start();</span>
+<span class="nc bnc" id="L1378" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.releasedCards.size() == 1</span>
+<span class="nc bnc" id="L1379" title="All 2 branches missed.">                &amp;&amp; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1380">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1381">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1384">        assertThat(runs.get()).isOne();</span>
+<span class="nc" id="L1385">        assertCardReleasedForRetry(snapshot, tracker);</span>
+<span class="nc" id="L1386">    }</span>
+
+    @Test
+    void runningCardIsCancelledWhenItLeavesTheActiveState() throws Exception {
+        // given
+<span class="nc" id="L1391">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1392">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L1393">        Card active = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L1394">        var tracker = new FakeTracker(List.of(active));</span>
+<span class="nc" id="L1395">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1396">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L1397">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1400">        orchestrator.start();</span>
+<span class="nc" id="L1401">        assertThat(blockingRun.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1402">                .as(&quot;the card worker should start within 5 seconds before the card leaves the active state&quot;)</span>
+<span class="nc" id="L1403">                .isTrue();</span>
+<span class="nc" id="L1404">        tracker.setCandidates(List.of());</span>
+<span class="nc" id="L1405">        tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Review&quot;));</span>
+<span class="nc" id="L1406">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L1407" title="All 2 branches missed.">        waitUntil(() -&gt; blockingRun.cancelled().get() == 1);</span>
+<span class="nc" id="L1408">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1409">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1412">        assertThat(snapshot.counts().running()).isZero();</span>
+<span class="nc" id="L1413">        assertThat(snapshot.counts().retrying()).isZero();</span>
+<span class="nc" id="L1414">    }</span>
+
+    @Test
+    void runningCardIsCancelledReleasedAndRetriedWhenItLosesRequiredLabel() throws Exception {
+        // given
+<span class="nc" id="L1419">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1420">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo, In Progress]
+                  in_progress_state: In Progress
+                  required_labels: [Ready for Codex]
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                agent:
+                  max_retry_backoff_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.title }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1443">        Card listedCard = TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;, List.of(&quot;ready for codex&quot;));</span>
+<span class="nc" id="L1444">        var tracker = new FakeTracker(List.of(listedCard));</span>
+<span class="nc" id="L1445">        tracker.preparedCard =</span>
+<span class="nc" id="L1446">                TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;, List.of(&quot;ready for codex&quot;));</span>
+<span class="nc" id="L1447">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1448">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L1449">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1452">        orchestrator.start();</span>
+<span class="nc" id="L1453">        assertThat(blockingRun.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1454">                .as(&quot;the card worker should start within 5 seconds before its required label is removed&quot;)</span>
+<span class="nc" id="L1455">                .isTrue();</span>
+<span class="nc" id="L1456">        tracker.setCandidates(List.of());</span>
+<span class="nc" id="L1457">        tracker.setCardState(TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;In Progress&quot;, List.of()));</span>
+<span class="nc" id="L1458">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L1459" title="All 2 branches missed.">        waitUntil(() -&gt; blockingRun.cancelled().get() == 1</span>
+<span class="nc bnc" id="L1460" title="All 2 branches missed.">                &amp;&amp; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1461">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1462">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1465">        assertThat(snapshot.counts().running()).isZero();</span>
+<span class="nc" id="L1466">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
+<span class="nc" id="L1467">                .isEqualTo(&quot;TRELLO-abc&quot;));</span>
+<span class="nc" id="L1468">        assertThat(tracker.releasedCards).containsExactly(&quot;TRELLO-abc&quot;);</span>
+<span class="nc" id="L1469">        assertThat(tracker.cardState(&quot;card-1&quot;).state()).isEqualTo(&quot;Todo&quot;);</span>
+<span class="nc" id="L1470">    }</span>
+
+    @Test
+    void dispatchesEligiblePrerequisiteBeforeUnrelatedLowerPriorityWork() throws Exception {
+        // given
+<span class="nc" id="L1475">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1476">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo]
+                  blocker_enforced_states: [Todo]
+                  terminal_states: [Done]
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.identifier }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1497">        Card blocked = cardWithPriorityAndBlockers(</span>
+                &quot;card-blocked&quot;,
+                &quot;TRELLO-blocked&quot;,
+<span class="nc" id="L1500">                1,</span>
+<span class="nc" id="L1501">                List.of(new BlockerRef(&quot;card-prerequisite&quot;, &quot;TRELLO-prerequisite&quot;, &quot;Todo&quot;, null)));</span>
+<span class="nc" id="L1502">        Card unrelated = cardWithPriorityAndBlockers(&quot;card-unrelated&quot;, &quot;TRELLO-unrelated&quot;, 2, List.of());</span>
+<span class="nc" id="L1503">        Card prerequisite = cardWithPriorityAndBlockers(&quot;card-prerequisite&quot;, &quot;TRELLO-prerequisite&quot;, null, List.of());</span>
+<span class="nc" id="L1504">        var tracker = new FakeTracker(List.of(blocked, unrelated, prerequisite));</span>
+
+        // when
+<span class="nc" id="L1507">        String dispatched = dispatchFirstCard(workflow, tracker);</span>
+
+        // then
+<span class="nc" id="L1510">        assertThat(dispatched).isEqualTo(&quot;TRELLO-prerequisite&quot;);</span>
+<span class="nc" id="L1511">    }</span>
+
+    @Test
+    void prerequisiteProblemsDenyDispatchEvenWhenPrerequisiteBlockerIsTerminal() throws Exception {
+        // given
+<span class="nc" id="L1516">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1517">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo]
+                  blocker_enforced_states: [Todo]
+                  terminal_states: [Done]
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.identifier }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1538">        Card blocked = cardWithPriorityBlockersAndProblems(</span>
+                &quot;card-blocked&quot;,
+                &quot;TRELLO-blocked&quot;,
+<span class="nc" id="L1541">                1,</span>
+<span class="nc" id="L1542">                List.of(new BlockerRef(</span>
+                        &quot;card-prerequisite&quot;, &quot;TRELLO-prerequisite&quot;, &quot;Done&quot;, &quot;https://trello.com/c/SYNTH103&quot;)),
+<span class="nc" id="L1544">                List.of(new Card.PrerequisiteProblem(</span>
+                        &quot;trello_prerequisite_checklist_sync_failed&quot;,
+                        &quot;Could not update a prerequisite checklist item.&quot;,
+                        &quot;Must finish first&quot;)));
+<span class="nc" id="L1548">        Card unrelated = cardWithPriorityAndBlockers(&quot;card-unrelated&quot;, &quot;TRELLO-unrelated&quot;, 2, List.of());</span>
+<span class="nc" id="L1549">        var tracker = new FakeTracker(List.of(blocked, unrelated));</span>
+
+        // when
+<span class="nc" id="L1552">        String dispatched = dispatchFirstCard(workflow, tracker);</span>
+
+        // then
+<span class="nc" id="L1555">        assertThat(dispatched).isEqualTo(&quot;TRELLO-unrelated&quot;);</span>
+<span class="nc" id="L1556">    }</span>
+
+    @Test
+    void runningCardContinuesWhenItOnlyGainsANonTerminalBlocker() throws Exception {
+        // given
+<span class="nc" id="L1561">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1562">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo]
+                  blocker_enforced_states: [Todo]
+                  terminal_states: [Done]
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                {{ card.title }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1583">        Card active = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L1584">        var tracker = new FakeTracker(List.of(active));</span>
+<span class="nc" id="L1585">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1586">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L1587">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1590">        orchestrator.start();</span>
+<span class="nc" id="L1591">        assertThat(blockingRun.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1592">                .as(&quot;the card worker should start within 5 seconds before a non-terminal blocker is added&quot;)</span>
+<span class="nc" id="L1593">                .isTrue();</span>
+<span class="nc" id="L1594">        int stateFetchesAfterDispatch = tracker.stateFetches.get();</span>
+<span class="nc" id="L1595">        tracker.setCardState(TestCards.cardWithBlockers(</span>
+                &quot;card-1&quot;,
+                &quot;TRELLO-abc&quot;,
+                &quot;Todo&quot;,
+<span class="nc" id="L1599">                List.of(new BlockerRef(&quot;card-2&quot;, &quot;TRELLO-blocker&quot;, &quot;Todo&quot;, &quot;https://trello.com/c/SYNTH102&quot;))));</span>
+<span class="nc" id="L1600">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L1601" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.stateFetches.get() &gt; stateFetchesAfterDispatch);</span>
+<span class="nc" id="L1602">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1603">        assertThat(blockingRun.cancelled()).hasValue(0);</span>
+<span class="nc" id="L1604">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1607">        assertThat(snapshot.counts().running()).isOne();</span>
+<span class="nc" id="L1608">        assertThat(snapshot.counts().retrying()).isZero();</span>
+<span class="nc" id="L1609">    }</span>
+
+    @Test
+    void invalidWorkflowReloadLeavesPreviousConfigActive() throws Exception {
+        // given
+<span class="nc" id="L1614">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1615">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L1616">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1617">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L1618">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1619">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1620">            runs.incrementAndGet();</span>
+<span class="nc" id="L1621">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L1623">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1626">        orchestrator.start();</span>
+<span class="nc bnc" id="L1627" title="All 4 branches missed.">        waitUntil(() -&gt; runs.get() == 1 &amp;&amp; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1628">        int fetchesBeforeUnsafeReload = tracker.candidateFetches.get();</span>
+<span class="nc" id="L1629">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker: []
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                codex:
+                  command: fake
+                ---
+                ## Operating Posture
+
+                This is an unattended orchestration run.
+
+                ## Local And Non-GitHub Repository Work
+
+                Record the validation evidence.
+
+                ## Trello List Routing
+
+                Card URL: {{ card.url }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1653">        Files.setLastModifiedTime(</span>
+                workflow,
+<span class="nc" id="L1655">                FileTime.fromMillis(Files.getLastModifiedTime(workflow).toMillis() + 2_000));</span>
+<span class="nc" id="L1656">        tracker.setCandidates(List.of(TestCards.card(&quot;card-2&quot;, &quot;TRELLO-second&quot;, &quot;Other&quot;)));</span>
+<span class="nc" id="L1657">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L1658" title="All 2 branches missed.">        waitUntil(() -&gt; tracker.candidateFetches.get() &gt; fetchesBeforeUnsafeReload);</span>
+<span class="nc" id="L1659">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1660">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1663">        assertThat(runs).hasValue(1);</span>
+<span class="nc" id="L1664">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
+<span class="nc" id="L1665">                .isEqualTo(&quot;TRELLO-first&quot;));</span>
+<span class="nc" id="L1666">    }</span>
+
+    @Test
+    void sameRawCardIdAcrossTargetsRunsIndependentlyWithoutCrossRemoval() throws Exception {
+        // given
+<span class="nc" id="L1671">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1672">        String endpoint = &quot;https://api.example.test/1&quot;;</span>
+<span class="nc" id="L1673">        writeWorkflowWithTarget(workflow, endpoint, &quot;board-a&quot;, &quot;token-a&quot;, &quot;same-command&quot;, &quot;work-a&quot;, 60_000, 2);</span>
+<span class="nc" id="L1674">        Card cardA = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-shared-a&quot;, &quot;Todo&quot;, &quot;board-a&quot;);</span>
+<span class="nc" id="L1675">        Card cardB = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-shared-b&quot;, &quot;Todo&quot;, &quot;board-b&quot;);</span>
+<span class="nc" id="L1676">        var tracker = new ScopedTracker();</span>
+<span class="nc" id="L1677">        tracker.setCandidates(endpoint, &quot;board-a&quot;, List.of(cardA));</span>
+<span class="nc" id="L1678">        tracker.setCandidates(endpoint, &quot;board-b&quot;, List.of(cardB));</span>
+<span class="nc" id="L1679">        var workerAStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1680">        var workerBStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1681">        var releaseWorkerA = new CountDownLatch(1);</span>
+<span class="nc" id="L1682">        var releaseWorkerB = new CountDownLatch(1);</span>
+<span class="nc" id="L1683">        List&lt;AgentRunner.AgentRunRequest&gt; requests = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L1684">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1685">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1686">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L1687">            requests.add(request);</span>
+<span class="nc" id="L1688">            String boardId = request.config().tracker().resolvedBoardId();</span>
+<span class="nc" id="L1689">            request.listener()</span>
+<span class="nc" id="L1690">                    .onEvent(agentEvent(</span>
+                            request,
+<span class="nc bnc" id="L1692" title="All 2 branches missed.">                            boardId.equals(&quot;board-a&quot;) ? &quot;a/running&quot; : &quot;b/running&quot;,</span>
+<span class="nc bnc" id="L1693" title="All 2 branches missed.">                            boardId.equals(&quot;board-a&quot;) ? &quot;from A&quot; : &quot;from B&quot;));</span>
+<span class="nc bnc" id="L1694" title="All 2 branches missed.">            if (boardId.equals(&quot;board-a&quot;)) {</span>
+<span class="nc" id="L1695">                workerAStarted.countDown();</span>
+<span class="nc" id="L1696">                assertThat(releaseWorkerA.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1697">                        .as(&quot;the test should release target A's worker within 5 seconds&quot;)</span>
+<span class="nc" id="L1698">                        .isTrue();</span>
+<span class="nc" id="L1699">                return AgentRunResult.fail(&quot;old target failed after reload&quot;);</span>
+            }
+<span class="nc" id="L1701">            return finishBoardBRun(tracker, endpoint, workerBStarted, releaseWorkerB, request);</span>
+        });
+<span class="nc" id="L1703">        SymphonyOrchestrator orchestrator = orchestrator(</span>
+<span class="nc" id="L1704">                workflow, tracker, runner, Clock.fixed(COMMENT_TIME, ZoneOffset.UTC), successfulWorkpadHandler());</span>
+
+        // when
+<span class="nc" id="L1707">        orchestrator.start();</span>
+<span class="nc" id="L1708">        assertThat(workerAStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1709">                .as(&quot;target A's same-ID worker should start within 5 seconds&quot;)</span>
+<span class="nc" id="L1710">                .isTrue();</span>
+<span class="nc" id="L1711">        orchestrator.stopWorkflowWatcherForTests();</span>
+<span class="nc" id="L1712">        rewriteWorkflowWithTarget(workflow, endpoint, &quot;board-b&quot;, &quot;token-b&quot;, &quot;same-command&quot;, &quot;work-b&quot;, 60_000, 2);</span>
+<span class="nc" id="L1713">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L1714">        assertThat(workerBStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1715">                .as(&quot;target B's same-ID worker should start within 5 seconds after reload&quot;)</span>
+<span class="nc" id="L1716">                .isTrue();</span>
+<span class="nc" id="L1717">        AgentRunner.AgentRunRequest requestA = requests.stream()</span>
+<span class="nc" id="L1718">                .filter(request -&gt; request.config().tracker().resolvedBoardId().equals(&quot;board-a&quot;))</span>
+<span class="nc" id="L1719">                .findFirst()</span>
+<span class="nc" id="L1720">                .orElseThrow();</span>
+<span class="nc" id="L1721">        requestA.listener().onEvent(agentEvent(requestA, &quot;a/late-after-reload&quot;, &quot;late from A&quot;));</span>
+<span class="nc" id="L1722">        RuntimeSnapshot whileBothRun = orchestrator.snapshot();</span>
+<span class="nc" id="L1723">        CardDebugDetails detailsB = orchestrator.cardDetails(&quot;TRELLO-shared-b&quot;).orElseThrow();</span>
+<span class="nc" id="L1724">        releaseWorkerA.countDown();</span>
+<span class="nc" id="L1725">        waitUntil(() -&gt;</span>
+<span class="nc bnc" id="L1726" title="All 4 branches missed.">                tracker.releases.size() == 1 &amp;&amp; orchestrator.snapshot().counts().running() == 1);</span>
+<span class="nc" id="L1727">        RuntimeSnapshot afterOldTargetExit = orchestrator.snapshot();</span>
+<span class="nc" id="L1728">        releaseWorkerB.countDown();</span>
+<span class="nc bnc" id="L1729" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L1730">        RuntimeSnapshot afterBothExit = orchestrator.snapshot();</span>
+<span class="nc" id="L1731">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1734">        assertThat(whileBothRun.running())</span>
+<span class="nc" id="L1735">                .extracting(RuntimeSnapshot.RunningRow::cardId)</span>
+<span class="nc" id="L1736">                .containsExactly(&quot;shared-card&quot;, &quot;shared-card&quot;);</span>
+<span class="nc" id="L1737">        assertThat(detailsB.workspace().path()).isEqualTo(tempDir.resolve(&quot;work-b/TRELLO-shared-b&quot;));</span>
+<span class="nc" id="L1738">        assertThat(detailsB.recentEvents())</span>
+<span class="nc" id="L1739">                .extracting(CardDebugDetails.EventInfo::event)</span>
+<span class="nc" id="L1740">                .containsExactly(&quot;b/running&quot;);</span>
+<span class="nc" id="L1741">        assertThat(afterOldTargetExit.running())</span>
+<span class="nc" id="L1742">                .singleElement()</span>
+<span class="nc" id="L1743">                .extracting(RuntimeSnapshot.RunningRow::cardIdentifier)</span>
+<span class="nc" id="L1744">                .isEqualTo(&quot;TRELLO-shared-b&quot;);</span>
+<span class="nc" id="L1745">        assertThat(afterOldTargetExit.retrying()).isEmpty();</span>
+<span class="nc" id="L1746">        assertThat(afterBothExit.retrying()).isEmpty();</span>
+<span class="nc" id="L1747">        assertThat(requests).hasSize(2);</span>
+<span class="nc" id="L1748">        verify(runner, never()).cancel(anyString());</span>
+<span class="nc" id="L1749">    }</span>
+
+    @Test
+    void staleOldTargetRetryCallbackCannotConsumeSameIdCurrentTargetRunningState() throws Exception {
+        // given
+<span class="nc" id="L1754">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1755">        String endpoint = &quot;https://api.example.test/1&quot;;</span>
+<span class="nc" id="L1756">        writeWorkflowWithTarget(workflow, endpoint, &quot;board-a&quot;, &quot;token-a&quot;, &quot;same-command&quot;, &quot;work-a&quot;);</span>
+<span class="nc" id="L1757">        Card cardA = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-stale-retry-a&quot;, &quot;Todo&quot;, &quot;board-a&quot;);</span>
+<span class="nc" id="L1758">        Card cardB = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-stale-retry-b&quot;, &quot;Todo&quot;, &quot;board-b&quot;);</span>
+<span class="nc" id="L1759">        var tracker = new ScopedTracker();</span>
+<span class="nc" id="L1760">        tracker.setCandidates(endpoint, &quot;board-a&quot;, List.of(cardA));</span>
+<span class="nc" id="L1761">        tracker.setCandidates(endpoint, &quot;board-b&quot;, List.of(cardB));</span>
+<span class="nc" id="L1762">        var workerBStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1763">        var releaseWorkerB = new CountDownLatch(1);</span>
+<span class="nc" id="L1764">        List&lt;AgentRunner.AgentRunRequest&gt; requests = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L1765">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1766">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1767">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L1768">            requests.add(request);</span>
+<span class="nc bnc" id="L1769" title="All 2 branches missed.">            if (request.config().tracker().resolvedBoardId().equals(&quot;board-a&quot;)) {</span>
+<span class="nc" id="L1770">                return AgentRunResult.fail(&quot;queue old-target retry&quot;);</span>
+            }
+<span class="nc" id="L1772">            return finishBoardBRun(tracker, endpoint, workerBStarted, releaseWorkerB, request);</span>
+        });
+<span class="nc" id="L1774">        SymphonyOrchestrator orchestrator = orchestrator(</span>
+<span class="nc" id="L1775">                workflow, tracker, runner, Clock.fixed(COMMENT_TIME, ZoneOffset.UTC), successfulWorkpadHandler());</span>
+<span class="nc" id="L1776">        var staleCallbackEntered = new CountDownLatch(1);</span>
+<span class="nc" id="L1777">        var releaseStaleCallback = new CountDownLatch(1);</span>
+<span class="nc" id="L1778">        orchestrator.retryTimerWaitingHookForTests = () -&gt; {</span>
+<span class="nc" id="L1779">            staleCallbackEntered.countDown();</span>
+            try {
+<span class="nc" id="L1781">                assertThat(releaseStaleCallback.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1782">                        .as(&quot;the test should release the stale target callback within 5 seconds&quot;)</span>
+<span class="nc" id="L1783">                        .isTrue();</span>
+<span class="nc" id="L1784">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L1785">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1786">                throw new AssertionError(e);</span>
+<span class="nc" id="L1787">            }</span>
+<span class="nc" id="L1788">        };</span>
+
+        // when
+<span class="nc" id="L1791">        orchestrator.start();</span>
+<span class="nc bnc" id="L1792" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L1793">        CompletableFuture&lt;Void&gt; staleCallback =</span>
+<span class="nc" id="L1794">                CompletableFuture.runAsync(() -&gt; orchestrator.retryNowForTests(&quot;shared-card&quot;));</span>
+<span class="nc" id="L1795">        assertThat(staleCallbackEntered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1796">                .as(&quot;the stale target retry callback should enter within 5 seconds&quot;)</span>
+<span class="nc" id="L1797">                .isTrue();</span>
+<span class="nc" id="L1798">        rewriteWorkflowWithTarget(workflow, endpoint, &quot;board-b&quot;, &quot;token-b&quot;, &quot;same-command&quot;, &quot;work-b&quot;);</span>
+<span class="nc" id="L1799">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L1800">        assertThat(workerBStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1801">                .as(&quot;the current target worker should start within 5 seconds while the stale callback is blocked&quot;)</span>
+<span class="nc" id="L1802">                .isTrue();</span>
+<span class="nc" id="L1803">        RuntimeSnapshot beforeStaleCallback = orchestrator.snapshot();</span>
+<span class="nc" id="L1804">        releaseStaleCallback.countDown();</span>
+<span class="nc" id="L1805">        staleCallback.get(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1806">        RuntimeSnapshot afterStaleCallback = orchestrator.snapshot();</span>
+<span class="nc" id="L1807">        releaseWorkerB.countDown();</span>
+<span class="nc bnc" id="L1808" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L1809">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1812">        assertThat(beforeStaleCallback.running())</span>
+<span class="nc" id="L1813">                .singleElement()</span>
+<span class="nc" id="L1814">                .extracting(RuntimeSnapshot.RunningRow::cardIdentifier)</span>
+<span class="nc" id="L1815">                .isEqualTo(&quot;TRELLO-stale-retry-b&quot;);</span>
+<span class="nc" id="L1816">        assertThat(beforeStaleCallback.retrying()).isEmpty();</span>
+<span class="nc" id="L1817">        assertThat(afterStaleCallback.running()).containsExactlyElementsOf(beforeStaleCallback.running());</span>
+<span class="nc" id="L1818">        assertThat(afterStaleCallback.retrying()).isEmpty();</span>
+<span class="nc" id="L1819">        assertThat(requests).hasSize(2);</span>
+<span class="nc" id="L1820">        assertThat(requests.get(1).attempt()).isNull();</span>
+<span class="nc" id="L1821">    }</span>
+
+    @Test
+    void sameRawCardIdAcrossTargetsKeepsRecentEventsIsolated() throws Exception {
+        // given
+<span class="nc" id="L1826">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1827">        String endpoint = &quot;https://api.example.test/1&quot;;</span>
+<span class="nc" id="L1828">        writeWorkflowWithTarget(workflow, endpoint, &quot;board-a&quot;, &quot;token-a&quot;, &quot;same-command&quot;, &quot;work-a&quot;);</span>
+<span class="nc" id="L1829">        Card cardA = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-history-a&quot;, &quot;Todo&quot;, &quot;board-a&quot;);</span>
+<span class="nc" id="L1830">        Card cardB = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-history-b&quot;, &quot;Todo&quot;, &quot;board-b&quot;);</span>
+<span class="nc" id="L1831">        var tracker = new ScopedTracker();</span>
+<span class="nc" id="L1832">        tracker.setCandidates(endpoint, &quot;board-a&quot;, List.of(cardA));</span>
+<span class="nc" id="L1833">        tracker.setCandidates(endpoint, &quot;board-b&quot;, List.of(cardB));</span>
+<span class="nc" id="L1834">        var workerBStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1835">        var workerACompleted = new CountDownLatch(1);</span>
+<span class="nc" id="L1836">        var releaseWorkerB = new CountDownLatch(1);</span>
+<span class="nc" id="L1837">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1838">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1839">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L1840">            String boardId = request.config().tracker().resolvedBoardId();</span>
+<span class="nc" id="L1841">            request.listener()</span>
+<span class="nc" id="L1842">                    .onEvent(agentEvent(</span>
+                            request,
+<span class="nc bnc" id="L1844" title="All 2 branches missed.">                            boardId.equals(&quot;board-a&quot;) ? &quot;a/history&quot; : &quot;b/history&quot;,</span>
+<span class="nc bnc" id="L1845" title="All 2 branches missed.">                            boardId.equals(&quot;board-a&quot;) ? &quot;from A&quot; : &quot;from B&quot;));</span>
+<span class="nc bnc" id="L1846" title="All 2 branches missed.">            if (boardId.equals(&quot;board-a&quot;)) {</span>
+<span class="nc" id="L1847">                tracker.setCardState(</span>
+                        endpoint,
+                        &quot;board-a&quot;,
+<span class="nc" id="L1850">                        cardOnBoard(request.card().id(), request.card().identifier(), &quot;Human Review&quot;, &quot;board-a&quot;));</span>
+<span class="nc" id="L1851">                workerACompleted.countDown();</span>
+<span class="nc" id="L1852">                return AgentRunResult.ok();</span>
+            }
+<span class="nc" id="L1854">            return finishBoardBRun(tracker, endpoint, workerBStarted, releaseWorkerB, request);</span>
+        });
+<span class="nc" id="L1856">        SymphonyOrchestrator orchestrator = orchestrator(</span>
+<span class="nc" id="L1857">                workflow, tracker, runner, Clock.fixed(COMMENT_TIME, ZoneOffset.UTC), successfulWorkpadHandler());</span>
+
+        // when
+<span class="nc" id="L1860">        orchestrator.start();</span>
+<span class="nc" id="L1861">        assertThat(workerACompleted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1862">                .as(&quot;target A's same-ID worker should complete within 5 seconds&quot;)</span>
+<span class="nc" id="L1863">                .isTrue();</span>
+<span class="nc bnc" id="L1864" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L1865">        rewriteWorkflowWithTarget(workflow, endpoint, &quot;board-b&quot;, &quot;token-b&quot;, &quot;same-command&quot;, &quot;work-b&quot;);</span>
+<span class="nc" id="L1866">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L1867">        assertThat(workerBStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1868">                .as(&quot;target B's same-ID worker should start within 5 seconds after reload&quot;)</span>
+<span class="nc" id="L1869">                .isTrue();</span>
+<span class="nc" id="L1870">        CardDebugDetails details = orchestrator.cardDetails(&quot;TRELLO-history-b&quot;).orElseThrow();</span>
+<span class="nc" id="L1871">        releaseWorkerB.countDown();</span>
+<span class="nc bnc" id="L1872" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L1873">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1876">        assertThat(details.recentEvents())</span>
+<span class="nc" id="L1877">                .extracting(CardDebugDetails.EventInfo::event)</span>
+<span class="nc" id="L1878">                .containsExactly(&quot;b/history&quot;);</span>
+<span class="nc" id="L1879">    }</span>
+
+    @Test
+    void missingLaunchTargetCardAfterReloadCleansOnlyLaunchWorkspaceRoot() throws Exception {
+        // given
+<span class="nc" id="L1884">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1885">        String endpoint = &quot;https://api.example.test/1&quot;;</span>
+<span class="nc" id="L1886">        writeWorkflowWithTarget(workflow, endpoint, &quot;board-a&quot;, &quot;token-a&quot;, &quot;command&quot;, &quot;work-a&quot;);</span>
+<span class="nc" id="L1887">        Card cardA = cardOnBoard(&quot;shared-card&quot;, &quot;TRELLO-workspace&quot;, &quot;Todo&quot;, &quot;board-a&quot;);</span>
+<span class="nc" id="L1888">        var tracker = new ScopedTracker();</span>
+<span class="nc" id="L1889">        tracker.setCandidates(endpoint, &quot;board-a&quot;, List.of(cardA));</span>
+<span class="nc" id="L1890">        tracker.setCandidates(endpoint, &quot;board-b&quot;, List.of());</span>
+<span class="nc" id="L1891">        var workerStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1892">        var releaseWorker = new CountDownLatch(1);</span>
+<span class="nc" id="L1893">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1894">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1895">            workerStarted.countDown();</span>
+            try {
+<span class="nc" id="L1897">                releaseWorker.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1898">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L1899">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1900">            }</span>
+<span class="nc" id="L1901">            return AgentRunResult.fail(&quot;cancelled after card disappeared&quot;);</span>
+        });
+<span class="nc" id="L1903">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+
+        // when
+<span class="nc" id="L1906">        orchestrator.start();</span>
+<span class="nc" id="L1907">        assertThat(workerStarted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1908">                .as(&quot;the launch-target worker should start within 5 seconds before workflow reload&quot;)</span>
+<span class="nc" id="L1909">                .isTrue();</span>
+<span class="nc" id="L1910">        Path launchWorkspace = tempDir.resolve(&quot;work-a/TRELLO-workspace&quot;);</span>
+<span class="nc" id="L1911">        Path reloadedWorkspace = tempDir.resolve(&quot;work-b/TRELLO-workspace&quot;);</span>
+<span class="nc" id="L1912">        Files.createDirectories(launchWorkspace);</span>
+<span class="nc" id="L1913">        Files.createDirectories(reloadedWorkspace);</span>
+<span class="nc" id="L1914">        Files.writeString(launchWorkspace.resolve(&quot;launch.txt&quot;), &quot;launch&quot;);</span>
+<span class="nc" id="L1915">        Files.writeString(reloadedWorkspace.resolve(&quot;sentinel.txt&quot;), &quot;must survive&quot;);</span>
+<span class="nc" id="L1916">        tracker.removeCardState(endpoint, &quot;board-a&quot;, &quot;shared-card&quot;);</span>
+<span class="nc" id="L1917">        rewriteWorkflowWithTarget(workflow, endpoint, &quot;board-b&quot;, &quot;token-b&quot;, &quot;command&quot;, &quot;work-b&quot;);</span>
+<span class="nc" id="L1918">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L1919">        releaseWorker.countDown();</span>
+<span class="nc" id="L1920">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1923">        assertThat(launchWorkspace).doesNotExist();</span>
+<span class="nc" id="L1924">        assertThat(reloadedWorkspace.resolve(&quot;sentinel.txt&quot;)).exists();</span>
+<span class="nc" id="L1925">    }</span>
+
+    @Test
+    void reloadedDisabledStallTimeoutDoesNotSuppressLaunchTimeout() throws Exception {
+        // given
+<span class="nc" id="L1930">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1931">        writeWorkflowWithStallTimeout(workflow, 1_000);</span>
+<span class="nc" id="L1932">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1933">        var clock = new MutableClock(now);</span>
+<span class="nc" id="L1934">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-stall&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1935">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1936">        BlockingRun blocking = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L1937">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+
+        // when
+<span class="nc" id="L1940">        orchestrator.start();</span>
+<span class="nc" id="L1941">        assertThat(blocking.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1942">                .as(&quot;the launch with an enabled stall timeout should start within 5 seconds&quot;)</span>
+<span class="nc" id="L1943">                .isTrue();</span>
+<span class="nc" id="L1944">        rewriteWorkflowWithStallTimeout(workflow, 0);</span>
+<span class="nc" id="L1945">        clock.advance(Duration.ofSeconds(2));</span>
+<span class="nc" id="L1946">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L1947">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1948">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1951">        assertThat(snapshot.running()).isEmpty();</span>
+<span class="nc" id="L1952">        assertThat(blocking.cancelled()).hasValueGreaterThanOrEqualTo(1);</span>
+<span class="nc" id="L1953">    }</span>
+
+    @Test
+    void reloadedPositiveStallTimeoutDoesNotApplyToLaunchWithDisabledTimeout() throws Exception {
+        // given
+<span class="nc" id="L1958">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L1959">        writeWorkflowWithStallTimeout(workflow, 0);</span>
+<span class="nc" id="L1960">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1961">        var clock = new MutableClock(now);</span>
+<span class="nc" id="L1962">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-no-stall&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L1963">        AgentRunner runner = mock();</span>
+<span class="nc" id="L1964">        BlockingRun blocking = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L1965">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+
+        // when
+<span class="nc" id="L1968">        orchestrator.start();</span>
+<span class="nc" id="L1969">        assertThat(blocking.started().await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1970">                .as(&quot;the launch with a disabled stall timeout should start within 5 seconds&quot;)</span>
+<span class="nc" id="L1971">                .isTrue();</span>
+<span class="nc" id="L1972">        rewriteWorkflowWithStallTimeout(workflow, 1_000);</span>
+<span class="nc" id="L1973">        clock.advance(Duration.ofSeconds(2));</span>
+<span class="nc" id="L1974">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L1975">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L1976">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L1979">        assertThat(snapshot.running()).hasSize(1);</span>
+<span class="nc" id="L1980">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

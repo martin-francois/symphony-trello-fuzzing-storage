@@ -1,0 +1,554 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalSetupTestFixture.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalSetupTestFixture.java</span></div><h1>LocalSetupTestFixture.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import ch.fmartin.symphony.trello.testsupport.SetupRunResult;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.io.StringReader;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
+
+final class LocalSetupTestFixture implements AutoCloseable {
+    private static final int FIRST_FIXTURE_PORT = 20_000;
+    private static final int LAST_FIXTURE_PORT = 29_999;
+<span class="nc" id="L32">    private static final AtomicInteger NEXT_FIXTURE_PORT = new AtomicInteger(FIRST_FIXTURE_PORT);</span>
+
+    private final Path tempDir;
+    private final FakeTrelloServer trello;
+    private final FakeCommands commands;
+<span class="nc" id="L37">    private final LocalWorkerManager workerManager = mock();</span>
+    private final LocalSetup setup;
+
+<span class="nc" id="L40">    LocalSetupTestFixture(Path tempDir) throws IOException {</span>
+<span class="nc" id="L41">        this.tempDir = tempDir;</span>
+<span class="nc" id="L42">        commands = new FakeCommands(availablePort());</span>
+<span class="nc" id="L43">        trello = new FakeTrelloServer().start();</span>
+<span class="nc" id="L44">        when(workerManager.canStopManagedWorker(any(), any())).thenReturn(true);</span>
+<span class="nc" id="L45">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L46">                    ConnectedBoard board = invocation.getArgument(1);</span>
+<span class="nc" id="L47">                    Path env = invocation.getArgument(2);</span>
+<span class="nc" id="L48">                    commands.startedEnvFiles.add(env.toString());</span>
+<span class="nc" id="L49">                    commands.startedWorkflows.add(board.workflowPath().toString());</span>
+<span class="nc" id="L50">                    commands.commandEvents.add(&quot;start:&quot; + board.workflowPath());</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">                    if (!commands.skipHealthStart) {</span>
+<span class="nc" id="L52">                        commands.startHealthServer(board.workflowPath());</span>
+                    }
+<span class="nc" id="L54">                    return null;</span>
+                })
+<span class="nc" id="L56">                .when(workerManager)</span>
+<span class="nc" id="L57">                .start(any(), any(), any(), any());</span>
+<span class="nc" id="L58">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L59">                    ConnectedBoard board = invocation.getArgument(1);</span>
+<span class="nc" id="L60">                    commands.stoppedWorkflows.add(board.workflowPath().toString());</span>
+<span class="nc" id="L61">                    commands.commandEvents.add(&quot;stop:&quot; + board.workflowPath());</span>
+<span class="nc" id="L62">                    commands.stopHealthServer(board.workflowPath().toString());</span>
+<span class="nc" id="L63">                    return null;</span>
+                })
+<span class="nc" id="L65">                .when(workerManager)</span>
+<span class="nc" id="L66">                .stop(any(), any(), any());</span>
+<span class="nc" id="L67">        setup = new LocalSetup(</span>
+                new TrelloBoardSetup(new ObjectMapper()),
+                commands,
+<span class="nc" id="L70">                Map.of(</span>
+                        &quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;,
+<span class="nc" id="L72">                        configDir().toString(),</span>
+                        &quot;SYMPHONY_TRELLO_COMMAND&quot;,
+                        &quot;symphony-trello&quot;),
+                new WorkflowConfigEditor(),
+                workerManager);
+<span class="nc" id="L77">    }</span>
+
+    Path configDir() {
+<span class="nc" id="L80">        return tempDir.resolve(&quot;config&quot;);</span>
+    }
+
+    Path workspaceRoot() {
+<span class="nc" id="L84">        return tempDir.resolve(&quot;workspaces&quot;);</span>
+    }
+
+    Path stateDir() {
+<span class="nc" id="L88">        return tempDir.resolve(&quot;state&quot;);</span>
+    }
+
+    Path envPath() {
+<span class="nc" id="L92">        return configDir().resolve(&quot;.env&quot;);</span>
+    }
+
+    Path workflowPath() {
+<span class="nc" id="L96">        return configDir().resolve(&quot;WORKFLOW.md&quot;);</span>
+    }
+
+    Path manifestPath() {
+<span class="nc" id="L100">        return configDir().resolve(ConnectedBoardManifest.FILE_NAME);</span>
+    }
+
+    String endpoint() {
+<span class="nc" id="L104">        return trello.endpoint();</span>
+    }
+
+    LocalSetup setup() {
+<span class="nc" id="L108">        return setup;</span>
+    }
+
+    FakeCommands commands() {
+<span class="nc" id="L112">        return commands;</span>
+    }
+
+    LocalWorkerManager workerManager() {
+<span class="nc" id="L116">        return workerManager;</span>
+    }
+
+    FakeTrelloServer trello() {
+<span class="nc" id="L120">        return trello;</span>
+    }
+
+    SetupRunResult runSetup(String... args) {
+<span class="nc" id="L124">        return runSetupWithInput(&quot;&quot;, args);</span>
+    }
+
+    SetupRunResult runSetupWithInput(String input, String... args) {
+<span class="nc" id="L128">        return runSetupWithEffectiveArgs(setup, input, argsWithFixtureServerPort(args));</span>
+    }
+
+    SetupRunResult runSetupWithProductionDefaultPort(String... args) {
+<span class="nc" id="L132">        return runSetupWithEffectiveArgs(setup, &quot;&quot;, args);</span>
+    }
+
+    SetupRunResult runSetupWithProductionDefaultPort(LocalSetup localSetup, String... args) {
+<span class="nc" id="L136">        return runSetupWithEffectiveArgs(localSetup, &quot;&quot;, args);</span>
+    }
+
+    private SetupRunResult runSetupWithEffectiveArgs(LocalSetup localSetup, String input, String[] args) {
+<span class="nc" id="L140">        var stdout = new ByteArrayOutputStream();</span>
+<span class="nc" id="L141">        var stderr = new ByteArrayOutputStream();</span>
+<span class="nc" id="L142">        int exitCode = localSetup.run(</span>
+                args,
+                new BufferedReader(new StringReader(input)),
+                new PrintStream(stdout, true, StandardCharsets.UTF_8),
+                new PrintStream(stderr, true, StandardCharsets.UTF_8));
+<span class="nc" id="L147">        return new SetupRunResult(</span>
+<span class="nc" id="L148">                exitCode, stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));</span>
+    }
+
+    String[] argsWithFixtureServerPort(String... args) {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (hasServerPort(args)</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                || invokesLifecycleSubcommand(args)</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                || hasDryRun(args)</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                || !hasNewBoardSetupShape(args)) {</span>
+<span class="nc" id="L156">            return args;</span>
+        }
+<span class="nc" id="L158">        String[] effectiveArgs = new String[args.length + 2];</span>
+<span class="nc" id="L159">        effectiveArgs[0] = &quot;--server-port&quot;;</span>
+<span class="nc" id="L160">        effectiveArgs[1] = String.valueOf(availablePort());</span>
+<span class="nc" id="L161">        System.arraycopy(args, 0, effectiveArgs, 2, args.length);</span>
+<span class="nc" id="L162">        return effectiveArgs;</span>
+    }
+
+    SetupRunResult runSetup(LocalSetupRequest request) {
+<span class="nc" id="L166">        var stdout = new ByteArrayOutputStream();</span>
+<span class="nc" id="L167">        var stderr = new ByteArrayOutputStream();</span>
+<span class="nc" id="L168">        int exitCode = setup.run(</span>
+                request,
+                new BufferedReader(new StringReader(&quot;&quot;)),
+                new PrintStream(stdout, true, StandardCharsets.UTF_8),
+                new PrintStream(stderr, true, StandardCharsets.UTF_8));
+<span class="nc" id="L173">        return new SetupRunResult(</span>
+<span class="nc" id="L174">                exitCode, stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));</span>
+    }
+
+    void givenConnectedBoard(String boardName, Path workflow, Path env, int serverPort, boolean githubEnabled)
+            throws IOException {
+<span class="nc" id="L179">        givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[{&quot;boardId&quot;:&quot;board-1&quot;,&quot;boardKey&quot;:&quot;abc123&quot;,&quot;boardName&quot;:&quot;%s&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/board&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:%d,&quot;githubEnabled&quot;:%s,&quot;additionalWritableRoots&quot;:[],&quot;dangerFullAccess&quot;:false}]}
+                &quot;&quot;&quot;
+<span class="nc" id="L183">                        .formatted(</span>
+                                boardName,
+<span class="nc" id="L185">                                json(workflow),</span>
+<span class="nc" id="L186">                                json(env),</span>
+<span class="nc" id="L187">                                json(workspaceRoot()),</span>
+<span class="nc" id="L188">                                serverPort,</span>
+<span class="nc" id="L189">                                githubEnabled));</span>
+<span class="nc" id="L190">    }</span>
+
+    void givenWorkflow(Path workflow, String boardId, int port) throws IOException {
+<span class="nc" id="L193">        Files.createDirectories(workflow.getParent());</span>
+<span class="nc" id="L194">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;%s&quot;
+                server:
+                  port: %d
+                codex:
+                  model: gpt-5.2
+                ---
+                # Test workflow
+                &quot;&quot;&quot;
+<span class="nc" id="L208">                        .formatted(boardId, port));</span>
+<span class="nc" id="L209">    }</span>
+
+    void givenWorkflowWithGithub(Path workflow, String boardId, int port) throws IOException {
+<span class="nc" id="L212">        givenWorkflow(workflow, boardId, port);</span>
+<span class="nc" id="L213">        Files.writeString(workflow, Files.readString(workflow) + &quot;\n## Pull Request Publication\n&quot;);</span>
+<span class="nc" id="L214">    }</span>
+
+    void givenWorkflowWithoutGithub(Path workflow, String boardId, int port) throws IOException {
+<span class="nc" id="L217">        givenWorkflow(workflow, boardId, port);</span>
+<span class="nc" id="L218">    }</span>
+
+    void givenManifest(String content) throws IOException {
+<span class="nc" id="L221">        Files.createDirectories(manifestPath().getParent());</span>
+<span class="nc" id="L222">        Files.writeString(manifestPath(), content);</span>
+<span class="nc" id="L223">    }</span>
+
+    void givenCodexAuthenticated() {
+<span class="nc" id="L226">        commands.codexAuthenticated = true;</span>
+<span class="nc" id="L227">    }</span>
+
+    void givenCodexUnauthenticated() {
+<span class="nc" id="L230">        commands.codexAuthenticated = false;</span>
+<span class="nc" id="L231">    }</span>
+
+    void givenGithubAuthenticated() {
+<span class="nc" id="L234">        commands.githubAuthenticated = true;</span>
+<span class="nc" id="L235">    }</span>
+
+    void givenGithubMissing() {
+<span class="nc" id="L238">        commands.githubCliAvailable = false;</span>
+<span class="nc" id="L239">    }</span>
+
+    void givenWorkerRunning(Path workflow) {
+<span class="nc" id="L242">        commands.startedWorkflows.add(workflow.toString());</span>
+<span class="nc" id="L243">        commands.startHealthServer(workflow);</span>
+<span class="nc" id="L244">    }</span>
+
+    void givenWorkerStopped(Path workflow) {
+<span class="nc" id="L247">        commands.stopHealthServer(workflow.toString());</span>
+<span class="nc" id="L248">    }</span>
+
+    void givenWorkerWrongWorkflow(Path expectedWorkflow, Path actualWorkflow) {
+<span class="nc" id="L251">        commands.stopHealthServer(expectedWorkflow.toString());</span>
+<span class="nc" id="L252">        commands.startHealthServer(actualWorkflow, &quot;board-1&quot;);</span>
+<span class="nc" id="L253">    }</span>
+
+    void givenWorkerWrongBoard(Path workflow, String boardId) {
+<span class="nc" id="L256">        commands.stopHealthServer(workflow.toString());</span>
+<span class="nc" id="L257">        commands.startHealthServer(workflow, boardId);</span>
+<span class="nc" id="L258">    }</span>
+
+    void givenPortOccupied(Path workflow, int port) {
+<span class="nc" id="L261">        commands.healthPortOverride = port;</span>
+<span class="nc" id="L262">        commands.startHealthServer(workflow);</span>
+<span class="nc" id="L263">    }</span>
+
+    @Override
+    public void close() {
+<span class="nc" id="L267">        trello.stop();</span>
+<span class="nc" id="L268">        commands.close();</span>
+<span class="nc" id="L269">    }</span>
+
+    private static String json(Path path) {
+<span class="nc" id="L272">        return path.toString().replace(&quot;\\&quot;, &quot;\\\\&quot;).replace(&quot;\&quot;&quot;, &quot;\\\&quot;&quot;);</span>
+    }
+
+    private static boolean hasServerPort(String... args) {
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        for (String arg : args) {</span>
+<span class="nc bnc" id="L277" title="All 4 branches missed.">            if (&quot;--server-port&quot;.equals(arg) || arg.startsWith(&quot;--server-port=&quot;)) {</span>
+<span class="nc" id="L278">                return true;</span>
+            }
+        }
+<span class="nc" id="L281">        return false;</span>
+    }
+
+    private static boolean invokesLifecycleSubcommand(String... args) {
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        for (String arg : args) {</span>
+<span class="nc bnc" id="L286" title="All 6 branches missed.">            if (&quot;check&quot;.equals(arg) || &quot;repair-port&quot;.equals(arg) || &quot;configure-github&quot;.equals(arg)) {</span>
+<span class="nc" id="L287">                return true;</span>
+            }
+        }
+<span class="nc" id="L290">        return false;</span>
+    }
+
+    private static boolean hasDryRun(String... args) {
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        for (String arg : args) {</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            if (&quot;--dry-run&quot;.equals(arg)) {</span>
+<span class="nc" id="L296">                return true;</span>
+            }
+        }
+<span class="nc" id="L299">        return false;</span>
+    }
+
+    private boolean hasNewBoardSetupShape(String... args) {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        return hasWorkflowOrEnvTarget(args)</span>
+<span class="nc bnc" id="L304" title="All 6 branches missed.">                || (hasDirectCredentials(args) &amp;&amp; (hasBoardSelector(args) || !Files.isRegularFile(manifestPath())));</span>
+    }
+
+    private static boolean hasWorkflowOrEnvTarget(String... args) {
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        for (String arg : args) {</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">            if (&quot;--workflow&quot;.equals(arg)</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">                    || arg.startsWith(&quot;--workflow=&quot;)</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">                    || &quot;--env&quot;.equals(arg)</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">                    || arg.startsWith(&quot;--env=&quot;)) {</span>
+<span class="nc" id="L313">                return true;</span>
+            }
+        }
+<span class="nc" id="L316">        return false;</span>
+    }
+
+    private static boolean hasDirectCredentials(String... args) {
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        for (String arg : args) {</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">            if (&quot;--key&quot;.equals(arg)</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                    || arg.startsWith(&quot;--key=&quot;)</span>
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                    || &quot;--token&quot;.equals(arg)</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">                    || arg.startsWith(&quot;--token=&quot;)) {</span>
+<span class="nc" id="L325">                return true;</span>
+            }
+        }
+<span class="nc" id="L328">        return false;</span>
+    }
+
+    private static boolean hasBoardSelector(String... args) {
+<span class="nc bnc" id="L332" title="All 2 branches missed.">        for (String arg : args) {</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            if (&quot;--board-name&quot;.equals(arg)</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">                    || arg.startsWith(&quot;--board-name=&quot;)</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">                    || &quot;--board&quot;.equals(arg)</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                    || arg.startsWith(&quot;--board=&quot;)) {</span>
+<span class="nc" id="L337">                return true;</span>
+            }
+        }
+<span class="nc" id="L340">        return false;</span>
+    }
+
+    private static int availablePort() {
+<span class="nc bnc" id="L344" title="All 2 branches missed.">        for (int attempt = FIRST_FIXTURE_PORT; attempt &lt;= LAST_FIXTURE_PORT; attempt++) {</span>
+<span class="nc" id="L345">            int port = nextFixturePort();</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">            if (!LocalHealthChecker.portAcceptsConnections(port)) {</span>
+<span class="nc" id="L347">                return port;</span>
+            }
+        }
+<span class="nc" id="L350">        throw new AssertionError(&quot;Could not allocate test port&quot;);</span>
+    }
+
+    private static int nextFixturePort() {
+<span class="nc" id="L354">        return NEXT_FIXTURE_PORT.getAndUpdate(</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">                current -&gt; current &gt;= LAST_FIXTURE_PORT ? FIRST_FIXTURE_PORT : current + 1);</span>
+    }
+
+    static final class FakeCommands implements CommandRunner {
+        private final int defaultServerPort;
+        boolean githubAuthenticated;
+<span class="nc" id="L361">        boolean githubCliAvailable = true;</span>
+        boolean wingetAvailable;
+<span class="nc" id="L363">        boolean javacAvailable = true;</span>
+<span class="nc" id="L364">        boolean codexAuthenticated = true;</span>
+<span class="nc" id="L365">        boolean managedCommandAvailable = true;</span>
+        boolean skipHealthStart;
+        Integer healthPortOverride;
+<span class="nc" id="L368">        final List&lt;String&gt; startedWorkflows = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L369">        final List&lt;String&gt; startedEnvFiles = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L370">        final List&lt;String&gt; stoppedWorkflows = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L371">        final List&lt;String&gt; commandEvents = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L372">        final List&lt;String&gt; codexLoginCommands = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L373">        final List&lt;String&gt; githubLoginCommands = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L374">        final Map&lt;String, String&gt; statusByWorkflow = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L375">        private final Map&lt;String, HttpServer&gt; healthServersByWorkflow = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="nc" id="L377">        FakeCommands(int defaultServerPort) {</span>
+<span class="nc" id="L378">            this.defaultServerPort = defaultServerPort;</span>
+<span class="nc" id="L379">        }</span>
+
+        @Override
+        public CommandResult run(String... command) {
+<span class="nc" id="L383">            String joined = String.join(&quot; &quot;, command);</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">            if (&quot;java -version&quot;.equals(joined)) {</span>
+<span class="nc" id="L385">                return new CommandResult(0, &quot;openjdk version \&quot;25.0.1\&quot; 2026-01-01&quot;);</span>
+            }
+<span class="nc bnc" id="L387" title="All 2 branches missed.">            if (&quot;javac -version&quot;.equals(joined)) {</span>
+<span class="nc" id="L388">                return new CommandResult(</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">                        javacAvailable ? 0 : CommandResult.COMMAND_NOT_FOUND_EXIT_CODE,</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                        javacAvailable ? &quot;javac 25.0.1&quot; : &quot;missing&quot;);</span>
+            }
+<span class="nc bnc" id="L392" title="All 2 branches missed.">            if (&quot;git --version&quot;.equals(joined)) {</span>
+<span class="nc" id="L393">                return new CommandResult(0, &quot;git version 2.51.0&quot;);</span>
+            }
+<span class="nc bnc" id="L395" title="All 2 branches missed.">            if (&quot;codex --version&quot;.equals(joined)) {</span>
+<span class="nc" id="L396">                return new CommandResult(0, &quot;codex 0.1.0&quot;);</span>
+            }
+<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (&quot;codex login status&quot;.equals(joined)) {</span>
+<span class="nc bnc" id="L399" title="All 4 branches missed.">                return new CommandResult(codexAuthenticated ? 0 : 1, codexAuthenticated ? &quot;authenticated&quot; : &quot;missing&quot;);</span>
+            }
+<span class="nc bnc" id="L401" title="All 4 branches missed.">            if (&quot;codex login --device-auth&quot;.equals(joined) || &quot;codex login&quot;.equals(joined)) {</span>
+<span class="nc" id="L402">                codexLoginCommands.add(joined);</span>
+<span class="nc" id="L403">                codexAuthenticated = true;</span>
+<span class="nc" id="L404">                return new CommandResult(0, &quot;authenticated&quot;);</span>
+            }
+<span class="nc bnc" id="L406" title="All 2 branches missed.">            if (&quot;gh --version&quot;.equals(joined)) {</span>
+<span class="nc" id="L407">                return new CommandResult(</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">                        githubCliAvailable ? 0 : CommandResult.COMMAND_NOT_FOUND_EXIT_CODE,</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">                        githubCliAvailable ? &quot;gh version 2.83.0&quot; : &quot;missing&quot;);</span>
+            }
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            if (&quot;apt-get --version&quot;.equals(joined)) {</span>
+<span class="nc" id="L412">                return new CommandResult(0, &quot;apt 3.0.0&quot;);</span>
+            }
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            if (&quot;id -u&quot;.equals(joined)) {</span>
+<span class="nc" id="L415">                return new CommandResult(0, &quot;0&quot;);</span>
+            }
+<span class="nc bnc" id="L417" title="All 2 branches missed.">            if (&quot;winget --version&quot;.equals(joined)) {</span>
+<span class="nc" id="L418">                return new CommandResult(</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                        wingetAvailable ? 0 : CommandResult.COMMAND_NOT_FOUND_EXIT_CODE,</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">                        wingetAvailable ? &quot;v1.12.0&quot; : &quot;missing&quot;);</span>
+            }
+<span class="nc bnc" id="L422" title="All 2 branches missed.">            if (&quot;gh auth status&quot;.equals(joined)) {</span>
+<span class="nc bnc" id="L423" title="All 4 branches missed.">                return new CommandResult(githubAuthenticated ? 0 : 1, githubAuthenticated ? &quot;ok&quot; : &quot;not logged in&quot;);</span>
+            }
+<span class="nc bnc" id="L425" title="All 2 branches missed.">            if (&quot;gh auth login&quot;.equals(joined)) {</span>
+<span class="nc" id="L426">                githubLoginCommands.add(joined);</span>
+<span class="nc" id="L427">                githubAuthenticated = true;</span>
+<span class="nc" id="L428">                return new CommandResult(0, &quot;authenticated&quot;);</span>
+            }
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            if (&quot;gh api user --jq .login // \&quot;\&quot;&quot;.equals(joined)) {</span>
+<span class="nc" id="L431">                return new CommandResult(0, &quot;alex-example&quot;);</span>
+            }
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            if (&quot;bash -lc apt-get update &amp;&amp; apt-get install -y gh&quot;.equals(joined)</span>
+<span class="nc bnc" id="L434" title="All 2 branches missed.">                    || &quot;bash -lc sudo apt-get update &amp;&amp; sudo apt-get install -y gh&quot;.equals(joined)</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">                    || &quot;bash -lc doas apt-get update &amp;&amp; doas apt-get install -y gh&quot;.equals(joined)) {</span>
+<span class="nc" id="L436">                commandEvents.add(&quot;install-gh&quot;);</span>
+<span class="nc" id="L437">                githubCliAvailable = true;</span>
+<span class="nc" id="L438">                return new CommandResult(0, &quot;installed gh&quot;);</span>
+            }
+<span class="nc bnc" id="L440" title="All 2 branches missed.">            if (&quot;cmd /c winget install --id GitHub.cli --source winget&quot;.equals(joined)) {</span>
+<span class="nc" id="L441">                commandEvents.add(&quot;install-gh-winget&quot;);</span>
+<span class="nc" id="L442">                githubCliAvailable = true;</span>
+<span class="nc" id="L443">                return new CommandResult(0, &quot;installed gh&quot;);</span>
+            }
+<span class="nc bnc" id="L445" title="All 6 branches missed.">            if (command.length == 2 &amp;&amp; &quot;symphony-trello&quot;.equals(command[0]) &amp;&amp; &quot;status&quot;.equals(command[1])) {</span>
+<span class="nc" id="L446">                return new CommandResult(</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">                        managedCommandAvailable ? 0 : CommandResult.COMMAND_NOT_FOUND_EXIT_CODE,</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">                        managedCommandAvailable ? &quot;ok&quot; : &quot;missing&quot;);</span>
+            }
+<span class="nc bnc" id="L450" title="All 6 branches missed.">            if (command.length == 3 &amp;&amp; &quot;symphony-trello&quot;.equals(command[0]) &amp;&amp; &quot;status&quot;.equals(command[1])) {</span>
+<span class="nc" id="L451">                String overriddenStatus = statusByWorkflow.get(command[2]);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                if (overriddenStatus != null) {</span>
+<span class="nc" id="L453">                    return new CommandResult(</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">                            managedCommandAvailable ? 0 : CommandResult.COMMAND_NOT_FOUND_EXIT_CODE, overriddenStatus);</span>
+                }
+<span class="nc" id="L456">                boolean running = startedWorkflows.contains(command[2]);</span>
+<span class="nc" id="L457">                return new CommandResult(</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">                        managedCommandAvailable ? 0 : CommandResult.COMMAND_NOT_FOUND_EXIT_CODE,</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">                        running ? &quot;running &quot; + command[2] : &quot;No managed Symphony process found&quot;);</span>
+            }
+<span class="nc bnc" id="L461" title="All 6 branches missed.">            if (command.length &gt;= 4 &amp;&amp; &quot;symphony-trello&quot;.equals(command[0]) &amp;&amp; &quot;start&quot;.equals(command[1])) {</span>
+<span class="nc" id="L462">                startedEnvFiles.add(command[3]);</span>
+<span class="nc" id="L463">                startedWorkflows.add(command[command.length - 1]);</span>
+<span class="nc" id="L464">                commandEvents.add(&quot;start:&quot; + command[command.length - 1]);</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">                if (!skipHealthStart) {</span>
+<span class="nc" id="L466">                    startHealthServer(Path.of(command[command.length - 1]));</span>
+                }
+<span class="nc" id="L468">                return new CommandResult(0, &quot;Started Symphony for Trello&quot;);</span>
+            }
+<span class="nc bnc" id="L470" title="All 6 branches missed.">            if (command.length == 3 &amp;&amp; &quot;symphony-trello&quot;.equals(command[0]) &amp;&amp; &quot;stop&quot;.equals(command[1])) {</span>
+<span class="nc" id="L471">                stoppedWorkflows.add(command[2]);</span>
+<span class="nc" id="L472">                commandEvents.add(&quot;stop:&quot; + command[2]);</span>
+<span class="nc" id="L473">                stopHealthServer(command[2]);</span>
+<span class="nc" id="L474">                return new CommandResult(0, &quot;Stopped Symphony for Trello&quot;);</span>
+            }
+<span class="nc" id="L476">            return new CommandResult(CommandResult.COMMAND_NOT_FOUND_EXIT_CODE, &quot;missing&quot;);</span>
+        }
+
+        void startHealthServer(Path workflowPath) {
+<span class="nc" id="L480">            startHealthServer(workflowPath, &quot;board-1&quot;);</span>
+<span class="nc" id="L481">        }</span>
+
+        void startHealthServer(Path workflowPath, String boardId) {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">            int port = healthPortOverride == null ? workflowPort(workflowPath) : healthPortOverride;</span>
+            try {
+<span class="nc" id="L486">                stopHealthServer(workflowPath.toString());</span>
+<span class="nc" id="L487">                HttpServer healthServer = createHealthServer(port);</span>
+<span class="nc" id="L488">                String workflow = workflowPath.toAbsolutePath().normalize().toString();</span>
+<span class="nc" id="L489">                healthServer.createContext(</span>
+                        &quot;/api/v1/local-status&quot;,
+<span class="nc" id="L491">                        exchange -&gt; FakeTrelloServer.respond(</span>
+                                exchange,
+                                &quot;&quot;&quot;
+                        {&quot;workflowPath&quot;:&quot;%s&quot;,&quot;boardId&quot;:&quot;%s&quot;}
+                        &quot;&quot;&quot;
+<span class="nc" id="L496">                                        .formatted(workflow.replace(&quot;\\&quot;, &quot;\\\\&quot;), boardId)));</span>
+<span class="nc" id="L497">                healthServer.createContext(</span>
+                        &quot;/api/v1/state&quot;,
+<span class="nc" id="L499">                        exchange -&gt; FakeTrelloServer.respond(</span>
+                                exchange,
+                                &quot;&quot;&quot;
+                        {&quot;counts&quot;:{&quot;running&quot;:0,&quot;retrying&quot;:0}}
+                        &quot;&quot;&quot;));
+<span class="nc" id="L504">                healthServer.start();</span>
+<span class="nc" id="L505">                healthServersByWorkflow.put(workflowPath.toString(), healthServer);</span>
+<span class="nc" id="L506">            } catch (IOException e) {</span>
+<span class="nc" id="L507">                throw new IllegalStateException(e);</span>
+<span class="nc" id="L508">            }</span>
+<span class="nc" id="L509">        }</span>
+
+        static HttpServer createHealthServer(int port) throws IOException {
+<span class="nc" id="L512">            IOException failure = null;</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">            for (int attempt = 0; attempt &lt; 10; attempt++) {</span>
+                try {
+<span class="nc" id="L515">                    return HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);</span>
+<span class="nc" id="L516">                } catch (IOException e) {</span>
+<span class="nc" id="L517">                    failure = e;</span>
+<span class="nc" id="L518">                    pollDelayBeforeRetryingHealthServerBind();</span>
+                }
+            }
+<span class="nc" id="L521">            throw failure;</span>
+        }
+
+        private static void pollDelayBeforeRetryingHealthServerBind() {
+            try {
+<span class="nc" id="L526">                Thread.sleep(25);</span>
+<span class="nc" id="L527">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L528">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L529">            }</span>
+<span class="nc" id="L530">        }</span>
+
+        void stopHealthServer(String workflowPath) {
+<span class="nc" id="L533">            HttpServer healthServer = healthServersByWorkflow.remove(workflowPath);</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">            if (healthServer != null) {</span>
+<span class="nc" id="L535">                healthServer.stop(0);</span>
+            }
+<span class="nc" id="L537">        }</span>
+
+        void close() {
+<span class="nc" id="L540">            healthServersByWorkflow.values().forEach(server -&gt; server.stop(0));</span>
+<span class="nc" id="L541">            healthServersByWorkflow.clear();</span>
+<span class="nc" id="L542">        }</span>
+
+        int workflowPort(Path workflowPath) {
+            try {
+<span class="nc" id="L546">                var matcher = Pattern.compile(&quot;(?m)^\\s*port:\\s*(\\d+)\\s*$&quot;).matcher(Files.readString(workflowPath));</span>
+<span class="nc bnc" id="L547" title="All 2 branches missed.">                return matcher.find() ? Integer.parseInt(matcher.group(1)) : defaultServerPort;</span>
+<span class="nc" id="L548">            } catch (IOException e) {</span>
+<span class="nc" id="L549">                return defaultServerPort;</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

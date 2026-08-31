@@ -1,0 +1,644 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloBoardConnector.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TrelloBoardConnector.java</span></div><h1>TrelloBoardConnector.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.CommaSeparatedValues.javaTrimmedNonEmptyFields;
+
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.GitHubIntegration;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.TrelloCredentials;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+final class TrelloBoardConnector {
+    private static final String DEFAULT_BOARD_NAME = &quot;Symphony Work Queue&quot;;
+
+    private final TrelloBoardSetup boardSetup;
+    private final WorkflowConfigEditor workflowConfig;
+    private final LocalWorkerManager workerManager;
+    private final Map&lt;String, String&gt; environment;
+    private final CodexModelSelectionFlow codexModelSelectionFlow;
+
+    TrelloBoardConnector(
+            TrelloBoardSetup boardSetup,
+            WorkflowConfigEditor workflowConfig,
+            LocalWorkerManager workerManager,
+<span class="nc" id="L32">            Map&lt;String, String&gt; environment) {</span>
+<span class="nc" id="L33">        this.boardSetup = boardSetup;</span>
+<span class="nc" id="L34">        this.workflowConfig = workflowConfig;</span>
+<span class="nc" id="L35">        this.workerManager = workerManager;</span>
+<span class="nc" id="L36">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L37">        this.codexModelSelectionFlow = new CodexModelSelectionFlow();</span>
+<span class="nc" id="L38">    }</span>
+
+    LocalSetup.SetupResult createOrConnectBoard(
+            BoardSetupChoice choice,
+            LocalSetup.Options options,
+            TrelloCredentials credentials,
+            GitHubIntegrationResolution githubIntegrationResolution,
+            ConnectedBoardManifest manifest,
+            CredentialPersistence credentialPersistence,
+            Terminal terminal)
+            throws IOException {
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if (choice == BoardSetupChoice.EXISTING) {</span>
+<span class="nc" id="L50">            return importExistingBoard(</span>
+                    options, credentials, githubIntegrationResolution, manifest, credentialPersistence, terminal);
+        }
+<span class="nc" id="L53">        return createRecommendedBoard(</span>
+                options, credentials, githubIntegrationResolution, manifest, credentialPersistence, terminal);
+    }
+
+    BoardSetupChoice chooseBoardSetup(LocalSetup.Options options, Terminal terminal) throws IOException {
+<span class="nc" id="L58">        BoardSetupChoice choice = boardSetupChoice(options, terminal);</span>
+<span class="nc" id="L59">        rejectNewBoardInProgress(options, choice);</span>
+<span class="nc" id="L60">        return choice;</span>
+    }
+
+    void preflightRequestedServerPort(LocalSetup.Options options, ConnectedBoardManifest manifest) {
+<span class="nc" id="L64">        options.serverPort().ifPresent(ignored -&gt; preflightWorkflowPath(options)</span>
+<span class="nc" id="L65">                .ifPresent(workflowPath -&gt; localSetupServerPort(options, manifest, workflowPath)));</span>
+<span class="nc" id="L66">    }</span>
+
+    void rejectDryRunNewBoardInProgress(LocalSetup.Options options) {
+<span class="nc" id="L69">        BoardSetupChoice dryRunChoice = options.existingBoardId()</span>
+<span class="nc" id="L70">                .map(ignored -&gt; BoardSetupChoice.EXISTING)</span>
+<span class="nc" id="L71">                .orElse(BoardSetupChoice.NEW);</span>
+<span class="nc" id="L72">        rejectNewBoardInProgress(options, dryRunChoice);</span>
+<span class="nc" id="L73">    }</span>
+
+    private static void rejectNewBoardInProgress(LocalSetup.Options options, BoardSetupChoice choice) {
+<span class="nc bnc" id="L76" title="All 4 branches missed.">        if (choice == BoardSetupChoice.NEW &amp;&amp; !blank(options.inProgressState())) {</span>
+<span class="nc" id="L77">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;,
+                    &quot;--in-progress is only supported when connecting an existing Trello board.&quot;);
+        }
+<span class="nc" id="L81">    }</span>
+
+    static Optional&lt;Path&gt; preflightWorkflowPath(LocalSetup.Options options) {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (options.workflowPathExplicit()) {</span>
+<span class="nc" id="L85">            return Optional.of(options.workflowPath());</span>
+        }
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        if (options.existingBoardId().isPresent()) {</span>
+<span class="nc" id="L88">            return Optional.empty();</span>
+        }
+<span class="nc" id="L90">        return options.boardName()</span>
+<span class="nc" id="L91">                .map(name -&gt; resolveWorkflowPath(options, name))</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                .or(() -&gt; options.nonInteractive()</span>
+<span class="nc" id="L93">                        ? Optional.of(resolveWorkflowPath(options, DEFAULT_BOARD_NAME))</span>
+<span class="nc" id="L94">                        : Optional.empty());</span>
+    }
+
+    private LocalSetup.SetupResult importExistingBoard(
+            LocalSetup.Options options,
+            TrelloCredentials credentials,
+            GitHubIntegrationResolution githubIntegrationResolution,
+            ConnectedBoardManifest manifest,
+            CredentialPersistence credentialPersistence,
+            Terminal terminal)
+            throws IOException {
+<span class="nc" id="L105">        String boardId = requestedBoardSelector(options, terminal);</span>
+<span class="nc" id="L106">        String selector = boardId;</span>
+<span class="nc" id="L107">        List&lt;ConnectedBoard&gt; connectedMatches = manifest.boards().stream()</span>
+<span class="nc" id="L108">                .filter(board -&gt; board.boardName().equalsIgnoreCase(selector))</span>
+<span class="nc" id="L109">                .toList();</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (connectedMatches.size() &gt; 1) {</span>
+<span class="nc" id="L111">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_worker_board_ambiguous&quot;,
+                    &quot;Multiple connected boards match --board. Re-run with a board id or short link.&quot;);
+        }
+<span class="nc" id="L115">        boardId =</span>
+<span class="nc" id="L116">                connectedMatches.stream().findAny().map(ConnectedBoard::boardId).orElse(selector);</span>
+<span class="nc" id="L117">        String parsedBoardId = TrelloBoardIds.parseImportBoardSelector(boardId);</span>
+<span class="nc" id="L118">        TrelloBoardSetup.BoardInfo boardInfo = boardSetup.getBoardInfo(</span>
+<span class="nc" id="L119">                new TrelloBoardSetup.BoardInfoRequest(options.endpoint(), credentials, parsedBoardId));</span>
+<span class="nc" id="L120">        List&lt;String&gt; openLists = boardSetup.getOpenBoardListNames(</span>
+<span class="nc" id="L121">                new TrelloBoardSetup.BoardInfoRequest(options.endpoint(), credentials, boardInfo.boardId()));</span>
+<span class="nc" id="L122">        Path workflowPath = resolveWorkflowPath(options, boardInfo.boardName());</span>
+<span class="nc" id="L123">        options = configureCodexModel(options, workflowPath, terminal);</span>
+<span class="nc" id="L124">        GitHubIntegration githubIntegration = githubIntegrationResolution.resolve();</span>
+<span class="nc" id="L125">        ExistingBoardLists configuredLists = existingBoardLists(options, terminal, openLists, githubIntegration);</span>
+<span class="nc" id="L126">        MaxAgentsSelection maxAgents = configureMaxAgents(options, workflowPath, terminal);</span>
+<span class="nc" id="L127">        credentialPersistence.persist();</span>
+<span class="nc" id="L128">        TrelloBoardSetup.ImportBoardResult result = boardSetup(options)</span>
+<span class="nc" id="L129">                .importExistingBoard(new TrelloBoardSetup.ImportBoardRequest(</span>
+<span class="nc" id="L130">                        options.endpoint(),</span>
+                        credentials,
+<span class="nc" id="L132">                        boardInfo.boardId(),</span>
+<span class="nc" id="L133">                        configuredLists.activeStates(),</span>
+<span class="nc" id="L134">                        configuredLists.terminalStates(),</span>
+<span class="nc" id="L135">                        configuredLists.inProgressState(),</span>
+<span class="nc" id="L136">                        configuredLists.detectInProgressState(),</span>
+<span class="nc" id="L137">                        configuredLists.blockedState(),</span>
+                        workflowPath,
+<span class="nc" id="L139">                        options.workspaceRoot(),</span>
+<span class="nc" id="L140">                        localSetupImportServerPort(options, manifest, workflowPath),</span>
+<span class="nc" id="L141">                        maxAgents.value(),</span>
+<span class="nc" id="L142">                        options.force(),</span>
+                        githubIntegration,
+<span class="nc" id="L144">                        configuredLists.createMissingGithubLists(),</span>
+<span class="nc" id="L145">                        options.envPath(),</span>
+<span class="nc" id="L146">                        maxAgents.preservedFromWorkflow(),</span>
+<span class="nc" id="L147">                        repositoryDefaults(workflowPath, options.repositoryUrl())));</span>
+<span class="nc" id="L148">        return LocalSetup.SetupResult.from(result, githubIntegration);</span>
+    }
+
+    private static String requestedBoardSelector(LocalSetup.Options options, Terminal terminal) throws IOException {
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        Optional&lt;String&gt; boardId = options.existingBoardId().filter(id -&gt; !blank(id));</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (boardId.isEmpty()) {</span>
+<span class="nc" id="L154">            return terminal.readLine(&quot;Trello board URL, shortlink, or id: &quot;);</span>
+        }
+<span class="nc" id="L156">        return boardId.get();</span>
+    }
+
+    private LocalSetup.SetupResult createRecommendedBoard(
+            LocalSetup.Options options,
+            TrelloCredentials credentials,
+            GitHubIntegrationResolution githubIntegrationResolution,
+            ConnectedBoardManifest manifest,
+            CredentialPersistence credentialPersistence,
+            Terminal terminal)
+            throws IOException {
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        Optional&lt;String&gt; configuredBoardName = options.boardName().filter(name -&gt; !blank(name));</span>
+<span class="nc bnc" id="L168" title="All 4 branches missed.">        if (configuredBoardName.isEmpty() &amp;&amp; !options.nonInteractive()) {</span>
+<span class="nc" id="L169">            String answer = terminal.readLine(&quot;Board name [\&quot;&quot; + DEFAULT_BOARD_NAME + &quot;\&quot;]: &quot;);</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">            configuredBoardName = Optional.ofNullable(answer).filter(name -&gt; !blank(name));</span>
+        }
+<span class="nc" id="L172">        String boardName = configuredBoardName.orElse(DEFAULT_BOARD_NAME);</span>
+<span class="nc" id="L173">        List&lt;TrelloBoardSetup.WorkspaceInfo&gt; workspaces =</span>
+<span class="nc" id="L174">                boardSetup.listWorkspaces(new TrelloBoardSetup.WorkspaceListRequest(options.endpoint(), credentials));</span>
+<span class="nc" id="L175">        String workspaceId = workspaceId(options, workspaces, terminal);</span>
+<span class="nc" id="L176">        Path workflowPath = resolveWorkflowPath(options, boardName);</span>
+<span class="nc" id="L177">        options = configureCodexModel(options, workflowPath, terminal);</span>
+<span class="nc" id="L178">        GitHubIntegration githubIntegration = githubIntegrationResolution.resolve();</span>
+<span class="nc" id="L179">        MaxAgentsSelection maxAgents = configureMaxAgents(options, workflowPath, terminal);</span>
+<span class="nc" id="L180">        credentialPersistence.persist();</span>
+<span class="nc" id="L181">        return LocalSetup.SetupResult.from(</span>
+<span class="nc" id="L182">                boardSetup(options)</span>
+<span class="nc" id="L183">                        .createRecommendedBoard(new TrelloBoardSetup.NewBoardRequest(</span>
+<span class="nc" id="L184">                                options.endpoint(),</span>
+                                credentials,
+                                boardName,
+                                workspaceId,
+                                workflowPath,
+<span class="nc" id="L189">                                options.workspaceRoot(),</span>
+<span class="nc" id="L190">                                localSetupServerPort(options, manifest, workflowPath),</span>
+<span class="nc" id="L191">                                maxAgents.value(),</span>
+<span class="nc" id="L192">                                options.force(),</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                                !options.workflowPathExplicit(),</span>
+                                githubIntegration,
+<span class="nc" id="L195">                                options.envPath(),</span>
+<span class="nc" id="L196">                                options.detectInProgressState(),</span>
+<span class="nc" id="L197">                                maxAgents.preservedFromWorkflow(),</span>
+<span class="nc" id="L198">                                repositoryDefaults(workflowPath, options.repositoryUrl()))),</span>
+                githubIntegration);
+    }
+
+    private TrelloBoardSetup.RepositoryDefaults repositoryDefaults(
+            Path workflowPath, Optional&lt;String&gt; explicitRepositoryUrl) {
+<span class="nc" id="L204">        return workflowConfig.repositoryDefaults(workflowPath).withExplicitDefaultUrl(explicitRepositoryUrl);</span>
+    }
+
+    private LocalSetup.Options configureCodexModel(LocalSetup.Options options, Path workflowPath, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L209">        CodexModelSelectionDefaults catalog =</span>
+<span class="nc" id="L210">                options.codexModelCatalog().orElseGet(boardSetup::resolvedCodexModelSelectionDefaults);</span>
+<span class="nc" id="L211">        CodexModelSelectionFlow.Selection selected = codexModelSelectionFlow.resolve(</span>
+<span class="nc" id="L212">                options, boardSetup.codexModelSelectionDefaultsForWorkflow(workflowPath, catalog), terminal);</span>
+<span class="nc" id="L213">        return options.withCodexModelCatalog(catalog).withCodexModelSelection(selected);</span>
+    }
+
+    private TrelloBoardSetup boardSetup(LocalSetup.Options options) {
+<span class="nc" id="L217">        return options.codexModelDefaults()</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                .map(defaults -&gt; options.hasExplicitCodexModelRequest()</span>
+<span class="nc" id="L219">                        ? boardSetup.withCodexModelOverrides(</span>
+<span class="nc" id="L220">                                defaults, options.codexModel(), options.codexReasoningEffort())</span>
+<span class="nc" id="L221">                        : boardSetup.withCodexModelDefaults(defaults))</span>
+<span class="nc" id="L222">                .orElse(boardSetup);</span>
+    }
+
+    private MaxAgentsSelection configureMaxAgents(LocalSetup.Options options, Path workflowPath, Terminal terminal)
+            throws IOException {
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if (options.maxAgentsExplicit()) {</span>
+<span class="nc" id="L228">            return new MaxAgentsSelection(options.maxAgents(), false);</span>
+        }
+<span class="nc" id="L230">        MaxAgentsSelection currentMaxAgents = workflowConfig</span>
+<span class="nc" id="L231">                .maxAgents(workflowPath)</span>
+<span class="nc" id="L232">                .map(maxAgents -&gt; new MaxAgentsSelection(maxAgents, true))</span>
+<span class="nc" id="L233">                .orElseGet(() -&gt; new MaxAgentsSelection(TrelloBoardSetup.DEFAULT_MAX_CONCURRENT_AGENTS, false));</span>
+<span class="nc" id="L234">        int defaultMaxAgents = currentMaxAgents.value();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">        if (options.nonInteractive()) {</span>
+<span class="nc" id="L236">            return currentMaxAgents;</span>
+        }
+
+<span class="nc" id="L239">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L240">        terminal.info(&quot;Per-board concurrency&quot;);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        terminal.info(&quot;Current value for this board: &quot; + defaultMaxAgents + &quot; card&quot; + (defaultMaxAgents == 1 ? &quot;&quot; : &quot;s&quot;)</span>
+                + &quot; processed concurrently.&quot;);
+<span class="nc" id="L243">        terminal.info(</span>
+                &quot;Higher values run multiple Codex agents for this board at once, including their builds, tests, package installs, and network calls.&quot;);
+<span class="nc" id="L245">        terminal.info(</span>
+                &quot;Only raise this when the machine and repository can handle parallel runs from separate workspaces.&quot;);
+<span class="nc" id="L247">        terminal.info(</span>
+                &quot;If Trello cards depend on each other, add prerequisite checklist items before moving them into Ready for Codex.&quot;);
+<span class="nc" id="L249">        terminal.info(&quot;If you are unsure, press Enter to keep the current value.&quot;);</span>
+<span class="nc" id="L250">        return new MaxAgentsSelection(</span>
+<span class="nc" id="L251">                promptedMaxAgents(terminal, currentMaxAgents), currentMaxAgents.preservedFromWorkflow());</span>
+    }
+
+    private static int promptedMaxAgents(Terminal terminal, MaxAgentsSelection currentMaxAgents) throws IOException {
+<span class="nc" id="L255">        String answer = terminal.readLine(</span>
+<span class="nc" id="L256">                &quot;Maximum cards processed concurrently for this board [&quot; + currentMaxAgents.value() + &quot;]: &quot;);</span>
+<span class="nc bnc" id="L257" title="All 4 branches missed.">        if (answer == null || answer.isBlank()) {</span>
+<span class="nc" id="L258">            return currentMaxAgents.value();</span>
+        }
+<span class="nc" id="L260">        return PromptSupport.parseBoundedChoice(answer, TrelloBoardSetup.MAX_SETUP_CONCURRENT_AGENTS);</span>
+    }
+
+<span class="nc" id="L263">    private record MaxAgentsSelection(int value, boolean preservedFromWorkflow) {}</span>
+
+    private static String workspaceId(
+            LocalSetup.Options options, List&lt;TrelloBoardSetup.WorkspaceInfo&gt; workspaces, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L268">        Optional&lt;String&gt; configuredWorkspaceId = options.workspaceId();</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        if (configuredWorkspaceId.isEmpty()) {</span>
+<span class="nc" id="L270">            return chooseWorkspaceId(workspaces, terminal, options.nonInteractive());</span>
+        }
+<span class="nc" id="L272">        return configuredWorkspaceId.get();</span>
+    }
+
+    private static String chooseWorkspaceId(
+            List&lt;TrelloBoardSetup.WorkspaceInfo&gt; workspaces, Terminal terminal, boolean nonInteractive)
+            throws IOException {
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        if (workspaces.size() == 1) {</span>
+<span class="nc" id="L279">            terminal.info(&quot;  OK  Trello Workspace: &quot;</span>
+<span class="nc" id="L280">                    + DisplayNames.quotedName(workspaces.getFirst().displayName()));</span>
+<span class="nc" id="L281">            return workspaces.getFirst().id();</span>
+        }
+<span class="nc bnc" id="L283" title="All 2 branches missed.">        if (workspaces.isEmpty()) {</span>
+<span class="nc" id="L284">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_workspace_required&quot;,
+                    &quot;No Trello Workspace was found for this token. Create a Workspace in Trello, then rerun setup-local.&quot;);
+        }
+<span class="nc" id="L288">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L289">        terminal.info(&quot;Choose Trello Workspace:&quot;);</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        for (int i = 0; i &lt; workspaces.size(); i++) {</span>
+<span class="nc" id="L291">            terminal.info(&quot;  &quot; + (i + 1) + &quot;. &quot;</span>
+<span class="nc" id="L292">                    + DisplayNames.quotedName(workspaces.get(i).displayName()));</span>
+        }
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        if (nonInteractive) {</span>
+<span class="nc" id="L295">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_workspace_id_required&quot;,
+                    &quot;This token can access multiple Trello Workspaces. Re-run with --workspace-id.&quot;);
+        }
+<span class="nc" id="L299">        int selected = PromptSupport.requiredChoice(</span>
+<span class="nc" id="L300">                terminal.readLine(&quot;Workspace: &quot;),</span>
+<span class="nc" id="L301">                workspaces.size(),</span>
+                &quot;setup_workspace_id_required&quot;,
+                &quot;Workspace selection is required.&quot;);
+<span class="nc" id="L304">        return workspaces.get(selected - 1).id();</span>
+    }
+
+    private static ExistingBoardLists existingBoardLists(
+            LocalSetup.Options options,
+            Terminal terminal,
+            List&lt;String&gt; openListNames,
+            GitHubIntegration githubIntegration)
+            throws IOException {
+<span class="nc bnc" id="L313" title="All 2 branches missed.">        List&lt;String&gt; activeStates = options.activeStates().isEmpty()</span>
+<span class="nc" id="L314">                ? detectedList(openListNames, TrelloBoardSetup.RECOMMENDED_ACTIVE_STATE)</span>
+<span class="nc" id="L315">                        .map(List::of)</span>
+<span class="nc" id="L316">                        .orElseGet(List::of)</span>
+<span class="nc" id="L317">                : options.activeStates();</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        List&lt;String&gt; terminalStates = options.terminalStates().isEmpty()</span>
+<span class="nc" id="L319">                ? detectedList(openListNames, &quot;Done&quot;).map(List::of).orElseGet(List::of)</span>
+<span class="nc" id="L320">                : options.terminalStates();</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        String inProgressState = options.detectInProgressState()</span>
+<span class="nc" id="L322">                ? detectedList(openListNames, TrelloBoardSetup.RECOMMENDED_IN_PROGRESS_STATE)</span>
+<span class="nc" id="L323">                        .orElse(null)</span>
+<span class="nc" id="L324">                : options.inProgressState();</span>
+<span class="nc" id="L325">        boolean detectInProgressState = false;</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">        String blockedState = blank(options.blockedState())</span>
+<span class="nc" id="L327">                ? detectedList(openListNames, TrelloBoardSetup.RECOMMENDED_BLOCKED_STATE)</span>
+<span class="nc" id="L328">                        .orElse(null)</span>
+<span class="nc" id="L329">                : options.blockedState();</span>
+<span class="nc" id="L330">        boolean createMissingGithubLists = githubIntegration.enabled();</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        if (!options.nonInteractive()) {</span>
+<span class="nc" id="L332">            terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L333">            terminal.info(&quot;Existing board lists&quot;);</span>
+<span class="nc" id="L334">            terminal.info(&quot;Open lists: &quot; + DisplayNames.quotedList(openListNames));</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            if (activeStates.isEmpty()) {</span>
+<span class="nc" id="L336">                activeStates = promptCommaSeparatedListNames(terminal, &quot;Queued-work list names, comma-separated: &quot;);</span>
+            }
+<span class="nc bnc" id="L338" title="All 2 branches missed.">            if (terminalStates.isEmpty()) {</span>
+<span class="nc" id="L339">                terminalStates = promptCommaSeparatedListNames(terminal, &quot;Done list names, comma-separated: &quot;);</span>
+            }
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            if (options.detectInProgressState()) {</span>
+<span class="nc" id="L342">                inProgressState = promptOptionalList(terminal, &quot;In-progress list name&quot;, inProgressState, null);</span>
+            }
+<span class="nc bnc" id="L344" title="All 2 branches missed.">            if (blank(options.blockedState())) {</span>
+<span class="nc" id="L345">                blockedState = promptOptionalList(terminal, &quot;Blocked list name&quot;, blockedState, &quot;-&quot;);</span>
+            }
+<span class="nc bnc" id="L347" title="All 2 branches missed.">            if (githubIntegration.enabled()</span>
+<span class="nc" id="L348">                    &amp;&amp; openListNames.stream()</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                            .noneMatch(name -&gt; name.equalsIgnoreCase(TrelloBoardSetup.RECOMMENDED_MERGING_STATE))) {</span>
+<span class="nc" id="L350">                terminal.info(</span>
+                        &quot;GitHub mode will create this missing list: &quot; + TrelloBoardSetup.RECOMMENDED_MERGING_STATE);
+<span class="nc" id="L352">                createMissingGithubLists = PromptSupport.yesDefaultTrue(terminal, &quot;Create missing GitHub list? [Y/n] &quot;);</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                if (!createMissingGithubLists) {</span>
+<span class="nc" id="L354">                    throw new TrelloBoardSetupException(</span>
+                            &quot;setup_github_import_list_declined&quot;,
+                            &quot;GitHub workflow import needs a Merging list for merge approval.&quot;);
+                }
+            }
+        }
+<span class="nc" id="L360">        return new ExistingBoardLists(</span>
+                activeStates,
+                terminalStates,
+                inProgressState,
+                detectInProgressState,
+                blockedState,
+                createMissingGithubLists);
+    }
+
+    private static Optional&lt;String&gt; detectedList(List&lt;String&gt; openListNames, String expectedName) {
+<span class="nc" id="L370">        return openListNames.stream()</span>
+<span class="nc" id="L371">                .filter(name -&gt; name.equalsIgnoreCase(expectedName))</span>
+<span class="nc" id="L372">                .findAny();</span>
+    }
+
+    private static List&lt;String&gt; promptCommaSeparatedListNames(Terminal terminal, String prompt) throws IOException {
+<span class="nc" id="L376">        return javaTrimmedNonEmptyFields(terminal.readLine(prompt));</span>
+    }
+
+    private static String promptOptionalList(Terminal terminal, String label, String detected, String disabledValue)
+            throws IOException {
+<span class="nc bnc" id="L381" title="All 2 branches missed.">        String suffix = blank(detected) ? &quot;[enter - for none]: &quot; : &quot;[&quot; + detected + &quot;, enter - for none]: &quot;;</span>
+<span class="nc" id="L382">        String answer = terminal.readLine(label + &quot; &quot; + suffix);</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">        if (&quot;-&quot;.equals(answer)) {</span>
+<span class="nc" id="L384">            return disabledValue;</span>
+        }
+<span class="nc bnc" id="L386" title="All 2 branches missed.">        return blank(answer) ? detected : answer;</span>
+    }
+
+    private static BoardSetupChoice boardSetupChoice(LocalSetup.Options options, Terminal terminal) throws IOException {
+<span class="nc bnc" id="L390" title="All 2 branches missed.">        if (options.existingBoardId().isPresent()) {</span>
+<span class="nc" id="L391">            return BoardSetupChoice.EXISTING;</span>
+        }
+<span class="nc bnc" id="L393" title="All 2 branches missed.">        if (options.boardName().isPresent()) {</span>
+<span class="nc" id="L394">            return BoardSetupChoice.NEW;</span>
+        }
+<span class="nc bnc" id="L396" title="All 2 branches missed.">        if (options.nonInteractive()) {</span>
+<span class="nc" id="L397">            return BoardSetupChoice.NEW;</span>
+        }
+<span class="nc" id="L399">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L400">        terminal.info(&quot;Trello board&quot;);</span>
+<span class="nc" id="L401">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L402">        terminal.info(&quot;Choose board setup:&quot;);</span>
+<span class="nc" id="L403">        terminal.info(&quot;  1. Create a new Trello board with recommended lists&quot;);</span>
+<span class="nc" id="L404">        terminal.info(&quot;  2. Use an existing Trello board&quot;);</span>
+<span class="nc" id="L405">        terminal.info(&quot;&quot;);</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        return PromptSupport.choice(terminal.readLine(&quot;Board setup [1]: &quot;), 1, 2) == 2</span>
+<span class="nc" id="L407">                ? BoardSetupChoice.EXISTING</span>
+<span class="nc" id="L408">                : BoardSetupChoice.NEW;</span>
+    }
+
+    static Path resolveWorkflowPath(LocalSetup.Options options, String boardName) {
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        if (options.workflowPathExplicit()) {</span>
+<span class="nc" id="L413">            return options.workflowPath();</span>
+        }
+<span class="nc" id="L415">        Path requested = options.configDir().resolve(WorkflowFileNames.generatedFileName(boardName, &quot;trello-board&quot;, 1));</span>
+<span class="nc bnc" id="L416" title="All 4 branches missed.">        if (options.force() || !Files.exists(requested.toAbsolutePath().normalize())) {</span>
+<span class="nc" id="L417">            return requested;</span>
+        }
+<span class="nc" id="L419">        Path parent = requested.getParent();</span>
+<span class="nc" id="L420">        Path candidate =</span>
+<span class="nc" id="L421">                parentOrCurrent(parent).resolve(WorkflowFileNames.generatedFileName(boardName, &quot;trello-board&quot;, 2));</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">        for (int suffix = 3; Files.exists(candidate.toAbsolutePath().normalize()); suffix++) {</span>
+<span class="nc" id="L423">            candidate = parentOrCurrent(parent)</span>
+<span class="nc" id="L424">                    .resolve(WorkflowFileNames.generatedFileName(boardName, &quot;trello-board&quot;, suffix));</span>
+        }
+<span class="nc" id="L426">        return candidate;</span>
+    }
+
+    private static Path parentOrCurrent(Path parent) {
+<span class="nc bnc" id="L430" title="All 2 branches missed.">        return parent == null ? Path.of(&quot;.&quot;) : parent;</span>
+    }
+
+    int localSetupServerPort(
+            LocalSetup.Options options,
+            ConnectedBoardManifest manifest,
+            Path workflowPath,
+            WorkflowConfigEditor editor) {
+<span class="nc" id="L438">        Set&lt;Integer&gt; reservedPorts = reservedWorkflowServerPorts(</span>
+<span class="nc" id="L439">                manifest, workflowPath, options.force(), editor, ignored -&gt; Optional.empty());</span>
+<span class="nc" id="L440">        return options.serverPort()</span>
+<span class="nc" id="L441">                .map(requestedPort -&gt; validatedRequestedServerPort(requestedPort, reservedPorts))</span>
+<span class="nc" id="L442">                .orElseGet(() -&gt; firstAvailableServerPort(reservedPorts));</span>
+    }
+
+    private int firstAvailableServerPort(Set&lt;Integer&gt; reservedPorts) {
+<span class="nc bnc" id="L446" title="All 2 branches missed.">        for (int port = TrelloBoardSetup.DEFAULT_SERVER_PORT; port &lt;= LocalPort.MAX; port++) {</span>
+<span class="nc bnc" id="L447" title="All 4 branches missed.">            if (!reservedPorts.contains(port) &amp;&amp; !boardSetup.portInUse(port)) {</span>
+<span class="nc" id="L448">                return port;</span>
+            }
+        }
+<span class="nc" id="L451">        throw new TrelloBoardSetupException(&quot;setup_server_port_unavailable&quot;, &quot;No free local server port was found.&quot;);</span>
+    }
+
+    private int validatedRequestedServerPort(int port, Set&lt;Integer&gt; reservedPorts) {
+<span class="nc bnc" id="L455" title="All 2 branches missed.">        if (reservedPorts.contains(port)) {</span>
+<span class="nc" id="L456">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_server_port_conflict&quot;,
+<span class="nc" id="L458">                    &quot;--server-port %d is already reserved by another connected workflow.&quot;.formatted(port));</span>
+        }
+<span class="nc bnc" id="L460" title="All 2 branches missed.">        if (boardSetup.portInUse(port)) {</span>
+<span class="nc" id="L461">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_server_port_conflict&quot;,
+<span class="nc" id="L463">                    &quot;--server-port %d is already in use on %s.&quot;.formatted(port, LocalHealthChecker.LOOPBACK_HOST));</span>
+        }
+<span class="nc" id="L465">        return port;</span>
+    }
+
+    private int localSetupServerPort(LocalSetup.Options options, ConnectedBoardManifest manifest, Path workflowPath) {
+<span class="nc" id="L469">        Set&lt;Integer&gt; reservedPorts = reservedWorkflowServerPorts(</span>
+                manifest,
+                workflowPath,
+<span class="nc" id="L472">                options.force(),</span>
+                workflowConfig,
+<span class="nc" id="L474">                name -&gt; LocalEnvironment.get(name, options.envPath()));</span>
+<span class="nc" id="L475">        return options.serverPort()</span>
+<span class="nc" id="L476">                .map(requestedPort -&gt;</span>
+<span class="nc" id="L477">                        validatedRequestedServerPort(options, manifest, workflowPath, requestedPort, reservedPorts))</span>
+<span class="nc" id="L478">                .orElseGet(() -&gt; firstAvailableServerPort(reservedPorts));</span>
+    }
+
+    private Integer localSetupImportServerPort(
+            LocalSetup.Options options, ConnectedBoardManifest manifest, Path workflowPath) throws IOException {
+<span class="nc" id="L483">        Set&lt;Integer&gt; reservedPorts = reservedWorkflowServerPorts(</span>
+                manifest,
+                workflowPath,
+<span class="nc" id="L486">                options.force(),</span>
+                workflowConfig,
+<span class="nc" id="L488">                name -&gt; LocalEnvironment.get(name, options.envPath()));</span>
+<span class="nc" id="L489">        Optional&lt;Integer&gt; serverPort = options.serverPort();</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">        if (serverPort.isEmpty()) {</span>
+<span class="nc" id="L491">            return selectedImportServerPort(options, manifest, workflowPath, reservedPorts);</span>
+        }
+<span class="nc" id="L493">        return validatedRequestedServerPort(options, manifest, workflowPath, serverPort.get(), reservedPorts);</span>
+    }
+
+    private Integer selectedImportServerPort(
+            LocalSetup.Options options, ConnectedBoardManifest manifest, Path workflowPath, Set&lt;Integer&gt; reservedPorts)
+            throws IOException {
+<span class="nc" id="L499">        return replaceableWorkflowServerPort(options, manifest, workflowPath, reservedPorts)</span>
+<span class="nc" id="L500">                .orElseGet(() -&gt; firstAvailableServerPort(reservedPorts));</span>
+    }
+
+    private Optional&lt;Integer&gt; replaceableWorkflowServerPort(
+            LocalSetup.Options options, ConnectedBoardManifest manifest, Path workflowPath, Set&lt;Integer&gt; reservedPorts)
+            throws IOException {
+<span class="nc bnc" id="L506" title="All 2 branches missed.">        if (!options.force()</span>
+<span class="nc bnc" id="L507" title="All 2 branches missed.">                || !Files.isRegularFile(workflowPath.toAbsolutePath().normalize())) {</span>
+<span class="nc" id="L508">            return Optional.empty();</span>
+        }
+<span class="nc" id="L510">        Optional&lt;Integer&gt; existingPort = workflowConfig</span>
+<span class="nc" id="L511">                .serverPort(workflowPath, name -&gt; LocalEnvironment.get(name, options.envPath()))</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">                .filter(port -&gt; port != 0)</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                .filter(port -&gt; !reservedPorts.contains(port));</span>
+<span class="nc" id="L514">        return existingPort.map(port -&gt; replaceableExistingPort(options, manifest, workflowPath, port));</span>
+    }
+
+    private int replaceableExistingPort(
+            LocalSetup.Options options, ConnectedBoardManifest manifest, Path workflowPath, int port) {
+<span class="nc bnc" id="L519" title="All 4 branches missed.">        if (boardSetup.portInUse(port) &amp;&amp; !canStopManagedWorkflow(options, manifest, workflowPath, port)) {</span>
+<span class="nc" id="L520">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_server_port_conflict&quot;,
+<span class="nc" id="L522">                    &quot;--server-port %d is already in use on %s.&quot;.formatted(port, LocalHealthChecker.LOOPBACK_HOST));</span>
+        }
+<span class="nc" id="L524">        return port;</span>
+    }
+
+    private int validatedRequestedServerPort(
+            LocalSetup.Options options,
+            ConnectedBoardManifest manifest,
+            Path workflowPath,
+            int port,
+            Set&lt;Integer&gt; reservedPorts) {
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        if (reservedPorts.contains(port)) {</span>
+<span class="nc" id="L534">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_server_port_conflict&quot;,
+<span class="nc" id="L536">                    &quot;--server-port %d is already reserved by another connected workflow.&quot;.formatted(port));</span>
+        }
+<span class="nc bnc" id="L538" title="All 4 branches missed.">        if (boardSetup.portInUse(port) &amp;&amp; !canStopManagedWorkflow(options, manifest, workflowPath, port)) {</span>
+<span class="nc" id="L539">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_server_port_conflict&quot;,
+<span class="nc" id="L541">                    &quot;--server-port %d is already in use on %s.&quot;.formatted(port, LocalHealthChecker.LOOPBACK_HOST));</span>
+        }
+<span class="nc" id="L543">        return port;</span>
+    }
+
+    private boolean canStopManagedWorkflow(
+            LocalSetup.Options options, ConnectedBoardManifest manifest, Path workflowPath, int port) {
+<span class="nc" id="L548">        List&lt;ConnectedBoard&gt; matches = manifest.boards().stream()</span>
+<span class="nc bnc" id="L549" title="All 2 branches missed.">                .filter(board -&gt; board.serverPort() == port)</span>
+<span class="nc" id="L550">                .filter(board -&gt; PathsEqual.samePath(board.workflowPath(), workflowPath))</span>
+<span class="nc" id="L551">                .toList();</span>
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        if (matches.isEmpty()) {</span>
+<span class="nc" id="L553">            return false;</span>
+        }
+        try {
+<span class="nc" id="L556">            return workerManager.canStopManagedWorker(localWorkerPaths(options), matches.getFirst());</span>
+<span class="nc" id="L557">        } catch (IOException e) {</span>
+<span class="nc" id="L558">            return false;</span>
+        }
+    }
+
+    private LocalWorkerPaths localWorkerPaths(LocalSetup.Options options) {
+<span class="nc" id="L563">        return LocalWorkerPaths.from(</span>
+<span class="nc" id="L564">                Optional.empty(),</span>
+<span class="nc" id="L565">                Optional.of(options.configDir()),</span>
+<span class="nc" id="L566">                Optional.of(options.workspaceRoot()),</span>
+<span class="nc" id="L567">                Optional.empty(),</span>
+                environment);
+    }
+
+    private static Set&lt;Integer&gt; reservedWorkflowServerPorts(
+            ConnectedBoardManifest manifest,
+            Path workflowPath,
+            boolean replacingTarget,
+            WorkflowConfigEditor editor,
+            Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L577">        Set&lt;Integer&gt; reservedPorts = manifest.boards().stream()</span>
+<span class="nc bnc" id="L578" title="All 2 branches missed.">                .filter(board -&gt; !PathsEqual.samePath(board.workflowPath(), workflowPath))</span>
+<span class="nc" id="L579">                .map(ConnectedBoard::serverPort)</span>
+                // Keep this mutable because sibling workflow ports are merged before returning the
+                // reserved-port set to setup validation.
+<span class="nc" id="L582">                .collect(Collectors.toCollection(HashSet::new));</span>
+<span class="nc" id="L583">        reservedPorts.addAll(siblingWorkflowServerPorts(workflowPath, replacingTarget, editor, environmentResolver));</span>
+<span class="nc" id="L584">        return reservedPorts;</span>
+    }
+
+    private static Set&lt;Integer&gt; siblingWorkflowServerPorts(
+            Path workflowPath,
+            boolean replacingTarget,
+            WorkflowConfigEditor editor,
+            Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
+<span class="nc" id="L592">        Path absolute = workflowPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L593">        Path parent = absolute.getParent();</span>
+<span class="nc bnc" id="L594" title="All 4 branches missed.">        if (parent == null || !Files.isDirectory(parent)) {</span>
+<span class="nc" id="L595">            return Set.of();</span>
+        }
+<span class="nc" id="L597">        try (var stream = Files.list(parent)) {</span>
+<span class="nc" id="L598">            return stream.filter(path -&gt; PathNames.fileName(path).matches(&quot;WORKFLOW(\\..*)?\\.md&quot;))</span>
+<span class="nc" id="L599">                    .map(Path::toAbsolutePath)</span>
+<span class="nc" id="L600">                    .map(Path::normalize)</span>
+<span class="nc bnc" id="L601" title="All 4 branches missed.">                    .filter(path -&gt; !replacingTarget || !path.equals(absolute))</span>
+<span class="nc" id="L602">                    .flatMap(path -&gt; editor.serverPort(path, environmentResolver).stream())</span>
+<span class="nc" id="L603">                    .collect(Collectors.toUnmodifiableSet());</span>
+<span class="nc" id="L604">        } catch (IOException ignored) {</span>
+<span class="nc" id="L605">            return Set.of();</span>
+        }
+    }
+
+    static String slug(String value) {
+<span class="nc" id="L610">        return WorkflowFileNames.slug(value, &quot;trello-board&quot;);</span>
+    }
+
+    static String fallbackSlug(String value) {
+<span class="nc bnc" id="L614" title="All 2 branches missed.">        return slug(blank(value) ? DEFAULT_BOARD_NAME : value);</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L618" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+
+<span class="nc" id="L621">    private record ExistingBoardLists(</span>
+            List&lt;String&gt; activeStates,
+            List&lt;String&gt; terminalStates,
+            String inProgressState,
+            boolean detectInProgressState,
+            String blockedState,
+            boolean createMissingGithubLists) {}
+
+<span class="nc" id="L629">    enum BoardSetupChoice {</span>
+<span class="nc" id="L630">        NEW,</span>
+<span class="nc" id="L631">        EXISTING</span>
+    }
+
+    @FunctionalInterface
+    interface CredentialPersistence {
+        void persist() throws IOException;
+    }
+
+    @FunctionalInterface
+    interface GitHubIntegrationResolution {
+        GitHubIntegration resolve() throws IOException;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

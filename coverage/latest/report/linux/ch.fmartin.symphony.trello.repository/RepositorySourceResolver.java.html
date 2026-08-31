@@ -1,0 +1,478 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepositorySourceResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.repository</a> &gt; <span class="el_source">RepositorySourceResolver.java</span></div><h1>RepositorySourceResolver.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.repository;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.SLASHES;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.domain.Card;
+import com.google.common.base.CharMatcher;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+<span class="fc" id="L19">public final class RepositorySourceResolver {</span>
+<span class="fc" id="L20">    private static final CharMatcher LEADING_TOKEN_PUNCTUATION = CharMatcher.anyOf(&quot;&lt;([{&quot;);</span>
+<span class="fc" id="L21">    private static final CharMatcher TRAILING_TOKEN_PUNCTUATION = CharMatcher.anyOf(&quot;.,;:)&gt;]}&quot;);</span>
+    private static final int URI_PORT_ABSENT = -1;
+    private static final int MIN_URI_PORT = 1;
+    private static final int MAX_URI_PORT = 65_535;
+<span class="fc" id="L25">    private static final Pattern LABELED_SOURCE = Pattern.compile(</span>
+            &quot;(?i)^[\\t ]*(repository[\\t ]+(?:url|path)|repo[\\t ]+(?:url|path)|local[\\t ]+(?:checkout|path)|checkout|repository|repo)[\\t ]*:[\\t ]*(.*)$&quot;);
+<span class="fc" id="L27">    private static final Pattern LINE_BREAK = Pattern.compile(&quot;\\R&quot;);</span>
+<span class="fc" id="L28">    private static final Pattern URI_SCHEME = Pattern.compile(&quot;^([A-Za-z][A-Za-z0-9+.-]*):&quot;);</span>
+<span class="fc" id="L29">    private static final Pattern WINDOWS_DRIVE_PATH = Pattern.compile(&quot;^[A-Za-z]:[\\\\/].*&quot;);</span>
+    private static final String REPOSITORY_SOURCE_CONFLICT_CODE = &quot;repository_source_conflict&quot;;
+    private static final String REPOSITORY_SOURCE_CONFLICT_GUIDANCE =
+            &quot;Multiple explicit repository source declarations conflict. Keep one source declaration or make every declaration identical.&quot;;
+
+    public RepositorySourceSelection select(Card card, EffectiveConfig.RepositoryConfig repository) {
+<span class="fc" id="L35">        RepositorySourceSelection explicit = explicitSource(card);</span>
+<span class="pc bpc" id="L36" title="1 of 2 branches missed.">        if (explicit.status() != RepositorySourceSelection.Status.NONE) {</span>
+<span class="fc" id="L37">            return explicit;</span>
+        }
+<span class="nc" id="L39">        return workflowDefault(repository);</span>
+    }
+
+    /// Validates a repository URL intended for `repository.default_url` without resolving or
+    /// contacting the repository.
+    public RepositorySourceSelection selectWorkflowDefaultUrl(String value) {
+<span class="fc bfc" id="L45" title="All 2 branches covered.">        if (!RepositorySourceText.safePromptLine(value)) {</span>
+<span class="fc" id="L46">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;,
+                    &quot;The selected repository URL contains unsupported control characters.&quot;);
+        }
+<span class="fc" id="L50">        String candidate = value.strip();</span>
+<span class="fc bfc" id="L51" title="All 4 branches covered.">        if (candidate.contains(&quot;?&quot;) || candidate.contains(&quot;#&quot;)) {</span>
+<span class="fc" id="L52">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;, &quot;Repository URLs must not include query strings or fragments.&quot;);
+        }
+<span class="fc bfc" id="L55" title="All 2 branches covered.">        if (!candidate.equals(stripTokenPunctuation(candidate))) {</span>
+<span class="fc" id="L56">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;,
+                    &quot;The selected repository URL contains unsupported token punctuation.&quot;);
+        }
+<span class="fc" id="L60">        return parse(candidate, RepositorySource.Origin.WORKFLOW_DEFAULT_URL, SourceMode.REMOTE_OR_FILE);</span>
+    }
+
+    private RepositorySourceSelection explicitSource(Card card) {
+<span class="fc" id="L64">        List&lt;Declaration&gt; declarations = declarations(card);</span>
+
+<span class="pc bpc" id="L66" title="1 of 3 branches missed.">        return switch (declarations.size()) {</span>
+<span class="nc" id="L67">            case 0 -&gt; RepositorySourceSelection.none();</span>
+<span class="fc" id="L68">            case 1 -&gt; parseExplicitSource(declarations.getFirst());</span>
+<span class="fc" id="L69">            default -&gt; explicitSourceFromMultipleDeclarations(declarations);</span>
+        };
+    }
+
+    private static RepositorySourceSelection explicitSourceFromMultipleDeclarations(List&lt;Declaration&gt; declarations) {
+<span class="fc" id="L74">        RepositorySourceSelection first = parseExplicitSource(declarations.getFirst());</span>
+
+<span class="fc bfc" id="L76" title="All 2 branches covered.">        boolean allEquivalent = first.status() == RepositorySourceSelection.Status.SELECTED</span>
+<span class="fc" id="L77">                &amp;&amp; declarations.stream()</span>
+<span class="fc" id="L78">                        .skip(1)</span>
+<span class="fc" id="L79">                        .map(RepositorySourceResolver::parseExplicitSource)</span>
+<span class="fc bfc" id="L80" title="All 2 branches covered.">                        .allMatch(selection -&gt; equivalent(first, selection));</span>
+
+<span class="fc bfc" id="L82" title="All 2 branches covered.">        return allEquivalent ? first : repositorySourceConflict();</span>
+    }
+
+    private static RepositorySourceSelection parseExplicitSource(Declaration declaration) {
+<span class="fc" id="L86">        return parse(declaration.value(), RepositorySource.Origin.CARD, declaration.mode());</span>
+    }
+
+    private static RepositorySourceSelection repositorySourceConflict() {
+<span class="fc" id="L90">        return invalid(REPOSITORY_SOURCE_CONFLICT_CODE, REPOSITORY_SOURCE_CONFLICT_GUIDANCE);</span>
+    }
+
+    private RepositorySourceSelection workflowDefault(EffectiveConfig.RepositoryConfig repository) {
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (repository.defaultUrl() != null) {</span>
+<span class="nc" id="L95">            RepositorySourceSelection selection = parse(</span>
+<span class="nc" id="L96">                    repository.defaultUrl(), RepositorySource.Origin.WORKFLOW_DEFAULT_URL, SourceMode.REMOTE_OR_FILE);</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">            if (selection.status() == RepositorySourceSelection.Status.INVALID_SELECTED) {</span>
+<span class="nc" id="L98">                return RepositorySourceSelection.invalidWorkflowFallback(selection.problem());</span>
+            }
+<span class="nc" id="L100">            return selection;</span>
+        }
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if (repository.defaultPath() != null) {</span>
+<span class="nc" id="L103">            return RepositorySourceSelection.selected(new RepositorySource(</span>
+                    RepositorySource.Kind.LOCAL_PATH,
+                    RepositorySource.Origin.WORKFLOW_DEFAULT_PATH,
+<span class="nc" id="L106">                    repository.defaultPath().toString(),</span>
+                    null,
+<span class="nc" id="L108">                    repository.defaultPath().toAbsolutePath().normalize()));</span>
+        }
+<span class="nc" id="L110">        return RepositorySourceSelection.none();</span>
+    }
+
+    private static RepositorySourceSelection parse(String rawValue, RepositorySource.Origin origin, SourceMode mode) {
+<span class="fc bfc" id="L114" title="All 2 branches covered.">        String value = mode == SourceMode.LOCAL_PATH ? rawValue.strip() : stripTokenPunctuation(rawValue);</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">        if (value.isBlank()) {</span>
+<span class="fc" id="L116">            return invalid(&quot;repository_source_missing&quot;, &quot;The selected repository source is blank.&quot;);</span>
+        }
+<span class="fc bfc" id="L118" title="All 2 branches covered.">        if (!RepositorySourceText.safePromptLine(value)) {</span>
+<span class="fc" id="L119">            return malformed(mode);</span>
+        }
+<span class="fc bfc" id="L121" title="All 2 branches covered.">        if (mode == SourceMode.LOCAL_PATH) {</span>
+<span class="fc" id="L122">            return localPath(value, origin);</span>
+        }
+<span class="fc bfc" id="L124" title="All 4 branches covered.">        if (mode.allowsLocalPath() &amp;&amp; windowsDrivePath(value)) {</span>
+<span class="fc" id="L125">            return localPath(value, origin);</span>
+        }
+<span class="fc bfc" id="L127" title="All 2 branches covered.">        if (fileUri(value)) {</span>
+<span class="fc" id="L128">            return fileUriPath(value, origin);</span>
+        }
+<span class="fc" id="L130">        RepositorySourceSelection remote = remote(value, origin);</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">        if (remote.status() != RepositorySourceSelection.Status.NONE) {</span>
+<span class="fc" id="L132">            return remote;</span>
+        }
+<span class="fc bfc" id="L134" title="All 6 branches covered.">        if (mode == SourceMode.REMOTE_ONLY || mode == SourceMode.REMOTE_OR_FILE || explicitUriScheme(value)) {</span>
+<span class="fc" id="L135">            return invalid(</span>
+                    &quot;repository_remote_unsupported&quot;,
+                    &quot;The selected repository remote uses an unsupported transport. Use HTTPS, SSH, SCP-style SSH, or a local checkout path.&quot;);
+        }
+<span class="fc" id="L139">        return localPath(rawValue.strip(), origin);</span>
+    }
+
+    private static RepositorySourceSelection remote(String value, RepositorySource.Origin origin) {
+<span class="fc bfc" id="L143" title="All 2 branches covered.">        if (!explicitUriScheme(value)) {</span>
+<span class="fc" id="L144">            RepositorySourceSelection scp = scpRemote(value, origin);</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">            if (scp.status() != RepositorySourceSelection.Status.NONE) {</span>
+<span class="fc" id="L146">                return scp;</span>
+            }
+        }
+        try {
+<span class="fc" id="L150">            var uri = new URI(value);</span>
+<span class="fc" id="L151">            String scheme = lower(uri.getScheme());</span>
+<span class="fc bfc" id="L152" title="All 4 branches covered.">            if (&quot;http&quot;.equals(scheme) || &quot;https&quot;.equals(scheme)) {</span>
+<span class="fc" id="L153">                return httpRemote(uri, origin);</span>
+            }
+<span class="fc bfc" id="L155" title="All 2 branches covered.">            if (&quot;ssh&quot;.equals(scheme)) {</span>
+<span class="fc" id="L156">                return sshRemote(uri, origin);</span>
+            }
+<span class="fc" id="L158">            return RepositorySourceSelection.none();</span>
+<span class="fc" id="L159">        } catch (URISyntaxException | IllegalArgumentException e) {</span>
+<span class="fc" id="L160">            return RepositorySourceSelection.none();</span>
+        }
+    }
+
+    private static RepositorySourceSelection httpRemote(URI uri, RepositorySource.Origin origin) {
+<span class="fc bfc" id="L165" title="All 4 branches covered.">        if (notBlank(uri.getRawUserInfo()) || hasQueryOrFragment(uri)) {</span>
+<span class="fc" id="L166">            return invalid(</span>
+                    &quot;repository_remote_credentials_unsupported&quot;,
+                    &quot;HTTP(S) repository URLs must not include embedded credentials, query strings, or fragments. Use a credential helper or SSH.&quot;);
+        }
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">        if (unsafeUriComponent(uri.getRawAuthority(), uri.getAuthority())</span>
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">                || unsafeUriComponent(uri.getRawPath(), uri.getPath())) {</span>
+<span class="nc" id="L172">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;,
+                    &quot;The selected repository URL contains unsupported control characters.&quot;);
+        }
+<span class="fc" id="L176">        return uriRemote(uri, origin, false);</span>
+    }
+
+    private static RepositorySourceSelection sshRemote(URI uri, RepositorySource.Origin origin) {
+<span class="fc bfc" id="L180" title="All 2 branches covered.">        if (hasQueryOrFragment(uri)) {</span>
+<span class="fc" id="L181">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;, &quot;SSH repository URLs must not include query strings or fragments.&quot;);
+        }
+<span class="fc" id="L184">        String userInfo = uri.getUserInfo();</span>
+<span class="fc bfc" id="L185" title="All 4 branches covered.">        if (notBlank(userInfo) &amp;&amp; userInfo.contains(&quot;:&quot;)) {</span>
+<span class="fc" id="L186">            return invalid(</span>
+                    &quot;repository_remote_credentials_unsupported&quot;,
+                    &quot;SSH repository URLs must not include password-like user information. Use a username-only SSH URL.&quot;);
+        }
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">        if (unsafeUriComponent(uri.getRawAuthority(), uri.getAuthority())</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">                || unsafeUriComponent(uri.getRawUserInfo(), uri.getUserInfo())</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">                || unsafeUriComponent(uri.getRawPath(), uri.getPath())) {</span>
+<span class="nc" id="L193">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;,
+                    &quot;The selected repository URL contains unsupported control characters.&quot;);
+        }
+<span class="fc" id="L197">        return uriRemote(uri, origin, true);</span>
+    }
+
+    private static RepositorySourceSelection uriRemote(URI uri, RepositorySource.Origin origin, boolean includeUser) {
+<span class="fc" id="L201">        String rawPath = uri.getRawPath();</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">        if (invalidExplicitPort(uri)) {</span>
+<span class="fc" id="L203">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;, &quot;The selected repository URL must use a port from 1 through 65535.&quot;);
+        }
+<span class="fc bfc" id="L206" title="All 6 branches covered.">        if (blank(uri.getHost()) || blank(rawPath) || &quot;/&quot;.equals(rawPath)) {</span>
+<span class="fc" id="L207">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;,
+                    &quot;The selected repository URL must include a host and repository path.&quot;);
+        }
+<span class="fc" id="L211">        String repositoryPath = stripSlashes(rawPath);</span>
+        try {
+<span class="fc" id="L213">            var identity = new RepositoryIdentity(authorityHost(uri), repositoryPath);</span>
+<span class="fc" id="L214">            return RepositorySourceSelection.selected(new RepositorySource(</span>
+                    RepositorySource.Kind.REMOTE,
+                    origin,
+<span class="fc" id="L217">                    normalizedUri(uri, repositoryPath, includeUser),</span>
+                    identity,
+                    null));
+<span class="fc" id="L220">        } catch (IllegalArgumentException e) {</span>
+<span class="fc" id="L221">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;, &quot;The selected repository URL must include a valid repository path.&quot;);
+        }
+    }
+
+    private static boolean invalidExplicitPort(URI uri) {
+<span class="fc" id="L227">        int port = uri.getPort();</span>
+<span class="pc bpc" id="L228" title="1 of 6 branches missed.">        return port == URI_PORT_ABSENT ? hasExplicitAuthorityPort(uri) : port &lt; MIN_URI_PORT || port &gt; MAX_URI_PORT;</span>
+    }
+
+    private static boolean hasExplicitAuthorityPort(URI uri) {
+<span class="fc" id="L232">        String authority = uri.getRawAuthority();</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">        if (authority == null) {</span>
+<span class="fc" id="L234">            return false;</span>
+        }
+<span class="fc" id="L236">        String hostAndPort = authority.substring(authority.lastIndexOf('@') + 1);</span>
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">        if (hostAndPort.startsWith(&quot;[&quot;)) {</span>
+<span class="nc" id="L238">            int closingBracket = hostAndPort.indexOf(']');</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">            return closingBracket &gt;= 0</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">                    &amp;&amp; closingBracket + 1 &lt; hostAndPort.length()</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                    &amp;&amp; hostAndPort.charAt(closingBracket + 1) == ':';</span>
+        }
+<span class="fc bfc" id="L243" title="All 2 branches covered.">        return hostAndPort.indexOf(':') &gt;= 0;</span>
+    }
+
+    private static RepositorySourceSelection scpRemote(String value, RepositorySource.Origin origin) {
+<span class="pc bpc" id="L247" title="1 of 4 branches missed.">        if (value.contains(&quot;://&quot;) || explicitUriScheme(value)) {</span>
+<span class="fc" id="L248">            return RepositorySourceSelection.none();</span>
+        }
+<span class="fc" id="L250">        int colon = value.indexOf(':');</span>
+<span class="pc bpc" id="L251" title="1 of 4 branches missed.">        if (colon &lt;= 0 || colon == value.length() - 1) {</span>
+<span class="fc" id="L252">            return RepositorySourceSelection.none();</span>
+        }
+<span class="fc" id="L254">        String hostPart = value.substring(0, colon);</span>
+<span class="fc" id="L255">        String rawPath = value.substring(colon + 1);</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">        if (!hostPart.contains(&quot;@&quot;)) {</span>
+<span class="fc" id="L257">            return RepositorySourceSelection.none();</span>
+        }
+<span class="fc bfc" id="L259" title="All 2 branches covered.">        if (containsWhitespace(hostPart)</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                || containsWhitespace(rawPath)</span>
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">                || unsafeRawComponent(hostPart)</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">                || unsafeRawComponent(rawPath)</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">                || rawPath.isBlank()) {</span>
+<span class="fc" id="L264">            return RepositorySourceSelection.none();</span>
+        }
+<span class="fc" id="L266">        int at = hostPart.lastIndexOf('@');</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">        String user = at &gt;= 0 ? hostPart.substring(0, at) : null;</span>
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">        String host = at &gt;= 0 ? hostPart.substring(at + 1) : hostPart;</span>
+<span class="pc bpc" id="L269" title="1 of 6 branches missed.">        if ((user != null &amp;&amp; !simpleName(user)) || !simpleHost(host)) {</span>
+<span class="fc" id="L270">            return RepositorySourceSelection.none();</span>
+        }
+<span class="fc" id="L272">        String path = stripSlashes(rawPath);</span>
+        try {
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">            String prefix = user == null ? &quot;&quot; : user + &quot;@&quot;;</span>
+<span class="fc" id="L275">            var identity = new RepositoryIdentity(host, path);</span>
+<span class="fc" id="L276">            return RepositorySourceSelection.selected(new RepositorySource(</span>
+<span class="fc" id="L277">                    RepositorySource.Kind.REMOTE, origin, prefix + identity.host() + &quot;:&quot; + path, identity, null));</span>
+<span class="fc" id="L278">        } catch (IllegalArgumentException e) {</span>
+<span class="fc" id="L279">            return invalid(</span>
+                    &quot;repository_remote_malformed&quot;,
+                    &quot;The selected SCP-style repository remote must include a valid host and repository path.&quot;);
+        }
+    }
+
+    private static RepositorySourceSelection fileUriPath(String value, RepositorySource.Origin origin) {
+        try {
+<span class="fc" id="L287">            var uri = new URI(value);</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">            if (!&quot;file&quot;.equals(lower(uri.getScheme()))</span>
+<span class="fc bfc" id="L289" title="All 2 branches covered.">                    || hasQueryOrFragment(uri)</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">                    || unsafeUriComponent(uri.getRawPath(), uri.getPath())) {</span>
+<span class="fc" id="L291">                return invalid(</span>
+                        &quot;repository_path_malformed&quot;,
+                        &quot;The selected file repository URL is malformed. Use a valid file URL or local checkout path.&quot;);
+            }
+<span class="fc" id="L295">            Path path = Path.of(uri).toAbsolutePath().normalize();</span>
+<span class="fc" id="L296">            return RepositorySourceSelection.selected(</span>
+<span class="fc" id="L297">                    new RepositorySource(RepositorySource.Kind.LOCAL_PATH, origin, path.toString(), null, path));</span>
+<span class="fc" id="L298">        } catch (IllegalArgumentException | URISyntaxException e) {</span>
+<span class="fc" id="L299">            return invalid(</span>
+                    &quot;repository_path_malformed&quot;,
+                    &quot;The selected file repository URL is malformed. Use a valid file URL or local checkout path.&quot;);
+        }
+    }
+
+    private static RepositorySourceSelection localPath(String value, RepositorySource.Origin origin) {
+        try {
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">            if (!RepositorySourceText.safePromptLine(stripAngleBrackets(value))) {</span>
+<span class="nc" id="L308">                return invalid(&quot;repository_path_malformed&quot;, &quot;The selected local repository path is malformed.&quot;);</span>
+            }
+<span class="fc" id="L310">            Path path = Path.of(stripAngleBrackets(value)).toAbsolutePath().normalize();</span>
+<span class="fc" id="L311">            return RepositorySourceSelection.selected(</span>
+<span class="fc" id="L312">                    new RepositorySource(RepositorySource.Kind.LOCAL_PATH, origin, path.toString(), null, path));</span>
+<span class="nc" id="L313">        } catch (InvalidPathException e) {</span>
+<span class="nc" id="L314">            return invalid(&quot;repository_path_malformed&quot;, &quot;The selected local repository path is malformed.&quot;);</span>
+        }
+    }
+
+    private static RepositorySourceSelection invalid(String code, String guidance) {
+<span class="fc" id="L319">        return RepositorySourceSelection.invalid(new RepositorySourceProblem(code, guidance));</span>
+    }
+
+    private static RepositorySourceSelection malformed(SourceMode mode) {
+<span class="fc bfc" id="L323" title="All 2 branches covered.">        return switch (mode) {</span>
+<span class="fc" id="L324">            case LOCAL_PATH -&gt; invalid(&quot;repository_path_malformed&quot;, &quot;The selected local repository path is malformed.&quot;);</span>
+            case REMOTE_ONLY, REMOTE_OR_FILE, REMOTE_FILE_OR_LOCAL -&gt;
+<span class="fc" id="L326">                invalid(</span>
+                        &quot;repository_remote_malformed&quot;,
+                        &quot;The selected repository URL must include a valid host and repository path.&quot;);
+        };
+    }
+
+    private static List&lt;Declaration&gt; declarations(Card card) {
+<span class="fc" id="L333">        return Stream.concat(</span>
+<span class="fc" id="L334">                        Stream.of(card.title(), card.description()),</span>
+<span class="fc" id="L335">                        card.comments().stream().map(Card.Comment::text))</span>
+<span class="fc" id="L336">                .flatMap(RepositorySourceResolver::declarations)</span>
+<span class="fc" id="L337">                .toList();</span>
+    }
+
+    private static Stream&lt;Declaration&gt; declarations(String text) {
+<span class="pc bpc" id="L341" title="1 of 4 branches missed.">        if (text == null || text.isBlank()) {</span>
+<span class="fc" id="L342">            return Stream.empty();</span>
+        }
+<span class="fc" id="L344">        return LINE_BREAK</span>
+<span class="fc" id="L345">                .splitAsStream(text)</span>
+<span class="fc" id="L346">                .map(LABELED_SOURCE::matcher)</span>
+<span class="fc" id="L347">                .filter(Matcher::matches)</span>
+<span class="fc" id="L348">                .map(labeled -&gt; new Declaration(labeled.group(2), labelMode(labeled.group(1))));</span>
+    }
+
+    private static boolean equivalent(RepositorySourceSelection expected, RepositorySourceSelection actual) {
+<span class="fc bfc" id="L352" title="All 2 branches covered.">        if (actual.status() != RepositorySourceSelection.Status.SELECTED) {</span>
+<span class="fc" id="L353">            return false;</span>
+        }
+<span class="fc" id="L355">        RepositorySource left = expected.source();</span>
+<span class="fc" id="L356">        RepositorySource right = actual.source();</span>
+<span class="fc bfc" id="L357" title="All 2 branches covered.">        return left.kind() == right.kind()</span>
+<span class="fc bfc" id="L358" title="All 2 branches covered.">                &amp;&amp; left.value().equals(right.value())</span>
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">                &amp;&amp; Objects.equals(left.identity(), right.identity())</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">                &amp;&amp; Objects.equals(left.path(), right.path());</span>
+    }
+
+    private static SourceMode labelMode(String label) {
+<span class="fc" id="L364">        String normalized =</span>
+<span class="fc" id="L365">                label.toLowerCase(Locale.ROOT).replaceAll(&quot;\\s+&quot;, &quot; &quot;).strip();</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        if (normalized.endsWith(&quot; url&quot;)) {</span>
+<span class="fc" id="L367">            return SourceMode.REMOTE_ONLY;</span>
+        }
+<span class="fc bfc" id="L369" title="All 4 branches covered.">        if (normalized.endsWith(&quot; path&quot;) || normalized.contains(&quot;checkout&quot;)) {</span>
+<span class="fc" id="L370">            return SourceMode.LOCAL_PATH;</span>
+        }
+<span class="fc" id="L372">        return SourceMode.REMOTE_FILE_OR_LOCAL;</span>
+    }
+
+    private static String normalizedUri(URI uri, String repositoryPath, boolean includeUser) {
+<span class="fc bfc" id="L376" title="All 4 branches covered.">        String user = includeUser &amp;&amp; notBlank(uri.getRawUserInfo()) ? uri.getRawUserInfo() + &quot;@&quot; : &quot;&quot;;</span>
+<span class="fc" id="L377">        return lower(uri.getScheme()) + &quot;://&quot; + user + authorityHost(uri) + &quot;/&quot; + repositoryPath;</span>
+    }
+
+    private static String authorityHost(URI uri) {
+<span class="fc" id="L381">        String host = uri.getHost().toLowerCase(Locale.ROOT);</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">        return uri.getPort() &lt; 0 ? host : host + &quot;:&quot; + uri.getPort();</span>
+    }
+
+    private static boolean explicitUriScheme(String value) {
+<span class="fc" id="L386">        Matcher matcher = URI_SCHEME.matcher(value);</span>
+<span class="fc bfc" id="L387" title="All 4 branches covered.">        return matcher.find() &amp;&amp; matcher.group(1).length() &gt; 1;</span>
+    }
+
+    private static boolean windowsDrivePath(String value) {
+<span class="fc" id="L391">        return WINDOWS_DRIVE_PATH.matcher(value).matches();</span>
+    }
+
+    private static boolean fileUri(String value) {
+<span class="fc" id="L395">        return value.regionMatches(true, 0, &quot;file://&quot;, 0, &quot;file://&quot;.length());</span>
+    }
+
+    private static String stripTokenPunctuation(String value) {
+<span class="fc" id="L399">        return TRAILING_TOKEN_PUNCTUATION.trimTrailingFrom(LEADING_TOKEN_PUNCTUATION.trimLeadingFrom(value.strip()));</span>
+    }
+
+    private static String stripAngleBrackets(String value) {
+<span class="fc" id="L403">        String stripped = value.strip();</span>
+<span class="pc bpc" id="L404" title="3 of 6 branches missed.">        if (stripped.startsWith(&quot;&lt;&quot;) &amp;&amp; stripped.endsWith(&quot;&gt;&quot;) &amp;&amp; stripped.length() &gt; 2) {</span>
+<span class="nc" id="L405">            return stripped.substring(1, stripped.length() - 1);</span>
+        }
+<span class="fc" id="L407">        return stripped;</span>
+    }
+
+    private static String stripSlashes(String value) {
+<span class="fc" id="L411">        return SLASHES.trimFrom(value.strip());</span>
+    }
+
+    private static String lower(String value) {
+<span class="fc bfc" id="L415" title="All 2 branches covered.">        return value == null ? null : value.toLowerCase(Locale.ROOT);</span>
+    }
+
+    private static boolean simpleName(String value) {
+<span class="fc bfc" id="L419" title="All 2 branches covered.">        return !value.isBlank()</span>
+<span class="fc" id="L420">                &amp;&amp; value.chars()</span>
+<span class="fc bfc" id="L421" title="All 10 branches covered.">                        .allMatch(character -&gt; Character.isLetterOrDigit(character)</span>
+                                || character == '.'
+                                || character == '_'
+                                || character == '-');
+    }
+
+    private static boolean simpleHost(String value) {
+<span class="fc bfc" id="L428" title="All 2 branches covered.">        return !value.isBlank()</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">                &amp;&amp; Character.isLetterOrDigit(value.charAt(0))</span>
+<span class="fc" id="L430">                &amp;&amp; value.chars()</span>
+<span class="fc bfc" id="L431" title="All 10 branches covered.">                        .allMatch(character -&gt; Character.isLetterOrDigit(character)</span>
+                                || character == '.'
+                                || character == '_'
+                                || character == '-');
+    }
+
+    private static boolean containsWhitespace(String value) {
+<span class="fc" id="L438">        return value.chars().anyMatch(Character::isWhitespace);</span>
+    }
+
+    private static boolean unsafeUriComponent(String rawValue, String decodedValue) {
+<span class="pc bpc" id="L442" title="2 of 4 branches missed.">        return unsafeRawComponent(rawValue) || unsafeDecodedComponent(decodedValue);</span>
+    }
+
+    private static boolean unsafeRawComponent(String value) {
+<span class="fc" id="L446">        return RepositorySourceText.unsafePromptLine(value);</span>
+    }
+
+    private static boolean unsafeDecodedComponent(String value) {
+<span class="fc" id="L450">        return RepositorySourceText.unsafePromptLine(value);</span>
+    }
+
+    private static boolean hasQueryOrFragment(URI uri) {
+<span class="fc bfc" id="L454" title="All 4 branches covered.">        return uri.getRawQuery() != null || uri.getRawFragment() != null;</span>
+    }
+
+    private static boolean notBlank(String value) {
+<span class="fc bfc" id="L458" title="All 2 branches covered.">        return !blank(value);</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="fc bfc" id="L462" title="All 4 branches covered.">        return value == null || value.isBlank();</span>
+    }
+
+<span class="fc" id="L465">    private enum SourceMode {</span>
+<span class="fc" id="L466">        REMOTE_ONLY,</span>
+<span class="fc" id="L467">        REMOTE_OR_FILE,</span>
+<span class="fc" id="L468">        REMOTE_FILE_OR_LOCAL,</span>
+<span class="fc" id="L469">        LOCAL_PATH;</span>
+
+        private boolean allowsLocalPath() {
+<span class="pc bpc" id="L472" title="1 of 4 branches missed.">            return this == REMOTE_FILE_OR_LOCAL || this == LOCAL_PATH;</span>
+        }
+    }
+
+<span class="fc" id="L476">    private record Declaration(String value, SourceMode mode) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

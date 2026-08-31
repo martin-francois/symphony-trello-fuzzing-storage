@@ -1,0 +1,602 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalSetupHealthTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalSetupHealthTest.java</span></div><h1>LocalSetupHealthTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.CliExitCodes.SETUP_FAILURE;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.testsupport.SetupRunResult;
+import ch.fmartin.symphony.trello.testsupport.TestEnv;
+import com.sun.net.httpserver.HttpServer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L19">final class LocalSetupHealthTest extends LocalSetupFixtureSupport {</span>
+    @MethodSource(&quot;workerHealthScenarios&quot;)
+    @ParameterizedTest
+    void checkReportsWorkerHealthState(WorkerHealthScenario scenario) throws Exception {
+        // given
+<span class="nc" id="L24">        Path workflow = tempDir.resolve(&quot;WORKFLOW.&quot; + scenario.fileSuffix() + &quot;.md&quot;);</span>
+<span class="nc" id="L25">        Path env = tempDir.resolve(&quot;.env.&quot; + scenario.fileSuffix());</span>
+<span class="nc" id="L26">        SetupRunResult setupResult = runSetup(</span>
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L29">                endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+<span class="nc" id="L35">                scenario.boardName(),</span>
+                &quot;--workflow&quot;,
+<span class="nc" id="L37">                workflow.toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L39">                env.toString(),</span>
+                &quot;--no-github&quot;);
+
+        // when
+<span class="nc" id="L43">        try (AutoCloseable ignored = scenario.prepare(this, workflow, env)) {</span>
+<span class="nc" id="L44">            SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+            // then
+<span class="nc" id="L47">            setupResult.assertSuccess();</span>
+<span class="nc" id="L48">            result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L49">                    .stderrEmpty()</span>
+<span class="nc" id="L50">                    .stdoutContains(scenario.expectedOutput(this, workflow, env))</span>
+<span class="nc" id="L51">                    .stdoutDoesNotContain(scenario.forbiddenOutputFragments());</span>
+        }
+<span class="nc" id="L53">    }</span>
+
+    private static Stream&lt;WorkerHealthScenario&gt; workerHealthScenarios() {
+<span class="nc" id="L56">        return Stream.of(</span>
+                new WorkerHealthScenario(
+                        &quot;wrong-board&quot;,
+                        &quot;Wrong Board Queue&quot;,
+                        (test, workflow, env) -&gt; {
+<span class="nc" id="L61">                            test.commands.stopHealthServer(workflow.toString());</span>
+<span class="nc" id="L62">                            test.commands.startHealthServer(workflow, &quot;other-board&quot;);</span>
+<span class="nc" id="L63">                            return () -&gt; {};</span>
+                        },
+<span class="nc" id="L65">                        (test, workflow, env) -&gt; new String[] {</span>
+                            &quot;WARN  \&quot;Wrong Board Queue\&quot; local server: http://127.0.0.1:&quot;,
+                            &quot;(wrong Symphony workflow or board)&quot;,
+<span class="nc" id="L68">                            &quot;Expected workflow: &quot; + workflow.toAbsolutePath().normalize(),</span>
+                            &quot;Actual board: other-board&quot;,
+                            &quot;Suggested fix: symphony-trello setup-local repair-port --board \&quot;Wrong Board Queue\&quot;&quot;
+                        },
+                        &quot;OK    \&quot;Wrong Board Queue\&quot; local server&quot;),
+                new WorkerHealthScenario(
+                        &quot;wrong-workflow&quot;,
+                        &quot;Wrong Workflow Queue&quot;,
+                        (test, workflow, env) -&gt; {
+<span class="nc" id="L77">                            Path wrongWorkflow = test.tempDir.resolve(&quot;WORKFLOW.actual.md&quot;);</span>
+<span class="nc" id="L78">                            Files.writeString(wrongWorkflow, Files.readString(workflow));</span>
+<span class="nc" id="L79">                            test.commands.stopHealthServer(workflow.toString());</span>
+<span class="nc" id="L80">                            test.commands.startHealthServer(wrongWorkflow, &quot;board-1&quot;);</span>
+<span class="nc" id="L81">                            return () -&gt; {};</span>
+                        },
+<span class="nc" id="L83">                        (test, workflow, env) -&gt; new String[] {</span>
+                            &quot;WARN  \&quot;Wrong Workflow Queue\&quot; local server: http://127.0.0.1:&quot;,
+                            &quot;(wrong Symphony workflow or board)&quot;,
+                            &quot;Actual workflow: &quot;
+                                    + test.tempDir
+<span class="nc" id="L88">                                            .resolve(&quot;WORKFLOW.actual.md&quot;)</span>
+<span class="nc" id="L89">                                            .toAbsolutePath()</span>
+<span class="nc" id="L90">                                            .normalize(),</span>
+                            &quot;Suggested fix: symphony-trello setup-local repair-port --board \&quot;Wrong Workflow Queue\&quot;&quot;
+                        },
+                        &quot;OK    \&quot;Wrong Workflow Queue\&quot; local server&quot;),
+                new WorkerHealthScenario(
+                        &quot;port-used&quot;,
+                        &quot;Port Used Queue&quot;,
+                        (test, workflow, env) -&gt; {
+<span class="nc" id="L98">                            test.commands.stopHealthServer(workflow.toString());</span>
+<span class="nc" id="L99">                            HttpServer otherServer = LocalSetupTestFixture.FakeCommands.createHealthServer(</span>
+<span class="nc" id="L100">                                    test.commands.workflowPort(workflow));</span>
+<span class="nc" id="L101">                            otherServer.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; {</span>
+<span class="nc" id="L102">                                byte[] bytes = &quot;{}&quot;.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L103">                                exchange.sendResponseHeaders(404, bytes.length);</span>
+<span class="nc" id="L104">                                try (var body = exchange.getResponseBody()) {</span>
+<span class="nc" id="L105">                                    body.write(bytes);</span>
+                                }
+<span class="nc" id="L107">                            });</span>
+<span class="nc" id="L108">                            otherServer.start();</span>
+<span class="nc" id="L109">                            return () -&gt; otherServer.stop(0);</span>
+                        },
+<span class="nc" id="L111">                        (test, workflow, env) -&gt; new String[] {</span>
+                            &quot;WARN  \&quot;Port Used Queue\&quot; configured port &quot;
+<span class="nc" id="L113">                                    + test.commands.workflowPort(workflow)</span>
+                                    + &quot; is in use by another process&quot;,
+                            &quot;Suggested fix: symphony-trello setup-local repair-port --board \&quot;Port Used Queue\&quot;&quot;
+                        },
+                        &quot;OK    \&quot;Port Used Queue\&quot; local server&quot;),
+                new WorkerHealthScenario(
+                        &quot;stopped&quot;,
+                        &quot;Stopped Queue&quot;,
+                        (test, workflow, env) -&gt; {
+<span class="nc" id="L122">                            test.commands.stopHealthServer(workflow.toString());</span>
+<span class="nc" id="L123">                            return () -&gt; {};</span>
+                        },
+<span class="nc" id="L125">                        (test, workflow, env) -&gt; new String[] {</span>
+                            &quot;WARN  \&quot;Stopped Queue\&quot; local server is not running&quot;,
+                            &quot;Start: symphony-trello start --env &quot; + env
+                        },
+                        &quot;setup-local repair-port&quot;,
+                        &quot;OK    \&quot;Stopped Queue\&quot; local server&quot;));
+    }
+
+<span class="nc" id="L133">    private record WorkerHealthScenario(</span>
+            String fileSuffix,
+            String boardName,
+            WorkerHealthPreparation preparation,
+            WorkerHealthExpectation expectation,
+            List&lt;String&gt; forbiddenOutput) {
+        private WorkerHealthScenario(
+                String fileSuffix,
+                String boardName,
+                WorkerHealthPreparation preparation,
+                WorkerHealthExpectation expectation,
+                String... forbiddenOutput) {
+<span class="nc" id="L145">            this(fileSuffix, boardName, preparation, expectation, List.of(forbiddenOutput));</span>
+<span class="nc" id="L146">        }</span>
+
+        AutoCloseable prepare(LocalSetupHealthTest test, Path workflow, Path env) throws Exception {
+<span class="nc" id="L149">            return preparation.prepare(test, workflow, env);</span>
+        }
+
+        String[] expectedOutput(LocalSetupHealthTest test, Path workflow, Path env) {
+<span class="nc" id="L153">            return expectation.fragments(test, workflow, env);</span>
+        }
+
+        String[] forbiddenOutputFragments() {
+<span class="nc" id="L157">            return forbiddenOutput.toArray(String[]::new);</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L162">            return fileSuffix;</span>
+        }
+    }
+
+    private interface WorkerHealthPreparation {
+        AutoCloseable prepare(LocalSetupHealthTest test, Path workflow, Path env) throws Exception;
+    }
+
+    private interface WorkerHealthExpectation {
+        String[] fragments(LocalSetupHealthTest test, Path workflow, Path env);
+    }
+
+    @Test
+    void setupPrefersRealHttpPortOverrideOverDotenvAlias() throws Exception {
+        // given
+<span class="nc" id="L177">        int envPort = availablePort();</span>
+<span class="nc" id="L178">        int dotenvPort = availablePort();</span>
+<span class="nc" id="L179">        commands.healthPortOverride = envPort;</span>
+<span class="nc" id="L180">        LocalSetup setupWithOverride = setupWithEnvironment(Map.of(</span>
+                &quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;,
+<span class="nc" id="L182">                tempDir.resolve(&quot;config&quot;).toString(),</span>
+                &quot;SYMPHONY_TRELLO_COMMAND&quot;,
+                &quot;symphony-trello&quot;,
+                &quot;QUARKUS_HTTP_PORT&quot;,
+<span class="nc" id="L186">                String.valueOf(envPort)));</span>
+<span class="nc" id="L187">        Path workflow = tempDir.resolve(&quot;WORKFLOW.env-precedence.md&quot;);</span>
+<span class="nc" id="L188">        Path env = tempDir.resolve(&quot;.env.env-precedence&quot;);</span>
+<span class="nc" id="L189">        Files.writeString(</span>
+                env,
+                &quot;&quot;&quot;
+                TRELLO_API_KEY=key
+                TRELLO_API_TOKEN=token
+                SYMPHONY_HTTP_PORT=%d
+                &quot;&quot;&quot;
+<span class="nc" id="L196">                        .formatted(dotenvPort));</span>
+
+        // when
+<span class="nc" id="L199">        SetupRunResult setupResult = runSetup(</span>
+                setupWithOverride,
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L203">                endpoint(),</span>
+                &quot;--board-name&quot;,
+                &quot;Env Precedence Queue&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L207">                workflow.toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L209">                env.toString(),</span>
+                &quot;--server-port&quot;,
+                &quot;19080&quot;,
+                &quot;--no-github&quot;);
+<span class="nc" id="L213">        SetupRunResult checkResult = runSetup(setupWithOverride, &quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L216">        setupResult.assertSuccess();</span>
+<span class="nc" id="L217">        checkResult</span>
+<span class="nc" id="L218">                .assertSuccess()</span>
+<span class="nc" id="L219">                .stdoutContains(&quot;\&quot;Env Precedence Queue\&quot; local server: http://127.0.0.1:&quot;, &quot;(already running)&quot;)</span>
+<span class="nc" id="L220">                .stdoutDoesNotContain(&quot;configured port is used by another process&quot;);</span>
+<span class="nc" id="L221">    }</span>
+
+    @Test
+    void checkReportsWorkflowBoardIdMismatchWithManifest() throws Exception {
+        // given
+<span class="nc" id="L226">        Path workflow = tempDir.resolve(&quot;WORKFLOW.board-mismatch.md&quot;);</span>
+<span class="nc" id="L227">        Path env = tempDir.resolve(&quot;.env.board-mismatch&quot;);</span>
+<span class="nc" id="L228">        SetupRunResult setupResult = runSetup(</span>
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L231">                endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;Board Mismatch Queue&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L239">                workflow.toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L241">                env.toString(),</span>
+                &quot;--no-github&quot;);
+<span class="nc" id="L243">        Files.writeString(</span>
+<span class="nc" id="L244">                workflow, Files.readString(workflow).replace(&quot;board_id: \&quot;abc123\&quot;&quot;, &quot;board_id: \&quot;other-board\&quot;&quot;));</span>
+
+        // when
+<span class="nc" id="L247">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L250">        setupResult.assertSuccess();</span>
+<span class="nc" id="L251">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L252">                .stderrEmpty()</span>
+<span class="nc" id="L253">                .stdoutContains(</span>
+                        &quot;Workflow tracker.board_id does not match the connected board&quot;,
+                        &quot;expected board-1 or abc123 but found other-board&quot;);
+<span class="nc" id="L256">    }</span>
+
+    @Test
+    void checkReportsWorkflowPortMismatchWithManifest() throws Exception {
+        // given
+<span class="nc" id="L261">        Path workflow = tempDir.resolve(&quot;WORKFLOW.port-mismatch.md&quot;);</span>
+<span class="nc" id="L262">        Path env = tempDir.resolve(&quot;.env.port-mismatch&quot;);</span>
+<span class="nc" id="L263">        int port = availablePort();</span>
+<span class="nc" id="L264">        SetupRunResult setupResult = runSetup(</span>
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L267">                endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;Port Mismatch Queue&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L275">                workflow.toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L277">                env.toString(),</span>
+                &quot;--server-port&quot;,
+<span class="nc" id="L279">                String.valueOf(port),</span>
+                &quot;--no-github&quot;);
+<span class="nc" id="L281">        Files.writeString(workflow, Files.readString(workflow).replace(&quot;port: &quot; + port, &quot;port: &quot; + (port + 1)));</span>
+
+        // when
+<span class="nc" id="L284">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L287">        setupResult.assertSuccess();</span>
+<span class="nc" id="L288">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L289">                .stderrEmpty()</span>
+<span class="nc" id="L290">                .stdoutContains(</span>
+                        &quot;Workflow server.port does not match the connected board&quot;,
+                        &quot;expected &quot; + port + &quot; but found &quot; + (port + 1));
+<span class="nc" id="L293">    }</span>
+
+    @Test
+    void checkReportsInvalidConnectedBoardLocalPathsWithoutStartHint() throws Exception {
+        // given
+<span class="nc" id="L298">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L299">        Path workflow = configDir.resolve(&quot;WORKFLOW.invalid-local-paths.md&quot;);</span>
+<span class="nc" id="L300">        Path envDirectory = tempDir.resolve(&quot;env-dir&quot;);</span>
+<span class="nc" id="L301">        Path workspaceFile = tempDir.resolve(&quot;workspace-file&quot;);</span>
+<span class="nc" id="L302">        Files.createDirectories(configDir);</span>
+<span class="nc" id="L303">        Files.createDirectories(envDirectory);</span>
+<span class="nc" id="L304">        Files.createDirectories(fixture.workspaceRoot());</span>
+<span class="nc" id="L305">        Files.writeString(workspaceFile, &quot;not a directory&quot;);</span>
+<span class="nc" id="L306">        writeWorkflow(workflow, &quot;synthetic-board&quot;, 20451);</span>
+<span class="nc" id="L307">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[
+                  {&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Workspace File&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/workspace-file&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20451,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]},
+                  {&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Env Directory&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/env-directory&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20453,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[&quot;relative/path&quot;]}
+                ]}
+                &quot;&quot;&quot;
+<span class="nc" id="L314">                        .formatted(</span>
+<span class="nc" id="L315">                                json(workflow),</span>
+<span class="nc" id="L316">                                json(configDir.resolve(&quot;.env.workspace-file&quot;)),</span>
+<span class="nc" id="L317">                                json(workspaceFile),</span>
+<span class="nc" id="L318">                                json(workflow),</span>
+<span class="nc" id="L319">                                json(envDirectory),</span>
+<span class="nc" id="L320">                                json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L323">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L326">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L327">                .stderrEmpty()</span>
+<span class="nc" id="L328">                .stdoutContains(</span>
+                        &quot;Workspace root for \&quot;Workspace File\&quot; must be a directory: &quot; + workspaceFile,
+                        &quot;Trello credential path for \&quot;Env Directory\&quot; must be a dotenv file, but it is a directory: &quot;
+                                + envDirectory,
+                        &quot;Additional writable root for \&quot;Env Directory\&quot; must be an absolute path: relative/path&quot;)
+<span class="nc" id="L333">                .stdoutDoesNotContain(&quot;Start: symphony-trello start&quot;);</span>
+<span class="nc" id="L334">    }</span>
+
+    @Test
+    void checkEscapesControlCharacterBoardNamesInManifestWarnings() throws Exception {
+        // given
+        // The manifest is hand-editable, so persisted board names may contain quotes and
+        // control characters; a warning that embeds such a name must stay one logical line
+        // with escaped, unambiguous quoting instead of splitting the warning across lines.
+<span class="nc" id="L342">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L343">        Path workflow = configDir.resolve(&quot;WORKFLOW.dirty-name-warning.md&quot;);</span>
+<span class="nc" id="L344">        Files.createDirectories(fixture.workspaceRoot());</span>
+<span class="nc" id="L345">        writeWorkflow(workflow, &quot;synthetic-board&quot;, 20455);</span>
+<span class="nc" id="L346">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[{&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Sneaky \\&quot;Q\\&quot;\\nBoard&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/synthetic&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20455,&quot;githubEnabled&quot;:&quot;false&quot;,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]}]}
+                &quot;&quot;&quot;
+<span class="nc" id="L350">                        .formatted(json(workflow), json(configDir.resolve(&quot;.env&quot;)), json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L353">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L356">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L357">                .stderrEmpty()</span>
+<span class="nc" id="L358">                .stdoutContains(</span>
+                        &quot;Connected-board manifest entry \&quot;Sneaky \\\&quot;Q\\\&quot;\\nBoard\&quot; field githubEnabled must be true or false.&quot;)
+<span class="nc" id="L360">                .stdoutDoesNotContain(&quot;Sneaky \&quot;Q\&quot;\nBoard&quot;, &quot;\&quot;Q\&quot;\nBoard&quot;);</span>
+<span class="nc" id="L361">    }</span>
+
+    @Test
+    void checkReportsInvalidConnectedBoardManifestValueShapes() throws Exception {
+        // given
+<span class="nc" id="L366">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L367">        Path workflow = configDir.resolve(&quot;WORKFLOW.invalid-shapes.md&quot;);</span>
+<span class="nc" id="L368">        Files.createDirectories(fixture.workspaceRoot());</span>
+<span class="nc" id="L369">        writeWorkflow(workflow, &quot;synthetic-board&quot;, 20454);</span>
+<span class="nc" id="L370">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[{&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Synthetic Board&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/synthetic&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:&quot;20454&quot;,&quot;githubEnabled&quot;:&quot;false&quot;,&quot;dangerFullAccess&quot;:&quot;false&quot;,&quot;additionalWritableRoots&quot;:&quot;relative/path&quot;}]}
+                &quot;&quot;&quot;
+<span class="nc" id="L374">                        .formatted(json(workflow), json(configDir.resolve(&quot;.env&quot;)), json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L377">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L380">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L381">                .stderrEmpty()</span>
+<span class="nc" id="L382">                .stdoutContains(</span>
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field githubEnabled must be true or false.&quot;,
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field dangerFullAccess must be true or false.&quot;,
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field serverPort must be a JSON number from 1 to 65535.&quot;,
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field additionalWritableRoots must be an array of path strings.&quot;,
+                        &quot;Connected-board manifest contains invalid values and could not be loaded for checks.&quot;)
+<span class="nc" id="L388">                .stdoutDoesNotContain(</span>
+                        &quot;Cannot deserialize&quot;, &quot;Troubleshooting report written&quot;, &quot;Start: symphony-trello start&quot;);
+<span class="nc" id="L390">    }</span>
+
+    @Test
+    void checkReportsNullConnectedBoardManifestShapesWithoutRawException() throws Exception {
+        // given
+<span class="nc" id="L395">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L396">        Files.createDirectories(configDir);</span>
+<span class="nc" id="L397">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[null,{&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Synthetic Board&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/synthetic&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20454,&quot;additionalWritableRoots&quot;:[null]}]}
+                &quot;&quot;&quot;
+<span class="nc" id="L401">                        .formatted(</span>
+<span class="nc" id="L402">                                json(configDir.resolve(&quot;WORKFLOW.null-shapes.md&quot;)),</span>
+<span class="nc" id="L403">                                json(configDir.resolve(&quot;.env&quot;)),</span>
+<span class="nc" id="L404">                                json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L407">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L410">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L411">                .stderrEmpty()</span>
+<span class="nc" id="L412">                .stdoutContains(</span>
+                        &quot;Connected-board manifest entry 1 must be an object.&quot;,
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field additionalWritableRoots must contain only non-blank path strings.&quot;,
+                        &quot;Connected-board manifest contains invalid values and could not be loaded for checks.&quot;)
+<span class="nc" id="L416">                .stdoutDoesNotContain(&quot;NullPointerException&quot;, &quot;Cannot deserialize&quot;, &quot;Troubleshooting report written&quot;);</span>
+<span class="nc" id="L417">    }</span>
+
+    @Test
+    void checkReportsMissingConnectedBoardManifestPathsWithoutRawException() throws Exception {
+        // given
+<span class="nc" id="L422">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L423">        Files.createDirectories(configDir);</span>
+<span class="nc" id="L424">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[{&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Synthetic Board&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/synthetic&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20456,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]}]}
+                &quot;&quot;&quot;
+<span class="nc" id="L428">                        .formatted(json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L431">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L434">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L435">                .stderrEmpty()</span>
+<span class="nc" id="L436">                .stdoutContains(</span>
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field workflowPath must be a non-blank string.&quot;,
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field envPath must be a non-blank string.&quot;,
+                        &quot;Workflow path for \&quot;Synthetic Board\&quot; is missing from &quot; + ConnectedBoardManifest.FILE_NAME
+                                + &quot;.&quot;,
+                        &quot;Trello credential path for \&quot;Synthetic Board\&quot; is missing from &quot;
+                                + ConnectedBoardManifest.FILE_NAME + &quot;.&quot;)
+<span class="nc" id="L443">                .stdoutDoesNotContain(&quot;NullPointerException&quot;, &quot;Troubleshooting report written&quot;);</span>
+<span class="nc" id="L444">    }</span>
+
+    @Test
+    void checkBoardSelectorToleratesMalformedManifestEntries() throws Exception {
+        // given
+<span class="nc" id="L449">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L450">        Path workflow = configDir.resolve(&quot;WORKFLOW.valid.md&quot;);</span>
+<span class="nc" id="L451">        Path env = configDir.resolve(&quot;.env.valid&quot;);</span>
+<span class="nc" id="L452">        Files.createDirectories(configDir);</span>
+<span class="nc" id="L453">        Files.createDirectories(fixture.workspaceRoot());</span>
+<span class="nc" id="L454">        Files.writeString(env, TestEnv.trelloCredentials());</span>
+<span class="nc" id="L455">        writeWorkflow(workflow, &quot;valid-board-id&quot;, 20457);</span>
+<span class="nc" id="L456">        commands.startHealthServer(workflow, &quot;other-board&quot;);</span>
+<span class="nc" id="L457">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[
+                  {&quot;boardId&quot;:&quot;missing-name-id&quot;,&quot;boardKey&quot;:&quot;missing-name-key&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/missing-name&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20458,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]},
+                  {&quot;boardId&quot;:&quot;valid-board-id&quot;,&quot;boardKey&quot;:&quot;valid-key&quot;,&quot;boardName&quot;:&quot;Valid Board&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/valid&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20457,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]}
+                ]}
+                &quot;&quot;&quot;
+<span class="nc" id="L464">                        .formatted(</span>
+<span class="nc" id="L465">                                json(configDir.resolve(&quot;WORKFLOW.missing-name.md&quot;)),</span>
+<span class="nc" id="L466">                                json(configDir.resolve(&quot;.env.missing-name&quot;)),</span>
+<span class="nc" id="L467">                                json(fixture.workspaceRoot()),</span>
+<span class="nc" id="L468">                                json(workflow),</span>
+<span class="nc" id="L469">                                json(env),</span>
+<span class="nc" id="L470">                                json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L473">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--board&quot;, &quot;valid-key&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L476">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L477">                .stderrEmpty()</span>
+<span class="nc" id="L478">                .stdoutContains(</span>
+                        &quot;Connected-board manifest entry 1 field boardName must be a non-blank string.&quot;,
+                        &quot;WARN  \&quot;Valid Board\&quot; local server:&quot;,
+                        &quot;Suggested fix: symphony-trello setup-local repair-port --board \&quot;Valid Board\&quot;&quot;)
+<span class="nc" id="L482">                .stdoutDoesNotContain(&quot;NullPointerException&quot;, &quot;Troubleshooting report written&quot;);</span>
+<span class="nc" id="L483">    }</span>
+
+    @Test
+    void checkBoardSelectorReportsManifestWarningsBeforeMissingSelectorError() throws Exception {
+        // given
+<span class="nc" id="L488">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L489">        Path workflow = configDir.resolve(&quot;WORKFLOW.valid.md&quot;);</span>
+<span class="nc" id="L490">        Path env = configDir.resolve(&quot;.env.valid&quot;);</span>
+<span class="nc" id="L491">        Files.createDirectories(configDir);</span>
+<span class="nc" id="L492">        Files.createDirectories(fixture.workspaceRoot());</span>
+<span class="nc" id="L493">        Files.writeString(env, TestEnv.trelloCredentials());</span>
+<span class="nc" id="L494">        writeWorkflow(workflow, &quot;valid-board-id&quot;, 20457);</span>
+<span class="nc" id="L495">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[
+                  {&quot;boardId&quot;:&quot;missing-name-id&quot;,&quot;boardKey&quot;:&quot;missing-name-key&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/missing-name&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20458,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]},
+                  {&quot;boardId&quot;:&quot;valid-board-id&quot;,&quot;boardKey&quot;:&quot;valid-key&quot;,&quot;boardName&quot;:&quot;Valid Board&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/valid&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:20457,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]}
+                ]}
+                &quot;&quot;&quot;
+<span class="nc" id="L502">                        .formatted(</span>
+<span class="nc" id="L503">                                json(configDir.resolve(&quot;WORKFLOW.missing-name.md&quot;)),</span>
+<span class="nc" id="L504">                                json(configDir.resolve(&quot;.env.missing-name&quot;)),</span>
+<span class="nc" id="L505">                                json(fixture.workspaceRoot()),</span>
+<span class="nc" id="L506">                                json(workflow),</span>
+<span class="nc" id="L507">                                json(env),</span>
+<span class="nc" id="L508">                                json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L511">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--board&quot;, &quot;missing-private-selector&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L514">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L515">                .stdoutContains(&quot;Connected-board manifest entry 1 field boardName must be a non-blank string.&quot;)</span>
+<span class="nc" id="L516">                .stderrContains(</span>
+                        &quot;setup_failed code=setup_board_selection_required&quot;,
+                        &quot;No connected Trello board matches \&quot;missing-private-selector\&quot;.&quot;)
+<span class="nc" id="L519">                .stderrDoesNotContain(&quot;Troubleshooting report written&quot;);</span>
+<span class="nc" id="L520">    }</span>
+
+    @Test
+    void checkReportsOutOfRangeConnectedBoardManifestPort() throws Exception {
+        // given
+<span class="nc" id="L525">        Path configDir = fixture.configDir();</span>
+<span class="nc" id="L526">        Path workflow = configDir.resolve(&quot;WORKFLOW.invalid-port.md&quot;);</span>
+<span class="nc" id="L527">        Files.createDirectories(fixture.workspaceRoot());</span>
+<span class="nc" id="L528">        writeWorkflow(workflow, &quot;synthetic-board&quot;, 20455);</span>
+<span class="nc" id="L529">        fixture.givenManifest(</span>
+                &quot;&quot;&quot;
+                {&quot;boards&quot;:[{&quot;boardId&quot;:&quot;synthetic-board&quot;,&quot;boardKey&quot;:&quot;synthetic&quot;,&quot;boardName&quot;:&quot;Synthetic Board&quot;,&quot;boardUrl&quot;:&quot;https://trello.example/synthetic&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s&quot;,&quot;workspaceRoot&quot;:&quot;%s&quot;,&quot;serverPort&quot;:65536,&quot;githubEnabled&quot;:false,&quot;dangerFullAccess&quot;:false,&quot;additionalWritableRoots&quot;:[]}]}
+                &quot;&quot;&quot;
+<span class="nc" id="L533">                        .formatted(json(workflow), json(configDir.resolve(&quot;.env&quot;)), json(fixture.workspaceRoot())));</span>
+
+        // when
+<span class="nc" id="L536">        SetupRunResult result = runSetup(&quot;check&quot;, &quot;--endpoint&quot;, endpoint());</span>
+
+        // then
+<span class="nc" id="L539">        result.assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L540">                .stderrEmpty()</span>
+<span class="nc" id="L541">                .stdoutContains(</span>
+                        &quot;Connected-board manifest entry \&quot;Synthetic Board\&quot; field serverPort must be between 1 and 65535.&quot;)
+<span class="nc" id="L543">                .stdoutDoesNotContain(&quot;expected 65536&quot;, &quot;http://127.0.0.1:65536&quot;, &quot;Start: symphony-trello start&quot;);</span>
+<span class="nc" id="L544">    }</span>
+
+    @Test
+    void setupRejectsExplicitServerPortReservedByConnectedBoard() {
+        // given
+<span class="nc" id="L549">        int reservedPort = availablePort();</span>
+<span class="nc" id="L550">        Path firstWorkflow = tempDir.resolve(&quot;WORKFLOW.first.md&quot;);</span>
+<span class="nc" id="L551">        Path secondWorkflow = tempDir.resolve(&quot;WORKFLOW.second.md&quot;);</span>
+<span class="nc" id="L552">        Path env = tempDir.resolve(&quot;.env&quot;);</span>
+<span class="nc" id="L553">        SetupRunResult firstResult = runSetup(</span>
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L556">                endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;First Queue&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L564">                firstWorkflow.toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L566">                env.toString(),</span>
+                &quot;--server-port&quot;,
+<span class="nc" id="L568">                String.valueOf(reservedPort),</span>
+                &quot;--no-start&quot;,
+                &quot;--no-github&quot;);
+<span class="nc" id="L571">        trello.createdLists().clear();</span>
+
+        // when
+<span class="nc" id="L574">        SetupRunResult secondResult = runSetup(</span>
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L577">                endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;Second Queue&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L585">                secondWorkflow.toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L587">                env.toString(),</span>
+                &quot;--server-port&quot;,
+<span class="nc" id="L589">                String.valueOf(reservedPort),</span>
+                &quot;--no-start&quot;,
+                &quot;--no-github&quot;);
+
+        // then
+<span class="nc" id="L594">        firstResult.assertSuccess();</span>
+<span class="nc" id="L595">        secondResult</span>
+<span class="nc" id="L596">                .assertFailure(SETUP_FAILURE)</span>
+<span class="nc" id="L597">                .stderrContains(&quot;setup_server_port_conflict&quot;, &quot;already reserved by another connected workflow&quot;);</span>
+<span class="nc" id="L598">        assertThat(trello.createdLists()).isEmpty();</span>
+<span class="nc" id="L599">        assertThat(secondWorkflow).doesNotExist();</span>
+<span class="nc" id="L600">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

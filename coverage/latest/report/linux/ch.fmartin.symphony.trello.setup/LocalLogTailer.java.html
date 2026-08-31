@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalLogTailer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalLogTailer.java</span></div><h1>LocalLogTailer.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+
+<span class="nc" id="L17">final class LocalLogTailer {</span>
+    private static final int TAIL_CHUNK_SIZE = 8 * 1024;
+
+    void printRecent(List&lt;Path&gt; logFiles, int maxLines, PrintStream out) throws IOException {
+<span class="nc" id="L21">        boolean printed = false;</span>
+<span class="nc bnc" id="L22" title="All 2 branches missed.">        for (Path logFile : logFiles) {</span>
+<span class="nc bnc" id="L23" title="All 2 branches missed.">            if (!isRegularLogFile(logFile)) {</span>
+<span class="nc" id="L24">                continue;</span>
+            }
+<span class="nc" id="L26">            printed = true;</span>
+<span class="nc bnc" id="L27" title="All 2 branches missed.">            for (String line : tailLines(logFile, maxLines)) {</span>
+<span class="nc" id="L28">                out.println(line);</span>
+<span class="nc" id="L29">            }</span>
+<span class="nc" id="L30">        }</span>
+<span class="nc bnc" id="L31" title="All 2 branches missed.">        if (!printed) {</span>
+<span class="nc" id="L32">            throw new TrelloBoardSetupException(&quot;setup_logs_missing&quot;, &quot;No managed log files found.&quot;);</span>
+        }
+<span class="nc" id="L34">    }</span>
+
+    /// Follow mode polls each log file by path every 500 ms instead of using `WatchService`:
+    /// re-opening by path follows rotated or recreated logs without watcher re-registration, it
+    /// behaves the same on network filesystems where file events do not fire, and half a second of
+    /// latency is fine for a human following logs. See
+    /// docs/adr/0053-sleep-based-waits-kept-as-polling-boundaries.md.
+    void follow(List&lt;Path&gt; logFiles, PrintStream out) throws IOException {
+<span class="nc" id="L42">        printRecent(logFiles, 100, out);</span>
+<span class="nc" id="L43">        long[] positions = new long[logFiles.size()];</span>
+<span class="nc bnc" id="L44" title="All 2 branches missed.">        for (int i = 0; i &lt; logFiles.size(); i++) {</span>
+<span class="nc" id="L45">            positions[i] = logSizeOrZero(logFiles.get(i));</span>
+        }
+<span class="nc bnc" id="L47" title="All 2 branches missed.">        while (!Thread.currentThread().isInterrupted()) {</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">            for (int i = 0; i &lt; logFiles.size(); i++) {</span>
+<span class="nc" id="L49">                Path logFile = logFiles.get(i);</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">                if (!isRegularLogFile(logFile)) {</span>
+<span class="nc" id="L51">                    continue;</span>
+                }
+<span class="nc" id="L53">                try (FileChannel file = openLogFile(logFile)) {</span>
+<span class="nc" id="L54">                    file.position(Math.min(positions[i], file.size()));</span>
+<span class="nc bnc" id="L55" title="All 2 branches missed.">                    for (String line : readRemainingLines(file)) {</span>
+<span class="nc" id="L56">                        out.println(line);</span>
+<span class="nc" id="L57">                    }</span>
+<span class="nc" id="L58">                    positions[i] = file.position();</span>
+                }
+            }
+            try {
+<span class="nc" id="L62">                Thread.sleep(Duration.ofMillis(500));</span>
+<span class="nc" id="L63">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L64">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L65">            }</span>
+        }
+<span class="nc" id="L67">    }</span>
+
+    private List&lt;String&gt; tailLines(Path logFile, int maxLines) throws IOException {
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if (maxLines &lt;= 0) {</span>
+<span class="nc" id="L71">            return List.of();</span>
+        }
+<span class="nc" id="L73">        try (FileChannel file = openLogFile(logFile)) {</span>
+<span class="nc" id="L74">            long position = file.size();</span>
+<span class="nc" id="L75">            int newlineCount = 0;</span>
+<span class="nc" id="L76">            List&lt;byte[]&gt; chunks = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L77" title="All 4 branches missed.">            while (position &gt; 0 &amp;&amp; newlineCount &lt;= maxLines) {</span>
+<span class="nc" id="L78">                var bytesToRead = (int) Math.min(TAIL_CHUNK_SIZE, position);</span>
+<span class="nc" id="L79">                position -= bytesToRead;</span>
+<span class="nc" id="L80">                byte[] chunk = new byte[bytesToRead];</span>
+<span class="nc" id="L81">                readFully(file, position, chunk);</span>
+<span class="nc" id="L82">                chunks.add(chunk);</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                for (int i = bytesToRead - 1; i &gt;= 0; i--) {</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                    if (chunk[i] == '\n') {</span>
+<span class="nc" id="L85">                        newlineCount++;</span>
+                    }
+                }
+<span class="nc" id="L88">            }</span>
+<span class="nc" id="L89">            String tailText = decodeChunks(chunks);</span>
+<span class="nc" id="L90">            List&lt;String&gt; lines = tailText.lines().toList();</span>
+<span class="nc" id="L91">            int start = Math.max(0, lines.size() - maxLines);</span>
+<span class="nc" id="L92">            return List.copyOf(lines.subList(start, lines.size()));</span>
+        }
+    }
+
+    private static List&lt;String&gt; readRemainingLines(FileChannel file) throws IOException {
+<span class="nc" id="L97">        var bytes = new ByteArrayOutputStream();</span>
+<span class="nc" id="L98">        ByteBuffer buffer = ByteBuffer.allocate(TAIL_CHUNK_SIZE);</span>
+<span class="nc" id="L99">        int read = file.read(buffer);</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        while (read != -1) {</span>
+<span class="nc" id="L101">            buffer.flip();</span>
+<span class="nc" id="L102">            bytes.write(buffer.array(), 0, buffer.remaining());</span>
+<span class="nc" id="L103">            buffer.clear();</span>
+<span class="nc" id="L104">            read = file.read(buffer);</span>
+        }
+<span class="nc" id="L106">        return bytes.toString(StandardCharsets.UTF_8).lines().toList();</span>
+    }
+
+    private static void readFully(FileChannel file, long position, byte[] target) throws IOException {
+<span class="nc" id="L110">        ByteBuffer buffer = ByteBuffer.wrap(target);</span>
+<span class="nc" id="L111">        file.position(position);</span>
+<span class="nc bnc" id="L112" title="All 4 branches missed.">        while (buffer.hasRemaining() &amp;&amp; file.read(buffer) != -1) {</span>
+            // Continue until the requested chunk has been read or EOF is reached.
+        }
+<span class="nc" id="L115">    }</span>
+
+    private static long logSizeOrZero(Path logFile) throws IOException {
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (!isRegularLogFile(logFile)) {</span>
+<span class="nc" id="L119">            return 0L;</span>
+        }
+<span class="nc" id="L121">        try (FileChannel file = openLogFile(logFile)) {</span>
+<span class="nc" id="L122">            return file.size();</span>
+        }
+    }
+
+    private static FileChannel openLogFile(Path logFile) throws IOException {
+<span class="nc" id="L127">        return FileChannel.open(logFile, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);</span>
+    }
+
+    private static boolean isRegularLogFile(Path logFile) {
+<span class="nc" id="L131">        return Files.isRegularFile(logFile, LinkOption.NOFOLLOW_LINKS);</span>
+    }
+
+    private static String decodeChunks(List&lt;byte[]&gt; reversedChunks) {
+<span class="nc" id="L135">        var tail = new ByteArrayOutputStream(</span>
+<span class="nc" id="L136">                reversedChunks.stream().mapToInt(chunk -&gt; chunk.length).sum());</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        for (byte[] chunk : reversedChunks.reversed()) {</span>
+<span class="nc" id="L138">            tail.writeBytes(chunk);</span>
+<span class="nc" id="L139">        }</span>
+<span class="nc" id="L140">        return tail.toString(StandardCharsets.UTF_8);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

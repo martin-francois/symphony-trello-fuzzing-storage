@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalAgentRunner.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">LocalAgentRunner.java</span></div><h1>LocalAgentRunner.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import static com.google.common.base.Strings.nullToEmpty;
+
+import ch.fmartin.symphony.trello.codex.CodexSkillCatalog;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.repository.RepositorySourcePrompt;
+import ch.fmartin.symphony.trello.repository.RepositorySourceResolver;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.TrackerClient;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.workspace.CodexSkillInstaller;
+import ch.fmartin.symphony.trello.workspace.HookRunner;
+import ch.fmartin.symphony.trello.workspace.Workspace;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@ApplicationScoped
+public class LocalAgentRunner implements AgentRunner {
+    private final WorkspaceManager workspaceManager;
+    private final HookRunner hooks;
+    private final CodexAppServerClient codex;
+    private final TrackerClient tracker;
+    private final PromptRenderer prompts;
+    private final CodexSkillInstaller codexSkills;
+    private final RepositorySourceResolver repositorySources;
+<span class="nc" id="L31">    private final Map&lt;String, Thread&gt; active = new ConcurrentHashMap&lt;&gt;();</span>
+
+    public LocalAgentRunner(
+            WorkspaceManager workspaceManager,
+            HookRunner hooks,
+            CodexAppServerClient codex,
+            TrackerClient tracker,
+            PromptRenderer prompts) {
+<span class="nc" id="L39">        this(workspaceManager, hooks, codex, tracker, prompts, new CodexSkillInstaller());</span>
+<span class="nc" id="L40">    }</span>
+
+    @Inject
+    public LocalAgentRunner(
+            WorkspaceManager workspaceManager,
+            HookRunner hooks,
+            CodexAppServerClient codex,
+            TrackerClient tracker,
+            PromptRenderer prompts,
+            CodexSkillInstaller codexSkills) {
+<span class="nc" id="L50">        this(workspaceManager, hooks, codex, tracker, prompts, codexSkills, new RepositorySourceResolver());</span>
+<span class="nc" id="L51">    }</span>
+
+    LocalAgentRunner(
+            WorkspaceManager workspaceManager,
+            HookRunner hooks,
+            CodexAppServerClient codex,
+            TrackerClient tracker,
+            PromptRenderer prompts,
+            CodexSkillInstaller codexSkills,
+<span class="nc" id="L60">            RepositorySourceResolver repositorySources) {</span>
+<span class="nc" id="L61">        this.workspaceManager = workspaceManager;</span>
+<span class="nc" id="L62">        this.hooks = hooks;</span>
+<span class="nc" id="L63">        this.codex = codex;</span>
+<span class="nc" id="L64">        this.tracker = tracker;</span>
+<span class="nc" id="L65">        this.prompts = prompts;</span>
+<span class="nc" id="L66">        this.codexSkills = codexSkills;</span>
+<span class="nc" id="L67">        this.repositorySources = repositorySources;</span>
+<span class="nc" id="L68">    }</span>
+
+    @Override
+    public AgentRunResult run(AgentRunRequest request) {
+<span class="nc" id="L72">        Thread.currentThread().setName(&quot;symphony-worker-&quot; + request.workerIdentity());</span>
+<span class="nc" id="L73">        active.put(request.workerIdentity(), Thread.currentThread());</span>
+<span class="nc" id="L74">        Workspace workspace = null;</span>
+        try {
+<span class="nc" id="L76">            workspace = workspaceManager.createForCard(request.card().identifier(), request.config());</span>
+<span class="nc" id="L77">            hooks.runRequired(</span>
+                    &quot;before_run&quot;,
+<span class="nc" id="L79">                    request.config().hooks().beforeRun(),</span>
+<span class="nc" id="L80">                    workspace.path(),</span>
+<span class="nc" id="L81">                    request.config().hooks());</span>
+<span class="nc" id="L82">            boolean installBundledSkills = usesBundledCodexSkills(request.prompt());</span>
+<span class="nc" id="L83">            String prompt = withRepositorySourceContext(request);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (installBundledSkills) {</span>
+<span class="nc" id="L85">                codexSkills.installInto(workspace.path());</span>
+            }
+<span class="nc" id="L87">            return codex.runSession(</span>
+<span class="nc" id="L88">                    request.config(),</span>
+<span class="nc" id="L89">                    request.card(),</span>
+<span class="nc" id="L90">                    workspace.path(),</span>
+                    prompt,
+<span class="nc" id="L92">                    request.workerIdentity(),</span>
+<span class="nc" id="L93">                    request.listener(),</span>
+<span class="nc" id="L94">                    turn -&gt; continuationDecision(request, turn));</span>
+<span class="nc" id="L95">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L96">            return AgentRunResult.fail(e.getMessage());</span>
+        } finally {
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            if (workspace != null) {</span>
+<span class="nc" id="L99">                hooks.runBestEffort(</span>
+                        &quot;after_run&quot;,
+<span class="nc" id="L101">                        request.config().hooks().afterRun(),</span>
+<span class="nc" id="L102">                        workspace.path(),</span>
+<span class="nc" id="L103">                        request.config().hooks());</span>
+            }
+<span class="nc" id="L105">            active.remove(request.workerIdentity(), Thread.currentThread());</span>
+        }
+    }
+
+    /// Shipped skills are installed only when the rendered prompt references their namespaced
+    /// paths, so workflows whose prompts do not use the shipped skills, such as hand-authored
+    /// workflows that expect an empty workspace root, keep their workspace shape.
+    private static boolean usesBundledCodexSkills(String prompt) {
+<span class="nc bnc" id="L113" title="All 4 branches missed.">        return prompt != null &amp;&amp; prompt.contains(&quot;.codex/skills/&quot; + CodexSkillCatalog.INSTALLED_SKILL_PREFIX);</span>
+    }
+
+    private String withRepositorySourceContext(AgentRunRequest request) {
+<span class="nc" id="L117">        return withRepositorySourceContext(</span>
+<span class="nc" id="L118">                request.prompt(),</span>
+<span class="nc" id="L119">                RepositorySourcePrompt.render(</span>
+<span class="nc" id="L120">                        repositorySources.select(</span>
+<span class="nc" id="L121">                                request.card(), request.config().repository()),</span>
+<span class="nc" id="L122">                        request.config().repository()));</span>
+    }
+
+    private static String withRepositorySourceContext(String prompt, String repositoryContext) {
+<span class="nc" id="L126">        String basePrompt = nullToEmpty(prompt).stripTrailing();</span>
+<span class="nc" id="L127">        return basePrompt + &quot;\n\n&quot; + repositoryContext;</span>
+    }
+
+    private CodexAppServerClient.TurnDecision continuationDecision(AgentRunRequest request, int completedTurns) {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (completedTurns &gt;= request.config().agent().maxTurns()) {</span>
+<span class="nc" id="L132">            return CodexAppServerClient.TurnDecision.stop();</span>
+        }
+<span class="nc" id="L134">        CardLookupResult result = tracker.fetchCardStatesByIds(</span>
+<span class="nc" id="L135">                        request.config(), List.of(request.card().id()))</span>
+<span class="nc" id="L136">                .get(request.card().id());</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if (TrelloClient.isActive(found.card(), request.config())</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                    &amp;&amp; !TrelloClient.isTerminal(found.card(), request.config())) {</span>
+<span class="nc" id="L140">                return CodexAppServerClient.TurnDecision.continueWith(prompts.continuationPrompt(</span>
+<span class="nc" id="L141">                        completedTurns + 1, request.config().agent().maxTurns()));</span>
+            }
+<span class="nc" id="L143">            return CodexAppServerClient.TurnDecision.stop();</span>
+        }
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (result instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L146">            return CodexAppServerClient.TurnDecision.fail(&quot;card_refresh_failed: &quot; + failed.message());</span>
+        }
+<span class="nc" id="L148">        return CodexAppServerClient.TurnDecision.stop();</span>
+    }
+
+    @Override
+    public void cancel(String workerIdentity) {
+<span class="nc" id="L153">        Thread thread = active.get(workerIdentity);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (thread != null) {</span>
+<span class="nc" id="L155">            thread.interrupt();</span>
+        }
+<span class="nc" id="L157">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

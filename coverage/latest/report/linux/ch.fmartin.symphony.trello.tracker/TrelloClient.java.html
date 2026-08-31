@@ -1,0 +1,1572 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">TrelloClient.java</span></div><h1>TrelloClient.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.SLASHES;
+import static com.google.common.base.Strings.nullToEmpty;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.StateNames;
+import ch.fmartin.symphony.trello.config.WholeNumbers;
+import ch.fmartin.symphony.trello.config.WholeNumbers.Classified;
+import ch.fmartin.symphony.trello.config.WholeNumbers.Kind;
+import ch.fmartin.symphony.trello.domain.BlockerRef;
+import ch.fmartin.symphony.trello.domain.Card;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.ws.rs.core.Response.Status;
+import jakarta.ws.rs.core.Response.Status.Family;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.jboss.logging.Logger;
+
+@ApplicationScoped
+public class TrelloClient implements TrackerClient {
+<span class="nc" id="L48">    private static final Logger LOG = Logger.getLogger(TrelloClient.class);</span>
+<span class="nc" id="L49">    private static final TypeReference&lt;Map&lt;String, Object&gt;&gt; MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L50">    private static final TypeReference&lt;List&lt;Map&lt;String, Object&gt;&gt;&gt; LIST_MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L51">    private static final TypeReference&lt;JsonNode&gt; JSON_TYPE = new TypeReference&lt;&gt;() {};</span>
+    private static final String CARD_FIELDS =
+            &quot;id,name,desc,idList,idBoard,closed,idShort,shortLink,shortUrl,url,labels,dateLastActivity,due,dueComplete,pos,badges&quot;;
+    private static final String COMMENT_ACTION_FIELDS = &quot;data,date,memberCreator&quot;;
+    private static final String COMMENT_ACTION_FIELDS_WITH_ID = &quot;id,data,date,memberCreator&quot;;
+    public static final String WORKPAD_MARKER = &quot;## Codex Workpad&quot;;
+    public static final String WAITING_COMMENT_MARKER = &quot;## Symphony Waiting for Prerequisites&quot;;
+    public static final String PREREQUISITE_STATUS_COMMENT_MARKER = &quot;## Symphony Prerequisite Status&quot;;
+    public static final int RECENT_COMMENT_ACTION_LIMIT = 20;
+    public static final int WORKPAD_COMMENT_ACTION_LIMIT = 1000;
+
+    private final ObjectMapper json;
+    private final HttpClient httpClient;
+
+<span class="nc" id="L65">    public TrelloClient(ObjectMapper json) {</span>
+<span class="nc" id="L66">        this.json = json;</span>
+<span class="nc" id="L67">        this.httpClient =</span>
+<span class="nc" id="L68">                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();</span>
+<span class="nc" id="L69">    }</span>
+
+    @Override
+    public String resolveBoardId(EffectiveConfig config) {
+<span class="nc" id="L73">        Map&lt;String, Object&gt; board = getMap(</span>
+<span class="nc" id="L74">                config, &quot;boards/&quot; + encodeSegment(config.tracker().boardId()), Map.of(&quot;fields&quot;, &quot;id,name,closed&quot;));</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (bool(board.get(&quot;closed&quot;))) {</span>
+<span class="nc" id="L76">            throw new TrelloException(&quot;trello_board_closed&quot;, &quot;Configured Trello board is archived&quot;);</span>
+        }
+<span class="nc" id="L78">        return requiredString(board, &quot;id&quot;, &quot;trello_unknown_payload&quot;);</span>
+    }
+
+    @Override
+    public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
+<span class="nc" id="L83">        BoardContext context = boardContext(config);</span>
+<span class="nc" id="L84">        List&lt;Map&lt;String, Object&gt;&gt; payload = getList(</span>
+                config,
+<span class="nc" id="L86">                &quot;boards/&quot; + encodeSegment(context.boardId()) + &quot;/cards/open&quot;,</span>
+<span class="nc" id="L87">                Map.of(&quot;fields&quot;, CARD_FIELDS, &quot;filter&quot;, &quot;open&quot;));</span>
+<span class="nc" id="L88">        List&lt;Card&gt; candidates = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L89">        Set&lt;String&gt; cardsWithComments = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        for (Map&lt;String, Object&gt; cardPayload : payload) {</span>
+<span class="nc" id="L91">            normalize(cardPayload, context, config).ifPresent(card -&gt; {</span>
+<span class="nc bnc" id="L92" title="All 4 branches missed.">                if (!isActive(card, config) || isTerminal(card, config)) {</span>
+<span class="nc" id="L93">                    return;</span>
+                }
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                if (hasComments(cardPayload)) {</span>
+<span class="nc" id="L96">                    cardsWithComments.add(card.id());</span>
+                }
+<span class="nc" id="L98">                candidates.add(</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                        hasChecklistItems(cardPayload)</span>
+<span class="nc" id="L100">                                ? card.withChecklists(fetchChecklists(config, card.id()))</span>
+<span class="nc" id="L101">                                : card);</span>
+<span class="nc" id="L102">            });</span>
+<span class="nc" id="L103">        }</span>
+<span class="nc" id="L104">        return enrichPrerequisites(config, candidates, false, cardsWithComments);</span>
+    }
+
+    @Override
+    public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
+<span class="nc" id="L109">        BoardContext context = boardContext(config);</span>
+<span class="nc" id="L110">        List&lt;Map&lt;String, Object&gt;&gt; boardCards = getList(</span>
+                config,
+<span class="nc" id="L112">                &quot;boards/&quot; + encodeSegment(context.boardId()) + &quot;/cards/all&quot;,</span>
+<span class="nc" id="L113">                Map.of(&quot;fields&quot;, CARD_FIELDS, &quot;filter&quot;, &quot;all&quot;));</span>
+<span class="nc" id="L114">        List&lt;Card&gt; normalized = boardCards.stream()</span>
+<span class="nc" id="L115">                .map(card -&gt; normalize(card, context, config))</span>
+<span class="nc" id="L116">                .flatMap(Optional::stream)</span>
+<span class="nc" id="L117">                .filter(card -&gt; isTerminal(card, config))</span>
+                // Keep this mutable: archived terminal cards are appended below before de-duplication.
+<span class="nc" id="L119">                .collect(Collectors.toCollection(ArrayList::new));</span>
+
+<span class="nc" id="L121">        Set&lt;String&gt; archivedListIds = context.lists().values().stream()</span>
+<span class="nc" id="L122">                .filter(BoardList::closed)</span>
+<span class="nc" id="L123">                .map(BoardList::id)</span>
+<span class="nc" id="L124">                .collect(toImmutableSet());</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        for (String listId : archivedListIds) {</span>
+<span class="nc" id="L126">            List&lt;Map&lt;String, Object&gt;&gt; listCards = getList(</span>
+                    config,
+<span class="nc" id="L128">                    &quot;lists/&quot; + encodeSegment(listId) + &quot;/cards&quot;,</span>
+<span class="nc" id="L129">                    Map.of(&quot;fields&quot;, CARD_FIELDS, &quot;filter&quot;, &quot;all&quot;));</span>
+<span class="nc" id="L130">            appendTerminalCards(normalized, listCards, context, config);</span>
+<span class="nc" id="L131">        }</span>
+
+        // Preserve Trello encounter order while de-duplicating cards returned by board and archived-list endpoints.
+<span class="nc" id="L134">        return normalized.stream()</span>
+<span class="nc" id="L135">                .collect(Collectors.toMap(Card::id, Function.identity(), (left, right) -&gt; left, LinkedHashMap::new))</span>
+<span class="nc" id="L136">                .values()</span>
+<span class="nc" id="L137">                .stream()</span>
+<span class="nc" id="L138">                .toList();</span>
+    }
+
+    private void appendTerminalCards(
+            List&lt;Card&gt; cards, List&lt;Map&lt;String, Object&gt;&gt; payloads, BoardContext context, EffectiveConfig config) {
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        for (Map&lt;String, Object&gt; payload : payloads) {</span>
+<span class="nc" id="L144">            normalize(payload, context, config)</span>
+<span class="nc" id="L145">                    .filter(card -&gt; isTerminal(card, config))</span>
+<span class="nc" id="L146">                    .ifPresent(cards::add);</span>
+<span class="nc" id="L147">        }</span>
+<span class="nc" id="L148">    }</span>
+
+    @Override
+    public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
+<span class="nc" id="L152">        return fetchCardStatesByIds(config, cardIds, false);</span>
+    }
+
+    @Override
+    public Map&lt;String, CardLookupResult&gt; fetchCardStatesForPromptByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
+<span class="nc" id="L157">        Map&lt;String, CardLookupResult&gt; results = fetchCardStatesByIds(config, cardIds, true);</span>
+<span class="nc" id="L158">        List&lt;Card&gt; foundCards = results.values().stream()</span>
+<span class="nc" id="L159">                .filter(CardLookupResult.Found.class::isInstance)</span>
+<span class="nc" id="L160">                .map(CardLookupResult.Found.class::cast)</span>
+<span class="nc" id="L161">                .map(CardLookupResult.Found::card)</span>
+<span class="nc" id="L162">                .toList();</span>
+<span class="nc" id="L163">        Map&lt;String, Card&gt; enriched =</span>
+<span class="nc" id="L164">                enrichPrerequisites(config, foundCards, true, cardsWithComments(foundCards)).stream()</span>
+<span class="nc" id="L165">                        .collect(Collectors.toMap(</span>
+<span class="nc" id="L166">                                Card::id, Function.identity(), (left, right) -&gt; left, LinkedHashMap::new));</span>
+<span class="nc" id="L167">        Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L168">        results.forEach((cardId, result) -&gt; {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc" id="L170">                updated.put(</span>
+                        cardId,
+                        new CardLookupResult.Found(
+<span class="nc" id="L173">                                enriched.getOrDefault(found.card().id(), found.card())));</span>
+            } else {
+<span class="nc" id="L175">                updated.put(cardId, result);</span>
+            }
+<span class="nc" id="L177">        });</span>
+<span class="nc" id="L178">        return updated;</span>
+    }
+
+    @Override
+    public Card prepareForDispatch(EffectiveConfig config, Card card) {
+<span class="nc" id="L183">        String inProgressState = config.tracker().inProgressState();</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (blank(inProgressState)</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                || StateNames.normalize(inProgressState).equals(StateNames.normalize(card.state()))) {</span>
+<span class="nc" id="L186">            return card;</span>
+        }
+
+<span class="nc" id="L189">        BoardContext context = boardContext(config);</span>
+<span class="nc" id="L190">        Optional&lt;BoardList&gt; target = context.lists().values().stream()</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">                .filter(list -&gt; !list.closed())</span>
+<span class="nc" id="L192">                .filter(list -&gt; StateNames.normalize(list.name()).equals(StateNames.normalize(inProgressState)))</span>
+<span class="nc" id="L193">                .findAny();</span>
+<span class="nc" id="L194">        BoardList targetList = target.orElseThrow(() -&gt; new TrelloException(</span>
+                &quot;trello_in_progress_list_not_found&quot;, &quot;Configured in-progress list was not found on the Trello board&quot;));
+<span class="nc bnc" id="L196" title="All 2 branches missed.">        if (!shouldMoveBeforeDispatch(config, card, targetList)) {</span>
+<span class="nc" id="L197">            return card;</span>
+        }
+
+<span class="nc" id="L200">        moveCardToList(config, card.id(), targetList.id());</span>
+<span class="nc" id="L201">        CardLookupResult refreshed =</span>
+<span class="nc" id="L202">                fetchCardStatesForPromptByIds(config, List.of(card.id())).get(card.id());</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (refreshed instanceof CardLookupResult.Found found) {</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (!targetList.id().equals(found.card().listId())) {</span>
+<span class="nc" id="L205">                throw new TrelloException(</span>
+                        &quot;trello_in_progress_move_not_visible&quot;,
+                        &quot;Card was not visible in the configured in-progress list after Trello accepted the move&quot;);
+            }
+<span class="nc" id="L209">            return found.card();</span>
+        }
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        if (refreshed instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L212">            throw new TrelloException(failed.code(), failed.message());</span>
+        }
+<span class="nc" id="L214">        throw new TrelloException(&quot;trello_card_missing&quot;, &quot;Card disappeared after moving to in-progress list&quot;);</span>
+    }
+
+    @Override
+    public void releaseFromDispatch(EffectiveConfig config, Card card) {
+<span class="nc" id="L219">        releaseFromDispatch(config, card, card);</span>
+<span class="nc" id="L220">    }</span>
+
+    @Override
+    public void releaseFromDispatch(EffectiveConfig config, Card card, Card dispatchSource) {
+<span class="nc" id="L224">        String inProgressState = config.tracker().inProgressState();</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (blank(inProgressState)</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                || !StateNames.normalize(inProgressState).equals(StateNames.normalize(card.state()))) {</span>
+<span class="nc" id="L227">            return;</span>
+        }
+
+<span class="nc" id="L230">        BoardContext context = boardContext(config);</span>
+<span class="nc" id="L231">        releaseTarget(config, card, dispatchSource, context)</span>
+<span class="nc" id="L232">                .ifPresent(target -&gt; moveCardToList(config, card.id(), target.id()));</span>
+<span class="nc" id="L233">    }</span>
+
+    private Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(
+            EffectiveConfig config, List&lt;String&gt; cardIds, boolean includeOlderWorkpad) {
+<span class="nc" id="L237">        BoardContext context = boardContext(config);</span>
+<span class="nc" id="L238">        Map&lt;String, CardLookupResult&gt; results = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        for (String cardId : cardIds) {</span>
+            try {
+<span class="nc" id="L241">                Map&lt;String, Object&gt; payload =</span>
+<span class="nc" id="L242">                        cardWithComments(config, cardId, RECENT_COMMENT_ACTION_LIMIT, includeOlderWorkpad);</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                if (includeOlderWorkpad) {</span>
+<span class="nc" id="L244">                    payload = includeOlderWorkpadComment(config, cardId, payload);</span>
+                }
+<span class="nc" id="L246">                Optional&lt;Card&gt; card = normalize(payload, context, config);</span>
+<span class="nc" id="L247">                results.put(</span>
+                        cardId,
+<span class="nc" id="L249">                        card.&lt;CardLookupResult&gt;map(CardLookupResult.Found::new)</span>
+<span class="nc" id="L250">                                .orElseGet(() -&gt; new CardLookupResult.Failed(</span>
+                                        cardId, &quot;trello_unknown_payload&quot;, &quot;Card payload could not be normalized&quot;)));
+<span class="nc" id="L252">            } catch (TrelloException e) {</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                if (isNotFound(e)) {</span>
+<span class="nc" id="L254">                    results.put(cardId, new CardLookupResult.Missing(cardId));</span>
+                } else {
+<span class="nc" id="L256">                    results.put(cardId, new CardLookupResult.Failed(cardId, e.code(), e.getMessage()));</span>
+                }
+<span class="nc" id="L258">            }</span>
+<span class="nc" id="L259">        }</span>
+<span class="nc" id="L260">        return results;</span>
+    }
+
+    public CardLookupResult fetchCardStateForWorkpad(EffectiveConfig config, String cardId) {
+<span class="nc" id="L264">        BoardContext context = boardContext(config);</span>
+        try {
+<span class="nc" id="L266">            Map&lt;String, Object&gt; payload = cardWithComments(config, cardId, WORKPAD_COMMENT_ACTION_LIMIT);</span>
+<span class="nc" id="L267">            Optional&lt;Card&gt; card = normalize(payload, context, config);</span>
+<span class="nc" id="L268">            return card.&lt;CardLookupResult&gt;map(CardLookupResult.Found::new)</span>
+<span class="nc" id="L269">                    .orElseGet(() -&gt; new CardLookupResult.Failed(</span>
+                            cardId, &quot;trello_unknown_payload&quot;, &quot;Card payload could not be normalized&quot;));
+<span class="nc" id="L271">        } catch (TrelloException e) {</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">            if (isNotFound(e)) {</span>
+<span class="nc" id="L273">                return new CardLookupResult.Missing(cardId);</span>
+            }
+<span class="nc" id="L275">            return new CardLookupResult.Failed(cardId, e.code(), e.getMessage());</span>
+        }
+    }
+
+    private Map&lt;String, Object&gt; cardWithComments(EffectiveConfig config, String cardId, int actionLimit) {
+<span class="nc" id="L280">        return cardWithComments(config, cardId, actionLimit, false);</span>
+    }
+
+    private Map&lt;String, Object&gt; cardWithComments(
+            EffectiveConfig config, String cardId, int actionLimit, boolean includePromptContext) {
+<span class="nc" id="L285">        Map&lt;String, String&gt; query = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L286">        query.put(&quot;fields&quot;, CARD_FIELDS);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        query.put(&quot;attachments&quot;, includePromptContext ? &quot;true&quot; : &quot;false&quot;);</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        if (includePromptContext) {</span>
+<span class="nc" id="L289">            query.put(&quot;attachment_fields&quot;, &quot;name,url&quot;);</span>
+<span class="nc" id="L290">            query.put(&quot;checklists&quot;, &quot;all&quot;);</span>
+<span class="nc" id="L291">            query.put(&quot;checklist_fields&quot;, &quot;id,name&quot;);</span>
+<span class="nc" id="L292">            query.put(&quot;checkItem_fields&quot;, &quot;id,name,state&quot;);</span>
+        }
+<span class="nc" id="L294">        query.put(&quot;actions&quot;, &quot;commentCard&quot;);</span>
+<span class="nc" id="L295">        query.put(&quot;actions_limit&quot;, Integer.toString(actionLimit));</span>
+<span class="nc" id="L296">        query.put(</span>
+                &quot;action_fields&quot;,
+<span class="nc bnc" id="L298" title="All 2 branches missed.">                actionLimit == WORKPAD_COMMENT_ACTION_LIMIT ? COMMENT_ACTION_FIELDS_WITH_ID : COMMENT_ACTION_FIELDS);</span>
+<span class="nc" id="L299">        return getMap(config, &quot;cards/&quot; + encodeSegment(cardId), query);</span>
+    }
+
+    private List&lt;Card.Checklist&gt; fetchChecklists(EffectiveConfig config, String cardId) {
+<span class="nc" id="L303">        List&lt;Map&lt;String, Object&gt;&gt; payload = getList(</span>
+                config,
+<span class="nc" id="L305">                &quot;cards/&quot; + encodeSegment(cardId) + &quot;/checklists&quot;,</span>
+<span class="nc" id="L306">                Map.of(&quot;fields&quot;, &quot;id,name&quot;, &quot;checkItem_fields&quot;, &quot;id,name,state&quot;));</span>
+<span class="nc" id="L307">        return payload.stream().map(TrelloClient::checklist).toList();</span>
+    }
+
+    private Map&lt;String, Object&gt; includeOlderWorkpadComment(
+            EffectiveConfig config, String cardId, Map&lt;String, Object&gt; recentPayload) {
+<span class="nc" id="L312">        List&lt;Map&lt;String, Object&gt;&gt; recentActions = actionMaps(recentPayload);</span>
+<span class="nc bnc" id="L313" title="All 4 branches missed.">        if (hasWorkpadComment(recentActions) || recentActions.size() &lt; RECENT_COMMENT_ACTION_LIMIT) {</span>
+<span class="nc" id="L314">            return recentPayload;</span>
+        }
+
+        Map&lt;String, Object&gt; deepPayload;
+        try {
+<span class="nc" id="L319">            deepPayload = cardWithComments(config, cardId, WORKPAD_COMMENT_ACTION_LIMIT);</span>
+<span class="nc" id="L320">        } catch (TrelloException e) {</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">            if (isNotFound(e)) {</span>
+<span class="nc" id="L322">                throw e;</span>
+            }
+<span class="nc" id="L324">            return recentPayload;</span>
+<span class="nc" id="L325">        }</span>
+<span class="nc" id="L326">        Optional&lt;Map&lt;String, Object&gt;&gt; workpad = actionMaps(deepPayload).stream()</span>
+<span class="nc" id="L327">                .filter(action -&gt; commentText(action).startsWith(WORKPAD_MARKER))</span>
+<span class="nc" id="L328">                .findFirst();</span>
+<span class="nc" id="L329">        return workpad.map(existingWorkpad -&gt; payloadWithWorkpadAction(recentPayload, recentActions, existingWorkpad))</span>
+<span class="nc" id="L330">                .orElse(recentPayload);</span>
+    }
+
+    private static Map&lt;String, Object&gt; payloadWithWorkpadAction(
+            Map&lt;String, Object&gt; recentPayload,
+            List&lt;Map&lt;String, Object&gt;&gt; recentActions,
+            Map&lt;String, Object&gt; existingWorkpad) {
+<span class="nc" id="L337">        List&lt;Map&lt;String, Object&gt;&gt; mergedActions = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L338">        mergedActions.add(existingWorkpad);</span>
+<span class="nc" id="L339">        mergedActions.addAll(recentActions);</span>
+<span class="nc" id="L340">        Map&lt;String, Object&gt; mergedPayload = new LinkedHashMap&lt;&gt;(recentPayload);</span>
+<span class="nc" id="L341">        mergedPayload.put(&quot;actions&quot;, mergedActions);</span>
+<span class="nc" id="L342">        return mergedPayload;</span>
+    }
+
+    private List&lt;Card&gt; enrichPrerequisites(
+            EffectiveConfig config, List&lt;Card&gt; cards, boolean includeReferenceContext, Set&lt;String&gt; cardsWithComments) {
+<span class="nc bnc" id="L347" title="All 2 branches missed.">        if (cards.isEmpty()) {</span>
+<span class="nc" id="L348">            return List.of();</span>
+        }
+<span class="nc" id="L350">        List&lt;PrerequisiteAnalysis&gt; analyses = cards.stream()</span>
+<span class="nc" id="L351">                .map(card -&gt; analyzePrerequisites(card, includeReferenceContext))</span>
+<span class="nc" id="L352">                .toList();</span>
+<span class="nc" id="L353">        Map&lt;String, CardLookupResult&gt; lookupResults = lookupReferencedCards(config, analyses);</span>
+<span class="nc" id="L354">        List&lt;Card&gt; enriched = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        for (PrerequisiteAnalysis analysis : analyses) {</span>
+<span class="nc" id="L356">            enriched.add(enrichPrerequisiteCard(</span>
+                    config,
+                    analysis,
+                    lookupResults,
+<span class="nc" id="L360">                    cardsWithComments.contains(analysis.card().id())));</span>
+<span class="nc" id="L361">        }</span>
+<span class="nc" id="L362">        return enriched;</span>
+    }
+
+    private static PrerequisiteAnalysis analyzePrerequisites(Card card, boolean includeReferenceContext) {
+<span class="nc" id="L366">        PrerequisitePlan plan = prerequisitePlan(card);</span>
+        Map&lt;String, ReferencedText&gt; promptReferences =
+<span class="nc bnc" id="L368" title="All 2 branches missed.">                includeReferenceContext ? promptReferenceTexts(card, plan) : Map.of();</span>
+<span class="nc" id="L369">        return new PrerequisiteAnalysis(card, plan, promptReferences);</span>
+    }
+
+    private Map&lt;String, CardLookupResult&gt; lookupReferencedCards(
+            EffectiveConfig config, List&lt;PrerequisiteAnalysis&gt; analyses) {
+<span class="nc" id="L374">        List&lt;String&gt; lookupIds =</span>
+<span class="nc" id="L375">                analyses.stream().flatMap(TrelloClient::lookupIds).distinct().toList();</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">        return lookupIds.isEmpty() ? Map.of() : fetchCardStatesByIds(config, lookupIds);</span>
+    }
+
+    private static Stream&lt;String&gt; lookupIds(PrerequisiteAnalysis analysis) {
+<span class="nc" id="L380">        Stream&lt;String&gt; prerequisiteLookupIds = analysis.plan().items().stream()</span>
+<span class="nc" id="L381">                .map(TrelloChecklistClassifier.PrerequisiteItem::reference)</span>
+<span class="nc" id="L382">                .map(TrelloCardReference::lookupId);</span>
+<span class="nc" id="L383">        Stream&lt;String&gt; promptLookupIds = analysis.promptReferences().values().stream()</span>
+<span class="nc" id="L384">                .map(ReferencedText::reference)</span>
+<span class="nc" id="L385">                .map(TrelloCardReference::lookupId);</span>
+<span class="nc" id="L386">        return Stream.concat(prerequisiteLookupIds, promptLookupIds);</span>
+    }
+
+    private Card enrichPrerequisiteCard(
+            EffectiveConfig config,
+            PrerequisiteAnalysis analysis,
+            Map&lt;String, CardLookupResult&gt; lookupResults,
+            boolean mayHaveWaitingComment) {
+<span class="nc" id="L394">        Card card = analysis.card();</span>
+<span class="nc" id="L395">        ResolvedPrerequisites resolved = resolvePrerequisites(config, card, analysis.plan(), lookupResults);</span>
+<span class="nc" id="L396">        List&lt;Card.TrelloReference&gt; references = promptReferences(config, analysis.promptReferences(), lookupResults);</span>
+<span class="nc" id="L397">        Card enriched = card.withRelationships(card.checklists(), references, resolved.problems(), resolved.blockers());</span>
+<span class="nc" id="L398">        syncPrerequisiteWaitingFeedback(config, enriched, mayHaveWaitingComment);</span>
+<span class="nc" id="L399">        return enriched;</span>
+    }
+
+    private static Set&lt;String&gt; cardsWithComments(List&lt;Card&gt; cards) {
+<span class="nc" id="L403">        return cards.stream()</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                .filter(card -&gt; !card.comments().isEmpty())</span>
+<span class="nc" id="L405">                .map(Card::id)</span>
+<span class="nc" id="L406">                .collect(Collectors.toUnmodifiableSet());</span>
+    }
+
+    private static PrerequisitePlan prerequisitePlan(Card card) {
+<span class="nc" id="L410">        List&lt;TrelloChecklistClassifier.PrerequisiteItem&gt; items = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L411">        List&lt;Card.PrerequisiteProblem&gt; problems = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">        for (Card.Checklist checklist : card.checklists()) {</span>
+<span class="nc" id="L413">            TrelloChecklistClassifier.ChecklistAnalysis analysis = TrelloChecklistClassifier.analyze(checklist);</span>
+<span class="nc" id="L414">            items.addAll(analysis.prerequisites());</span>
+<span class="nc" id="L415">            problems.addAll(analysis.problems());</span>
+<span class="nc" id="L416">        }</span>
+<span class="nc" id="L417">        return new PrerequisitePlan(List.copyOf(items), List.copyOf(problems));</span>
+    }
+
+    private ResolvedPrerequisites resolvePrerequisites(
+            EffectiveConfig config, Card card, PrerequisitePlan plan, Map&lt;String, CardLookupResult&gt; lookupResults) {
+<span class="nc" id="L422">        List&lt;Card.PrerequisiteProblem&gt; problems = new ArrayList&lt;&gt;(plan.problems());</span>
+        // Preserve prerequisite checklist order so generated blockers follow the operator-authored checklist.
+<span class="nc" id="L424">        Map&lt;String, BlockerRef&gt; blockers = LinkedHashMap.newLinkedHashMap(</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">                plan.items().size() + (plan.problems().isEmpty() ? 0 : 1));</span>
+<span class="nc" id="L426">        boolean continueChecklistSync = true;</span>
+<span class="nc bnc" id="L427" title="All 2 branches missed.">        for (TrelloChecklistClassifier.PrerequisiteItem item : plan.items()) {</span>
+<span class="nc" id="L428">            TrelloCardReference reference = item.reference();</span>
+<span class="nc" id="L429">            CardLookupResult result = lookupResults.get(reference.lookupId());</span>
+<span class="nc" id="L430">            BlockerRef blocker = blockerRef(config, card, reference, result, problems);</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">            blockers.putIfAbsent(blocker.id() == null ? reference.key() : blocker.id(), blocker);</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">            if (continueChecklistSync) {</span>
+<span class="nc" id="L433">                continueChecklistSync = syncPrerequisiteItem(config, card, item, result, problems);</span>
+            }
+<span class="nc" id="L435">        }</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        if (!plan.problems().isEmpty()) {</span>
+<span class="nc" id="L437">            String blockerId = &quot;ambiguous-prerequisite:&quot; + card.id();</span>
+<span class="nc" id="L438">            blockers.putIfAbsent(</span>
+<span class="nc" id="L439">                    blockerId, new BlockerRef(blockerId, &quot;Ambiguous prerequisite checklist&quot;, null, card.cardUrl()));</span>
+        }
+<span class="nc" id="L441">        return new ResolvedPrerequisites(List.copyOf(problems), List.copyOf(blockers.values()));</span>
+    }
+
+    private BlockerRef blockerRef(
+            EffectiveConfig config,
+            Card card,
+            TrelloCardReference reference,
+            CardLookupResult result,
+            List&lt;Card.PrerequisiteProblem&gt; problems) {
+<span class="nc bnc" id="L450" title="All 2 branches missed.">        if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc" id="L451">            Card blocker = found.card();</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">            if (Objects.equals(card.id(), blocker.id())) {</span>
+<span class="nc" id="L453">                problems.add(new Card.PrerequisiteProblem(</span>
+                        &quot;trello_prerequisite_self_reference&quot;,
+                        &quot;A Trello card cannot use itself as a prerequisite.&quot;,
+                        null));
+<span class="nc" id="L457">                return unresolvedBlocker(reference, &quot;Self prerequisite&quot;);</span>
+            }
+<span class="nc bnc" id="L459" title="All 2 branches missed.">            if (isCrossBoard(config, blocker)) {</span>
+<span class="nc" id="L460">                problems.add(new Card.PrerequisiteProblem(</span>
+                        &quot;trello_prerequisite_cross_board&quot;,
+                        &quot;A prerequisite card is outside the configured Trello board.&quot;,
+                        null));
+<span class="nc" id="L464">                return unresolvedBlocker(reference, &quot;Unsupported cross-board prerequisite&quot;);</span>
+            }
+<span class="nc" id="L466">            return new BlockerRef(blocker.id(), blocker.identifier(), blocker.state(), blocker.cardUrl());</span>
+        }
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        if (result instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L469">            problems.add(</span>
+<span class="nc" id="L470">                    new Card.PrerequisiteProblem(failed.code(), &quot;Could not resolve a prerequisite Trello card.&quot;, null));</span>
+<span class="nc" id="L471">            return unresolvedBlocker(reference, &quot;Unresolved prerequisite&quot;);</span>
+        }
+<span class="nc" id="L473">        problems.add(new Card.PrerequisiteProblem(</span>
+                &quot;trello_prerequisite_missing&quot;, &quot;A prerequisite Trello card is missing or inaccessible.&quot;, null));
+<span class="nc" id="L475">        return unresolvedBlocker(reference, &quot;Missing prerequisite&quot;);</span>
+    }
+
+    private static BlockerRef unresolvedBlocker(TrelloCardReference reference, String identifier) {
+<span class="nc" id="L479">        return new BlockerRef(reference.lookupId(), identifier, null, reference.url());</span>
+    }
+
+    private boolean syncPrerequisiteItem(
+            EffectiveConfig config,
+            Card card,
+            TrelloChecklistClassifier.PrerequisiteItem item,
+            CardLookupResult result,
+            List&lt;Card.PrerequisiteProblem&gt; problems) {
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        if (blank(item.item().id())) {</span>
+<span class="nc" id="L489">            return true;</span>
+        }
+<span class="nc" id="L491">        boolean targetComplete = isResolvedTerminal(config, card, result);</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">        if (item.item().complete() == targetComplete) {</span>
+<span class="nc" id="L493">            return true;</span>
+        }
+        try {
+<span class="nc" id="L496">            updateCheckItemState(config, card.id(), item.item().id(), targetComplete);</span>
+<span class="nc" id="L497">            return true;</span>
+<span class="nc" id="L498">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L499">            problems.add(new Card.PrerequisiteProblem(</span>
+                    &quot;trello_prerequisite_checklist_sync_failed&quot;,
+                    &quot;Could not update a prerequisite checklist item.&quot;,
+<span class="nc" id="L502">                    item.checklist().name()));</span>
+<span class="nc" id="L503">            LOG.warnf(</span>
+                    &quot;card_id=%s checklist_id=%s check_item_id=%s prerequisite_sync=failed reason=%s&quot;,
+<span class="nc" id="L505">                    card.id(), item.checklist().id(), item.item().id(), e.getMessage());</span>
+<span class="nc" id="L506">            return false;</span>
+        }
+    }
+
+    private boolean isResolvedTerminal(EffectiveConfig config, Card currentCard, CardLookupResult result) {
+<span class="nc bnc" id="L511" title="All 2 branches missed.">        if (!(result instanceof CardLookupResult.Found found)) {</span>
+<span class="nc" id="L512">            return false;</span>
+        }
+<span class="nc" id="L514">        Card prerequisite = found.card();</span>
+<span class="nc bnc" id="L515" title="All 4 branches missed.">        return isSupportedPrerequisite(config, currentCard, prerequisite) &amp;&amp; isTerminal(prerequisite, config);</span>
+    }
+
+    private static boolean isSupportedPrerequisite(EffectiveConfig config, Card currentCard, Card prerequisite) {
+<span class="nc bnc" id="L519" title="All 4 branches missed.">        return !Objects.equals(currentCard.id(), prerequisite.id()) &amp;&amp; isOnConfiguredBoard(config, prerequisite);</span>
+    }
+
+    private static boolean isOnConfiguredBoard(EffectiveConfig config, Card card) {
+<span class="nc bnc" id="L523" title="All 2 branches missed.">        return card.boardId() == null</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">                || Objects.equals(card.boardId(), config.tracker().resolvedBoardId());</span>
+    }
+
+    private static boolean isCrossBoard(EffectiveConfig config, Card card) {
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        return card.boardId() != null</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">                &amp;&amp; !Objects.equals(card.boardId(), config.tracker().resolvedBoardId());</span>
+    }
+
+    private List&lt;Card.TrelloReference&gt; promptReferences(
+            EffectiveConfig config,
+            Map&lt;String, ReferencedText&gt; references,
+            Map&lt;String, CardLookupResult&gt; lookupResults) {
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (references.isEmpty()) {</span>
+<span class="nc" id="L537">            return List.of();</span>
+        }
+<span class="nc" id="L539">        return references.values().stream()</span>
+<span class="nc" id="L540">                .map(reference -&gt; promptReference(</span>
+                        config,
+                        reference,
+<span class="nc" id="L543">                        lookupResults.get(reference.reference().lookupId())))</span>
+<span class="nc" id="L544">                .toList();</span>
+    }
+
+    private static Map&lt;String, ReferencedText&gt; promptReferenceTexts(Card card, PrerequisitePlan plan) {
+<span class="nc" id="L548">        var references = new ReferenceAccumulator();</span>
+<span class="nc" id="L549">        references.add(&quot;title&quot;, card.title());</span>
+<span class="nc" id="L550">        references.add(&quot;description&quot;, card.description());</span>
+<span class="nc bnc" id="L551" title="All 2 branches missed.">        for (Card.Checklist checklist : card.checklists()) {</span>
+<span class="nc" id="L552">            references.addChecklist(checklist);</span>
+<span class="nc" id="L553">        }</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">        for (Card.Comment comment : card.comments()) {</span>
+<span class="nc" id="L555">            references.add(&quot;comment&quot;, comment.text());</span>
+<span class="nc" id="L556">        }</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">        for (Card.Attachment attachment : card.attachments()) {</span>
+<span class="nc" id="L558">            references.addAttachment(attachment);</span>
+<span class="nc" id="L559">        }</span>
+<span class="nc bnc" id="L560" title="All 2 branches missed.">        for (TrelloChecklistClassifier.PrerequisiteItem item : plan.items()) {</span>
+<span class="nc" id="L561">            references.addPrerequisite(item.reference());</span>
+<span class="nc" id="L562">        }</span>
+<span class="nc" id="L563">        return references.asMap();</span>
+    }
+
+    private static Card.TrelloReference promptReference(
+            EffectiveConfig config, ReferencedText reference, CardLookupResult result) {
+<span class="nc bnc" id="L568" title="All 2 branches missed.">        if (result instanceof CardLookupResult.Found found) {</span>
+<span class="nc" id="L569">            Card card = found.card();</span>
+<span class="nc bnc" id="L570" title="All 2 branches missed.">            Boolean terminal = card.boardId() != null</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">                            &amp;&amp; !Objects.equals(card.boardId(), config.tracker().resolvedBoardId())</span>
+<span class="nc" id="L572">                    ? null</span>
+<span class="nc" id="L573">                    : isTerminal(card, config);</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">            String status = terminal == null ? &quot;unsupported_cross_board&quot; : &quot;found&quot;;</span>
+<span class="nc" id="L575">            return new Card.TrelloReference(</span>
+<span class="nc" id="L576">                    reference.source(),</span>
+<span class="nc" id="L577">                    reference.text(),</span>
+<span class="nc" id="L578">                    reference.reference().lookupId(),</span>
+<span class="nc" id="L579">                    card.identifier(),</span>
+<span class="nc" id="L580">                    card.title(),</span>
+<span class="nc" id="L581">                    card.state(),</span>
+<span class="nc" id="L582">                    card.cardUrl(),</span>
+                    status,
+                    terminal);
+        }
+<span class="nc bnc" id="L586" title="All 2 branches missed.">        if (result instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L587">            return new Card.TrelloReference(</span>
+<span class="nc" id="L588">                    reference.source(),</span>
+<span class="nc" id="L589">                    reference.text(),</span>
+<span class="nc" id="L590">                    reference.reference().lookupId(),</span>
+                    null,
+                    null,
+                    null,
+<span class="nc" id="L594">                    reference.reference().url(),</span>
+<span class="nc" id="L595">                    failed.code(),</span>
+                    null);
+        }
+<span class="nc" id="L598">        return new Card.TrelloReference(</span>
+<span class="nc" id="L599">                reference.source(),</span>
+<span class="nc" id="L600">                reference.text(),</span>
+<span class="nc" id="L601">                reference.reference().lookupId(),</span>
+                null,
+                null,
+                null,
+<span class="nc" id="L605">                reference.reference().url(),</span>
+                &quot;missing&quot;,
+                null);
+    }
+
+    private void syncPrerequisiteWaitingFeedback(EffectiveConfig config, Card card, boolean mayHaveWaitingComment) {
+<span class="nc bnc" id="L611" title="All 2 branches missed.">        if (!config.tracker().blockerEnforcedStates().contains(StateNames.normalize(card.state()))) {</span>
+<span class="nc" id="L612">            return;</span>
+        }
+<span class="nc" id="L614">        boolean waiting = card.blockedBy().stream()</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">                .anyMatch(blocker -&gt; blocker.state() == null</span>
+<span class="nc bnc" id="L616" title="All 2 branches missed.">                        || !config.tracker().terminalStates().contains(StateNames.normalize(blocker.state())));</span>
+<span class="nc bnc" id="L617" title="All 4 branches missed.">        if (!waiting &amp;&amp; card.prerequisiteProblems().isEmpty()) {</span>
+<span class="nc bnc" id="L618" title="All 4 branches missed.">            if (!card.checklists().isEmpty() || mayHaveWaitingComment) {</span>
+<span class="nc" id="L619">                clearPrerequisiteWaitingComment(config, card);</span>
+            }
+<span class="nc bnc" id="L621" title="All 4 branches missed.">        } else if (waiting || !card.prerequisiteProblems().isEmpty()) {</span>
+<span class="nc" id="L622">            upsertPrerequisiteWaitingComment(config, card, prerequisiteWaitingText(card));</span>
+        }
+<span class="nc" id="L624">    }</span>
+
+    private void upsertPrerequisiteWaitingComment(EffectiveConfig config, Card card, String text) {
+        try {
+<span class="nc" id="L628">            prerequisiteWaitingComment(config, card.id())</span>
+<span class="nc" id="L629">                    .ifPresentOrElse(</span>
+<span class="nc" id="L630">                            comment -&gt; updateOrCreatePrerequisiteWaitingComment(config, card, comment, text),</span>
+<span class="nc" id="L631">                            () -&gt; addComment(config, card.id(), text));</span>
+<span class="nc" id="L632">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L633">            LOG.warnf(&quot;card_id=%s prerequisite_waiting_comment=failed reason=%s&quot;, card.id(), e.getMessage());</span>
+<span class="nc" id="L634">        }</span>
+<span class="nc" id="L635">    }</span>
+
+    private void updateOrCreatePrerequisiteWaitingComment(
+            EffectiveConfig config, Card card, Card.Comment existing, String text) {
+<span class="nc bnc" id="L639" title="All 2 branches missed.">        if (text.equals(existing.text())) {</span>
+<span class="nc" id="L640">            return;</span>
+        }
+<span class="nc bnc" id="L642" title="All 2 branches missed.">        if (blank(existing.id())) {</span>
+<span class="nc" id="L643">            addComment(config, card.id(), text);</span>
+<span class="nc" id="L644">            return;</span>
+        }
+<span class="nc" id="L646">        updateComment(config, existing.id(), text);</span>
+<span class="nc" id="L647">    }</span>
+
+    private void clearPrerequisiteWaitingComment(EffectiveConfig config, Card card) {
+        try {
+<span class="nc" id="L651">            Optional&lt;Card.Comment&gt; existing = prerequisiteWaitingComment(config, card.id());</span>
+<span class="nc" id="L652">            String text = resolvedPrerequisiteStatusText();</span>
+<span class="nc bnc" id="L653" title="All 2 branches missed.">            existing.filter(comment -&gt; !blank(comment.id()))</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">                    .filter(comment -&gt; !text.equals(comment.text()))</span>
+<span class="nc" id="L655">                    .ifPresent(comment -&gt; updateComment(config, comment.id(), text));</span>
+<span class="nc" id="L656">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L657">            LOG.warnf(&quot;card_id=%s prerequisite_waiting_comment_clear=failed reason=%s&quot;, card.id(), e.getMessage());</span>
+<span class="nc" id="L658">        }</span>
+<span class="nc" id="L659">    }</span>
+
+    private Optional&lt;Card.Comment&gt; prerequisiteWaitingComment(EffectiveConfig config, String cardId) {
+<span class="nc" id="L662">        Map&lt;String, Object&gt; payload = getMap(</span>
+                config,
+<span class="nc" id="L664">                &quot;cards/&quot; + encodeSegment(cardId),</span>
+<span class="nc" id="L665">                Map.of(</span>
+                        &quot;fields&quot;,
+                        CARD_FIELDS,
+                        &quot;attachments&quot;,
+                        &quot;false&quot;,
+                        &quot;actions&quot;,
+                        &quot;commentCard&quot;,
+                        &quot;actions_limit&quot;,
+<span class="nc" id="L673">                        Integer.toString(WORKPAD_COMMENT_ACTION_LIMIT),</span>
+                        &quot;action_fields&quot;,
+                        COMMENT_ACTION_FIELDS_WITH_ID));
+<span class="nc" id="L676">        return comments(payload).stream()</span>
+<span class="nc" id="L677">                .filter(comment -&gt; isManagedPrerequisiteStatusComment(comment.text()))</span>
+<span class="nc" id="L678">                .findFirst();</span>
+    }
+
+    private static boolean isManagedPrerequisiteStatusComment(String text) {
+<span class="nc bnc" id="L682" title="All 2 branches missed.">        return text != null</span>
+<span class="nc bnc" id="L683" title="All 4 branches missed.">                &amp;&amp; (text.startsWith(PREREQUISITE_STATUS_COMMENT_MARKER) || text.startsWith(WAITING_COMMENT_MARKER));</span>
+    }
+
+    private static String prerequisiteWaitingText(Card card) {
+<span class="nc" id="L687">        List&lt;String&gt; lines = new ArrayList&lt;&gt;(List.of(</span>
+                PREREQUISITE_STATUS_COMMENT_MARKER,
+                &quot;&quot;,
+                &quot;Status: waiting for prerequisites.&quot;,
+                &quot;&quot;,
+                &quot;Symphony has not started this Trello card because prerequisite checklists are not resolved.&quot;));
+<span class="nc bnc" id="L693" title="All 2 branches missed.">        if (!card.blockedBy().isEmpty()) {</span>
+<span class="nc" id="L694">            lines.add(&quot;&quot;);</span>
+<span class="nc" id="L695">            lines.add(&quot;Waiting for:&quot;);</span>
+<span class="nc bnc" id="L696" title="All 2 branches missed.">            for (BlockerRef blocker : card.blockedBy()) {</span>
+<span class="nc" id="L697">                lines.add(&quot;- &quot; + waitingBlockerText(blocker));</span>
+<span class="nc" id="L698">            }</span>
+        }
+<span class="nc bnc" id="L700" title="All 2 branches missed.">        if (!card.prerequisiteProblems().isEmpty()) {</span>
+<span class="nc" id="L701">            lines.add(&quot;&quot;);</span>
+<span class="nc" id="L702">            lines.add(&quot;Checklist cleanup needed:&quot;);</span>
+<span class="nc bnc" id="L703" title="All 2 branches missed.">            for (Card.PrerequisiteProblem problem : card.prerequisiteProblems()) {</span>
+<span class="nc" id="L704">                lines.add(&quot;- &quot; + problem.message()</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">                        + (blank(problem.checklist()) ? &quot;&quot; : &quot; Checklist: &quot; + problem.checklist() + &quot;.&quot;));</span>
+<span class="nc" id="L706">            }</span>
+        }
+<span class="nc" id="L708">        lines.add(&quot;&quot;);</span>
+<span class="nc" id="L709">        lines.add(</span>
+                &quot;Fix by making prerequisite checklist items exactly one bare Trello card reference each, moving notes to a separate checklist, or writing non-prerequisite Trello references as Markdown links.&quot;);
+<span class="nc" id="L711">        return String.join(&quot;\n&quot;, lines);</span>
+    }
+
+    private static String resolvedPrerequisiteStatusText() {
+<span class="nc" id="L715">        return String.join(</span>
+                &quot;\n&quot;,
+                PREREQUISITE_STATUS_COMMENT_MARKER,
+                &quot;&quot;,
+                &quot;Status: prerequisites resolved.&quot;,
+                &quot;&quot;,
+                &quot;Symphony may start this Trello card when other dispatch rules allow.&quot;);
+    }
+
+    private static String waitingBlockerText(BlockerRef blocker) {
+<span class="nc bnc" id="L725" title="All 2 branches missed.">        String identifier = blank(blocker.identifier()) ? blocker.id() : blocker.identifier();</span>
+<span class="nc bnc" id="L726" title="All 2 branches missed.">        String state = blank(blocker.state()) ? &quot;unresolved&quot; : blocker.state();</span>
+<span class="nc" id="L727">        return identifier + &quot; (&quot; + state + &quot;)&quot;;</span>
+    }
+
+    private Map&lt;String, Object&gt; updateCheckItemState(
+            EffectiveConfig config, String cardId, String checkItemId, boolean complete) {
+<span class="nc" id="L732">        return putMap(</span>
+                config,
+<span class="nc" id="L734">                &quot;cards/&quot; + encodeSegment(cardId) + &quot;/checkItem/&quot; + encodeSegment(checkItemId),</span>
+<span class="nc bnc" id="L735" title="All 2 branches missed.">                Map.of(&quot;state&quot;, complete ? &quot;complete&quot; : &quot;incomplete&quot;));</span>
+    }
+
+    private static boolean hasWorkpadComment(List&lt;Map&lt;String, Object&gt;&gt; actions) {
+<span class="nc" id="L739">        return actions.stream().anyMatch(action -&gt; commentText(action).startsWith(WORKPAD_MARKER));</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static List&lt;Map&lt;String, Object&gt;&gt; actionMaps(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L744">        Object actions = payload.get(&quot;actions&quot;);</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">        if (!(actions instanceof List&lt;?&gt; actionList)) {</span>
+<span class="nc" id="L746">            return List.of();</span>
+        }
+<span class="nc" id="L748">        return actionList.stream()</span>
+<span class="nc" id="L749">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L750">                .map(action -&gt; (Map&lt;String, Object&gt;) action)</span>
+<span class="nc" id="L751">                .toList();</span>
+    }
+
+    public static boolean isActive(Card card, EffectiveConfig config) {
+<span class="nc bnc" id="L755" title="All 6 branches missed.">        if (card.closed() || Boolean.TRUE.equals(card.listClosed()) || Boolean.TRUE.equals(card.boardClosed())) {</span>
+<span class="nc" id="L756">            return false;</span>
+        }
+<span class="nc bnc" id="L758" title="All 2 branches missed.">        if (card.boardId() != null</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">                &amp;&amp; !Objects.equals(card.boardId(), config.tracker().resolvedBoardId())) {</span>
+<span class="nc" id="L760">            return false;</span>
+        }
+<span class="nc bnc" id="L762" title="All 4 branches missed.">        if (card.listId() != null &amp;&amp; !config.tracker().activeListIds().isEmpty()) {</span>
+<span class="nc" id="L763">            return config.tracker().activeListIds().contains(card.listId());</span>
+        }
+<span class="nc" id="L765">        return config.tracker().activeStates().stream()</span>
+<span class="nc" id="L766">                .map(StateNames::normalize)</span>
+<span class="nc" id="L767">                .anyMatch(state -&gt; state.equals(StateNames.normalize(card.state())));</span>
+    }
+
+    public static boolean isTerminal(Card card, EffectiveConfig config) {
+<span class="nc bnc" id="L771" title="All 2 branches missed.">        if (isOpenListBacked(card)</span>
+<span class="nc bnc" id="L772" title="All 2 branches missed.">                &amp;&amp; card.listId() != null</span>
+<span class="nc bnc" id="L773" title="All 2 branches missed.">                &amp;&amp; !config.tracker().terminalListIds().isEmpty()) {</span>
+<span class="nc" id="L774">            return config.tracker().terminalListIds().contains(card.listId());</span>
+        }
+<span class="nc" id="L776">        return config.tracker().terminalStates().contains(StateNames.normalize(card.state()));</span>
+    }
+
+    private static boolean isOpenListBacked(Card card) {
+<span class="nc bnc" id="L780" title="All 2 branches missed.">        return &quot;list&quot;.equals(card.stateSource())</span>
+<span class="nc bnc" id="L781" title="All 2 branches missed.">                &amp;&amp; !card.closed()</span>
+<span class="nc bnc" id="L782" title="All 2 branches missed.">                &amp;&amp; !Boolean.TRUE.equals(card.listClosed())</span>
+<span class="nc bnc" id="L783" title="All 2 branches missed.">                &amp;&amp; !Boolean.TRUE.equals(card.boardClosed());</span>
+    }
+
+    public static Comparator&lt;Card&gt; dispatchComparator(EffectiveConfig config) {
+<span class="nc" id="L787">        return dispatchComparator(config, Map.of());</span>
+    }
+
+    public static Comparator&lt;Card&gt; dispatchComparator(EffectiveConfig config, Map&lt;String, Integer&gt; priorityOverrides) {
+<span class="nc" id="L791">        return Comparator.comparingInt((Card card) -&gt; activeOrder(card, config))</span>
+<span class="nc" id="L792">                .thenComparingInt(card -&gt; dispatchPriority(priorityOverrides, card))</span>
+<span class="nc bnc" id="L793" title="All 2 branches missed.">                .thenComparing(card -&gt; card.position() == null ? BigDecimal.valueOf(Long.MAX_VALUE) : card.position())</span>
+<span class="nc bnc" id="L794" title="All 2 branches missed.">                .thenComparing(card -&gt; card.createdAt() == null ? Instant.MAX : card.createdAt())</span>
+<span class="nc" id="L795">                .thenComparing(Card::identifier);</span>
+    }
+
+    private static int dispatchPriority(Map&lt;String, Integer&gt; priorityOverrides, Card card) {
+<span class="nc" id="L799">        Integer override = priorityOverrides.get(card.id());</span>
+<span class="nc bnc" id="L800" title="All 2 branches missed.">        if (override != null) {</span>
+<span class="nc" id="L801">            return override;</span>
+        }
+<span class="nc" id="L803">        Integer priority = card.priority();</span>
+<span class="nc bnc" id="L804" title="All 2 branches missed.">        return priority == null ? Integer.MAX_VALUE : priority;</span>
+    }
+
+    private static int activeOrder(Card card, EffectiveConfig config) {
+<span class="nc bnc" id="L808" title="All 4 branches missed.">        if (card.listId() != null &amp;&amp; !config.tracker().activeListIds().isEmpty()) {</span>
+<span class="nc" id="L809">            int index = config.tracker().activeListIds().indexOf(card.listId());</span>
+<span class="nc bnc" id="L810" title="All 2 branches missed.">            return index &lt; 0</span>
+<span class="nc" id="L811">                    ? Integer.MAX_VALUE</span>
+<span class="nc" id="L812">                    : config.tracker().activeListIds().size() - 1 - index;</span>
+        }
+<span class="nc" id="L814">        List&lt;String&gt; active = config.tracker().activeStates().stream()</span>
+<span class="nc" id="L815">                .map(StateNames::normalize)</span>
+<span class="nc" id="L816">                .toList();</span>
+<span class="nc" id="L817">        int index = active.indexOf(StateNames.normalize(card.state()));</span>
+<span class="nc bnc" id="L818" title="All 2 branches missed.">        return index &lt; 0 ? Integer.MAX_VALUE : active.size() - 1 - index;</span>
+    }
+
+    private BoardContext boardContext(EffectiveConfig config) {
+<span class="nc" id="L822">        Map&lt;String, Object&gt; board = getMap(</span>
+<span class="nc" id="L823">                config, &quot;boards/&quot; + encodeSegment(config.tracker().boardId()), Map.of(&quot;fields&quot;, &quot;id,name,closed&quot;));</span>
+<span class="nc" id="L824">        String boardId = requiredString(board, &quot;id&quot;, &quot;trello_unknown_payload&quot;);</span>
+<span class="nc" id="L825">        boolean boardClosed = bool(board.get(&quot;closed&quot;));</span>
+<span class="nc" id="L826">        Map&lt;String, BoardList&gt; listMap = fetchBoardLists(config.withResolvedBoardId(boardId)).stream()</span>
+<span class="nc" id="L827">                .collect(Collectors.toMap(</span>
+<span class="nc" id="L828">                        BoardList::id, Function.identity(), (left, right) -&gt; left, LinkedHashMap::new));</span>
+<span class="nc" id="L829">        return new BoardContext(boardId, boardClosed, listMap);</span>
+    }
+
+    public List&lt;BoardList&gt; fetchBoardLists(EffectiveConfig config) {
+<span class="nc" id="L833">        String boardId = config.tracker().resolvedBoardId();</span>
+<span class="nc" id="L834">        return getList(</span>
+                        config,
+<span class="nc" id="L836">                        &quot;boards/&quot; + encodeSegment(boardId) + &quot;/lists&quot;,</span>
+<span class="nc" id="L837">                        Map.of(&quot;filter&quot;, &quot;all&quot;, &quot;fields&quot;, &quot;id,name,closed,pos&quot;))</span>
+<span class="nc" id="L838">                .stream()</span>
+<span class="nc" id="L839">                .map(this::toList)</span>
+<span class="nc" id="L840">                .toList();</span>
+    }
+
+    public Map&lt;String, Object&gt; addComment(EffectiveConfig config, String cardId, String text) {
+<span class="nc" id="L844">        return postMap(config, &quot;cards/&quot; + encodeSegment(cardId) + &quot;/actions/comments&quot;, Map.of(&quot;text&quot;, text));</span>
+    }
+
+    public Map&lt;String, Object&gt; updateComment(EffectiveConfig config, String actionId, String text) {
+<span class="nc" id="L848">        return putMap(config, &quot;actions/&quot; + encodeSegment(actionId) + &quot;/text&quot;, Map.of(&quot;value&quot;, text));</span>
+    }
+
+    public Map&lt;String, Object&gt; deleteComment(EffectiveConfig config, String actionId) {
+<span class="nc" id="L852">        return request(&quot;DELETE&quot;, config, &quot;actions/&quot; + encodeSegment(actionId), Map.of(), MAP_TYPE, false);</span>
+    }
+
+    public Map&lt;String, Object&gt; moveCardToList(EffectiveConfig config, String cardId, String listId) {
+<span class="nc" id="L856">        return putMap(config, &quot;cards/&quot; + encodeSegment(cardId) + &quot;/idList&quot;, Map.of(&quot;value&quot;, listId));</span>
+    }
+
+    public ChecklistItemWrite upsertChecklistItem(
+            EffectiveConfig config, String cardId, String checklistName, String itemName, boolean complete) {
+<span class="nc" id="L861">        Card.Checklist checklist = singleChecklistByName(fetchChecklists(config, cardId), checklistName);</span>
+<span class="nc bnc" id="L862" title="All 2 branches missed.">        if (checklist == null) {</span>
+<span class="nc" id="L863">            checklist = createChecklist(config, cardId, checklistName);</span>
+        }
+
+<span class="nc" id="L866">        Card.ChecklistItem item = singleCheckItemByName(checklist, itemName);</span>
+<span class="nc bnc" id="L867" title="All 2 branches missed.">        if (item == null) {</span>
+            // Preserve query parameter order for deterministic request logs and tests.
+<span class="nc" id="L869">            Map&lt;String, String&gt; query = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L870">            query.put(&quot;name&quot;, itemName);</span>
+<span class="nc" id="L871">            query.put(&quot;checked&quot;, Boolean.toString(complete));</span>
+<span class="nc" id="L872">            Map&lt;String, Object&gt; created =</span>
+<span class="nc" id="L873">                    postMap(config, &quot;checklists/&quot; + encodeSegment(checklist.id()) + &quot;/checkItems&quot;, query);</span>
+<span class="nc" id="L874">            return new ChecklistItemWrite(</span>
+<span class="nc" id="L875">                    checklist.id(), requiredString(created, &quot;id&quot;, &quot;trello_unknown_payload&quot;), complete, &quot;created&quot;);</span>
+        }
+<span class="nc bnc" id="L877" title="All 2 branches missed.">        if (item.complete() == complete) {</span>
+<span class="nc" id="L878">            return new ChecklistItemWrite(checklist.id(), item.id(), complete, &quot;unchanged&quot;);</span>
+        }
+<span class="nc" id="L880">        updateCheckItemState(config, cardId, item.id(), complete);</span>
+<span class="nc" id="L881">        return new ChecklistItemWrite(checklist.id(), item.id(), complete, &quot;updated&quot;);</span>
+    }
+
+    public UrlAttachmentWrite addUrlAttachment(EffectiveConfig config, String cardId, String url, String name) {
+        // Keep the URL first so request logs mirror the documented Trello attachment call.
+<span class="nc" id="L886">        Map&lt;String, String&gt; query = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L887">        query.put(&quot;url&quot;, url);</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">        if (!blank(name)) {</span>
+<span class="nc" id="L889">            query.put(&quot;name&quot;, name);</span>
+        }
+<span class="nc" id="L891">        JsonNode created = postJson(config, &quot;cards/&quot; + encodeSegment(cardId) + &quot;/attachments&quot;, query);</span>
+<span class="nc" id="L892">        return new UrlAttachmentWrite(attachmentId(created));</span>
+    }
+
+    private Card.Checklist createChecklist(EffectiveConfig config, String cardId, String checklistName) {
+<span class="nc" id="L896">        Map&lt;String, Object&gt; created =</span>
+<span class="nc" id="L897">                postMap(config, &quot;cards/&quot; + encodeSegment(cardId) + &quot;/checklists&quot;, Map.of(&quot;name&quot;, checklistName));</span>
+<span class="nc" id="L898">        return new Card.Checklist(requiredString(created, &quot;id&quot;, &quot;trello_unknown_payload&quot;), checklistName, List.of());</span>
+    }
+
+    private static Card.Checklist singleChecklistByName(List&lt;Card.Checklist&gt; checklists, String checklistName) {
+<span class="nc" id="L902">        return singleMatching(</span>
+                checklists,
+<span class="nc" id="L904">                checklist -&gt; Objects.equals(checklist.name(), checklistName),</span>
+                &quot;trello_checklist_ambiguous&quot;,
+                &quot;Multiple Trello checklists match the requested checklist_name.&quot;);
+    }
+
+    private static Card.ChecklistItem singleCheckItemByName(Card.Checklist checklist, String itemName) {
+<span class="nc" id="L910">        return singleMatching(</span>
+<span class="nc" id="L911">                checklist.items(),</span>
+<span class="nc" id="L912">                item -&gt; Objects.equals(item.text(), itemName),</span>
+                &quot;trello_check_item_ambiguous&quot;,
+                &quot;Multiple Trello checklist items match the requested item_name.&quot;);
+    }
+
+    private static &lt;T&gt; T singleMatching(
+            List&lt;T&gt; values, Predicate&lt;? super T&gt; predicate, String duplicateCode, String duplicateMessage) {
+<span class="nc" id="L919">        List&lt;T&gt; matches = values.stream().filter(predicate).limit(2).toList();</span>
+<span class="nc bnc" id="L920" title="All 3 branches missed.">        return switch (matches.size()) {</span>
+<span class="nc" id="L921">            case 0 -&gt; null;</span>
+<span class="nc" id="L922">            case 1 -&gt; matches.getFirst();</span>
+<span class="nc" id="L923">            default -&gt; throw new TrelloException(duplicateCode, duplicateMessage);</span>
+        };
+    }
+
+    private static boolean shouldMoveBeforeDispatch(EffectiveConfig config, Card card, BoardList target) {
+<span class="nc bnc" id="L928" title="All 4 branches missed.">        if (card.listId() != null &amp;&amp; !config.tracker().activeListIds().isEmpty()) {</span>
+<span class="nc" id="L929">            int currentIndex = config.tracker().activeListIds().indexOf(card.listId());</span>
+<span class="nc" id="L930">            int targetIndex = config.tracker().activeListIds().indexOf(target.id());</span>
+<span class="nc bnc" id="L931" title="All 6 branches missed.">            return currentIndex &gt;= 0 &amp;&amp; targetIndex &gt;= 0 &amp;&amp; currentIndex &lt; targetIndex;</span>
+        }
+<span class="nc" id="L933">        List&lt;String&gt; active = config.tracker().activeStates().stream()</span>
+<span class="nc" id="L934">                .map(StateNames::normalize)</span>
+<span class="nc" id="L935">                .toList();</span>
+<span class="nc" id="L936">        int currentIndex = active.indexOf(StateNames.normalize(card.state()));</span>
+<span class="nc" id="L937">        int targetIndex = active.indexOf(StateNames.normalize(target.name()));</span>
+<span class="nc bnc" id="L938" title="All 6 branches missed.">        return currentIndex &gt;= 0 &amp;&amp; targetIndex &gt;= 0 &amp;&amp; currentIndex &lt; targetIndex;</span>
+    }
+
+    private static Optional&lt;BoardList&gt; releaseTarget(
+            EffectiveConfig config, Card card, Card dispatchSource, BoardContext context) {
+<span class="nc bnc" id="L943" title="All 2 branches missed.">        if (hasDispatchSource(config, dispatchSource)) {</span>
+<span class="nc" id="L944">            return releaseTargetFromDispatchSource(config, card, dispatchSource, context);</span>
+        }
+<span class="nc" id="L946">        return releaseTarget(config, card, context);</span>
+    }
+
+    private static Optional&lt;BoardList&gt; releaseTargetFromDispatchSource(
+            EffectiveConfig config, Card card, Card dispatchSource, BoardContext context) {
+<span class="nc bnc" id="L951" title="All 2 branches missed.">        if (dispatchSource.listId() != null) {</span>
+<span class="nc" id="L952">            return Optional.ofNullable(context.lists().get(dispatchSource.listId()))</span>
+<span class="nc bnc" id="L953" title="All 2 branches missed.">                    .filter(list -&gt; !list.closed())</span>
+<span class="nc bnc" id="L954" title="All 2 branches missed.">                    .filter(list -&gt; !Objects.equals(list.id(), card.listId()))</span>
+<span class="nc" id="L955">                    .filter(list -&gt; isDispatchSourceList(config, dispatchSource, list));</span>
+        }
+<span class="nc" id="L957">        String sourceState = StateNames.normalize(dispatchSource.state());</span>
+<span class="nc bnc" id="L958" title="All 2 branches missed.">        if (!isActiveState(config, sourceState)) {</span>
+<span class="nc" id="L959">            return Optional.empty();</span>
+        }
+<span class="nc" id="L961">        return context.lists().values().stream()</span>
+<span class="nc bnc" id="L962" title="All 2 branches missed.">                .filter(list -&gt; !list.closed())</span>
+<span class="nc" id="L963">                .filter(list -&gt; sourceState.equals(StateNames.normalize(list.name())))</span>
+<span class="nc" id="L964">                .findAny();</span>
+    }
+
+    private static boolean hasDispatchSource(EffectiveConfig config, Card dispatchSource) {
+<span class="nc" id="L968">        String sourceState = StateNames.normalize(dispatchSource.state());</span>
+<span class="nc bnc" id="L969" title="All 2 branches missed.">        if (StateNames.normalize(config.tracker().inProgressState()).equals(sourceState)) {</span>
+<span class="nc" id="L970">            return false;</span>
+        }
+<span class="nc bnc" id="L972" title="All 4 branches missed.">        return config.tracker().activeListIds().contains(dispatchSource.listId()) || isActiveState(config, sourceState);</span>
+    }
+
+    private static boolean isDispatchSourceList(EffectiveConfig config, Card dispatchSource, BoardList list) {
+<span class="nc bnc" id="L976" title="All 2 branches missed.">        if (!config.tracker().activeListIds().isEmpty()) {</span>
+<span class="nc" id="L977">            return config.tracker().activeListIds().contains(list.id());</span>
+        }
+<span class="nc" id="L979">        return isActiveState(config, StateNames.normalize(dispatchSource.state()));</span>
+    }
+
+    private static boolean isActiveState(EffectiveConfig config, String normalizedState) {
+<span class="nc" id="L983">        return config.tracker().activeStates().stream()</span>
+<span class="nc" id="L984">                .map(StateNames::normalize)</span>
+<span class="nc" id="L985">                .anyMatch(normalizedState::equals);</span>
+    }
+
+    private static Optional&lt;BoardList&gt; releaseTarget(EffectiveConfig config, Card card, BoardContext context) {
+<span class="nc bnc" id="L989" title="All 4 branches missed.">        if (card.listId() != null &amp;&amp; !config.tracker().activeListIds().isEmpty()) {</span>
+<span class="nc" id="L990">            int currentIndex = config.tracker().activeListIds().indexOf(card.listId());</span>
+<span class="nc bnc" id="L991" title="All 2 branches missed.">            if (currentIndex &gt; 0) {</span>
+<span class="nc" id="L992">                return Optional.ofNullable(context.lists()</span>
+<span class="nc" id="L993">                                .get(config.tracker().activeListIds().get(currentIndex - 1)))</span>
+<span class="nc bnc" id="L994" title="All 2 branches missed.">                        .filter(list -&gt; !list.closed());</span>
+            }
+        }
+
+<span class="nc" id="L998">        List&lt;String&gt; active = config.tracker().activeStates().stream()</span>
+<span class="nc" id="L999">                .map(StateNames::normalize)</span>
+<span class="nc" id="L1000">                .toList();</span>
+<span class="nc" id="L1001">        int inProgressIndex =</span>
+<span class="nc" id="L1002">                active.indexOf(StateNames.normalize(config.tracker().inProgressState()));</span>
+<span class="nc bnc" id="L1003" title="All 2 branches missed.">        if (inProgressIndex &lt;= 0) {</span>
+<span class="nc" id="L1004">            return Optional.empty();</span>
+        }
+<span class="nc" id="L1006">        Set&lt;String&gt; targetNames = Set.of(active.get(inProgressIndex - 1));</span>
+<span class="nc" id="L1007">        return context.lists().values().stream()</span>
+<span class="nc bnc" id="L1008" title="All 2 branches missed.">                .filter(list -&gt; !list.closed())</span>
+<span class="nc" id="L1009">                .filter(list -&gt; targetNames.contains(StateNames.normalize(list.name())))</span>
+<span class="nc" id="L1010">                .findAny();</span>
+    }
+
+    private Optional&lt;Card&gt; normalize(Map&lt;String, Object&gt; payload, BoardContext context, EffectiveConfig config) {
+<span class="nc" id="L1014">        String id = string(payload.get(&quot;id&quot;));</span>
+<span class="nc" id="L1015">        String name = string(payload.get(&quot;name&quot;));</span>
+<span class="nc" id="L1016">        String boardId = string(payload.get(&quot;idBoard&quot;));</span>
+<span class="nc" id="L1017">        String listId = string(payload.get(&quot;idList&quot;));</span>
+<span class="nc bnc" id="L1018" title="All 6 branches missed.">        if (blank(id) || blank(name) || blank(boardId)) {</span>
+<span class="nc" id="L1019">            LOG.warnf(&quot;trello_card outcome=skipped reason=missing_required_fields card_id=%s&quot;, id);</span>
+<span class="nc" id="L1020">            return Optional.empty();</span>
+        }
+<span class="nc bnc" id="L1022" title="All 2 branches missed.">        BoardList list = listId == null ? null : context.lists().get(listId);</span>
+<span class="nc" id="L1023">        boolean cardClosed = bool(payload.get(&quot;closed&quot;));</span>
+        String state;
+        String source;
+<span class="nc bnc" id="L1026" title="All 2 branches missed.">        if (context.boardClosed()) {</span>
+<span class="nc" id="L1027">            state = &quot;ArchivedBoard&quot;;</span>
+<span class="nc" id="L1028">            source = &quot;board_closed&quot;;</span>
+<span class="nc bnc" id="L1029" title="All 2 branches missed.">        } else if (cardClosed) {</span>
+<span class="nc" id="L1030">            state = &quot;Archived&quot;;</span>
+<span class="nc" id="L1031">            source = &quot;card_closed&quot;;</span>
+<span class="nc bnc" id="L1032" title="All 4 branches missed.">        } else if (list != null &amp;&amp; list.closed()) {</span>
+<span class="nc" id="L1033">            state = &quot;ArchivedList&quot;;</span>
+<span class="nc" id="L1034">            source = &quot;list_closed&quot;;</span>
+<span class="nc bnc" id="L1035" title="All 2 branches missed.">        } else if (list != null) {</span>
+<span class="nc" id="L1036">            state = list.name();</span>
+<span class="nc" id="L1037">            source = &quot;list&quot;;</span>
+        } else {
+<span class="nc" id="L1039">            state = &quot;Unknown&quot;;</span>
+<span class="nc" id="L1040">            source = &quot;unknown&quot;;</span>
+        }
+
+<span class="nc" id="L1043">        List&lt;String&gt; labels = labels(payload);</span>
+<span class="nc" id="L1044">        Integer priority = labels.stream()</span>
+<span class="nc" id="L1045">                .map(label -&gt; config.tracker().priorityLabels().get(StateNames.normalize(label)))</span>
+<span class="nc" id="L1046">                .filter(Objects::nonNull)</span>
+<span class="nc" id="L1047">                .min(Integer::compareTo)</span>
+<span class="nc" id="L1048">                .orElse(null);</span>
+
+<span class="nc" id="L1050">        return Optional.of(new Card(</span>
+                id,
+<span class="nc" id="L1052">                identifier(config, payload),</span>
+                name,
+<span class="nc" id="L1054">                string(payload.get(&quot;desc&quot;)),</span>
+                priority,
+                state,
+                source,
+                listId,
+<span class="nc bnc" id="L1059" title="All 2 branches missed.">                list == null ? null : list.name(),</span>
+<span class="nc bnc" id="L1060" title="All 2 branches missed.">                list == null ? null : list.closed(),</span>
+                boardId,
+<span class="nc" id="L1062">                context.boardClosed(),</span>
+                cardClosed,
+<span class="nc" id="L1064">                integer(payload.get(&quot;idShort&quot;), &quot;idShort&quot;),</span>
+<span class="nc" id="L1065">                string(payload.get(&quot;shortLink&quot;)),</span>
+<span class="nc" id="L1066">                string(payload.get(&quot;shortUrl&quot;)),</span>
+                null,
+<span class="nc" id="L1068">                string(payload.get(&quot;url&quot;)),</span>
+                labels,
+<span class="nc" id="L1070">                labelIds(payload),</span>
+<span class="nc" id="L1071">                List.of(),</span>
+<span class="nc" id="L1072">                checklists(payload),</span>
+<span class="nc" id="L1073">                attachments(payload),</span>
+<span class="nc" id="L1074">                List.of(),</span>
+<span class="nc" id="L1075">                List.of(),</span>
+<span class="nc" id="L1076">                List.&lt;BlockerRef&gt;of(),</span>
+<span class="nc" id="L1077">                comments(payload),</span>
+<span class="nc" id="L1078">                createdAtFromObjectId(id),</span>
+<span class="nc" id="L1079">                instant(payload.get(&quot;dateLastActivity&quot;)),</span>
+<span class="nc" id="L1080">                instant(payload.get(&quot;due&quot;)),</span>
+<span class="nc" id="L1081">                nullableBool(payload.get(&quot;dueComplete&quot;)),</span>
+<span class="nc" id="L1082">                decimal(payload.get(&quot;pos&quot;))));</span>
+    }
+
+    private static List&lt;Card.Comment&gt; comments(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1086">        Object actions = payload.get(&quot;actions&quot;);</span>
+<span class="nc bnc" id="L1087" title="All 2 branches missed.">        if (!(actions instanceof List&lt;?&gt; actionList)) {</span>
+<span class="nc" id="L1088">            return List.of();</span>
+        }
+<span class="nc" id="L1090">        return actionList.stream()</span>
+<span class="nc" id="L1091">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L1092">                .map(Map.class::cast)</span>
+<span class="nc" id="L1093">                .map(TrelloClient::comment)</span>
+<span class="nc" id="L1094">                .flatMap(Optional::stream)</span>
+<span class="nc" id="L1095">                .toList();</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static List&lt;Card.Checklist&gt; checklists(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1100">        Object checklists = payload.get(&quot;checklists&quot;);</span>
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">        if (!(checklists instanceof List&lt;?&gt; checklistList)) {</span>
+<span class="nc" id="L1102">            return List.of();</span>
+        }
+<span class="nc" id="L1104">        return checklistList.stream()</span>
+<span class="nc" id="L1105">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L1106">                .map(checklist -&gt; checklist((Map&lt;String, Object&gt;) checklist))</span>
+<span class="nc" id="L1107">                .toList();</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static Card.Checklist checklist(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1112">        Object checkItems = payload.get(&quot;checkItems&quot;);</span>
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">        List&lt;Card.ChecklistItem&gt; items = checkItems instanceof List&lt;?&gt; itemList</span>
+<span class="nc" id="L1114">                ? itemList.stream()</span>
+<span class="nc" id="L1115">                        .filter(Map.class::isInstance)</span>
+<span class="nc" id="L1116">                        .map(item -&gt; checklistItem((Map&lt;String, Object&gt;) item))</span>
+<span class="nc" id="L1117">                        .toList()</span>
+<span class="nc" id="L1118">                : List.of();</span>
+<span class="nc" id="L1119">        return new Card.Checklist(string(payload.get(&quot;id&quot;)), string(payload.get(&quot;name&quot;)), items);</span>
+    }
+
+    private static Card.ChecklistItem checklistItem(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1123">        return new Card.ChecklistItem(</span>
+<span class="nc" id="L1124">                string(payload.get(&quot;id&quot;)),</span>
+<span class="nc" id="L1125">                string(payload.get(&quot;name&quot;)),</span>
+<span class="nc" id="L1126">                &quot;complete&quot;.equalsIgnoreCase(string(payload.get(&quot;state&quot;))));</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static List&lt;Card.Attachment&gt; attachments(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1131">        Object attachments = payload.get(&quot;attachments&quot;);</span>
+<span class="nc bnc" id="L1132" title="All 2 branches missed.">        if (!(attachments instanceof List&lt;?&gt; attachmentList)) {</span>
+<span class="nc" id="L1133">            return List.of();</span>
+        }
+<span class="nc" id="L1135">        return attachmentList.stream()</span>
+<span class="nc" id="L1136">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L1137">                .map(attachment -&gt; attachment((Map&lt;String, Object&gt;) attachment))</span>
+<span class="nc" id="L1138">                .toList();</span>
+    }
+
+    private static Card.Attachment attachment(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1142">        return new Card.Attachment(string(payload.get(&quot;id&quot;)), string(payload.get(&quot;name&quot;)), string(payload.get(&quot;url&quot;)));</span>
+    }
+
+    private static Optional&lt;Card.Comment&gt; comment(Map&lt;?, ?&gt; action) {
+<span class="nc" id="L1146">        String text = commentText(action);</span>
+<span class="nc bnc" id="L1147" title="All 2 branches missed.">        if (blank(text)) {</span>
+<span class="nc" id="L1148">            return Optional.empty();</span>
+        }
+<span class="nc" id="L1150">        return Optional.of(new Card.Comment(</span>
+<span class="nc" id="L1151">                string(action.get(&quot;id&quot;)),</span>
+                text,
+<span class="nc" id="L1153">                commentAuthor(action.get(&quot;memberCreator&quot;)),</span>
+<span class="nc" id="L1154">                instant(action.get(&quot;date&quot;))));</span>
+    }
+
+    private static String commentText(Map&lt;?, ?&gt; action) {
+<span class="nc" id="L1158">        Object data = action.get(&quot;data&quot;);</span>
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">        if (!(data instanceof Map&lt;?, ?&gt; dataMap)) {</span>
+<span class="nc" id="L1160">            return &quot;&quot;;</span>
+        }
+<span class="nc" id="L1162">        String text = string(dataMap.get(&quot;text&quot;));</span>
+<span class="nc" id="L1163">        return nullToEmpty(text);</span>
+    }
+
+    private static String commentAuthor(Object memberCreator) {
+<span class="nc bnc" id="L1167" title="All 2 branches missed.">        if (!(memberCreator instanceof Map&lt;?, ?&gt; member)) {</span>
+<span class="nc" id="L1168">            return null;</span>
+        }
+<span class="nc" id="L1170">        String fullName = string(member.get(&quot;fullName&quot;));</span>
+<span class="nc bnc" id="L1171" title="All 2 branches missed.">        return blank(fullName) ? string(member.get(&quot;username&quot;)) : fullName;</span>
+    }
+
+    private Map&lt;String, Object&gt; getMap(EffectiveConfig config, String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L1175">        return request(&quot;GET&quot;, config, path, query, MAP_TYPE, true);</span>
+    }
+
+    private List&lt;Map&lt;String, Object&gt;&gt; getList(EffectiveConfig config, String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L1179">        return request(&quot;GET&quot;, config, path, query, LIST_MAP_TYPE, true);</span>
+    }
+
+    private Map&lt;String, Object&gt; postMap(EffectiveConfig config, String path, Map&lt;String, String&gt; query) {
+        // Do not automatically retry writes; a network failure after Trello applied a comment could duplicate it.
+<span class="nc" id="L1184">        return request(&quot;POST&quot;, config, path, query, MAP_TYPE, false);</span>
+    }
+
+    private JsonNode postJson(EffectiveConfig config, String path, Map&lt;String, String&gt; query) {
+        // Do not automatically retry writes; a network failure after Trello applied a write could duplicate it.
+<span class="nc" id="L1189">        String body = requestBody(&quot;POST&quot;, config, path, query, false);</span>
+<span class="nc bnc" id="L1190" title="All 2 branches missed.">        if (blank(body)) {</span>
+<span class="nc" id="L1191">            throw new TrelloException(&quot;trello_unknown_payload&quot;, &quot;Trello attachment payload is empty&quot;);</span>
+        }
+        try {
+<span class="nc" id="L1194">            return json.readValue(body, JSON_TYPE);</span>
+<span class="nc" id="L1195">        } catch (IOException e) {</span>
+<span class="nc" id="L1196">            throw new TrelloException(&quot;trello_unknown_payload&quot;, &quot;Trello attachment payload could not be parsed&quot;, e);</span>
+        }
+    }
+
+    private Map&lt;String, Object&gt; putMap(EffectiveConfig config, String path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L1201">        return request(&quot;PUT&quot;, config, path, query, MAP_TYPE, false);</span>
+    }
+
+    private &lt;T&gt; T request(
+            String method,
+            EffectiveConfig config,
+            String path,
+            Map&lt;String, String&gt; query,
+            TypeReference&lt;T&gt; type,
+            boolean retry) {
+<span class="nc" id="L1211">        String body = requestBody(method, config, path, query, retry);</span>
+        try {
+<span class="nc" id="L1213">            return json.readValue(body, type);</span>
+<span class="nc" id="L1214">        } catch (IOException e) {</span>
+<span class="nc" id="L1215">            throw new TrelloException(&quot;trello_api_request&quot;, &quot;Trello request failed&quot;, e);</span>
+        }
+    }
+
+    private String requestBody(
+            String method, EffectiveConfig config, String path, Map&lt;String, String&gt; query, boolean retry) {
+<span class="nc" id="L1221">        URI uri = uri(config, path, query);</span>
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">        int maxAttempts = retry ? Math.max(1, config.tracker().maxApiRetries() + 1) : 1;</span>
+<span class="nc bnc" id="L1223" title="All 2 branches missed.">        for (int attempt = 1; attempt &lt;= maxAttempts; attempt++) {</span>
+            try {
+<span class="nc" id="L1225">                HttpRequest.Builder builder = HttpRequest.newBuilder(uri)</span>
+<span class="nc" id="L1226">                        .timeout(config.tracker().requestTimeout())</span>
+<span class="nc" id="L1227">                        .header(&quot;Accept&quot;, &quot;application/json&quot;)</span>
+<span class="nc" id="L1228">                        .header(&quot;Authorization&quot;, authorization(config));</span>
+                HttpRequest request =
+<span class="nc bnc" id="L1230" title="All 5 branches missed.">                        switch (method) {</span>
+<span class="nc" id="L1231">                            case &quot;GET&quot; -&gt; builder.GET().build();</span>
+                            case &quot;POST&quot; -&gt;
+<span class="nc" id="L1233">                                builder.POST(HttpRequest.BodyPublishers.noBody())</span>
+<span class="nc" id="L1234">                                        .build();</span>
+                            case &quot;PUT&quot; -&gt;
+<span class="nc" id="L1236">                                builder.PUT(HttpRequest.BodyPublishers.noBody()).build();</span>
+<span class="nc" id="L1237">                            case &quot;DELETE&quot; -&gt; builder.DELETE().build();</span>
+<span class="nc" id="L1238">                            default -&gt; throw new IllegalArgumentException(&quot;Unsupported Trello method: &quot; + method);</span>
+                        };
+<span class="nc" id="L1240">                HttpResponse&lt;String&gt; response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L1241" title="All 2 branches missed.">                if (isSuccessfulStatus(response.statusCode())) {</span>
+<span class="nc" id="L1242">                    return response.body();</span>
+                }
+<span class="nc bnc" id="L1244" title="All 4 branches missed.">                if (isRateLimited(response.statusCode()) &amp;&amp; attempt &lt; maxAttempts) {</span>
+<span class="nc" id="L1245">                    LOG.warn(rateLimitWarning(config));</span>
+<span class="nc" id="L1246">                    sleep(backoff(config, attempt, response));</span>
+<span class="nc" id="L1247">                    continue;</span>
+                }
+<span class="nc bnc" id="L1249" title="All 2 branches missed.">                if (isRateLimited(response.statusCode())) {</span>
+<span class="nc" id="L1250">                    LOG.warn(rateLimitWarning(config));</span>
+                }
+<span class="nc" id="L1252">                throw statusException(response.statusCode());</span>
+<span class="nc" id="L1253">            } catch (IOException e) {</span>
+<span class="nc bnc" id="L1254" title="All 2 branches missed.">                if (attempt == maxAttempts) {</span>
+<span class="nc" id="L1255">                    throw new TrelloException(&quot;trello_api_request&quot;, &quot;Trello request failed&quot;, e);</span>
+                }
+<span class="nc" id="L1257">                sleep(backoff(config, attempt, null));</span>
+<span class="nc" id="L1258">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L1259">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1260">                throw new TrelloException(&quot;trello_api_request&quot;, &quot;Trello request interrupted&quot;, e);</span>
+<span class="nc" id="L1261">            }</span>
+        }
+<span class="nc" id="L1263">        throw new TrelloException(&quot;trello_api_request&quot;, &quot;Trello request failed after retries&quot;);</span>
+    }
+
+    private static TrelloException statusException(int statusCode) {
+<span class="nc bnc" id="L1267" title="All 2 branches missed.">        if (isRateLimited(statusCode)) {</span>
+<span class="nc" id="L1268">            return new TrelloException(&quot;trello_api_rate_limited&quot;, &quot;Trello rate limit exceeded&quot;, statusCode);</span>
+        }
+<span class="nc" id="L1270">        Status status = Status.fromStatusCode(statusCode);</span>
+<span class="nc bnc" id="L1271" title="All 2 branches missed.">        if (status == null) {</span>
+<span class="nc" id="L1272">            return new TrelloException(&quot;trello_api_status&quot;, &quot;Trello returned HTTP &quot; + statusCode, statusCode);</span>
+        }
+<span class="nc bnc" id="L1274" title="All 4 branches missed.">        return switch (status) {</span>
+<span class="nc" id="L1275">            case UNAUTHORIZED -&gt; new TrelloException(&quot;trello_auth_failed&quot;, &quot;Trello authentication failed&quot;, statusCode);</span>
+<span class="nc" id="L1276">            case FORBIDDEN -&gt; new TrelloException(&quot;trello_permission_denied&quot;, &quot;Trello permission denied&quot;, statusCode);</span>
+<span class="nc" id="L1277">            case NOT_FOUND -&gt; new TrelloException(&quot;trello_card_not_found&quot;, &quot;Trello resource not found&quot;, statusCode);</span>
+<span class="nc" id="L1278">            default -&gt; new TrelloException(&quot;trello_api_status&quot;, &quot;Trello returned HTTP &quot; + statusCode, statusCode);</span>
+        };
+    }
+
+    private static boolean isRateLimited(int statusCode) {
+<span class="nc bnc" id="L1283" title="All 2 branches missed.">        return statusCode == Status.TOO_MANY_REQUESTS.getStatusCode();</span>
+    }
+
+    private static boolean isNotFound(TrelloException exception) {
+<span class="nc bnc" id="L1287" title="All 2 branches missed.">        return exception.statusCode() == Status.NOT_FOUND.getStatusCode();</span>
+    }
+
+    private static boolean isSuccessfulStatus(int statusCode) {
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">        return Family.SUCCESSFUL == Family.familyOf(statusCode);</span>
+    }
+
+    static String rateLimitWarning(EffectiveConfig config) {
+<span class="nc" id="L1295">        return &quot;Trello rate limit reached. Current polling.interval_ms is %d in %s. If this happens often, increase polling.interval_ms, especially when running more than 5-10 boards with the same Trello token.&quot;</span>
+<span class="nc" id="L1296">                .formatted(config.polling().interval().toMillis(), config.workflowPath());</span>
+    }
+
+    static Duration backoff(EffectiveConfig config, int attempt, HttpResponse&lt;?&gt; response) {
+<span class="nc bnc" id="L1300" title="All 2 branches missed.">        Optional&lt;Duration&gt; retryAfter = response == null</span>
+<span class="nc" id="L1301">                ? Optional.empty()</span>
+<span class="nc" id="L1302">                : response.headers().firstValue(&quot;Retry-After&quot;).flatMap(TrelloClient::parseRetryAfter);</span>
+<span class="nc" id="L1303">        return retryAfter.orElseGet(() -&gt; exponentialBackoffWithJitter(config, attempt));</span>
+    }
+
+    private static Duration exponentialBackoffWithJitter(EffectiveConfig config, int attempt) {
+<span class="nc" id="L1307">        long base = config.tracker().apiRetryBaseDelay().toMillis();</span>
+<span class="nc" id="L1308">        long jitter = ThreadLocalRandom.current().nextLong(Math.max(1L, base));</span>
+<span class="nc" id="L1309">        return Duration.ofMillis((base * (1L &lt;&lt; Math.min(attempt - 1, 8))) + jitter);</span>
+    }
+
+    private static Optional&lt;Duration&gt; parseRetryAfter(String value) {
+        try {
+<span class="nc bnc" id="L1314" title="All 2 branches missed.">            return Optional.of(Duration.ofSeconds(Long.parseLong(value))).filter(duration -&gt; !duration.isNegative());</span>
+<span class="nc" id="L1315">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L1316">            return Optional.empty();</span>
+        }
+    }
+
+    // Blocking out the retry window is inherent: Trello publishes no event when a rate-limit
+    // window or outage ends, so the only choices are honoring Retry-After/backoff or failing
+    // the request (see docs/adr/0053-sleep-based-waits-kept-as-polling-boundaries.md).
+    private static void sleep(Duration duration) {
+        try {
+<span class="nc" id="L1325">            Thread.sleep(duration);</span>
+<span class="nc" id="L1326">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L1327">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1328">            throw new TrelloException(&quot;trello_api_request&quot;, &quot;Trello retry sleep interrupted&quot;, e);</span>
+<span class="nc" id="L1329">        }</span>
+<span class="nc" id="L1330">    }</span>
+
+    private static boolean hasChecklistItems(Map&lt;String, Object&gt; payload) {
+<span class="nc bnc" id="L1333" title="All 2 branches missed.">        return badgeCount(payload, &quot;checkItems&quot;) &gt; 0;</span>
+    }
+
+    private static boolean hasComments(Map&lt;String, Object&gt; payload) {
+<span class="nc bnc" id="L1337" title="All 2 branches missed.">        return badgeCount(payload, &quot;comments&quot;) &gt; 0;</span>
+    }
+
+    private static int badgeCount(Map&lt;String, Object&gt; payload, String name) {
+<span class="nc" id="L1341">        Object badges = payload.get(&quot;badges&quot;);</span>
+<span class="nc bnc" id="L1342" title="All 2 branches missed.">        if (!(badges instanceof Map&lt;?, ?&gt; badgeMap)) {</span>
+<span class="nc" id="L1343">            return 0;</span>
+        }
+<span class="nc" id="L1345">        Object value = badgeMap.get(name);</span>
+<span class="nc bnc" id="L1346" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L1347">            return 0;</span>
+        }
+        try {
+<span class="nc" id="L1350">            return Integer.parseInt(value.toString());</span>
+<span class="nc" id="L1351">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L1352">            return 0;</span>
+        }
+    }
+
+    private static URI uri(EffectiveConfig config, String path, Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L1357" title="All 2 branches missed.">        String normalizedPath = path.startsWith(&quot;/&quot;) ? path.substring(1) : path;</span>
+<span class="nc bnc" id="L1358" title="All 6 branches missed.">        if (normalizedPath.contains(&quot;..&quot;) || normalizedPath.contains(&quot;?&quot;) || normalizedPath.contains(&quot;#&quot;)) {</span>
+<span class="nc" id="L1359">            throw new TrelloException(&quot;trello_unsupported_operation&quot;, &quot;Invalid Trello API path&quot;);</span>
+        }
+<span class="nc" id="L1361">        String queryString = query.entrySet().stream()</span>
+<span class="nc" id="L1362">                .map(entry -&gt; encode(entry.getKey()) + &quot;=&quot; + encode(entry.getValue()))</span>
+<span class="nc" id="L1363">                .collect(Collectors.joining(&quot;&amp;&quot;));</span>
+<span class="nc" id="L1364">        String endpoint = SLASHES.trimTrailingFrom(config.tracker().endpoint());</span>
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">        return URI.create(endpoint + &quot;/&quot; + normalizedPath + (queryString.isBlank() ? &quot;&quot; : &quot;?&quot; + queryString));</span>
+    }
+
+    private static String authorization(EffectiveConfig config) {
+<span class="nc" id="L1369">        return authorization(config.tracker().apiKey(), config.tracker().apiToken());</span>
+    }
+
+    public static String authorization(String apiKey, String apiToken) {
+<span class="nc" id="L1373">        return &quot;OAuth oauth_consumer_key=\&quot;%s\&quot;, oauth_token=\&quot;%s\&quot;&quot;.formatted(apiKey, apiToken);</span>
+    }
+
+    private BoardList toList(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1377">        return new BoardList(</span>
+<span class="nc" id="L1378">                requiredString(payload, &quot;id&quot;, &quot;trello_unknown_payload&quot;),</span>
+<span class="nc" id="L1379">                requiredString(payload, &quot;name&quot;, &quot;trello_unknown_payload&quot;),</span>
+<span class="nc" id="L1380">                bool(payload.get(&quot;closed&quot;)));</span>
+    }
+
+    private static String identifier(EffectiveConfig config, Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1384">        String shortLink = string(payload.get(&quot;shortLink&quot;));</span>
+<span class="nc" id="L1385">        String id = string(payload.get(&quot;id&quot;));</span>
+<span class="nc bnc" id="L1386" title="All 2 branches missed.">        if (!blank(shortLink)) {</span>
+<span class="nc" id="L1387">            return config.tracker().cardIdentifierPrefix() + &quot;-&quot; + shortLink;</span>
+        }
+<span class="nc bnc" id="L1389" title="All 2 branches missed.">        return blank(id) ? null : config.tracker().cardIdentifierPrefix() + &quot;-&quot; + id;</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static List&lt;String&gt; labels(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1394">        Object labels = payload.get(&quot;labels&quot;);</span>
+<span class="nc bnc" id="L1395" title="All 2 branches missed.">        if (!(labels instanceof List&lt;?&gt; list)) {</span>
+<span class="nc" id="L1396">            return List.of();</span>
+        }
+<span class="nc" id="L1398">        return list.stream()</span>
+<span class="nc" id="L1399">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L1400">                .map(label -&gt; string(((Map&lt;String, Object&gt;) label).get(&quot;name&quot;)))</span>
+<span class="nc bnc" id="L1401" title="All 2 branches missed.">                .filter(label -&gt; !blank(label))</span>
+<span class="nc" id="L1402">                .map(StateNames::normalize)</span>
+<span class="nc" id="L1403">                .toList();</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static List&lt;String&gt; labelIds(Map&lt;String, Object&gt; payload) {
+<span class="nc" id="L1408">        Object labels = payload.get(&quot;labels&quot;);</span>
+<span class="nc bnc" id="L1409" title="All 2 branches missed.">        if (!(labels instanceof List&lt;?&gt; list)) {</span>
+<span class="nc" id="L1410">            return List.of();</span>
+        }
+<span class="nc" id="L1412">        return list.stream()</span>
+<span class="nc" id="L1413">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L1414">                .map(label -&gt; string(((Map&lt;String, Object&gt;) label).get(&quot;id&quot;)))</span>
+<span class="nc bnc" id="L1415" title="All 2 branches missed.">                .filter(label -&gt; !blank(label))</span>
+<span class="nc" id="L1416">                .toList();</span>
+    }
+
+    private static Instant createdAtFromObjectId(String id) {
+<span class="nc bnc" id="L1420" title="All 4 branches missed.">        if (id == null || id.length() &lt; 8) {</span>
+<span class="nc" id="L1421">            return null;</span>
+        }
+        try {
+<span class="nc" id="L1424">            long epochSeconds = Long.parseLong(id.substring(0, 8), 16);</span>
+<span class="nc" id="L1425">            return Instant.ofEpochSecond(epochSeconds);</span>
+<span class="nc" id="L1426">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L1427">            return null;</span>
+        }
+    }
+
+    private static Instant instant(Object value) {
+<span class="nc bnc" id="L1432" title="All 4 branches missed.">        if (value == null || value.toString().isBlank()) {</span>
+<span class="nc" id="L1433">            return null;</span>
+        }
+<span class="nc" id="L1435">        return Instant.parse(value.toString());</span>
+    }
+
+    private static BigDecimal decimal(Object value) {
+<span class="nc bnc" id="L1439" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L1440">            return null;</span>
+        }
+<span class="nc" id="L1442">        return new BigDecimal(value.toString());</span>
+    }
+
+    private static Integer integer(Object value, String field) {
+<span class="nc bnc" id="L1446" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L1447">            return null;</span>
+        }
+        // Trello integer fields such as idShort are whole numbers in valid payloads. Classify through
+        // the shared WholeNumbers helper so a fractional or out-of-range value is rejected as a
+        // malformed payload instead of being silently truncated by Number.intValue().
+<span class="nc" id="L1452">        Classified classified = WholeNumbers.classify(value.toString());</span>
+<span class="nc bnc" id="L1453" title="All 2 branches missed.">        if (classified.kind() != Kind.WHOLE) {</span>
+<span class="nc" id="L1454">            throw new TrelloException(</span>
+                    &quot;trello_unknown_payload&quot;, &quot;Trello payload field &quot; + field + &quot; is not a whole number: &quot; + value);
+        }
+<span class="nc" id="L1457">        return classified.value();</span>
+    }
+
+    private static Boolean nullableBool(Object value) {
+<span class="nc bnc" id="L1461" title="All 2 branches missed.">        return value == null ? null : bool(value);</span>
+    }
+
+    private static boolean bool(Object value) {
+<span class="nc bnc" id="L1465" title="All 4 branches missed.">        return value != null &amp;&amp; Boolean.parseBoolean(value.toString());</span>
+    }
+
+    private static String requiredString(Map&lt;String, Object&gt; payload, String key, String errorCode) {
+<span class="nc" id="L1469">        String value = string(payload.get(key));</span>
+<span class="nc bnc" id="L1470" title="All 2 branches missed.">        if (blank(value)) {</span>
+<span class="nc" id="L1471">            throw new TrelloException(errorCode, &quot;Trello payload is missing &quot; + key);</span>
+        }
+<span class="nc" id="L1473">        return value;</span>
+    }
+
+    private static String attachmentId(JsonNode payload) {
+<span class="nc" id="L1477">        JsonNode attachment = payload;</span>
+<span class="nc bnc" id="L1478" title="All 2 branches missed.">        if (payload.isArray()) {</span>
+<span class="nc bnc" id="L1479" title="All 2 branches missed.">            if (payload.isEmpty()) {</span>
+<span class="nc" id="L1480">                throw new TrelloException(&quot;trello_unknown_payload&quot;, &quot;Trello attachment payload is empty&quot;);</span>
+            }
+<span class="nc" id="L1482">            attachment = payload.get(0);</span>
+        }
+<span class="nc bnc" id="L1484" title="All 2 branches missed.">        if (!attachment.isObject()) {</span>
+<span class="nc" id="L1485">            throw new TrelloException(&quot;trello_unknown_payload&quot;, &quot;Trello attachment payload is not an object&quot;);</span>
+        }
+<span class="nc" id="L1487">        String id = attachment.path(&quot;id&quot;).asText(&quot;&quot;);</span>
+<span class="nc bnc" id="L1488" title="All 2 branches missed.">        if (blank(id)) {</span>
+<span class="nc" id="L1489">            throw new TrelloException(&quot;trello_unknown_payload&quot;, &quot;Trello attachment payload is missing id&quot;);</span>
+        }
+<span class="nc" id="L1491">        return id;</span>
+    }
+
+    private static String string(Object value) {
+<span class="nc bnc" id="L1495" title="All 2 branches missed.">        return value == null ? null : value.toString();</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L1499" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+
+    private static String encodeSegment(String value) {
+<span class="nc" id="L1503">        return encode(value).replace(&quot;+&quot;, &quot;%20&quot;);</span>
+    }
+
+    private static String encode(String value) {
+<span class="nc" id="L1507">        return URLEncoder.encode(value, StandardCharsets.UTF_8);</span>
+    }
+
+<span class="nc" id="L1510">    private record BoardContext(String boardId, boolean boardClosed, Map&lt;String, BoardList&gt; lists) {}</span>
+
+<span class="nc" id="L1512">    public record BoardList(String id, String name, boolean closed) {}</span>
+
+<span class="nc" id="L1514">    public record ChecklistItemWrite(String checklistId, String checkItemId, boolean complete, String status) {}</span>
+
+<span class="nc" id="L1516">    public record UrlAttachmentWrite(String attachmentId) {}</span>
+
+<span class="nc" id="L1518">    private record PrerequisitePlan(</span>
+            List&lt;TrelloChecklistClassifier.PrerequisiteItem&gt; items, List&lt;Card.PrerequisiteProblem&gt; problems) {}
+
+<span class="nc" id="L1521">    private record PrerequisiteAnalysis(</span>
+            Card card, PrerequisitePlan plan, Map&lt;String, ReferencedText&gt; promptReferences) {}
+
+<span class="nc" id="L1524">    private record ResolvedPrerequisites(List&lt;Card.PrerequisiteProblem&gt; problems, List&lt;BlockerRef&gt; blockers) {}</span>
+
+<span class="nc" id="L1526">    private record ReferencedText(String source, String text, TrelloCardReference reference) {}</span>
+
+<span class="nc" id="L1528">    private static final class ReferenceAccumulator {</span>
+        // Preserve first-seen reference order for stable prompt context and duplicate handling.
+<span class="nc" id="L1530">        private final Map&lt;String, ReferencedText&gt; references = new LinkedHashMap&lt;&gt;();</span>
+
+        void add(String source, String text) {
+<span class="nc bnc" id="L1533" title="All 2 branches missed.">            if (blank(text)) {</span>
+<span class="nc" id="L1534">                return;</span>
+            }
+<span class="nc" id="L1536">            TrelloCardReferenceParser.referencesIn(text).forEach(reference -&gt; add(source, text, reference));</span>
+<span class="nc" id="L1537">        }</span>
+
+        void addExact(String source, String text) {
+<span class="nc bnc" id="L1540" title="All 2 branches missed.">            if (blank(text)) {</span>
+<span class="nc" id="L1541">                return;</span>
+            }
+<span class="nc" id="L1543">            TrelloCardReferenceParser.exactReference(text).ifPresent(reference -&gt; add(source, text, reference));</span>
+<span class="nc" id="L1544">        }</span>
+
+        void addChecklist(Card.Checklist checklist) {
+<span class="nc" id="L1547">            String source = &quot;checklist:&quot; + nullToEmpty(checklist.name());</span>
+<span class="nc bnc" id="L1548" title="All 2 branches missed.">            for (Card.ChecklistItem item : checklist.items()) {</span>
+<span class="nc" id="L1549">                addExact(source, item.text());</span>
+<span class="nc" id="L1550">                add(source, item.text());</span>
+<span class="nc" id="L1551">            }</span>
+<span class="nc" id="L1552">        }</span>
+
+        void addAttachment(Card.Attachment attachment) {
+<span class="nc" id="L1555">            add(&quot;attachment&quot;, attachment.name());</span>
+<span class="nc" id="L1556">            add(&quot;attachment&quot;, attachment.url());</span>
+<span class="nc" id="L1557">        }</span>
+
+        void addPrerequisite(TrelloCardReference reference) {
+<span class="nc" id="L1560">            add(&quot;checklist&quot;, reference.url(), reference);</span>
+<span class="nc" id="L1561">        }</span>
+
+        void add(String source, String text, TrelloCardReference reference) {
+<span class="nc" id="L1564">            references.putIfAbsent(reference.key(), new ReferencedText(source, text, reference));</span>
+<span class="nc" id="L1565">        }</span>
+
+        Map&lt;String, ReferencedText&gt; asMap() {
+<span class="nc" id="L1568">            return references;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

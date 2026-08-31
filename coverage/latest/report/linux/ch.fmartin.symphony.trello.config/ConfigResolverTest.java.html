@@ -1,0 +1,1245 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConfigResolverTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.config</a> &gt; <span class="el_source">ConfigResolverTest.java</span></div><h1>ConfigResolverTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.config;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L22">final class ConfigResolverTest {</span>
+    private static final String NUL_IN_REPOSITORY_PATH = &quot;\u0000&quot;;
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void resolvesWorkflowEnvironmentReferencesForBoardScopeAndServerPort() throws Exception {
+        // given
+<span class="nc" id="L31">        Path workflow = writeTrelloWorkflow(</span>
+                &quot;WORKFLOW.md&quot;,
+                &quot;$SYMPHONY_BOARD_ID&quot;,
+                &quot;&quot;&quot;
+                  resolved_board_id: $SYMPHONY_RESOLVED_BOARD_ID
+                server:
+                  port: $SYMPHONY_TEST_PORT
+                &quot;&quot;&quot;);
+<span class="nc bnc" id="L39" title="All 4 branches missed.">        var resolver = new ConfigResolver(name -&gt; switch (name) {</span>
+<span class="nc" id="L40">            case &quot;SYMPHONY_BOARD_ID&quot; -&gt; Optional.of(&quot;board-shortlink&quot;);</span>
+<span class="nc" id="L41">            case &quot;SYMPHONY_RESOLVED_BOARD_ID&quot; -&gt; Optional.of(&quot;resolved-board-id&quot;);</span>
+<span class="nc" id="L42">            case &quot;SYMPHONY_TEST_PORT&quot; -&gt; Optional.of(&quot;19093&quot;);</span>
+<span class="nc" id="L43">            default -&gt; Optional.empty();</span>
+        });
+
+        // when
+<span class="nc" id="L47">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L50">        assertThat(config.tracker().boardId()).isEqualTo(&quot;board-shortlink&quot;);</span>
+<span class="nc" id="L51">        assertThat(config.tracker().resolvedBoardId()).isEqualTo(&quot;resolved-board-id&quot;);</span>
+<span class="nc" id="L52">        assertThat(config.server().port()).hasValue(19093);</span>
+<span class="nc" id="L53">    }</span>
+
+    @Test
+    void resolvesLiteralRepositoryDefaultUrl() throws Exception {
+        // given
+<span class="nc" id="L58">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-url.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_url: https://github.com/example/project.git
+                &quot;&quot;&quot;);
+<span class="nc" id="L64">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L67">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L70">        assertThat(config.repository().defaultUrl()).isEqualTo(&quot;https://github.com/example/project.git&quot;);</span>
+<span class="nc" id="L71">        assertThat(config.repository().defaultPath()).isNull();</span>
+<span class="nc" id="L72">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.URL);</span>
+<span class="nc" id="L73">    }</span>
+
+    @Test
+    void resolvesEnvironmentBackedRepositoryDefaultUrl() throws Exception {
+        // given
+<span class="nc" id="L78">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-url-env.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_url: $SYMPHONY_DEFAULT_REPOSITORY_URL
+                &quot;&quot;&quot;);
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        var resolver = new ConfigResolver(name -&gt; &quot;SYMPHONY_DEFAULT_REPOSITORY_URL&quot;.equals(name)</span>
+<span class="nc" id="L85">                ? Optional.of(&quot;ssh://git@example.com/team/project.git&quot;)</span>
+<span class="nc" id="L86">                : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L89">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L92">        assertThat(config.repository().defaultUrl()).isEqualTo(&quot;ssh://git@example.com/team/project.git&quot;);</span>
+<span class="nc" id="L93">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.URL);</span>
+<span class="nc" id="L94">    }</span>
+
+    @Test
+    void missingOptionalRepositoryDefaultUrlEnvironmentReferenceResolvesToAbsent() throws Exception {
+        // given
+<span class="nc" id="L99">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-url-env-missing.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_url: $SYMPHONY_MISSING_REPOSITORY_URL
+                &quot;&quot;&quot;);
+<span class="nc" id="L105">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L108">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L111">        assertThat(config.repository().defaultUrl()).isNull();</span>
+<span class="nc" id="L112">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.NONE);</span>
+<span class="nc" id="L113">    }</span>
+
+    @Test
+    void blankOptionalRepositoryDefaultUrlEnvironmentReferenceResolvesToAbsent() throws Exception {
+        // given
+<span class="nc" id="L118">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-url-env-blank.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_url: $SYMPHONY_BLANK_REPOSITORY_URL
+                &quot;&quot;&quot;);
+<span class="nc" id="L124">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_BLANK_REPOSITORY_URL&quot;.equals(name) ? Optional.of(&quot;   &quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L128">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L131">        assertThat(config.repository().defaultUrl()).isNull();</span>
+<span class="nc" id="L132">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.NONE);</span>
+<span class="nc" id="L133">    }</span>
+
+    @Test
+    void resolvesLiteralRelativeRepositoryDefaultPathAgainstWorkflowDirectoryWithoutProbingIt() throws Exception {
+        // given
+<span class="nc" id="L138">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-path-relative.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_path: ../repositories/project
+                &quot;&quot;&quot;);
+<span class="nc" id="L144">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L147">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L150">        assertThat(config.repository().defaultPath())</span>
+<span class="nc" id="L151">                .isEqualTo(tempDir.resolve(&quot;../repositories/project&quot;)</span>
+<span class="nc" id="L152">                        .toAbsolutePath()</span>
+<span class="nc" id="L153">                        .normalize());</span>
+<span class="nc" id="L154">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.PATH);</span>
+<span class="nc" id="L155">        assertThat(config.repository().defaultPath()).doesNotExist();</span>
+<span class="nc" id="L156">    }</span>
+
+    @Test
+    void resolvesLiteralAbsoluteRepositoryDefaultPathWithoutProbingIt() throws Exception {
+        // given
+<span class="nc" id="L161">        Path missingCheckout = tempDir.resolve(&quot;missing-checkout&quot;);</span>
+<span class="nc" id="L162">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-path-absolute.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_path: %s
+                &quot;&quot;&quot;
+<span class="nc" id="L168">                        .formatted(missingCheckout));</span>
+<span class="nc" id="L169">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L172">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L175">        assertThat(config.repository().defaultPath())</span>
+<span class="nc" id="L176">                .isEqualTo(missingCheckout.toAbsolutePath().normalize());</span>
+<span class="nc" id="L177">        assertThat(config.repository().defaultPath()).doesNotExist();</span>
+<span class="nc" id="L178">    }</span>
+
+    @Test
+    void resolvesEnvironmentBackedRepositoryDefaultPath() throws Exception {
+        // given
+<span class="nc" id="L183">        Path repositoryPath = tempDir.resolve(&quot;source-repository&quot;);</span>
+<span class="nc" id="L184">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-path-env.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_path: $SYMPHONY_DEFAULT_REPOSITORY_PATH
+                &quot;&quot;&quot;);
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        var resolver = new ConfigResolver(name -&gt; &quot;SYMPHONY_DEFAULT_REPOSITORY_PATH&quot;.equals(name)</span>
+<span class="nc" id="L191">                ? Optional.of(repositoryPath.toString())</span>
+<span class="nc" id="L192">                : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L195">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L198">        assertThat(config.repository().defaultPath())</span>
+<span class="nc" id="L199">                .isEqualTo(repositoryPath.toAbsolutePath().normalize());</span>
+<span class="nc" id="L200">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.PATH);</span>
+<span class="nc" id="L201">    }</span>
+
+    @Test
+    void resolvesEnvironmentBackedRepositoryDefaultPathWithSuffix() throws Exception {
+        // given
+<span class="nc" id="L206">        Path repositoryParent = tempDir.resolve(&quot;repositories&quot;);</span>
+<span class="nc" id="L207">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-path-env-suffix.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_path: $SYMPHONY_REPOSITORY_PARENT/project
+                &quot;&quot;&quot;);
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        var resolver = new ConfigResolver(name -&gt; &quot;SYMPHONY_REPOSITORY_PARENT&quot;.equals(name)</span>
+<span class="nc" id="L214">                ? Optional.of(repositoryParent.toString())</span>
+<span class="nc" id="L215">                : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L218">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L221">        assertThat(config.repository().defaultPath())</span>
+<span class="nc" id="L222">                .isEqualTo(repositoryParent.resolve(&quot;project&quot;).toAbsolutePath().normalize());</span>
+<span class="nc" id="L223">    }</span>
+
+    @Test
+    void missingOptionalRepositoryDefaultPathEnvironmentReferenceResolvesToAbsent() throws Exception {
+        // given
+<span class="nc" id="L228">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-path-env-missing.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_path: $SYMPHONY_MISSING_REPOSITORY_PATH
+                &quot;&quot;&quot;);
+<span class="nc" id="L234">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L237">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L240">        assertThat(config.repository().defaultPath()).isNull();</span>
+<span class="nc" id="L241">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.NONE);</span>
+<span class="nc" id="L242">    }</span>
+
+    @Test
+    void blankOptionalRepositoryDefaultPathEnvironmentReferenceResolvesToAbsent() throws Exception {
+        // given
+<span class="nc" id="L247">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-path-env-blank.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_path: $SYMPHONY_BLANK_REPOSITORY_PATH
+                &quot;&quot;&quot;);
+<span class="nc" id="L253">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_BLANK_REPOSITORY_PATH&quot;.equals(name) ? Optional.of(&quot;   &quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L257">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L260">        assertThat(config.repository().defaultPath()).isNull();</span>
+<span class="nc" id="L261">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.NONE);</span>
+<span class="nc" id="L262">    }</span>
+
+    @Test
+    void repositoryDefaultUrlKeepsRepositoryDefaultPathAsCheckoutCandidate() throws Exception {
+        // given
+<span class="nc" id="L267">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-url-over-path.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_url: https://github.com/example/project.git
+                  default_path: ../repositories/project
+                &quot;&quot;&quot;);
+<span class="nc" id="L274">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L277">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L280">        assertThat(config.repository().defaultUrl()).isEqualTo(&quot;https://github.com/example/project.git&quot;);</span>
+<span class="nc" id="L281">        assertThat(config.repository().defaultPath())</span>
+<span class="nc" id="L282">                .isEqualTo(tempDir.resolve(&quot;../repositories/project&quot;)</span>
+<span class="nc" id="L283">                        .toAbsolutePath()</span>
+<span class="nc" id="L284">                        .normalize());</span>
+<span class="nc" id="L285">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.URL);</span>
+<span class="nc" id="L286">    }</span>
+
+    @Test
+    void repositoryDefaultUrlSuppressesMalformedLowerPriorityPath() {
+        // given
+<span class="nc" id="L291">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L294">        EffectiveConfig config = resolver.resolve(workflowDefinitionWithRepository(Map.of(</span>
+                &quot;default_url&quot;,
+                &quot;https://github.com/example/project.git&quot;,
+                &quot;default_path&quot;,
+                &quot;bad&quot; + NUL_IN_REPOSITORY_PATH + &quot;path&quot;)));
+
+        // then
+<span class="nc" id="L301">        assertThat(config.repository().defaultUrl()).isEqualTo(&quot;https://github.com/example/project.git&quot;);</span>
+<span class="nc" id="L302">        assertThat(config.repository().defaultPath()).isNull();</span>
+<span class="nc" id="L303">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.URL);</span>
+<span class="nc" id="L304">    }</span>
+
+    @Test
+    void environmentRepositoryDefaultUrlIgnoresMalformedLowerPriorityEnvironmentPath() {
+        // given
+<span class="nc" id="L309">        var pathEnvironmentRequests = new AtomicInteger();</span>
+<span class="nc bnc" id="L310" title="All 3 branches missed.">        var resolver = new ConfigResolver(name -&gt; switch (name) {</span>
+<span class="nc" id="L311">            case &quot;SYMPHONY_DEFAULT_REPOSITORY_URL&quot; -&gt; Optional.of(&quot;ssh://git@example.com/team/project.git&quot;);</span>
+            case &quot;SYMPHONY_DEFAULT_REPOSITORY_PATH&quot; -&gt; {
+<span class="nc" id="L313">                pathEnvironmentRequests.incrementAndGet();</span>
+<span class="nc" id="L314">                yield Optional.of(&quot;bad&quot; + NUL_IN_REPOSITORY_PATH + &quot;path&quot;);</span>
+            }
+<span class="nc" id="L316">            default -&gt; Optional.empty();</span>
+        });
+
+        // when
+<span class="nc" id="L320">        EffectiveConfig config = resolver.resolve(workflowDefinitionWithRepository(Map.of(</span>
+                &quot;default_url&quot;, &quot;$SYMPHONY_DEFAULT_REPOSITORY_URL&quot;,
+                &quot;default_path&quot;, &quot;$SYMPHONY_DEFAULT_REPOSITORY_PATH&quot;)));
+
+        // then
+<span class="nc" id="L325">        assertThat(config.repository().defaultUrl()).isEqualTo(&quot;ssh://git@example.com/team/project.git&quot;);</span>
+<span class="nc" id="L326">        assertThat(config.repository().defaultPath()).isNull();</span>
+<span class="nc" id="L327">        assertThat(pathEnvironmentRequests).hasValue(1);</span>
+<span class="nc" id="L328">    }</span>
+
+    @MethodSource(&quot;missingOrBlankUrlWithValidPath&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void absentRepositoryDefaultUrlAllowsRepositoryDefaultPath(String ignored, Map&lt;String, String&gt; environment)
+            throws Exception {
+        // given
+<span class="nc" id="L335">        Path repositoryPath = tempDir.resolve(&quot;selected-path&quot;);</span>
+<span class="nc" id="L336">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.repository-url-absent-path-selected.md&quot;,
+                &quot;&quot;&quot;
+                repository:
+                  default_url: $SYMPHONY_DEFAULT_REPOSITORY_URL
+                  default_path: %s
+                &quot;&quot;&quot;
+<span class="nc" id="L343">                        .formatted(repositoryPath));</span>
+<span class="nc" id="L344">        var resolver = new ConfigResolver(name -&gt; Optional.ofNullable(environment.get(name)));</span>
+
+        // when
+<span class="nc" id="L347">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L350">        assertThat(config.repository().defaultUrl()).isNull();</span>
+<span class="nc" id="L351">        assertThat(config.repository().defaultPath())</span>
+<span class="nc" id="L352">                .isEqualTo(repositoryPath.toAbsolutePath().normalize());</span>
+<span class="nc" id="L353">        assertThat(config.repository().selectedDefaultSource()).isEqualTo(EffectiveConfig.DefaultSource.PATH);</span>
+<span class="nc" id="L354">    }</span>
+
+    @Test
+    void malformedSelectedRepositoryDefaultPathFailsAsConfigurationError() {
+        // given
+<span class="nc" id="L359">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L362">        ConfigException error = catchThrowableOfType(</span>
+                ConfigException.class,
+<span class="nc" id="L364">                () -&gt; resolver.resolve(workflowDefinitionWithRepository(</span>
+<span class="nc" id="L365">                        Map.of(&quot;default_path&quot;, &quot;bad&quot; + NUL_IN_REPOSITORY_PATH + &quot;path&quot;))));</span>
+
+        // then
+<span class="nc" id="L368">        assertThat(error.code()).isEqualTo(&quot;config_value_error&quot;);</span>
+<span class="nc" id="L369">        assertThat(error).hasMessage(&quot;repository.default_path must be a valid local path&quot;);</span>
+<span class="nc" id="L370">    }</span>
+
+    @MethodSource(&quot;fractionalNumericValues&quot;)
+    @ParameterizedTest
+    void rejectsFractionalNumericValuesInsteadOfTruncatingThem(String name, String section, String expectedMessage)
+            throws Exception {
+        // given
+<span class="nc" id="L377">        Path workflow = writeDefaultWorkflow(&quot;WORKFLOW.&quot; + name + &quot;.md&quot;, section);</span>
+<span class="nc" id="L378">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L381">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L382">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L385">        assertThat(error.code()).isEqualTo(&quot;config_value_error&quot;);</span>
+<span class="nc" id="L386">        assertThat(error).hasMessage(expectedMessage);</span>
+<span class="nc" id="L387">    }</span>
+
+    private static Stream&lt;Arguments&gt; fractionalNumericValues() {
+<span class="nc" id="L390">        return Stream.of(</span>
+<span class="nc" id="L391">                Arguments.of(&quot;fractional-port&quot;, &quot;server:\n  port: 18080.5&quot;, &quot;server.port must be a whole number&quot;),</span>
+<span class="nc" id="L392">                Arguments.of(</span>
+                        &quot;fractional-agents&quot;,
+                        &quot;agent:\n  max_concurrent_agents: 1.5&quot;,
+                        &quot;max_concurrent_agents must be a whole number&quot;),
+<span class="nc" id="L396">                Arguments.of(</span>
+                        &quot;non-numeric-retries&quot;,
+                        &quot;tracker:\n  max_api_retries: not-a-number&quot;,
+                        &quot;max_api_retries must be a whole number&quot;),
+<span class="nc" id="L400">                Arguments.of(&quot;overflowing-float-port&quot;, &quot;server:\n  port: 1e400&quot;, &quot;server.port must be a whole number&quot;));</span>
+    }
+
+    private static Stream&lt;Arguments&gt; missingOrBlankUrlWithValidPath() {
+<span class="nc" id="L404">        return Stream.of(</span>
+<span class="nc" id="L405">                Arguments.of(&quot;missing-url&quot;, Map.of()),</span>
+<span class="nc" id="L406">                Arguments.of(&quot;blank-url&quot;, Map.of(&quot;SYMPHONY_DEFAULT_REPOSITORY_URL&quot;, &quot;   &quot;)));</span>
+    }
+
+    @MethodSource(&quot;malformedObjectSections&quot;)
+    @ParameterizedTest
+    void rejectsMalformedObjectSectionsInsteadOfIgnoringThem(String name, String section, String expectedMessage)
+            throws Exception {
+        // given
+<span class="nc" id="L414">        Path workflow = writeDefaultWorkflow(&quot;WORKFLOW.&quot; + name + &quot;.md&quot;, section);</span>
+<span class="nc" id="L415">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L418">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L419">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L422">        assertThat(error.code()).isEqualTo(&quot;config_type_error&quot;);</span>
+<span class="nc" id="L423">        assertThat(error).hasMessage(expectedMessage);</span>
+<span class="nc" id="L424">    }</span>
+
+    private static Stream&lt;Arguments&gt; malformedObjectSections() {
+<span class="nc" id="L427">        return Stream.of(</span>
+<span class="nc" id="L428">                Arguments.of(&quot;scalar-server&quot;, &quot;server: 18080&quot;, &quot;server must be an object&quot;),</span>
+<span class="nc" id="L429">                Arguments.of(&quot;scalar-polling&quot;, &quot;polling: disabled&quot;, &quot;polling must be an object&quot;));</span>
+    }
+
+    @Test
+    void emptyPriorityLabelValuesFallBackToDefaultsInsteadOfCrashing() throws Exception {
+        // given
+<span class="nc" id="L435">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.empty-priority.md&quot;,
+                &quot;&quot;&quot;
+                  priority_labels:
+                    rush:
+                &quot;&quot;&quot;);
+<span class="nc" id="L441">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L444">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L447">        assertThat(config.tracker().priorityLabels()).doesNotContainKey(&quot;rush&quot;);</span>
+<span class="nc" id="L448">    }</span>
+
+    @Test
+    void rejectsFractionalEnvironmentBackedServerPortInsteadOfCrashingRaw() throws Exception {
+        // given
+<span class="nc" id="L453">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.fractional-env-port.md&quot;,
+                &quot;&quot;&quot;
+                server:
+                  port: $SYMPHONY_FRACTIONAL_PORT
+                &quot;&quot;&quot;);
+<span class="nc" id="L459">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_FRACTIONAL_PORT&quot;.equals(name) ? Optional.of(&quot;18080.5&quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L463">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L464">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L467">        assertThat(error.code()).isEqualTo(&quot;config_value_error&quot;);</span>
+<span class="nc" id="L468">        assertThat(error).hasMessage(&quot;server.port must be a whole number&quot;);</span>
+<span class="nc" id="L469">    }</span>
+
+    @Test
+    void reportsWholeButTooLargeServerPortAsOutOfRangeNotAsFractional() throws Exception {
+        // given
+<span class="nc" id="L474">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.huge-port.md&quot;,
+                &quot;&quot;&quot;
+                server:
+                  port: 99999999999999999999999
+                &quot;&quot;&quot;);
+<span class="nc" id="L480">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L483">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L484">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L487">        assertThat(error.code()).isEqualTo(&quot;config_value_error&quot;);</span>
+<span class="nc" id="L488">        assertThat(error).hasMessage(&quot;server.port is out of integer range&quot;);</span>
+<span class="nc" id="L489">    }</span>
+
+    @Test
+    void reportsWholeButTooLargeEnvironmentBackedServerPortAsOutOfRange() throws Exception {
+        // given
+<span class="nc" id="L494">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.huge-env-port.md&quot;,
+                &quot;&quot;&quot;
+                server:
+                  port: $SYMPHONY_HUGE_PORT
+                &quot;&quot;&quot;);
+<span class="nc" id="L500">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_HUGE_PORT&quot;.equals(name) ? Optional.of(&quot;9999999999&quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L504">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L505">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L508">        assertThat(error.code()).isEqualTo(&quot;config_value_error&quot;);</span>
+<span class="nc" id="L509">        assertThat(error).hasMessage(&quot;server.port is out of integer range&quot;);</span>
+<span class="nc" id="L510">    }</span>
+
+    @Test
+    void acceptsWholeValuedFloatingPointServerPort() throws Exception {
+        // given
+<span class="nc" id="L515">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.whole-float-port.md&quot;,
+                &quot;&quot;&quot;
+                server:
+                  port: 18080.0
+                &quot;&quot;&quot;);
+<span class="nc" id="L521">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L524">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L527">        assertThat(config.server().port()).hasValue(18080);</span>
+<span class="nc" id="L528">    }</span>
+
+    @Test
+    void keepsOutOfRangePortsResolvableBecauseRangePolicyLivesAtTheLaunchLayer() throws Exception {
+        // given
+        // The resolved server.port has no runtime consumer (the worker reads its HTTP port from
+        // the raw workflow or the SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT overrides), so rejecting
+        // ranges here would only break deployed workers whose unused workflow port is stale.
+        // Range validation stays at the launch layer (WorkflowConfigEditor/LocalPort).
+<span class="nc" id="L537">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.out-of-range-port.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: fake
+                server:
+                  port: 70000
+                &quot;&quot;&quot;);
+<span class="nc" id="L545">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L548">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L549">        Throwable dispatchFailure = catchThrowable(() -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L552">        assertThat(config.server().port()).hasValue(70000);</span>
+<span class="nc" id="L553">        assertThat(dispatchFailure).isNull();</span>
+<span class="nc" id="L554">    }</span>
+
+    @Test
+    void keepsEphemeralServerPortZeroDispatchable() throws Exception {
+        // given
+        // SPEC.md allows server.port 0 for temporary local runs on an ephemeral port.
+<span class="nc" id="L560">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.ephemeral-port.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: fake
+                server:
+                  port: 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L568">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L571">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L572">        Throwable dispatchFailure = catchThrowable(() -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L575">        assertThat(config.server().port()).hasValue(0);</span>
+<span class="nc" id="L576">        assertThat(dispatchFailure).isNull();</span>
+<span class="nc" id="L577">    }</span>
+
+    @Test
+    void fractionalPriorityLabelValuesFallBackToDefaultsInsteadOfTruncating() throws Exception {
+        // given
+<span class="nc" id="L582">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.fractional-priority.md&quot;,
+                &quot;&quot;&quot;
+                  priority_labels:
+                    rush: 2.5
+                &quot;&quot;&quot;);
+<span class="nc" id="L588">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L591">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L594">        assertThat(config.tracker().priorityLabels()).doesNotContainKey(&quot;rush&quot;);</span>
+<span class="nc" id="L595">    }</span>
+
+    @Test
+    void requiredLabelsDefaultEmptyAndConfiguredLabelsAreNormalizedWithoutDroppingBlanks() throws Exception {
+        // given
+<span class="nc" id="L600">        Path configuredWorkflow = tempDir.resolve(&quot;WORKFLOW.required-labels.md&quot;);</span>
+<span class="nc" id="L601">        Files.writeString(</span>
+                configuredWorkflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                  required_labels:
+                    - &quot; Ready For Codex &quot;
+                    - &quot;&quot;
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L616">        Path defaultWorkflow = tempDir.resolve(&quot;WORKFLOW.default-required-labels.md&quot;);</span>
+<span class="nc" id="L617">        Files.writeString(</span>
+                defaultWorkflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L629">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L632">        EffectiveConfig configured = resolver.resolve(new WorkflowLoader().load(configuredWorkflow));</span>
+<span class="nc" id="L633">        EffectiveConfig defaults = resolver.resolve(new WorkflowLoader().load(defaultWorkflow));</span>
+
+        // then
+<span class="nc" id="L636">        assertThat(configured.tracker().requiredLabels()).containsExactly(&quot;ready for codex&quot;, &quot;&quot;);</span>
+<span class="nc" id="L637">        assertThat(defaults.tracker().requiredLabels()).isEmpty();</span>
+<span class="nc" id="L638">    }</span>
+
+    @Test
+    void unresolvedWorkflowBoardIdEnvironmentReferenceFailsBeforeDispatch() throws Exception {
+        // given
+<span class="nc" id="L643">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L644">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: $SYMPHONY_MISSING_BOARD_ID
+                codex:
+                  command: fake
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L658">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L661">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L662">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L665">        assertThat(config.tracker().boardId()).isNull();</span>
+<span class="nc" id="L666">        assertThat(error.code()).isEqualTo(&quot;missing_tracker_board_id&quot;);</span>
+<span class="nc" id="L667">        assertThat(error).hasMessage(&quot;tracker.board_id is required&quot;);</span>
+<span class="nc" id="L668">    }</span>
+
+    @Test
+    void overlappingWorkflowListRolesFailBeforeDispatch() throws Exception {
+        // given
+<span class="nc" id="L673">        Path workflow = tempDir.resolve(&quot;WORKFLOW.overlap.md&quot;);</span>
+<span class="nc" id="L674">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-id
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Ready  for Codex&quot;
+                codex:
+                  command: fake
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L692">        var resolver = new ConfigResolver();</span>
+
+        // when
+<span class="nc" id="L695">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L696">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L699">        assertThat(error.code()).isEqualTo(&quot;overlapping_tracker_list_roles&quot;);</span>
+<span class="nc" id="L700">        assertThat(error).hasMessageContaining(&quot;active and terminal both use Ready for Codex&quot;);</span>
+<span class="nc" id="L701">    }</span>
+
+    @Test
+    void overlappingBlockedWorkflowListRoleFailsBeforeDispatch() throws Exception {
+        // given
+<span class="nc" id="L706">        Path workflow = tempDir.resolve(&quot;WORKFLOW.blocked-overlap.md&quot;);</span>
+<span class="nc" id="L707">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-id
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                  blocked_state: &quot;Ready  for Codex&quot;
+                codex:
+                  command: fake
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L726">        var resolver = new ConfigResolver();</span>
+
+        // when
+<span class="nc" id="L729">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L730">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L733">        assertThat(error.code()).isEqualTo(&quot;overlapping_tracker_list_roles&quot;);</span>
+<span class="nc" id="L734">        assertThat(error).hasMessageContaining(&quot;active and blocked both use Ready for Codex&quot;);</span>
+<span class="nc" id="L735">    }</span>
+
+    @Test
+    void overlappingListNamesAreAllowedWhenListIdsAreAuthoritative() throws Exception {
+        // given
+<span class="nc" id="L740">        Path workflow = tempDir.resolve(&quot;WORKFLOW.list-ids.md&quot;);</span>
+<span class="nc" id="L741">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-id
+                  active_states:
+                    - &quot;Done&quot;
+                  active_list_ids:
+                    - &quot;list-active-done&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                  terminal_list_ids:
+                    - &quot;list-terminal-done&quot;
+                  blocked_state: &quot;Done&quot;
+                codex:
+                  command: fake
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L764">        var resolver = new ConfigResolver();</span>
+
+        // when
+<span class="nc" id="L767">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L768">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L771">        assertThat(error).isNull();</span>
+<span class="nc" id="L772">    }</span>
+
+    @Test
+    void overlappingListIdsFailBeforeDispatch() throws Exception {
+        // given
+<span class="nc" id="L777">        Path workflow = tempDir.resolve(&quot;WORKFLOW.list-id-overlap.md&quot;);</span>
+<span class="nc" id="L778">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-id
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  active_list_ids:
+                    - &quot;shared-list-id&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                  terminal_list_ids:
+                    - &quot;shared-list-id&quot;
+                codex:
+                  command: fake
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L800">        var resolver = new ConfigResolver();</span>
+
+        // when
+<span class="nc" id="L803">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L804">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L807">        assertThat(error.code()).isEqualTo(&quot;overlapping_tracker_list_roles&quot;);</span>
+<span class="nc" id="L808">        assertThat(error).hasMessageContaining(&quot;active and terminal both use shared-list-id&quot;);</span>
+<span class="nc" id="L809">    }</span>
+
+    @Test
+    void duplicateValuesWithinOneRoleAreAllowedBeforeDispatch() throws Exception {
+        // given
+<span class="nc" id="L814">        Path workflow = tempDir.resolve(&quot;WORKFLOW.duplicate-role-values.md&quot;);</span>
+<span class="nc" id="L815">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-id
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                    - &quot;Ready  for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                    - &quot;Done &quot;
+                codex:
+                  command: fake
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L835">        var resolver = new ConfigResolver();</span>
+
+        // when
+<span class="nc" id="L838">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L839">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L842">        assertThat(error).isNull();</span>
+<span class="nc" id="L843">    }</span>
+
+    @Test
+    void rejectsNonPositivePollingInterval() throws Exception {
+        // given
+<span class="nc" id="L848">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L849">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                polling:
+                  interval_ms: 0
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L863">        var resolver = new ConfigResolver(name -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L866">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L867">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L870">        assertThat(error).hasMessageContaining(&quot;interval_ms must be positive&quot;);</span>
+<span class="nc" id="L871">    }</span>
+
+    @Test
+    void rejectsInvalidTrackerEndpointBeforeDispatch() throws Exception {
+        // given
+<span class="nc" id="L876">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L877">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                  endpoint: &quot;not-a-url&quot;
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L890">        var resolver = new ConfigResolver(name -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L893">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L894">        ConfigException error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L897">        assertThat(error).hasMessageContaining(&quot;tracker.endpoint must be an absolute http(s) URL&quot;);</span>
+<span class="nc" id="L898">    }</span>
+
+    @Test
+    void acceptsLoopbackHttpTrackerEndpointForDispatch() throws Exception {
+        // given
+<span class="nc" id="L903">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L904">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                  endpoint: &quot;http://127.0.0.1:18099/1&quot;
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L917">        var resolver = new ConfigResolver(name -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L920">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L921">        Throwable error = catchThrowableOfType(ConfigException.class, () -&gt; resolver.validateForDispatch(config));</span>
+
+        // then
+<span class="nc" id="L924">        assertThat(error).isNull();</span>
+<span class="nc" id="L925">    }</span>
+
+    @Test
+    void acceptsUppercaseSchemeInTrackerEndpointLikeSetupNormalization() throws Exception {
+        // given
+<span class="nc" id="L930">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L931">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  endpoint: &quot;HTTPS://api.trello.com/1&quot;
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L944">        var resolver = new ConfigResolver();</span>
+
+        // when
+<span class="nc" id="L947">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+<span class="nc" id="L948">        resolver.validateForDispatch(config);</span>
+
+        // then
+<span class="nc" id="L951">        assertThat(config.tracker().endpoint()).isEqualTo(&quot;HTTPS://api.trello.com/1&quot;);</span>
+<span class="nc" id="L952">    }</span>
+
+    @Test
+    void resolvesBraceStyleEnvironmentReferencesForCredentials() throws Exception {
+        // given
+<span class="nc" id="L957">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L958">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: &quot;${SYMPHONY_TEST_KEY}&quot;
+                  api_token: &quot;${SYMPHONY_TEST_TOKEN}&quot;
+                  board_id: board-1
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc bnc" id="L970" title="All 3 branches missed.">        var resolver = new ConfigResolver(name -&gt; switch (name) {</span>
+<span class="nc" id="L971">            case &quot;SYMPHONY_TEST_KEY&quot; -&gt; Optional.of(&quot;resolved-key&quot;);</span>
+<span class="nc" id="L972">            case &quot;SYMPHONY_TEST_TOKEN&quot; -&gt; Optional.of(&quot;resolved-token&quot;);</span>
+<span class="nc" id="L973">            default -&gt; Optional.empty();</span>
+        });
+
+        // when
+<span class="nc" id="L977">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L980">        assertThat(config.tracker().apiKey()).isEqualTo(&quot;resolved-key&quot;);</span>
+<span class="nc" id="L981">        assertThat(config.tracker().apiToken()).isEqualTo(&quot;resolved-token&quot;);</span>
+<span class="nc" id="L982">    }</span>
+
+    @Test
+    void keepsShellDefaultExpansionSyntaxAsLiteralText() throws Exception {
+        // given
+<span class="nc" id="L987">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L988">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: &quot;${SYMPHONY_TEST_KEY:-fallback}&quot;
+                  api_token: literal-token
+                  board_id: board-1
+                ---
+                Prompt
+                &quot;&quot;&quot;);
+<span class="nc" id="L1000">        var resolver = new ConfigResolver(name -&gt; Optional.of(&quot;should-not-resolve&quot;));</span>
+
+        // when
+<span class="nc" id="L1003">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L1006">        assertThat(config.tracker().apiKey()).isEqualTo(&quot;${SYMPHONY_TEST_KEY:-fallback}&quot;);</span>
+<span class="nc" id="L1007">    }</span>
+
+    @Test
+    void preservesReadOnlyCodexSandboxPolicyWithoutWritableRootMerge() throws Exception {
+        // given
+<span class="nc" id="L1012">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.read-only-sandbox.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy:
+                    type: readOnly
+                &quot;&quot;&quot;);
+<span class="nc" id="L1020">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L1023">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L1026">        assertThat(config.codex().turnSandboxPolicy()).isEqualTo(Map.of(&quot;type&quot;, &quot;readOnly&quot;));</span>
+<span class="nc" id="L1027">    }</span>
+
+    @Test
+    void rejectsReadOnlySandboxPolicyWithAdditionalWritableRoots() throws Exception {
+        // given
+<span class="nc" id="L1032">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.read-only-sandbox-with-roots.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy:
+                    type: readOnly
+                  additional_writable_roots:
+                    - /allowed/project
+                &quot;&quot;&quot;);
+<span class="nc" id="L1042">        var resolver = new ConfigResolver(ignored -&gt; Optional.empty());</span>
+
+        // when
+<span class="nc" id="L1045">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L1046">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L1049">        assertThat(error.code()).isEqualTo(&quot;codex_sandbox_policy_invalid&quot;);</span>
+<span class="nc" id="L1050">        assertThat(error)</span>
+<span class="nc" id="L1051">                .hasMessage(</span>
+                        &quot;codex.additional_writable_roots require a workspaceWrite or dangerFullAccess sandbox policy.&quot;);
+<span class="nc" id="L1053">    }</span>
+
+    @Test
+    void rejectsReadOnlySandboxPolicyWithEnvironmentAdditionalWritableRoots() throws Exception {
+        // given
+<span class="nc" id="L1058">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.read-only-sandbox-with-env-roots.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy:
+                    type: readOnly
+                &quot;&quot;&quot;);
+<span class="nc bnc" id="L1066" title="All 2 branches missed.">        var resolver = new ConfigResolver(name -&gt; &quot;SYMPHONY_CODEX_ADDITIONAL_WRITABLE_ROOTS&quot;.equals(name)</span>
+<span class="nc" id="L1067">                ? Optional.of(&quot;/allowed/env&quot;)</span>
+<span class="nc" id="L1068">                : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L1071">        ConfigException error = catchThrowableOfType(</span>
+<span class="nc" id="L1072">                ConfigException.class, () -&gt; resolver.resolve(new WorkflowLoader().load(workflow)));</span>
+
+        // then
+<span class="nc" id="L1075">        assertThat(error.code()).isEqualTo(&quot;codex_sandbox_policy_invalid&quot;);</span>
+<span class="nc" id="L1076">        assertThat(error)</span>
+<span class="nc" id="L1077">                .hasMessage(</span>
+                        &quot;codex.additional_writable_roots require a workspaceWrite or dangerFullAccess sandbox policy.&quot;);
+<span class="nc" id="L1079">    }</span>
+
+    @Test
+    void forceDangerFullAccessIgnoresReadOnlyAdditionalWritableRootConflict() throws Exception {
+        // given
+<span class="nc" id="L1084">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.read-only-sandbox-force-danger.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy:
+                    type: readOnly
+                  additional_writable_roots:
+                    - /allowed/project
+                &quot;&quot;&quot;);
+<span class="nc" id="L1094">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L1095" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_CODEX_DANGER_FULL_ACCESS&quot;.equals(name) ? Optional.of(&quot;true&quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L1098">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L1101">        assertThat(config.codex())</span>
+<span class="nc" id="L1102">                .as(&quot;Codex config [forceDangerFullAccess, turnSandboxPolicy, additionalWritableRoots]&quot;)</span>
+<span class="nc" id="L1103">                .extracting(</span>
+                        EffectiveConfig.CodexConfig::forceDangerFullAccess,
+                        EffectiveConfig.CodexConfig::turnSandboxPolicy,
+                        EffectiveConfig.CodexConfig::additionalWritableRoots)
+<span class="nc" id="L1107">                .containsExactly(true, Map.of(&quot;type&quot;, &quot;readOnly&quot;), List.of());</span>
+<span class="nc" id="L1108">    }</span>
+
+    @MethodSource(&quot;invalidSandboxFallbacksIgnoredWhenDangerFullAccessIsForced&quot;)
+    @ParameterizedTest
+    @SuppressWarnings(&quot;JUnitValueSource&quot;)
+    void forceDangerFullAccessIgnoresInvalidConfiguredSandboxFallback(String codexYaml) throws Exception {
+        // given
+<span class="nc" id="L1115">        Path workflow = writeDefaultWorkflow(</span>
+                &quot;WORKFLOW.force-danger-invalid-sandbox.md&quot;,
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L1122">                        .formatted(codexYaml.indent(2)));</span>
+<span class="nc" id="L1123">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L1124" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_CODEX_DANGER_FULL_ACCESS&quot;.equals(name) ? Optional.of(&quot;true&quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L1127">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L1130">        assertThat(config.codex())</span>
+<span class="nc" id="L1131">                .as(&quot;Codex config [forceDangerFullAccess, additionalWritableRoots]&quot;)</span>
+<span class="nc" id="L1132">                .extracting(</span>
+                        EffectiveConfig.CodexConfig::forceDangerFullAccess,
+                        EffectiveConfig.CodexConfig::additionalWritableRoots)
+<span class="nc" id="L1135">                .containsExactly(true, List.of());</span>
+<span class="nc" id="L1136">    }</span>
+
+    @Test
+    void forceDangerFullAccessIgnoresInvalidCurrentSandboxPolicy() throws Exception {
+        // given
+<span class="nc" id="L1141">        Path workflow = tempDir.resolve(&quot;WORKFLOW.force-danger-invalid-sandbox.md&quot;);</span>
+<span class="nc" id="L1142">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: board-1
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy: []
+                ---
+                ## Operating Posture
+
+                This is an unattended orchestration run.
+
+                ## Pull Request Publication
+
+                Create a pull request when needed.
+
+                ## Trello List Routing
+
+                Card URL: {{ card.url }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L1169">        var resolver = new ConfigResolver(</span>
+<span class="nc bnc" id="L1170" title="All 2 branches missed.">                name -&gt; &quot;SYMPHONY_CODEX_DANGER_FULL_ACCESS&quot;.equals(name) ? Optional.of(&quot;true&quot;) : Optional.empty());</span>
+
+        // when
+<span class="nc" id="L1173">        EffectiveConfig config = resolver.resolve(new WorkflowLoader().load(workflow));</span>
+
+        // then
+<span class="nc" id="L1176">        assertThat(config.codex())</span>
+<span class="nc" id="L1177">                .as(&quot;Codex config [forceDangerFullAccess, turnSandboxPolicy]&quot;)</span>
+<span class="nc" id="L1178">                .extracting(</span>
+                        EffectiveConfig.CodexConfig::forceDangerFullAccess,
+                        EffectiveConfig.CodexConfig::turnSandboxPolicy)
+<span class="nc" id="L1181">                .containsExactly(true, List.of());</span>
+<span class="nc" id="L1182">    }</span>
+
+    private static Stream&lt;String&gt; invalidSandboxFallbacksIgnoredWhenDangerFullAccessIsForced() {
+<span class="nc" id="L1185">        return Stream.of(</span>
+                &quot;turn_sandbox_policy: workspaceWrite&quot;,
+                &quot;turn_sandbox_policy: []&quot;,
+                &quot;turn_sandbox_policy: {}&quot;,
+                &quot;turn_sandbox_policy:\n  type: futurePolicy\n&quot;,
+                &quot;turn_sandbox_policy:\n  type: workspaceWrite\n  networkAccess: \&quot;true\&quot;\n&quot;,
+                &quot;additional_writable_roots: /ignored-when-danger-is-forced&quot;);
+    }
+
+    private Path writeDefaultWorkflow(String fileName, String extraFrontMatter) throws Exception {
+<span class="nc" id="L1195">        return writeTrelloWorkflow(fileName, &quot;board-1&quot;, extraFrontMatter);</span>
+    }
+
+    private WorkflowDefinition workflowDefinitionWithRepository(Map&lt;String, Object&gt; repository) {
+<span class="nc" id="L1199">        return new WorkflowDefinition(</span>
+<span class="nc" id="L1200">                tempDir.resolve(&quot;WORKFLOW.repository-direct.md&quot;),</span>
+<span class="nc" id="L1201">                Map.of(</span>
+                        &quot;tracker&quot;,
+<span class="nc" id="L1203">                        Map.of(</span>
+                                &quot;kind&quot;,
+                                &quot;trello&quot;,
+                                &quot;api_key&quot;,
+                                &quot;literal-key&quot;,
+                                &quot;api_token&quot;,
+                                &quot;literal-token&quot;,
+                                &quot;board_id&quot;,
+                                &quot;board-1&quot;),
+                        &quot;repository&quot;,
+                        repository),
+                &quot;Prompt&quot;);
+    }
+
+    private Path writeTrelloWorkflow(String fileName, String boardId, String extraFrontMatter) throws Exception {
+<span class="nc" id="L1218">        return writeWorkflow(</span>
+                fileName,
+                &quot;&quot;&quot;
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: %s
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L1228">                        .formatted(boardId, extraFrontMatter));</span>
+    }
+
+    private Path writeWorkflow(String fileName, String frontMatter) throws Exception {
+<span class="nc" id="L1232">        Path workflow = tempDir.resolve(fileName);</span>
+<span class="nc" id="L1233">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                %s
+                ---
+                Prompt
+                &quot;&quot;&quot;
+<span class="nc" id="L1241">                        .formatted(frontMatter));</span>
+<span class="nc" id="L1242">        return workflow;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

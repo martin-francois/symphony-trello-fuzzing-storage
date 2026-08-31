@@ -1,0 +1,1221 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloHandoffToolHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">TrelloHandoffToolHandler.java</span></div><h1>TrelloHandoffToolHandler.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import static com.google.common.base.Preconditions.checkArgument;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.StateNames;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.tracker.TrelloException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.base.Splitter;
+import jakarta.enterprise.context.ApplicationScoped;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.PrimitiveIterator;
+import java.util.stream.Collectors;
+import org.jboss.logging.Logger;
+import org.jspecify.annotations.Nullable;
+
+@ApplicationScoped
+public class TrelloHandoffToolHandler {
+<span class="nc" id="L30">    private static final Logger LOG = Logger.getLogger(TrelloHandoffToolHandler.class);</span>
+
+    static final String ADD_COMMENT = &quot;trello_add_comment&quot;;
+    static final String UPSERT_WORKPAD = &quot;trello_upsert_workpad&quot;;
+    static final String UPDATE_BLOCKER_RECHECK_STATUS = &quot;trello_update_blocker_recheck_status&quot;;
+    static final String MOVE_CURRENT_CARD = &quot;trello_move_current_card&quot;;
+    static final String UPSERT_CHECKLIST_ITEM = &quot;trello_upsert_checklist_item&quot;;
+    static final String ADD_URL_ATTACHMENT = &quot;trello_add_url_attachment&quot;;
+    static final String WORKPAD_MARKER = TrelloClient.WORKPAD_MARKER;
+    static final String DUPLICATE_WORKPADS_NOTE_PREFIX = &quot;&gt; Duplicate Codex workpads found: &quot;;
+    static final String DUPLICATE_BLOCKER_RECHECK_NOTE_PREFIX = &quot;&gt; Duplicate Symphony blocker recheck statuses found: &quot;;
+    static final String BLOCKER_RECHECK_CHECKING = &quot;Checking whether this card is still blocked...&quot;;
+    static final String RESUMED_WORK_PREFIX = &quot;No longer blocked; working on &quot;;
+    static final String BLOCKER_RECHECK_FOOTER_PREFIX =
+            &quot;_Managed by Symphony · [View the comment explaining why this card was previously blocked](&quot;;
+    static final String BLOCKER_RECHECK_FOOTER_SUFFIX = &quot;)_&quot;;
+    private static final String TRELLO_CARD_URL_PREFIX = &quot;https://trello.com/c/&quot;;
+    private static final String TRELLO_COMMENT_FRAGMENT = &quot;#comment-&quot;;
+    private static final String RECHECK_STATUS_CHECKING = &quot;checking&quot;;
+    private static final String RECHECK_STATUS_RESUMED = &quot;resumed&quot;;
+    private static final int VISIBLE_TASK_SUMMARY_CODE_POINT_LIMIT = 120;
+    private static final int TASK_SUMMARY_BODY_CODE_POINT_LIMIT = VISIBLE_TASK_SUMMARY_CODE_POINT_LIMIT - 1;
+    private static final int ELLIPSIS_CODE_POINT_COUNT = 3;
+    private static final int MAX_ACTION_ID_LENGTH = 128;
+<span class="nc" id="L54">    private static final Splitter LOGICAL_LINE_BREAK = Splitter.onPattern(&quot;\\r\\n|[\\n\\r\\x{0085}\\x{2028}\\x{2029}]&quot;);</span>
+    private static final int WORKPAD_LOCK_STRIPES = 64;
+
+    private final ObjectMapper json;
+    private final TrelloClient trello;
+<span class="nc" id="L59">    private final Object[] workpadLocks = new Object[WORKPAD_LOCK_STRIPES];</span>
+
+<span class="nc" id="L61">    public TrelloHandoffToolHandler(ObjectMapper json, TrelloClient trello) {</span>
+<span class="nc" id="L62">        this.json = json;</span>
+<span class="nc" id="L63">        this.trello = trello;</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">        for (int index = 0; index &lt; workpadLocks.length; index++) {</span>
+<span class="nc" id="L65">            workpadLocks[index] = new Object();</span>
+        }
+<span class="nc" id="L67">    }</span>
+
+    public boolean shouldEnableExperimentalApi(EffectiveConfig config) {
+<span class="nc" id="L70">        return config.trelloTools().enabled();</span>
+    }
+
+    public ArrayNode toolSpecs(EffectiveConfig config) {
+<span class="nc" id="L74">        ArrayNode tools = json.createArrayNode();</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (!writesEnabled(config)) {</span>
+<span class="nc" id="L76">            return tools;</span>
+        }
+<span class="nc bnc" id="L78" title="All 2 branches missed.">        if (config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L79">            tools.add(tool(</span>
+                    ADD_COMMENT,
+                    &quot;Add a handoff comment to the current Trello card. The current card is fixed by Symphony; do not include a card id.&quot;,
+<span class="nc" id="L82">                    objectSchema(</span>
+<span class="nc" id="L83">                            Map.of(</span>
+                                    &quot;text&quot;,
+<span class="nc" id="L85">                                    stringSchema(</span>
+                                            &quot;Concise human-readable comment text to add to the current Trello card.&quot;)),
+<span class="nc" id="L87">                            List.of(&quot;text&quot;))));</span>
+<span class="nc" id="L88">            tools.add(tool(</span>
+                    UPSERT_WORKPAD,
+                    &quot;Create or update the single Codex workpad comment on the current Trello card. The text is Markdown and must summarize current plan, acceptance criteria, progress, validation, blockers, and handoff notes.&quot;,
+<span class="nc" id="L91">                    objectSchema(</span>
+<span class="nc" id="L92">                            Map.of(</span>
+                                    &quot;text&quot;,
+<span class="nc" id="L94">                                    stringSchema(</span>
+                                            &quot;Full Markdown workpad body. Symphony ensures it starts with ## Codex Workpad. Do not include Symphony's managed Codex usage-section markers.&quot;)),
+<span class="nc" id="L96">                            List.of(&quot;text&quot;))));</span>
+<span class="nc" id="L97">            tools.add(tool(</span>
+                    UPDATE_BLOCKER_RECHECK_STATUS,
+                    &quot;Maintain one managed status while rechecking the newest exact Blocked: or Blocked by handoff. Set checking before the recheck, then set resumed only after that blocker no longer applies.&quot;,
+<span class="nc" id="L100">                    objectSchema(</span>
+<span class="nc" id="L101">                            Map.of(</span>
+                                    &quot;status&quot;,
+<span class="nc" id="L103">                                    enumStringSchema(</span>
+                                            &quot;Recheck lifecycle state. Use checking before rechecking the blocker and resumed only after the recheck succeeds.&quot;,
+<span class="nc" id="L105">                                            List.of(RECHECK_STATUS_CHECKING, RECHECK_STATUS_RESUMED))),</span>
+<span class="nc" id="L106">                            List.of(&quot;status&quot;))));</span>
+        }
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (config.trelloTools().allowChecklists()) {</span>
+<span class="nc" id="L109">            tools.add(tool(</span>
+                    UPSERT_CHECKLIST_ITEM,
+                    &quot;Create or update one checklist item on the current Trello card. The current card is fixed by Symphony; do not include a card id.&quot;,
+<span class="nc" id="L112">                    objectSchema(</span>
+<span class="nc" id="L113">                            Map.of(</span>
+                                    &quot;checklist_name&quot;,
+<span class="nc" id="L115">                                    stringSchema(&quot;Exact checklist name on the current Trello card.&quot;),</span>
+                                    &quot;item_name&quot;,
+<span class="nc" id="L117">                                    stringSchema(&quot;Exact checklist item text to create or update.&quot;),</span>
+                                    &quot;complete&quot;,
+<span class="nc" id="L119">                                    booleanSchema(&quot;Whether the checklist item should be complete.&quot;)),</span>
+<span class="nc" id="L120">                            List.of(&quot;checklist_name&quot;, &quot;item_name&quot;, &quot;complete&quot;))));</span>
+        }
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (config.trelloTools().allowUrlAttachments()) {</span>
+<span class="nc" id="L123">            tools.add(tool(</span>
+                    ADD_URL_ATTACHMENT,
+                    &quot;Attach one http or https URL without credentials, query string, or fragment to the current Trello card. The current card is fixed by Symphony; do not include a card id.&quot;,
+<span class="nc" id="L126">                    objectSchema(</span>
+<span class="nc" id="L127">                            Map.of(</span>
+                                    &quot;url&quot;,
+<span class="nc" id="L129">                                    stringSchema(</span>
+                                            &quot;HTTP or HTTPS URL without credentials, query string, or fragment to attach to the current Trello card.&quot;),
+                                    &quot;name&quot;,
+<span class="nc" id="L132">                                    stringSchema(&quot;Optional attachment display name.&quot;)),</span>
+<span class="nc" id="L133">                            List.of(&quot;url&quot;))));</span>
+        }
+<span class="nc bnc" id="L135" title="All 2 branches missed.">        if (moveAllowlistConfigured(config)) {</span>
+<span class="nc" id="L136">            tools.add(tool(</span>
+                    MOVE_CURRENT_CARD,
+                    &quot;Move the current Trello card to one configured board-local handoff list. Use list_name unless the workflow explicitly gives a Trello list_id.&quot;,
+<span class="nc" id="L139">                    objectSchema(</span>
+<span class="nc" id="L140">                            Map.of(</span>
+                                    &quot;list_name&quot;,
+<span class="nc" id="L142">                                    stringSchema(&quot;Allowed destination list name, for example Human Review.&quot;),</span>
+                                    &quot;list_id&quot;,
+<span class="nc" id="L144">                                    stringSchema(&quot;Allowed destination Trello list id.&quot;)),</span>
+<span class="nc" id="L145">                            List.of())));</span>
+        }
+<span class="nc" id="L147">        return tools;</span>
+    }
+
+    public ObjectNode handle(EffectiveConfig config, Card card, JsonNode params) {
+<span class="nc" id="L151">        String tool = params.path(&quot;tool&quot;).asText(&quot;&quot;);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        if (!ADD_COMMENT.equals(tool)</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                &amp;&amp; !UPSERT_WORKPAD.equals(tool)</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                &amp;&amp; !UPDATE_BLOCKER_RECHECK_STATUS.equals(tool)</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                &amp;&amp; !MOVE_CURRENT_CARD.equals(tool)</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">                &amp;&amp; !UPSERT_CHECKLIST_ITEM.equals(tool)</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">                &amp;&amp; !ADD_URL_ATTACHMENT.equals(tool)) {</span>
+<span class="nc" id="L158">            return failure(&quot;unsupported_tool&quot;, &quot;Unsupported Trello handoff tool: &quot; + tool);</span>
+        }
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (!config.trelloTools().enabled()) {</span>
+<span class="nc" id="L161">            return failure(&quot;trello_tools_disabled&quot;, &quot;Trello handoff tools are disabled by trello_tools.enabled.&quot;);</span>
+        }
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (!config.trelloTools().allowWrites()) {</span>
+<span class="nc" id="L164">            return failure(&quot;trello_writes_disabled&quot;, &quot;Trello writes are disabled by trello_tools.allow_writes.&quot;);</span>
+        }
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (blank(card.id())) {</span>
+<span class="nc" id="L167">            return failure(&quot;missing_card_context&quot;, &quot;The active worker session has no Trello card id.&quot;);</span>
+        }
+
+        try {
+<span class="nc bnc" id="L171" title="All 7 branches missed.">            return switch (tool) {</span>
+<span class="nc" id="L172">                case ADD_COMMENT -&gt; addComment(config, card, params.path(&quot;arguments&quot;));</span>
+<span class="nc" id="L173">                case UPSERT_WORKPAD -&gt; upsertWorkpad(config, card, params.path(&quot;arguments&quot;));</span>
+                case UPDATE_BLOCKER_RECHECK_STATUS -&gt;
+<span class="nc" id="L175">                    updateBlockerRecheckStatus(config, card, params.path(&quot;arguments&quot;));</span>
+<span class="nc" id="L176">                case MOVE_CURRENT_CARD -&gt; moveCurrentCard(config, card, params.path(&quot;arguments&quot;));</span>
+<span class="nc" id="L177">                case UPSERT_CHECKLIST_ITEM -&gt; upsertChecklistItem(config, card, params.path(&quot;arguments&quot;));</span>
+<span class="nc" id="L178">                case ADD_URL_ATTACHMENT -&gt; addUrlAttachment(config, card, params.path(&quot;arguments&quot;));</span>
+<span class="nc" id="L179">                default -&gt; throw new IllegalStateException(&quot;unreachable&quot;);</span>
+            };
+<span class="nc" id="L181">        } catch (TrelloException e) {</span>
+<span class="nc" id="L182">            return failure(e.code(), e.getMessage());</span>
+<span class="nc" id="L183">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L184">            return failure(&quot;trello_tool_failed&quot;, e.getMessage());</span>
+        }
+    }
+
+    private ObjectNode addComment(EffectiveConfig config, Card card, JsonNode arguments) {
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L190">            return failure(&quot;trello_comments_disabled&quot;, &quot;Trello comments are disabled by trello_tools.allow_comments.&quot;);</span>
+        }
+<span class="nc" id="L192">        String text = TrelloMarkdown.escapeLeadingHashtags(requiredText(arguments, &quot;text&quot;));</span>
+<span class="nc" id="L193">        trello.addComment(config, card.id(), text);</span>
+<span class="nc" id="L194">        return success(Map.of(&quot;status&quot;, &quot;comment_added&quot;, &quot;card_id&quot;, card.id()));</span>
+    }
+
+    private ObjectNode upsertChecklistItem(EffectiveConfig config, Card card, JsonNode arguments) {
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (!config.trelloTools().allowChecklists()) {</span>
+<span class="nc" id="L199">            return failure(</span>
+                    &quot;trello_checklists_disabled&quot;, &quot;Trello checklists are disabled by trello_tools.allow_checklists.&quot;);
+        }
+<span class="nc" id="L202">        String checklistName = requiredText(arguments, &quot;checklist_name&quot;).strip();</span>
+<span class="nc" id="L203">        String itemName = requiredText(arguments, &quot;item_name&quot;).strip();</span>
+<span class="nc bnc" id="L204" title="All 4 branches missed.">        if (unsafeToolLine(checklistName) || unsafeToolLine(itemName)) {</span>
+<span class="nc" id="L205">            return failure(&quot;invalid_checklist_item&quot;, &quot;Checklist names and item names must be one non-control line.&quot;);</span>
+        }
+
+<span class="nc" id="L208">        TrelloClient.ChecklistItemWrite result = trello.upsertChecklistItem(</span>
+<span class="nc" id="L209">                config, card.id(), checklistName, itemName, requiredBoolean(arguments, &quot;complete&quot;));</span>
+<span class="nc" id="L210">        return success(Map.of(</span>
+                &quot;status&quot;,
+<span class="nc" id="L212">                &quot;checklist_item_&quot; + result.status(),</span>
+                &quot;card_id&quot;,
+<span class="nc" id="L214">                card.id(),</span>
+                &quot;checklist_id&quot;,
+<span class="nc" id="L216">                result.checklistId(),</span>
+                &quot;check_item_id&quot;,
+<span class="nc" id="L218">                result.checkItemId(),</span>
+                &quot;complete&quot;,
+<span class="nc" id="L220">                Boolean.toString(result.complete())));</span>
+    }
+
+    private ObjectNode updateBlockerRecheckStatus(EffectiveConfig config, Card card, JsonNode arguments) {
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L225">            return failure(&quot;trello_comments_disabled&quot;, &quot;Trello comments are disabled by trello_tools.allow_comments.&quot;);</span>
+        }
+<span class="nc" id="L227">        String requestedStatus = requiredText(arguments, &quot;status&quot;);</span>
+<span class="nc bnc" id="L228" title="All 4 branches missed.">        if (!RECHECK_STATUS_CHECKING.equals(requestedStatus) &amp;&amp; !RECHECK_STATUS_RESUMED.equals(requestedStatus)) {</span>
+<span class="nc" id="L229">            return failure(&quot;invalid_blocker_recheck_status&quot;, &quot;Blocker recheck status must be checking or resumed.&quot;);</span>
+        }
+
+<span class="nc" id="L232">        CardLookupResult lookup = trello.fetchCardStateForWorkpad(config, card.id());</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (lookup instanceof CardLookupResult.Missing) {</span>
+<span class="nc" id="L234">            return failure(</span>
+                    &quot;trello_blocker_recheck_card_missing&quot;,
+                    &quot;Cannot update blocker recheck status because the Trello card is missing.&quot;);
+        }
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (lookup instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L239">            return failure(&quot;trello_blocker_recheck_refresh_failed&quot;, failed.message());</span>
+        }
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        if (!(lookup instanceof CardLookupResult.Found found)) {</span>
+<span class="nc" id="L242">            return failure(&quot;trello_blocker_recheck_refresh_failed&quot;, &quot;Could not refresh the current Trello card.&quot;);</span>
+        }
+
+<span class="nc" id="L245">        BlockerRecheckComments comments = blockerRecheckComments(found.card());</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        return RECHECK_STATUS_CHECKING.equals(requestedStatus)</span>
+<span class="nc" id="L247">                ? beginBlockerRecheck(config, found.card(), comments)</span>
+<span class="nc" id="L248">                : confirmResumedWork(config, found.card(), comments);</span>
+    }
+
+    private ObjectNode beginBlockerRecheck(EffectiveConfig config, Card currentCard, BlockerRecheckComments comments) {
+<span class="nc" id="L252">        Card.Comment blocker = comments.blocker();</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (blocker == null) {</span>
+<span class="nc" id="L254">            return success(Map.of(&quot;status&quot;, &quot;blocker_recheck_not_needed&quot;, &quot;card_id&quot;, currentCard.id()));</span>
+        }
+<span class="nc bnc" id="L256" title="All 2 branches missed.">        if (!safeActionId(blocker.id())) {</span>
+<span class="nc" id="L257">            return failure(</span>
+                    &quot;trello_blocker_recheck_missing_source_id&quot;,
+                    &quot;The newest blocker handoff has no usable Trello action id.&quot;);
+        }
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (!safeShortLink(currentCard.shortLink())) {</span>
+<span class="nc" id="L262">            return failure(</span>
+                    &quot;trello_blocker_recheck_missing_card_link&quot;,
+                    &quot;The current Trello card has no usable short link for the managed status comment.&quot;);
+        }
+
+<span class="nc" id="L267">        List&lt;Card.Comment&gt; managedComments = comments.managedComments();</span>
+<span class="nc" id="L268">        Card.Comment managed = newestAddressableComment(managedComments);</span>
+<span class="nc bnc" id="L269" title="All 4 branches missed.">        if (managed == null &amp;&amp; !managedComments.isEmpty()) {</span>
+<span class="nc" id="L270">            return failure(</span>
+                    &quot;trello_blocker_recheck_missing_action_id&quot;,
+                    &quot;The managed blocker recheck comments have no Trello action ids.&quot;);
+        }
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (managedTracksBlocker(managed, currentCard, blocker.id())) {</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">            if (isResumedStatus(managed.text())) {</span>
+<span class="nc" id="L276">                return updateExistingBlockerRecheckComment(</span>
+                        config,
+                        currentCard,
+<span class="nc" id="L279">                        blockerRecheckText(currentCard, resumedWorkText(currentCard.title()), blocker.id()),</span>
+                        &quot;resumed_work_already_confirmed&quot;,
+                        managedComments,
+                        managed);
+            }
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            if (isCheckingStatus(managed.text())) {</span>
+<span class="nc" id="L285">                return updateExistingBlockerRecheckComment(</span>
+                        config,
+                        currentCard,
+<span class="nc" id="L288">                        blockerRecheckText(currentCard, BLOCKER_RECHECK_CHECKING, blocker.id()),</span>
+                        &quot;blocker_recheck_already_started&quot;,
+                        managedComments,
+                        managed);
+            }
+        }
+
+<span class="nc" id="L295">        String text = blockerRecheckText(currentCard, BLOCKER_RECHECK_CHECKING, blocker.id());</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">        if (managed != null) {</span>
+<span class="nc" id="L297">            return updateExistingBlockerRecheckComment(</span>
+                    config, currentCard, text, &quot;blocker_recheck_started&quot;, managedComments, managed);
+        }
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (currentCard.comments().size() &gt;= TrelloClient.WORKPAD_COMMENT_ACTION_LIMIT) {</span>
+<span class="nc" id="L301">            return failure(</span>
+                    &quot;trello_blocker_recheck_comment_window_incomplete&quot;,
+                    &quot;Cannot safely create blocker recheck status because the fetched Trello comment window is full and an older managed status may exist.&quot;);
+        }
+<span class="nc" id="L305">        Map&lt;String, Object&gt; created = trello.addComment(config, currentCard.id(), text);</span>
+<span class="nc" id="L306">        String actionId = string(created.get(&quot;id&quot;));</span>
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (blank(actionId)) {</span>
+<span class="nc" id="L308">            return failure(</span>
+                    &quot;trello_blocker_recheck_missing_action_id&quot;,
+                    &quot;Trello created the blocker recheck status without returning its action id.&quot;);
+        }
+<span class="nc" id="L312">        return success(blockerRecheckResult(</span>
+<span class="nc" id="L313">                &quot;blocker_recheck_started&quot;, currentCard.id(), actionId, 0, false, DuplicateCleanup.none()));</span>
+    }
+
+    private ObjectNode confirmResumedWork(EffectiveConfig config, Card currentCard, BlockerRecheckComments comments) {
+<span class="nc" id="L317">        Card.Comment blocker = comments.blocker();</span>
+<span class="nc" id="L318">        List&lt;Card.Comment&gt; managedComments = comments.managedComments();</span>
+<span class="nc" id="L319">        Card.Comment managed = newestAddressableComment(managedComments);</span>
+<span class="nc bnc" id="L320" title="All 6 branches missed.">        if (blocker == null || managed == null || !safeActionId(blocker.id())) {</span>
+<span class="nc" id="L321">            return failure(</span>
+                    &quot;trello_blocker_recheck_not_started&quot;,
+                    &quot;Confirm resumed work only after starting a recheck for the newest blocker handoff.&quot;);
+        }
+<span class="nc bnc" id="L325" title="All 2 branches missed.">        if (!managedTracksBlocker(managed, currentCard, blocker.id())) {</span>
+<span class="nc" id="L326">            return failure(</span>
+                    &quot;trello_blocker_recheck_stale&quot;,
+                    &quot;A newer blocker handoff must enter checking status before resumed work can be confirmed.&quot;);
+        }
+<span class="nc" id="L330">        String text = blockerRecheckText(currentCard, resumedWorkText(currentCard.title()), blocker.id());</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">        if (isResumedStatus(managed.text())) {</span>
+<span class="nc" id="L332">            return updateExistingBlockerRecheckComment(</span>
+                    config, currentCard, text, &quot;resumed_work_already_confirmed&quot;, managedComments, managed);
+        }
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (!isCheckingStatus(managed.text())) {</span>
+<span class="nc" id="L336">            return failure(</span>
+                    &quot;trello_blocker_recheck_not_started&quot;,
+                    &quot;Confirm resumed work only after starting a recheck for the newest blocker handoff.&quot;);
+        }
+
+<span class="nc" id="L341">        return updateExistingBlockerRecheckComment(</span>
+                config, currentCard, text, &quot;resumed_work_confirmed&quot;, managedComments, managed);
+    }
+
+    private ObjectNode updateExistingBlockerRecheckComment(
+            EffectiveConfig config,
+            Card currentCard,
+            String text,
+            String status,
+            List&lt;Card.Comment&gt; managedComments,
+            Card.Comment primary) {
+<span class="nc" id="L352">        int duplicatesFound = managedComments.size() - 1;</span>
+<span class="nc" id="L353">        boolean destructiveAllowed = config.trelloTools().allowDestructiveOperations();</span>
+<span class="nc bnc" id="L354" title="All 4 branches missed.">        String authoritativeText = duplicatesFound &gt; 0 &amp;&amp; !destructiveAllowed</span>
+<span class="nc" id="L355">                ? blockerRecheckTextWithManualCleanup(text, duplicatesFound)</span>
+<span class="nc" id="L356">                : text;</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">        if (!authoritativeText.equals(primary.text())) {</span>
+<span class="nc" id="L358">            trello.updateComment(config, primary.id(), authoritativeText);</span>
+        }
+<span class="nc bnc" id="L360" title="All 2 branches missed.">        DuplicateCleanup cleanup = destructiveAllowed</span>
+<span class="nc" id="L361">                ? removeDuplicateManagedComments(config, managedComments, primary, &quot;blocker_recheck_duplicate_delete&quot;)</span>
+<span class="nc" id="L362">                : DuplicateCleanup.none();</span>
+<span class="nc" id="L363">        return success(blockerRecheckResult(</span>
+<span class="nc" id="L364">                status, currentCard.id(), primary.id(), duplicatesFound, destructiveAllowed, cleanup));</span>
+    }
+
+    private static Map&lt;String, String&gt; blockerRecheckResult(
+            String status,
+            String cardId,
+            String actionId,
+            int duplicatesFound,
+            boolean destructiveAllowed,
+            DuplicateCleanup cleanup) {
+        // LinkedHashMap keeps model-visible tool result fields in a stable diagnostic order.
+<span class="nc" id="L375">        Map&lt;String, String&gt; result = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L376">        result.put(&quot;status&quot;, status);</span>
+<span class="nc" id="L377">        result.put(&quot;card_id&quot;, cardId);</span>
+<span class="nc" id="L378">        result.put(&quot;action_id&quot;, actionId);</span>
+<span class="nc" id="L379">        result.put(&quot;duplicate_statuses_found&quot;, Integer.toString(duplicatesFound));</span>
+<span class="nc" id="L380">        result.put(&quot;duplicate_statuses_removed&quot;, Integer.toString(cleanup.removed()));</span>
+<span class="nc" id="L381">        result.put(&quot;duplicate_statuses_delete_failed&quot;, Integer.toString(cleanup.deleteFailed()));</span>
+<span class="nc" id="L382">        result.put(&quot;duplicate_statuses_cleanup_status&quot;, cleanupStatus(duplicatesFound, destructiveAllowed, cleanup));</span>
+<span class="nc" id="L383">        return result;</span>
+    }
+
+    private static String blockerRecheckManualCleanupNote(int duplicatesFound) {
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        String existence = duplicatesFound == 1 ? &quot;comment exists&quot; : &quot;comments exist&quot;;</span>
+<span class="nc" id="L388">        return String.join(</span>
+                &quot;&quot;,
+                &quot;\n\n&quot;,
+                DUPLICATE_BLOCKER_RECHECK_NOTE_PREFIX,
+<span class="nc" id="L392">                Integer.toString(duplicatesFound),</span>
+                &quot; other managed status &quot;,
+                existence,
+                &quot; on this card. Deleting Trello comments is disabled by&quot;,
+                &quot; trello_tools.allow_destructive_operations, so delete the duplicate blocker recheck&quot;,
+                &quot; comments manually and keep this one.&quot;);
+    }
+
+    private static String blockerRecheckTextWithManualCleanup(String text, int duplicatesFound) {
+<span class="nc" id="L401">        int footerStart = text.lastIndexOf(&quot;\n\n&quot; + BLOCKER_RECHECK_FOOTER_PREFIX);</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        checkArgument(footerStart &gt;= 0, &quot;Managed blocker-recheck text must contain its footer&quot;);</span>
+<span class="nc" id="L403">        return text.substring(0, footerStart)</span>
+<span class="nc" id="L404">                + blockerRecheckManualCleanupNote(duplicatesFound)</span>
+<span class="nc" id="L405">                + text.substring(footerStart);</span>
+    }
+
+    private static BlockerRecheckComments blockerRecheckComments(Card card) {
+<span class="nc" id="L409">        List&lt;Card.Comment&gt; comments = card.comments();</span>
+<span class="nc" id="L410">        Card.Comment newestOrdinary = null;</span>
+        // Trello returns comment actions newest first. Keep the first ordinary comment even while
+        // scanning the rest of the deep window for Symphony-managed statuses.
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        for (Card.Comment comment : comments) {</span>
+<span class="nc bnc" id="L414" title="All 4 branches missed.">            if (newestOrdinary == null &amp;&amp; !excludedFromBlockerClassification(comment, card)) {</span>
+<span class="nc" id="L415">                newestOrdinary = comment;</span>
+            }
+<span class="nc" id="L417">        }</span>
+<span class="nc" id="L418">        List&lt;Card.Comment&gt; managedComments = comments.stream()</span>
+<span class="nc" id="L419">                .filter(comment -&gt; isManagedBlockerRecheckComment(comment, card))</span>
+<span class="nc" id="L420">                .toList();</span>
+        Card.Comment blocker =
+<span class="nc bnc" id="L422" title="All 4 branches missed.">                newestOrdinary != null &amp;&amp; isExactBlockerHandoff(newestOrdinary.text()) ? newestOrdinary : null;</span>
+<span class="nc" id="L423">        return new BlockerRecheckComments(blocker, managedComments);</span>
+    }
+
+    private static Card.@Nullable Comment newestAddressableComment(List&lt;Card.Comment&gt; comments) {
+<span class="nc bnc" id="L427" title="All 2 branches missed.">        for (Card.Comment comment : comments) {</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            if (!blank(comment.id())) {</span>
+<span class="nc" id="L429">                return comment;</span>
+            }
+<span class="nc" id="L431">        }</span>
+<span class="nc" id="L432">        return null;</span>
+    }
+
+    private static boolean excludedFromBlockerClassification(Card.Comment comment, Card card) {
+<span class="nc" id="L436">        String text = comment.text();</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        if (text == null) {</span>
+<span class="nc" id="L438">            return false;</span>
+        }
+        // Managed-family identity starts at byte zero, symmetric with each family's own classifier.
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        return text.startsWith(WORKPAD_MARKER)</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">                || text.startsWith(TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER)</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">                || text.startsWith(TrelloClient.WAITING_COMMENT_MARKER)</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                || isManagedBlockerRecheckComment(comment, card);</span>
+    }
+
+    private static boolean isExactBlockerHandoff(String text) {
+<span class="nc" id="L448">        String firstLine = firstNonBlankLine(text).toLowerCase(Locale.ROOT);</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        return firstLine.startsWith(&quot;blocked:&quot;)</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">                || firstLine.equals(&quot;blocked by&quot;)</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                || firstLine.startsWith(&quot;blocked by &quot;)</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">                || firstLine.startsWith(&quot;blocked by:&quot;);</span>
+    }
+
+    private static String firstNonBlankLine(String text) {
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        if (text == null) {</span>
+<span class="nc" id="L457">            return &quot;&quot;;</span>
+        }
+<span class="nc bnc" id="L459" title="All 2 branches missed.">        for (String line : LOGICAL_LINE_BREAK.split(text)) {</span>
+<span class="nc" id="L460">            String stripped = line.strip();</span>
+<span class="nc bnc" id="L461" title="All 2 branches missed.">            if (!stripped.isEmpty()) {</span>
+<span class="nc" id="L462">                return stripped;</span>
+            }
+<span class="nc" id="L464">        }</span>
+<span class="nc" id="L465">        return &quot;&quot;;</span>
+    }
+
+    private static boolean isManagedBlockerRecheckComment(Card.Comment candidate, Card card) {
+<span class="nc" id="L469">        String sourceActionId = blockerActionId(candidate.text(), card);</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (sourceActionId == null) {</span>
+<span class="nc" id="L471">            return false;</span>
+        }
+<span class="nc" id="L473">        return card.comments().stream()</span>
+<span class="nc" id="L474">                .anyMatch(source -&gt; isQualifyingBlockerSource(candidate, sourceActionId, source));</span>
+    }
+
+    private static boolean isQualifyingBlockerSource(
+            Card.Comment candidate, String sourceActionId, Card.Comment source) {
+<span class="nc bnc" id="L479" title="All 2 branches missed.">        return !sourceActionId.equals(candidate.id())</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">                &amp;&amp; sourceActionId.equals(source.id())</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">                &amp;&amp; isExactBlockerHandoff(source.text());</span>
+    }
+
+    private static boolean managedTracksBlocker(Card.@Nullable Comment managed, Card card, String blockerActionId) {
+<span class="nc bnc" id="L485" title="All 2 branches missed.">        return managed != null</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">                &amp;&amp; managed.text() != null</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">                &amp;&amp; blockerActionId.equals(blockerActionId(managed.text(), card));</span>
+    }
+
+    private static boolean isCheckingStatus(String text) {
+<span class="nc bnc" id="L491" title="All 4 branches missed.">        return text != null &amp;&amp; text.startsWith(BLOCKER_RECHECK_CHECKING + &quot;\n\n&quot;);</span>
+    }
+
+    private static boolean isResumedStatus(String text) {
+<span class="nc bnc" id="L495" title="All 4 branches missed.">        return text != null &amp;&amp; text.startsWith(RESUMED_WORK_PREFIX);</span>
+    }
+
+    private static String blockerRecheckText(Card card, String visibleStatus, String blockerActionId) {
+<span class="nc" id="L499">        return visibleStatus + &quot;\n\n&quot; + blockerRecheckFooter(card, blockerActionId);</span>
+    }
+
+    private static String blockerRecheckFooter(Card card, String blockerActionId) {
+<span class="nc" id="L503">        return BLOCKER_RECHECK_FOOTER_PREFIX</span>
+                + TRELLO_CARD_URL_PREFIX
+<span class="nc" id="L505">                + card.shortLink()</span>
+                + TRELLO_COMMENT_FRAGMENT
+                + blockerActionId
+                + BLOCKER_RECHECK_FOOTER_SUFFIX;
+    }
+
+    private static @Nullable String blockerActionId(String text, Card card) {
+<span class="nc bnc" id="L512" title="All 4 branches missed.">        if (text == null || !safeShortLink(card.shortLink())) {</span>
+<span class="nc" id="L513">            return null;</span>
+        }
+<span class="nc" id="L515">        String linkPrefix =</span>
+<span class="nc" id="L516">                BLOCKER_RECHECK_FOOTER_PREFIX + TRELLO_CARD_URL_PREFIX + card.shortLink() + TRELLO_COMMENT_FRAGMENT;</span>
+<span class="nc" id="L517">        int footerStart = text.lastIndexOf(&quot;\n\n&quot; + linkPrefix);</span>
+<span class="nc bnc" id="L518" title="All 4 branches missed.">        if (footerStart &lt; 0 || !text.endsWith(BLOCKER_RECHECK_FOOTER_SUFFIX)) {</span>
+<span class="nc" id="L519">            return null;</span>
+        }
+<span class="nc" id="L521">        int actionIdStart = footerStart + 2 + linkPrefix.length();</span>
+<span class="nc" id="L522">        int actionIdEnd = text.length() - BLOCKER_RECHECK_FOOTER_SUFFIX.length();</span>
+<span class="nc" id="L523">        String actionId = text.substring(actionIdStart, actionIdEnd);</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        return safeActionId(actionId) ? actionId : null;</span>
+    }
+
+    private static String resumedWorkText(String title) {
+<span class="nc" id="L528">        String summary = shortTaskSummary(title);</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">        String terminator = endsSentence(summary) ? &quot;&quot; : &quot;.&quot;;</span>
+<span class="nc" id="L530">        return RESUMED_WORK_PREFIX + summary + terminator;</span>
+    }
+
+    private static String shortTaskSummary(String title) {
+<span class="nc" id="L534">        var plain = new StringBuilder();</span>
+<span class="nc" id="L535">        boolean previousWhitespace = true;</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (title != null) {</span>
+<span class="nc" id="L537">            PrimitiveIterator.OfInt codePoints = title.codePoints().iterator();</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">            while (codePoints.hasNext()) {</span>
+<span class="nc" id="L539">                int codePoint = codePoints.nextInt();</span>
+<span class="nc bnc" id="L540" title="All 4 branches missed.">                if (unsafeSummaryCodePoint(codePoint) || Character.isWhitespace(codePoint)) {</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">                    if (!previousWhitespace) {</span>
+<span class="nc" id="L542">                        plain.append(' ');</span>
+<span class="nc" id="L543">                        previousWhitespace = true;</span>
+                    }
+                } else {
+<span class="nc" id="L546">                    plain.appendCodePoint(codePoint);</span>
+<span class="nc" id="L547">                    previousWhitespace = false;</span>
+                }
+<span class="nc" id="L549">            }</span>
+        }
+<span class="nc" id="L551">        String summary = plain.toString().strip();</span>
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        if (summary.isEmpty()) {</span>
+<span class="nc" id="L553">            return &quot;this card&quot;;</span>
+        }
+<span class="nc" id="L555">        int codePoints = summary.codePointCount(0, summary.length());</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">        if (codePoints &lt;= TASK_SUMMARY_BODY_CODE_POINT_LIMIT) {</span>
+<span class="nc" id="L557">            return summary;</span>
+        }
+<span class="nc" id="L559">        int end = summary.offsetByCodePoints(0, TASK_SUMMARY_BODY_CODE_POINT_LIMIT - ELLIPSIS_CODE_POINT_COUNT);</span>
+<span class="nc" id="L560">        return summary.substring(0, end).stripTrailing() + &quot;...&quot;;</span>
+    }
+
+    private static boolean unsafeSummaryCodePoint(int codePoint) {
+<span class="nc" id="L564">        int type = Character.getType(codePoint);</span>
+<span class="nc bnc" id="L565" title="All 14 branches missed.">        return Character.isISOControl(codePoint)</span>
+                || type == Character.FORMAT
+                || type == Character.LINE_SEPARATOR
+                || type == Character.PARAGRAPH_SEPARATOR
+                || type == Character.SURROGATE
+                || type == Character.PRIVATE_USE
+                || type == Character.UNASSIGNED
+<span class="nc bnc" id="L572" title="All 2 branches missed.">                || &quot;\\`*_{}[]()&lt;&gt;|~&amp;:/@&quot;.indexOf(codePoint) &gt;= 0;</span>
+    }
+
+    private static boolean endsSentence(String summary) {
+<span class="nc" id="L576">        int last = summary.codePointBefore(summary.length());</span>
+<span class="nc bnc" id="L577" title="All 6 branches missed.">        return last == '.' || last == '!' || last == '?';</span>
+    }
+
+    private static boolean safeActionId(String actionId) {
+<span class="nc" id="L581">        return safeIdentifier(actionId, MAX_ACTION_ID_LENGTH);</span>
+    }
+
+    private static boolean safeShortLink(String shortLink) {
+<span class="nc" id="L585">        return safeIdentifier(shortLink, 64);</span>
+    }
+
+    private static boolean safeIdentifier(String value, int maxLength) {
+<span class="nc bnc" id="L589" title="All 4 branches missed.">        if (blank(value) || value.length() &gt; maxLength) {</span>
+<span class="nc" id="L590">            return false;</span>
+        }
+<span class="nc bnc" id="L592" title="All 2 branches missed.">        for (int index = 0; index &lt; value.length(); index++) {</span>
+<span class="nc" id="L593">            char c = value.charAt(index);</span>
+<span class="nc bnc" id="L594" title="All 8 branches missed.">            boolean asciiLetter = (c &gt;= 'A' &amp;&amp; c &lt;= 'Z') || (c &gt;= 'a' &amp;&amp; c &lt;= 'z');</span>
+<span class="nc bnc" id="L595" title="All 10 branches missed.">            if (!asciiLetter &amp;&amp; !(c &gt;= '0' &amp;&amp; c &lt;= '9') &amp;&amp; c != '-' &amp;&amp; c != '_') {</span>
+<span class="nc" id="L596">                return false;</span>
+            }
+        }
+<span class="nc" id="L599">        return true;</span>
+    }
+
+    private ObjectNode addUrlAttachment(EffectiveConfig config, Card card, JsonNode arguments) {
+<span class="nc bnc" id="L603" title="All 2 branches missed.">        if (!config.trelloTools().allowUrlAttachments()) {</span>
+<span class="nc" id="L604">            return failure(</span>
+                    &quot;trello_url_attachments_disabled&quot;,
+                    &quot;Trello URL attachments are disabled by trello_tools.allow_url_attachments.&quot;);
+        }
+<span class="nc" id="L608">        String url = requiredText(arguments, &quot;url&quot;).strip();</span>
+<span class="nc bnc" id="L609" title="All 2 branches missed.">        if (!validAttachmentUrl(url)) {</span>
+<span class="nc" id="L610">            return failure(</span>
+                    &quot;invalid_url_attachment&quot;,
+                    &quot;Provide an http or https URL without credentials, query string, or fragment.&quot;);
+        }
+<span class="nc" id="L614">        String name = text(arguments, &quot;name&quot;);</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">        if (name != null) {</span>
+<span class="nc" id="L616">            name = name.strip();</span>
+        }
+<span class="nc bnc" id="L618" title="All 2 branches missed.">        if (unsafeToolLine(name)) {</span>
+<span class="nc" id="L619">            return failure(&quot;invalid_url_attachment_name&quot;, &quot;Attachment names must be one non-control line.&quot;);</span>
+        }
+
+<span class="nc" id="L622">        TrelloClient.UrlAttachmentWrite result = trello.addUrlAttachment(config, card.id(), url, name);</span>
+<span class="nc" id="L623">        return success(</span>
+<span class="nc" id="L624">                Map.of(&quot;status&quot;, &quot;url_attachment_added&quot;, &quot;card_id&quot;, card.id(), &quot;attachment_id&quot;, result.attachmentId()));</span>
+    }
+
+    private ObjectNode upsertWorkpad(EffectiveConfig config, Card card, JsonNode arguments) {
+<span class="nc bnc" id="L628" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L629">            return failure(&quot;trello_comments_disabled&quot;, &quot;Trello comments are disabled by trello_tools.allow_comments.&quot;);</span>
+        }
+<span class="nc" id="L631">        String proposedText = requiredText(arguments, &quot;text&quot;);</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">        if (CodexUsageWorkpadSection.hasMalformedManagedSectionMarkers(proposedText)) {</span>
+<span class="nc" id="L633">            return failure(</span>
+                    &quot;trello_workpad_managed_section_malformed&quot;,
+                    &quot;Cannot update workpad because the proposed Codex usage section markers are malformed.&quot;);
+        }
+<span class="nc bnc" id="L637" title="All 2 branches missed.">        if (CodexUsageWorkpadSection.containsManagedSectionMarker(proposedText)) {</span>
+<span class="nc" id="L638">            return failure(</span>
+                    &quot;trello_workpad_managed_section_forbidden&quot;,
+                    &quot;The Codex usage section is owned by Symphony and cannot be supplied by the workpad tool.&quot;);
+        }
+<span class="nc" id="L642">        String text = workpadText(proposedText);</span>
+<span class="nc" id="L643">        synchronized (workpadLock(card.id())) {</span>
+<span class="nc" id="L644">            CardLookupResult lookup = trello.fetchCardStateForWorkpad(config, card.id());</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">            if (lookup instanceof CardLookupResult.Missing) {</span>
+<span class="nc" id="L646">                return failure(</span>
+                        &quot;trello_workpad_card_missing&quot;, &quot;Cannot update workpad because the Trello card is missing.&quot;);
+            }
+<span class="nc bnc" id="L649" title="All 2 branches missed.">            if (lookup instanceof CardLookupResult.Failed failed) {</span>
+<span class="nc" id="L650">                return failure(&quot;trello_workpad_refresh_failed&quot;, failed.message());</span>
+            }
+<span class="nc bnc" id="L652" title="All 2 branches missed.">            if (!(lookup instanceof CardLookupResult.Found found)) {</span>
+<span class="nc" id="L653">                return failure(&quot;trello_workpad_refresh_failed&quot;, &quot;Could not refresh the current Trello card.&quot;);</span>
+            }
+<span class="nc" id="L655">            return upsertAgentWorkpadComment(config, card.id(), found.card(), text);</span>
+        }
+    }
+
+    public boolean updateCodexUsageSection(EffectiveConfig config, String cardId, String section) {
+<span class="nc bnc" id="L660" title="All 4 branches missed.">        if (!writesEnabled(config) || !config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L661">            return false;</span>
+        }
+        try {
+<span class="nc" id="L664">            synchronized (workpadLock(cardId)) {</span>
+<span class="nc" id="L665">                CardLookupResult lookup = trello.fetchCardStateForWorkpad(config, cardId);</span>
+<span class="nc bnc" id="L666" title="All 2 branches missed.">                if (!(lookup instanceof CardLookupResult.Found found)) {</span>
+<span class="nc" id="L667">                    return false;</span>
+                }
+<span class="nc" id="L669">                return upsertCodexUsageWorkpadComment(config, cardId, found.card(), section)</span>
+<span class="nc" id="L670">                        .path(&quot;success&quot;)</span>
+<span class="nc" id="L671">                        .asBoolean();</span>
+            }
+<span class="nc" id="L673">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L674">            LOG.warnf(&quot;card_id=%s codex_usage_workpad=failed&quot;, cardId);</span>
+<span class="nc" id="L675">            return false;</span>
+        }
+    }
+
+    private ObjectNode upsertAgentWorkpadComment(EffectiveConfig config, String cardId, Card currentCard, String text) {
+<span class="nc" id="L680">        List&lt;Card.Comment&gt; workpads = workpadComments(currentCard);</span>
+<span class="nc bnc" id="L681" title="All 2 branches missed.">        if (workpads.isEmpty()) {</span>
+<span class="nc" id="L682">            return createWorkpad(config, cardId, currentCard, text);</span>
+        }
+<span class="nc" id="L684">        ManagedWorkpadState managed = managedWorkpadState(workpads);</span>
+<span class="nc" id="L685">        ObjectNode invalid = invalidManagedWorkpadState(managed);</span>
+<span class="nc bnc" id="L686" title="All 2 branches missed.">        if (invalid != null) {</span>
+<span class="nc" id="L687">            return invalid;</span>
+        }
+<span class="nc" id="L689">        Card.Comment primary = primaryWorkpad(workpads);</span>
+<span class="nc bnc" id="L690" title="All 2 branches missed.">        if (blank(primary.id())) {</span>
+<span class="nc" id="L691">            return failure(&quot;trello_workpad_missing_action_id&quot;, &quot;Existing workpad comment has no Trello action id.&quot;);</span>
+        }
+<span class="nc" id="L693">        boolean destructiveAllowed = config.trelloTools().allowDestructiveOperations();</span>
+<span class="nc" id="L694">        Card.Comment nonPrimaryOwner = nonPrimaryManagedOwner(managed, primary);</span>
+<span class="nc bnc" id="L695" title="All 4 branches missed.">        if (nonPrimaryOwner != null &amp;&amp; !destructiveAllowed) {</span>
+<span class="nc" id="L696">            return failure(</span>
+                    &quot;trello_workpad_managed_section_non_primary&quot;,
+                    &quot;Cannot safely update the authoritative workpad while an older duplicate owns the Codex usage section and destructive duplicate cleanup is disabled.&quot;);
+        }
+<span class="nc bnc" id="L700" title="All 2 branches missed.">        String ownedText = managed.section() == null ? text : CodexUsageWorkpadSection.upsert(text, managed.section());</span>
+<span class="nc" id="L701">        return updateExistingWorkpad(</span>
+<span class="nc" id="L702">                config, cardId, workpads, primary, stripManualCleanupNotes(ownedText), nonPrimaryOwner);</span>
+    }
+
+    private ObjectNode upsertCodexUsageWorkpadComment(
+            EffectiveConfig config, String cardId, Card currentCard, String section) {
+<span class="nc" id="L707">        List&lt;Card.Comment&gt; workpads = workpadComments(currentCard);</span>
+<span class="nc bnc" id="L708" title="All 2 branches missed.">        if (workpads.isEmpty()) {</span>
+<span class="nc bnc" id="L709" title="All 2 branches missed.">            if (commentWindowMayBeIncomplete(currentCard)) {</span>
+<span class="nc" id="L710">                LOG.warnf(&quot;card_id=%s codex_usage_workpad=comment_window_incomplete&quot;, cardId);</span>
+<span class="nc" id="L711">                return incompleteWorkpadWindowFailure();</span>
+            }
+<span class="nc bnc" id="L713" title="All 2 branches missed.">            if (section == null) {</span>
+<span class="nc" id="L714">                return success(Map.of(&quot;status&quot;, &quot;workpad_unchanged&quot;, &quot;card_id&quot;, cardId));</span>
+            }
+<span class="nc" id="L716">            String text = CodexUsageWorkpadSection.upsert(WORKPAD_MARKER, section);</span>
+<span class="nc" id="L717">            return createWorkpad(config, cardId, currentCard, text);</span>
+        }
+<span class="nc" id="L719">        ManagedWorkpadState managed = managedWorkpadState(workpads);</span>
+<span class="nc" id="L720">        ObjectNode invalid = invalidManagedWorkpadState(managed);</span>
+<span class="nc bnc" id="L721" title="All 2 branches missed.">        if (invalid != null) {</span>
+<span class="nc" id="L722">            LOG.warnf(</span>
+                    &quot;card_id=%s codex_usage_workpad=%s&quot;,
+<span class="nc" id="L724">                    cardId, managed.problem().logValue());</span>
+<span class="nc" id="L725">            return invalid;</span>
+        }
+<span class="nc bnc" id="L727" title="All 4 branches missed.">        if (managed.section() == null &amp;&amp; commentWindowMayBeIncomplete(currentCard)) {</span>
+<span class="nc" id="L728">            LOG.warnf(&quot;card_id=%s codex_usage_workpad=comment_window_incomplete&quot;, cardId);</span>
+<span class="nc" id="L729">            return incompleteWorkpadWindowFailure();</span>
+        }
+<span class="nc" id="L731">        Card.Comment primary = primaryWorkpad(workpads);</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">        if (blank(primary.id())) {</span>
+<span class="nc" id="L733">            return failure(&quot;trello_workpad_missing_action_id&quot;, &quot;Existing workpad comment has no Trello action id.&quot;);</span>
+        }
+<span class="nc" id="L735">        boolean destructiveAllowed = config.trelloTools().allowDestructiveOperations();</span>
+<span class="nc" id="L736">        Card.Comment nonPrimaryOwner = nonPrimaryManagedOwner(managed, primary);</span>
+<span class="nc bnc" id="L737" title="All 4 branches missed.">        if (nonPrimaryOwner != null &amp;&amp; !destructiveAllowed) {</span>
+<span class="nc" id="L738">            LOG.warnf(&quot;card_id=%s codex_usage_workpad=managed_section_non_primary&quot;, cardId);</span>
+<span class="nc" id="L739">            return failure(</span>
+                    &quot;trello_workpad_managed_section_non_primary&quot;,
+                    &quot;Cannot safely change the Codex usage section while an older duplicate owns it and destructive duplicate cleanup is disabled.&quot;);
+        }
+<span class="nc bnc" id="L743" title="All 2 branches missed.">        String text = section == null</span>
+<span class="nc" id="L744">                ? CodexUsageWorkpadSection.remove(primary.text())</span>
+<span class="nc" id="L745">                : CodexUsageWorkpadSection.upsert(primary.text(), section);</span>
+<span class="nc" id="L746">        String canonicalText = stripManualCleanupNotes(text);</span>
+<span class="nc bnc" id="L747" title="All 4 branches missed.">        if (workpads.size() == 1 &amp;&amp; canonicalText.equals(primary.text())) {</span>
+<span class="nc" id="L748">            return success(Map.of(&quot;status&quot;, &quot;workpad_unchanged&quot;, &quot;card_id&quot;, cardId));</span>
+        }
+<span class="nc" id="L750">        return updateExistingWorkpad(config, cardId, workpads, primary, canonicalText, nonPrimaryOwner);</span>
+    }
+
+    private ObjectNode updateExistingWorkpad(
+            EffectiveConfig config,
+            String cardId,
+            List&lt;Card.Comment&gt; workpads,
+            Card.Comment primary,
+            String canonicalText,
+            Card.Comment nonPrimaryManagedOwner) {
+<span class="nc" id="L760">        int duplicatesFound = workpads.size() - 1;</span>
+<span class="nc" id="L761">        boolean destructiveAllowed = config.trelloTools().allowDestructiveOperations();</span>
+        // Without the destructive opt-in, the duplicates stay on the card, so the canonical
+        // workpad itself must tell the next agent or human that manual cleanup is required.
+<span class="nc bnc" id="L764" title="All 4 branches missed.">        String authoritativeText = duplicatesFound &gt; 0 &amp;&amp; !destructiveAllowed</span>
+<span class="nc" id="L765">                ? canonicalText + manualCleanupNote(duplicatesFound)</span>
+<span class="nc" id="L766">                : canonicalText;</span>
+        // The authoritative update runs before any duplicate cleanup: if it fails, every workpad
+        // stays in place and no comment content is lost to a delete that ran first.
+<span class="nc" id="L769">        trello.updateComment(config, primary.id(), authoritativeText);</span>
+        // Deleting Trello comments is a destructive operation and disallowed by default. Without
+        // the opt-in, duplicate workpads stay in place and only the primary comment is updated.
+<span class="nc bnc" id="L772" title="All 2 branches missed.">        DuplicateCleanup cleanup = destructiveAllowed</span>
+<span class="nc" id="L773">                ? removeDuplicateManagedComments(config, workpads, primary, &quot;workpad_duplicate_delete&quot;)</span>
+<span class="nc" id="L774">                : DuplicateCleanup.none();</span>
+<span class="nc bnc" id="L775" title="All 4 branches missed.">        if (nonPrimaryManagedOwner != null &amp;&amp; !cleanup.removedActionIds().contains(nonPrimaryManagedOwner.id())) {</span>
+            try {
+<span class="nc" id="L777">                trello.updateComment(config, primary.id(), primary.text());</span>
+<span class="nc" id="L778">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L779">                LOG.warnf(&quot;workpad_managed_section_transfer_rollback outcome=failed action_id=%s&quot;, primary.id());</span>
+<span class="nc" id="L780">                return failure(</span>
+                        &quot;trello_workpad_managed_section_transfer_rollback_failed&quot;,
+                        &quot;The older workpad that owned the Codex usage section could not be removed, and restoring the authoritative workpad also failed. Managed-section ownership is ambiguous and must be repaired manually.&quot;);
+<span class="nc" id="L783">            }</span>
+<span class="nc" id="L784">            return failure(</span>
+                    &quot;trello_workpad_managed_section_cleanup_failed&quot;,
+                    &quot;The older duplicate that owned the Codex usage section could not be removed. The authoritative workpad was restored so the transfer can be retried safely.&quot;);
+        }
+<span class="nc" id="L788">        return success(Map.of(</span>
+                &quot;status&quot;,
+                &quot;workpad_updated&quot;,
+                &quot;card_id&quot;,
+                cardId,
+                &quot;action_id&quot;,
+<span class="nc" id="L794">                primary.id(),</span>
+                &quot;duplicate_workpads_found&quot;,
+<span class="nc" id="L796">                Integer.toString(duplicatesFound),</span>
+                &quot;duplicate_workpads_removed&quot;,
+<span class="nc" id="L798">                Integer.toString(cleanup.removed()),</span>
+                &quot;duplicate_workpads_delete_failed&quot;,
+<span class="nc" id="L800">                Integer.toString(cleanup.deleteFailed()),</span>
+                &quot;duplicate_workpads_cleanup_status&quot;,
+<span class="nc" id="L802">                cleanupStatus(duplicatesFound, destructiveAllowed, cleanup)));</span>
+    }
+
+    private Object workpadLock(String cardId) {
+<span class="nc bnc" id="L806" title="All 2 branches missed.">        int hash = cardId == null ? 0 : cardId.hashCode();</span>
+<span class="nc" id="L807">        return workpadLocks[Math.floorMod(hash, workpadLocks.length)];</span>
+    }
+
+    private List&lt;Card.Comment&gt; workpadComments(Card currentCard) {
+<span class="nc" id="L811">        return currentCard.comments().stream().filter(this::isWorkpadComment).toList();</span>
+    }
+
+    private static Card.Comment primaryWorkpad(List&lt;Card.Comment&gt; workpads) {
+<span class="nc" id="L815">        return workpads.stream()</span>
+<span class="nc bnc" id="L816" title="All 2 branches missed.">                .filter(workpad -&gt; !blank(workpad.id()))</span>
+<span class="nc" id="L817">                .findFirst()</span>
+<span class="nc" id="L818">                .orElseGet(workpads::getFirst);</span>
+    }
+
+    private static ManagedWorkpadState managedWorkpadState(List&lt;Card.Comment&gt; workpads) {
+<span class="nc" id="L822">        Card.Comment owner = null;</span>
+<span class="nc" id="L823">        String section = null;</span>
+<span class="nc bnc" id="L824" title="All 2 branches missed.">        for (Card.Comment workpad : workpads) {</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">            if (CodexUsageWorkpadSection.hasMalformedManagedSectionMarkers(workpad.text())) {</span>
+<span class="nc" id="L826">                return new ManagedWorkpadState(null, null, ManagedSectionProblem.MALFORMED);</span>
+            }
+<span class="nc" id="L828">            String candidate = CodexUsageWorkpadSection.managedSection(workpad.text());</span>
+<span class="nc bnc" id="L829" title="All 2 branches missed.">            if (candidate == null) {</span>
+<span class="nc" id="L830">                continue;</span>
+            }
+<span class="nc bnc" id="L832" title="All 2 branches missed.">            if (owner != null) {</span>
+<span class="nc" id="L833">                return new ManagedWorkpadState(null, null, ManagedSectionProblem.AMBIGUOUS);</span>
+            }
+<span class="nc" id="L835">            owner = workpad;</span>
+<span class="nc" id="L836">            section = candidate;</span>
+<span class="nc" id="L837">        }</span>
+<span class="nc" id="L838">        return new ManagedWorkpadState(owner, section, ManagedSectionProblem.NONE);</span>
+    }
+
+    private ObjectNode invalidManagedWorkpadState(ManagedWorkpadState managed) {
+<span class="nc bnc" id="L842" title="All 3 branches missed.">        return switch (managed.problem()) {</span>
+<span class="nc" id="L843">            case NONE -&gt; null;</span>
+            case MALFORMED -&gt;
+<span class="nc" id="L845">                failure(</span>
+                        &quot;trello_workpad_managed_section_malformed&quot;,
+                        &quot;Cannot update workpad because a Codex usage section is malformed or occurs more than once in one workpad.&quot;);
+            case AMBIGUOUS -&gt;
+<span class="nc" id="L849">                failure(</span>
+                        &quot;trello_workpad_managed_section_ambiguous&quot;,
+                        &quot;Cannot update workpad because more than one workpad contains a Codex usage section.&quot;);
+        };
+    }
+
+    private static Card.Comment nonPrimaryManagedOwner(ManagedWorkpadState managed, Card.Comment primary) {
+<span class="nc bnc" id="L856" title="All 4 branches missed.">        return managed.owner() == null || managed.owner().equals(primary) ? null : managed.owner();</span>
+    }
+
+<span class="nc" id="L859">    private record ManagedWorkpadState(Card.Comment owner, String section, ManagedSectionProblem problem) {}</span>
+
+<span class="nc" id="L861">    private enum ManagedSectionProblem {</span>
+<span class="nc" id="L862">        NONE(&quot;valid&quot;),</span>
+<span class="nc" id="L863">        MALFORMED(&quot;malformed_managed_section&quot;),</span>
+<span class="nc" id="L864">        AMBIGUOUS(&quot;ambiguous_managed_section&quot;);</span>
+
+        private final String logValue;
+
+<span class="nc" id="L868">        ManagedSectionProblem(String logValue) {</span>
+<span class="nc" id="L869">            this.logValue = logValue;</span>
+<span class="nc" id="L870">        }</span>
+
+        String logValue() {
+<span class="nc" id="L873">            return logValue;</span>
+        }
+    }
+
+    private static String cleanupStatus(int duplicatesFound, boolean destructiveAllowed, DuplicateCleanup cleanup) {
+<span class="nc bnc" id="L878" title="All 2 branches missed.">        if (duplicatesFound == 0) {</span>
+<span class="nc" id="L879">            return &quot;not_needed&quot;;</span>
+        }
+<span class="nc bnc" id="L881" title="All 2 branches missed.">        if (!destructiveAllowed) {</span>
+<span class="nc" id="L882">            return &quot;skipped_destructive_operations_disabled&quot;;</span>
+        }
+<span class="nc bnc" id="L884" title="All 2 branches missed.">        return cleanup.removed() == duplicatesFound ? &quot;removed&quot; : &quot;delete_failed&quot;;</span>
+    }
+
+    private static String manualCleanupNote(int duplicatesFound) {
+<span class="nc bnc" id="L888" title="All 2 branches missed.">        String existence = duplicatesFound == 1 ? &quot;comment exists&quot; : &quot;comments exist&quot;;</span>
+<span class="nc" id="L889">        return System.lineSeparator()</span>
+<span class="nc" id="L890">                + System.lineSeparator()</span>
+                + DUPLICATE_WORKPADS_NOTE_PREFIX
+                + duplicatesFound
+                + &quot; other Codex workpad &quot;
+                + existence
+                + &quot; on this card. Deleting Trello comments is disabled by&quot;
+                + &quot; trello_tools.allow_destructive_operations, so delete the duplicate workpad&quot;
+                + &quot; comments manually and keep this one.&quot;;
+    }
+
+    /// A managed comment family should have one authoritative comment, so destructive-policy cleanup
+    /// removes duplicates only after the authoritative state is safe. Failed or unaddressable deletes
+    /// stay visible and are reported instead of disappearing from the cleanup totals. Workpad callers
+    /// additionally fail when an undeleted duplicate owns the managed usage section.
+    private DuplicateCleanup removeDuplicateManagedComments(
+            EffectiveConfig config, List&lt;Card.Comment&gt; managedComments, Card.Comment primary, String logEvent) {
+<span class="nc" id="L906">        int removed = 0;</span>
+<span class="nc" id="L907">        int deleteFailed = 0;</span>
+<span class="nc" id="L908">        List&lt;String&gt; removedActionIds = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L909" title="All 2 branches missed.">        for (Card.Comment duplicate : managedComments) {</span>
+<span class="nc bnc" id="L910" title="All 2 branches missed.">            if (duplicate.equals(primary)) {</span>
+<span class="nc" id="L911">                continue;</span>
+            }
+<span class="nc bnc" id="L913" title="All 2 branches missed.">            if (blank(duplicate.id())) {</span>
+<span class="nc" id="L914">                deleteFailed++;</span>
+<span class="nc" id="L915">                LOG.warnf(&quot;%s outcome=missing_action_id&quot;, logEvent);</span>
+<span class="nc" id="L916">                continue;</span>
+            }
+            try {
+<span class="nc" id="L919">                trello.deleteComment(config, duplicate.id());</span>
+<span class="nc" id="L920">                removed++;</span>
+<span class="nc" id="L921">                removedActionIds.add(duplicate.id());</span>
+<span class="nc" id="L922">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L923">                deleteFailed++;</span>
+<span class="nc" id="L924">                LOG.warnf(e, &quot;%s outcome=failed action_id=%s&quot;, logEvent, duplicate.id());</span>
+<span class="nc" id="L925">            }</span>
+<span class="nc" id="L926">        }</span>
+<span class="nc" id="L927">        return new DuplicateCleanup(removed, deleteFailed, List.copyOf(removedActionIds));</span>
+    }
+
+<span class="nc" id="L930">    private record DuplicateCleanup(int removed, int deleteFailed, List&lt;String&gt; removedActionIds) {</span>
+        static DuplicateCleanup none() {
+<span class="nc" id="L932">            return new DuplicateCleanup(0, 0, List.of());</span>
+        }
+    }
+
+    private boolean isWorkpadComment(Card.Comment comment) {
+<span class="nc bnc" id="L937" title="All 4 branches missed.">        return comment.text() != null &amp;&amp; comment.text().startsWith(WORKPAD_MARKER);</span>
+    }
+
+    private ObjectNode createWorkpad(EffectiveConfig config, String cardId, Card currentCard, String text) {
+<span class="nc bnc" id="L941" title="All 2 branches missed.">        if (commentWindowMayBeIncomplete(currentCard)) {</span>
+<span class="nc" id="L942">            return incompleteWorkpadWindowFailure();</span>
+        }
+<span class="nc" id="L944">        Map&lt;String, Object&gt; created = trello.addComment(config, cardId, text);</span>
+<span class="nc" id="L945">        return success(Map.of(&quot;status&quot;, &quot;workpad_created&quot;, &quot;card_id&quot;, cardId, &quot;action_id&quot;, string(created.get(&quot;id&quot;))));</span>
+    }
+
+    private static boolean commentWindowMayBeIncomplete(Card card) {
+<span class="nc bnc" id="L949" title="All 2 branches missed.">        return card.comments().size() &gt;= TrelloClient.WORKPAD_COMMENT_ACTION_LIMIT;</span>
+    }
+
+    private ObjectNode incompleteWorkpadWindowFailure() {
+<span class="nc" id="L953">        return failure(</span>
+                &quot;trello_workpad_comment_window_incomplete&quot;,
+                &quot;Cannot safely change the workpad because the fetched Trello comment window is full and an older workpad or managed section may exist.&quot;);
+    }
+
+    private static String workpadText(String text) {
+<span class="nc" id="L959">        String trimmed = stripManualCleanupNotes(text.strip());</span>
+<span class="nc bnc" id="L960" title="All 2 branches missed.">        if (trimmed.startsWith(WORKPAD_MARKER)) {</span>
+<span class="nc" id="L961">            int markerEnd = markerLineEnd(trimmed);</span>
+<span class="nc" id="L962">            return trimmed.substring(0, markerEnd) + TrelloMarkdown.escapeLeadingHashtags(trimmed.substring(markerEnd));</span>
+        }
+<span class="nc" id="L964">        return WORKPAD_MARKER</span>
+<span class="nc" id="L965">                + System.lineSeparator()</span>
+<span class="nc" id="L966">                + System.lineSeparator()</span>
+<span class="nc" id="L967">                + TrelloMarkdown.escapeLeadingHashtags(trimmed);</span>
+    }
+
+    /// Agents often echo the previous workpad body into the next upsert, so a cleanup note from an
+    /// earlier update is dropped before the fresh state is decided. This keeps the note from
+    /// accumulating and removes it once the duplicates are gone.
+    private static String stripManualCleanupNotes(String text) {
+<span class="nc bnc" id="L974" title="All 2 branches missed.">        if (!text.contains(DUPLICATE_WORKPADS_NOTE_PREFIX)) {</span>
+<span class="nc" id="L975">            return text;</span>
+        }
+<span class="nc" id="L977">        return text.lines()</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">                .filter(line -&gt; !line.startsWith(DUPLICATE_WORKPADS_NOTE_PREFIX))</span>
+<span class="nc" id="L979">                .collect(Collectors.joining(&quot;\n&quot;))</span>
+<span class="nc" id="L980">                .strip();</span>
+    }
+
+    private static int markerLineEnd(String text) {
+<span class="nc" id="L984">        int lineEnd = text.indexOf('\n');</span>
+<span class="nc bnc" id="L985" title="All 2 branches missed.">        return lineEnd &lt; 0 ? text.length() : lineEnd;</span>
+    }
+
+    private ObjectNode moveCurrentCard(EffectiveConfig config, Card card, JsonNode arguments) {
+<span class="nc bnc" id="L989" title="All 2 branches missed.">        if (!moveAllowlistConfigured(config)) {</span>
+<span class="nc" id="L990">            return failure(</span>
+                    &quot;trello_move_allowlist_required&quot;,
+                    &quot;Trello card moves require trello_tools.allowed_move_list_ids or allowed_move_list_names.&quot;);
+        }
+<span class="nc" id="L994">        String listId = text(arguments, &quot;list_id&quot;);</span>
+<span class="nc" id="L995">        String listName = text(arguments, &quot;list_name&quot;);</span>
+<span class="nc bnc" id="L996" title="All 4 branches missed.">        if (blank(listId) &amp;&amp; blank(listName)) {</span>
+<span class="nc" id="L997">            return failure(&quot;missing_destination_list&quot;, &quot;Provide list_name or list_id for the destination list.&quot;);</span>
+        }
+
+<span class="nc" id="L1000">        BoardListMatch target = resolveAllowedTarget(config, listId, listName);</span>
+<span class="nc bnc" id="L1001" title="All 2 branches missed.">        if (target.list() == null) {</span>
+<span class="nc" id="L1002">            return failure(&quot;trello_move_not_allowed&quot;, target.error());</span>
+        }
+
+<span class="nc" id="L1005">        trello.moveCardToList(config, card.id(), target.list().id());</span>
+<span class="nc" id="L1006">        return success(Map.of(</span>
+                &quot;status&quot;,
+                &quot;card_moved&quot;,
+                &quot;card_id&quot;,
+<span class="nc" id="L1010">                card.id(),</span>
+                &quot;list_id&quot;,
+<span class="nc" id="L1012">                target.list().id(),</span>
+                &quot;list_name&quot;,
+<span class="nc" id="L1014">                target.list().name()));</span>
+    }
+
+    private BoardListMatch resolveAllowedTarget(EffectiveConfig config, String listId, String listName) {
+<span class="nc" id="L1018">        List&lt;TrelloClient.BoardList&gt; lists = trello.fetchBoardLists(config);</span>
+<span class="nc" id="L1019">        List&lt;TrelloClient.BoardList&gt; openLists =</span>
+<span class="nc bnc" id="L1020" title="All 2 branches missed.">                lists.stream().filter(list -&gt; !list.closed()).toList();</span>
+<span class="nc bnc" id="L1021" title="All 2 branches missed.">        if (!blank(listId)) {</span>
+<span class="nc" id="L1022">            return openLists.stream()</span>
+<span class="nc" id="L1023">                    .filter(list -&gt; list.id().equals(listId))</span>
+<span class="nc" id="L1024">                    .findAny()</span>
+<span class="nc" id="L1025">                    .map(list -&gt; allowedTargetById(config, list, openLists))</span>
+<span class="nc" id="L1026">                    .orElseGet(() -&gt; new BoardListMatch(null, &quot;Destination list is not open on the configured board.&quot;));</span>
+        }
+
+<span class="nc" id="L1029">        List&lt;TrelloClient.BoardList&gt; nameMatches = openLists.stream()</span>
+<span class="nc" id="L1030">                .filter(list -&gt; StateNames.normalize(list.name()).equals(StateNames.normalize(listName)))</span>
+<span class="nc" id="L1031">                .toList();</span>
+<span class="nc bnc" id="L1032" title="All 2 branches missed.">        if (nameMatches.size() &gt; 1) {</span>
+<span class="nc" id="L1033">            return new BoardListMatch(</span>
+                    null,
+                    &quot;Destination list name matches multiple open Trello lists. Rename the duplicate lists or move by list_id.&quot;);
+        }
+<span class="nc bnc" id="L1037" title="All 2 branches missed.">        if (nameMatches.isEmpty()) {</span>
+<span class="nc" id="L1038">            return new BoardListMatch(null, &quot;Destination list is not open on the configured board.&quot;);</span>
+        }
+<span class="nc" id="L1040">        return allowedTarget(config, nameMatches.getFirst());</span>
+    }
+
+    private BoardListMatch allowedTargetById(
+            EffectiveConfig config, TrelloClient.BoardList list, List&lt;TrelloClient.BoardList&gt; openLists) {
+<span class="nc bnc" id="L1045" title="All 2 branches missed.">        if (allowedById(config, list)) {</span>
+<span class="nc" id="L1046">            return new BoardListMatch(list, null);</span>
+        }
+<span class="nc bnc" id="L1048" title="All 4 branches missed.">        if (allowedByName(config, list) &amp;&amp; hasUniqueOpenListName(list, openLists)) {</span>
+<span class="nc" id="L1049">            return new BoardListMatch(list, null);</span>
+        }
+<span class="nc bnc" id="L1051" title="All 2 branches missed.">        if (allowedByName(config, list)) {</span>
+<span class="nc" id="L1052">            return new BoardListMatch(</span>
+                    null,
+                    &quot;Destination list name matches multiple open Trello lists. Allow the exact list_id before moving by list_id.&quot;);
+        }
+<span class="nc" id="L1056">        return new BoardListMatch(null, &quot;Destination list is not included in the configured Trello move allowlist.&quot;);</span>
+    }
+
+    private BoardListMatch allowedTarget(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="nc bnc" id="L1060" title="All 4 branches missed.">        return allowedById(config, list) || allowedByName(config, list)</span>
+<span class="nc" id="L1061">                ? new BoardListMatch(list, null)</span>
+<span class="nc" id="L1062">                : new BoardListMatch(null, &quot;Destination list is not included in the configured Trello move allowlist.&quot;);</span>
+    }
+
+    private boolean hasUniqueOpenListName(TrelloClient.BoardList list, List&lt;TrelloClient.BoardList&gt; openLists) {
+<span class="nc" id="L1066">        String normalized = StateNames.normalize(list.name());</span>
+<span class="nc" id="L1067">        return openLists.stream()</span>
+<span class="nc" id="L1068">                        .filter(candidate -&gt; normalized.equals(StateNames.normalize(candidate.name())))</span>
+<span class="nc bnc" id="L1069" title="All 2 branches missed.">                        .count()</span>
+                == 1;
+    }
+
+    private boolean allowedById(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="nc" id="L1074">        return config.trelloTools().allowedMoveListIds().contains(list.id());</span>
+    }
+
+    private boolean allowedByName(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="nc" id="L1078">        String normalized = StateNames.normalize(list.name());</span>
+<span class="nc" id="L1079">        return config.trelloTools().allowedMoveListNames().contains(normalized);</span>
+    }
+
+    private boolean writesEnabled(EffectiveConfig config) {
+<span class="nc bnc" id="L1083" title="All 4 branches missed.">        return config.trelloTools().enabled() &amp;&amp; config.trelloTools().allowWrites();</span>
+    }
+
+    private boolean moveAllowlistConfigured(EffectiveConfig config) {
+<span class="nc bnc" id="L1087" title="All 2 branches missed.">        return !config.trelloTools().allowedMoveListIds().isEmpty()</span>
+<span class="nc bnc" id="L1088" title="All 2 branches missed.">                || !config.trelloTools().allowedMoveListNames().isEmpty();</span>
+    }
+
+    private ObjectNode tool(String name, String description, ObjectNode inputSchema) {
+<span class="nc" id="L1092">        return object(&quot;namespace&quot;, &quot;symphony&quot;, &quot;name&quot;, name, &quot;description&quot;, description, &quot;inputSchema&quot;, inputSchema);</span>
+    }
+
+    private ObjectNode objectSchema(Map&lt;String, ObjectNode&gt; properties, List&lt;String&gt; required) {
+<span class="nc" id="L1096">        ObjectNode schema = object(&quot;type&quot;, &quot;object&quot;, &quot;additionalProperties&quot;, false);</span>
+<span class="nc" id="L1097">        ObjectNode propertySchema = json.createObjectNode();</span>
+<span class="nc" id="L1098">        properties.forEach(propertySchema::set);</span>
+<span class="nc" id="L1099">        schema.set(&quot;properties&quot;, propertySchema);</span>
+<span class="nc" id="L1100">        schema.set(&quot;required&quot;, json.valueToTree(required));</span>
+<span class="nc" id="L1101">        return schema;</span>
+    }
+
+    private ObjectNode stringSchema(String description) {
+<span class="nc" id="L1105">        return object(&quot;type&quot;, &quot;string&quot;, &quot;minLength&quot;, 1, &quot;description&quot;, description);</span>
+    }
+
+    private ObjectNode enumStringSchema(String description, List&lt;String&gt; values) {
+<span class="nc" id="L1109">        ObjectNode schema = stringSchema(description);</span>
+<span class="nc" id="L1110">        schema.set(&quot;enum&quot;, json.valueToTree(values));</span>
+<span class="nc" id="L1111">        return schema;</span>
+    }
+
+    private ObjectNode booleanSchema(String description) {
+<span class="nc" id="L1115">        return object(&quot;type&quot;, &quot;boolean&quot;, &quot;description&quot;, description);</span>
+    }
+
+    private ObjectNode success(Map&lt;String, String&gt; payload) {
+<span class="nc" id="L1119">        ObjectNode result = object(&quot;success&quot;, true);</span>
+<span class="nc" id="L1120">        result.set(&quot;contentItems&quot;, json.createArrayNode().add(inputText(toJson(payload))));</span>
+<span class="nc" id="L1121">        return result;</span>
+    }
+
+    private ObjectNode failure(String code, String message) {
+<span class="nc" id="L1125">        Map&lt;String, String&gt; payload = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L1126">        payload.put(&quot;error&quot;, code);</span>
+<span class="nc bnc" id="L1127" title="All 2 branches missed.">        payload.put(&quot;message&quot;, blank(message) ? code : message);</span>
+<span class="nc" id="L1128">        ObjectNode result = object(&quot;success&quot;, false);</span>
+<span class="nc" id="L1129">        result.set(&quot;contentItems&quot;, json.createArrayNode().add(inputText(toJson(payload))));</span>
+<span class="nc" id="L1130">        return result;</span>
+    }
+
+    private ObjectNode inputText(String text) {
+<span class="nc" id="L1134">        return object(&quot;type&quot;, &quot;inputText&quot;, &quot;text&quot;, text);</span>
+    }
+
+    private String toJson(Map&lt;String, String&gt; payload) {
+        try {
+<span class="nc" id="L1139">            return json.writeValueAsString(payload);</span>
+<span class="nc" id="L1140">        } catch (Exception e) {</span>
+<span class="nc" id="L1141">            return payload.toString();</span>
+        }
+    }
+
+    private static String string(Object value) {
+<span class="nc bnc" id="L1146" title="All 2 branches missed.">        return value == null ? &quot;&quot; : value.toString();</span>
+    }
+
+    private ObjectNode object(Object... keyValues) {
+<span class="nc" id="L1150">        ObjectNode node = json.createObjectNode();</span>
+<span class="nc bnc" id="L1151" title="All 2 branches missed.">        for (int i = 0; i &lt; keyValues.length; i += 2) {</span>
+<span class="nc" id="L1152">            node.set(keyValues[i].toString(), json.valueToTree(keyValues[i + 1]));</span>
+        }
+<span class="nc" id="L1154">        return node;</span>
+    }
+
+    private static String requiredText(JsonNode node, String key) {
+<span class="nc" id="L1158">        String value = text(node, key);</span>
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">        checkArgument(!blank(value), &quot;Missing required argument: %s&quot;, key);</span>
+<span class="nc" id="L1160">        return value;</span>
+    }
+
+    private static boolean requiredBoolean(JsonNode node, String key) {
+<span class="nc" id="L1164">        JsonNode value = node.path(key);</span>
+<span class="nc bnc" id="L1165" title="All 4 branches missed.">        checkArgument(!value.isMissingNode() &amp;&amp; !value.isNull(), &quot;Missing required argument: %s&quot;, key);</span>
+<span class="nc" id="L1166">        checkArgument(value.isBoolean(), &quot;Argument %s must be a boolean&quot;, key);</span>
+<span class="nc" id="L1167">        return value.asBoolean();</span>
+    }
+
+    private static String text(JsonNode node, String key) {
+<span class="nc" id="L1171">        JsonNode value = node.path(key);</span>
+<span class="nc bnc" id="L1172" title="All 4 branches missed.">        if (value.isMissingNode() || value.isNull()) {</span>
+<span class="nc" id="L1173">            return null;</span>
+        }
+<span class="nc" id="L1175">        checkArgument(value.isTextual(), &quot;Argument %s must be a string&quot;, key);</span>
+<span class="nc" id="L1176">        return value.textValue();</span>
+    }
+
+    private static boolean validAttachmentUrl(String value) {
+<span class="nc bnc" id="L1180" title="All 2 branches missed.">        if (unsafeToolLine(value)) {</span>
+<span class="nc" id="L1181">            return false;</span>
+        }
+        try {
+<span class="nc" id="L1184">            URI uri = URI.create(value);</span>
+<span class="nc" id="L1185">            String scheme = uri.getScheme();</span>
+<span class="nc bnc" id="L1186" title="All 4 branches missed.">            return (&quot;http&quot;.equalsIgnoreCase(scheme) || &quot;https&quot;.equalsIgnoreCase(scheme))</span>
+<span class="nc bnc" id="L1187" title="All 2 branches missed.">                    &amp;&amp; !blank(uri.getHost())</span>
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">                    &amp;&amp; uri.getRawUserInfo() == null</span>
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">                    &amp;&amp; uri.getRawQuery() == null</span>
+<span class="nc bnc" id="L1190" title="All 2 branches missed.">                    &amp;&amp; uri.getRawFragment() == null;</span>
+<span class="nc" id="L1191">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L1192">            return false;</span>
+        }
+    }
+
+    private static boolean unsafeToolLine(String value) {
+<span class="nc bnc" id="L1197" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L1198">            return false;</span>
+        }
+<span class="nc bnc" id="L1200" title="All 2 branches missed.">        for (int index = 0; index &lt; value.length(); index++) {</span>
+<span class="nc" id="L1201">            char c = value.charAt(index);</span>
+<span class="nc bnc" id="L1202" title="All 4 branches missed.">            if (c &lt; ' ' || c == 0x7F) {</span>
+<span class="nc" id="L1203">                return true;</span>
+            }
+        }
+<span class="nc" id="L1206">        return false;</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L1210" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+
+<span class="nc" id="L1213">    private record BoardListMatch(TrelloClient.BoardList list, String error) {}</span>
+
+    private record BlockerRecheckComments(Card.@Nullable Comment blocker, List&lt;Card.Comment&gt; managedComments) {
+<span class="nc" id="L1216">        private BlockerRecheckComments {</span>
+<span class="nc" id="L1217">            managedComments = List.copyOf(managedComments);</span>
+<span class="nc" id="L1218">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

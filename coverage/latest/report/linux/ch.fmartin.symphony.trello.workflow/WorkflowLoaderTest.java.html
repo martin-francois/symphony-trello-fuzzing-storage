@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowLoaderTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.workflow</a> &gt; <span class="el_source">WorkflowLoaderTest.java</span></div><h1>WorkflowLoaderTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.workflow;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L15">final class WorkflowLoaderTest {</span>
+    @TempDir
+    Path tempDir;
+
+<span class="nc" id="L19">    private final WorkflowLoader loader = new WorkflowLoader();</span>
+
+    @Test
+    void loadsCurrentWorkflowWithoutAddingGeneratedMetadataOrSandboxPolicy() throws Exception {
+        // given
+<span class="nc" id="L24">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L25">        String original = workflowWithBody(</span>
+                &quot;&quot;&quot;
+                ## Operating Posture
+
+                Current workflow body.
+                &quot;&quot;&quot;);
+<span class="nc" id="L31">        Files.writeString(workflow, original);</span>
+
+        // when
+<span class="nc" id="L34">        WorkflowDefinition loaded = loader.load(workflow);</span>
+
+        // then
+<span class="nc" id="L37">        assertThat(loaded.config()).doesNotContainKey(&quot;symphony&quot;);</span>
+<span class="nc" id="L38">        assertThat(codex(loaded)).doesNotContainKey(&quot;turn_sandbox_policy&quot;);</span>
+<span class="nc" id="L39">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L40">    }</span>
+
+    @Test
+    void preservesHandAuthoredSymphonySectionAsPlainConfig() throws Exception {
+        // given
+<span class="nc" id="L45">        Path workflow = tempDir.resolve(&quot;WORKFLOW.hand-authored-symphony.md&quot;);</span>
+<span class="nc" id="L46">        String original = workflowWithExtraFrontMatter(</span>
+                &quot;symphony: local-notes&quot;,
+                &quot;&quot;&quot;
+                # Custom workflow
+
+                This workflow uses a private top-level symphony note.
+                &quot;&quot;&quot;);
+<span class="nc" id="L53">        Files.writeString(workflow, original);</span>
+
+        // when
+<span class="nc" id="L56">        WorkflowDefinition loaded = loader.load(workflow);</span>
+
+        // then
+<span class="nc" id="L59">        assertThat(loaded.config()).containsEntry(&quot;symphony&quot;, &quot;local-notes&quot;);</span>
+<span class="nc" id="L60">        assertThat(codex(loaded)).doesNotContainKey(&quot;turn_sandbox_policy&quot;);</span>
+<span class="nc" id="L61">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L62">    }</span>
+
+    @Test
+    void loadsExistingWorkflowBodyWithoutAdaptingOrRejectingIt() throws Exception {
+        // given
+<span class="nc" id="L67">        Path workflow = tempDir.resolve(&quot;WORKFLOW.current-unmarked.md&quot;);</span>
+<span class="nc" id="L68">        String original = workflowWithBody(</span>
+                &quot;&quot;&quot;
+                ## Operating Posture
+
+                This is an unattended orchestration run.
+
+                ## Pull Request Publication
+
+                Run relevant validation, then record the branch, commit, and validation evidence.
+
+                ## Trello List Routing
+
+                Card URL: {{ card.url }}
+                &quot;&quot;&quot;);
+<span class="nc" id="L82">        Files.writeString(workflow, original);</span>
+
+        // when
+<span class="nc" id="L85">        WorkflowDefinition loaded = loader.load(workflow);</span>
+
+        // then
+<span class="nc" id="L88">        assertThat(codex(loaded)).doesNotContainKey(&quot;turn_sandbox_policy&quot;);</span>
+<span class="nc" id="L89">        assertThat(loaded.promptTemplate()).contains(&quot;validation evidence&quot;);</span>
+<span class="nc" id="L90">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L91">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;~:\n&quot;, &quot;repository:\n&quot;})
+    void rejectsNullTopLevelFrontMatterEntries(String frontMatter) throws Exception {
+        // given
+<span class="nc" id="L97">        Path workflow = tempDir.resolve(&quot;WORKFLOW.null-top-level.md&quot;);</span>
+<span class="nc" id="L98">        Files.writeString(workflow, workflowWithExtraFrontMatter(frontMatter, &quot;Body&quot;));</span>
+
+        // when
+<span class="nc" id="L101">        WorkflowException failure = catchThrowableOfType(() -&gt; loader.load(workflow), WorkflowException.class);</span>
+
+        // then
+<span class="nc" id="L104">        assertThat(failure.code()).isEqualTo(&quot;workflow_parse_error&quot;);</span>
+<span class="nc" id="L105">        assertThat(failure).hasMessage(&quot;Workflow front matter top-level keys and values must not be null&quot;);</span>
+<span class="nc" id="L106">        assertThat(workflow).content(StandardCharsets.UTF_8).contains(frontMatter);</span>
+<span class="nc" id="L107">    }</span>
+
+    @Test
+    void preservesNestedNullConfigValues() throws Exception {
+        // given
+<span class="nc" id="L112">        Path workflow = tempDir.resolve(&quot;WORKFLOW.nested-null.md&quot;);</span>
+<span class="nc" id="L113">        String original = workflowWithExtraFrontMatter(</span>
+                &quot;&quot;&quot;
+                repository:
+                  default_url: null
+                  default_path: null
+                &quot;&quot;&quot;,
+                &quot;Body&quot;);
+<span class="nc" id="L120">        Files.writeString(workflow, original);</span>
+
+        // when
+<span class="nc" id="L123">        WorkflowDefinition loaded = loader.load(workflow);</span>
+
+        // then
+<span class="nc" id="L126">        assertThat(repository(loaded)).containsEntry(&quot;default_url&quot;, null).containsEntry(&quot;default_path&quot;, null);</span>
+<span class="nc" id="L127">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L128">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static Map&lt;String, Object&gt; codex(WorkflowDefinition loaded) {
+<span class="nc" id="L132">        return (Map&lt;String, Object&gt;) loaded.config().get(&quot;codex&quot;);</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private static Map&lt;String, Object&gt; repository(WorkflowDefinition loaded) {
+<span class="nc" id="L137">        return (Map&lt;String, Object&gt;) loaded.config().get(&quot;repository&quot;);</span>
+    }
+
+    private static String workflowWithBody(String body) {
+<span class="nc" id="L141">        return workflowWithExtraFrontMatter(&quot;&quot;, body);</span>
+    }
+
+    private static String workflowWithExtraFrontMatter(String extraFrontMatter, String body) {
+<span class="nc" id="L145">        return &quot;&quot;&quot;</span>
+                ---
+                tracker:
+                  kind: trello
+                  board_id: board-1
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                %s
+                ---
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L158">                .formatted(extraFrontMatter.stripTrailing(), body);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

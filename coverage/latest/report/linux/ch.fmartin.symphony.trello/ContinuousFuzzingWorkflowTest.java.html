@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContinuousFuzzingWorkflowTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello</a> &gt; <span class="el_source">ContinuousFuzzingWorkflowTest.java</span></div><h1>ContinuousFuzzingWorkflowTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello;
+
+import static java.nio.file.Path.of;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
+import org.junit.jupiter.api.Test;
+
+<span class="nc" id="L18">final class ContinuousFuzzingWorkflowTest {</span>
+<span class="nc" id="L19">    private static final Path WORKFLOW = of(&quot;.github/workflows/continuous-fuzzing.yml&quot;);</span>
+    private static final String CLUSTERFUZZLITE_COMMIT = &quot;884713a6c30a92e5e8544c39945cd7cb630abcd1&quot;;
+<span class="nc" id="L21">    private static final Pattern UNPINNED_ACTION = Pattern.compile(&quot;uses: [^\\s]+@(?![0-9a-f]{40}(?:\\s|$))&quot;);</span>
+<span class="nc" id="L22">    private static final Pattern PINNED_TEMURIN_IMAGE =</span>
+<span class="nc" id="L23">            Pattern.compile(&quot;FROM eclipse-temurin:25\\.\\d+\\.\\d+_\\d+-jdk@sha256:[0-9a-f]{64} AS jdk&quot;);</span>
+
+    @Test
+    void batchFuzzingRunsOnlyOnMainWithPersistentCorporaAndNativeReporting() throws IOException {
+        // given
+<span class="nc" id="L28">        String source = workflowSource();</span>
+
+        // when
+<span class="nc" id="L31">        String batchJob = source.substring(source.indexOf(&quot;  batch:&quot;), source.indexOf(&quot;  prune:&quot;));</span>
+
+        // then
+<span class="nc" id="L34">        assertThat(batchJob)</span>
+<span class="nc" id="L35">                .contains(</span>
+                        &quot;github.ref == 'refs/heads/main'&quot;,
+                        &quot;runs-on: ubuntu-latest&quot;,
+                        &quot;timeout-minutes: 100&quot;,
+                        &quot;fail-fast: false&quot;,
+                        &quot;max-parallel: 1&quot;,
+                        &quot;group: continuous-fuzzing-batch-main-${{ matrix.target }}&quot;,
+                        &quot;RepositorySourceFuzzer&quot;,
+                        &quot;TrelloCardReferenceParserFuzzer&quot;,
+                        &quot;TrelloChecklistClassifierFuzzer&quot;,
+                        &quot;WorkflowLoaderFuzzer&quot;,
+                        &quot;scripts/select-clusterfuzzlite-target \&quot;${{ matrix.target }}\&quot;&quot;,
+                        &quot;google/clusterfuzzlite/actions/build_fuzzers@&quot; + CLUSTERFUZZLITE_COMMIT,
+                        &quot;google/clusterfuzzlite/actions/run_fuzzers@&quot; + CLUSTERFUZZLITE_COMMIT,
+                        &quot;github.event.schedule == '17 0 * * *' &amp;&amp; 4500 || 4950&quot;,
+                        &quot;language: jvm&quot;,
+                        &quot;minimize-crashes: true&quot;,
+                        &quot;mode: batch&quot;,
+                        &quot;output-sarif: true&quot;,
+                        &quot;storage-repo: https://${{ secrets.CLUSTERFUZZLITE_STORAGE_TOKEN }}@github.com/&quot;
+                                + &quot;martin-francois/symphony-trello-fuzzing-storage.git&quot;,
+                        &quot;scripts/verify-clusterfuzzlite-storage corpus \&quot;${{ matrix.target }}\&quot;&quot;,
+                        &quot;github/codeql-action/upload-sarif@&quot;,
+                        &quot;category: clusterfuzzlite-${{ matrix.target }}&quot;,
+                        &quot;sarif_file: cifuzz-sarif/results.sarif&quot;,
+                        &quot;CFL_CRASH_ARTIFACT: crashes-${{ matrix.target }}&quot;,
+                        &quot;CFL_TARGET: ${{ matrix.target }}&quot;,
+                        &quot;scripts/report-clusterfuzzlite-failure&quot;,
+                        &quot;!cancelled()&quot;)
+<span class="nc" id="L64">                .doesNotContain(&quot;blacksmith-&quot;, &quot;parallel-fuzzing: true&quot;);</span>
+<span class="nc" id="L65">        String issueStep = batchJob.substring(batchJob.indexOf(&quot;      - name: Create or update fuzz failure issue&quot;));</span>
+<span class="nc" id="L66">        assertThat(issueStep.substring(0, issueStep.indexOf(&quot;      - name: Fail after publishing&quot;)))</span>
+<span class="nc" id="L67">                .doesNotContain(&quot;hashFiles('cifuzz-sarif/results.sarif')&quot;);</span>
+<span class="nc" id="L68">    }</span>
+
+    @Test
+    void corpusPruningRunsDailyAndCanBeDispatchedManually() throws IOException {
+        // given
+<span class="nc" id="L73">        String source = workflowSource();</span>
+
+        // when
+<span class="nc" id="L76">        String pruneJob = source.substring(source.indexOf(&quot;  prune:&quot;));</span>
+
+        // then
+<span class="nc" id="L79">        assertThat(source)</span>
+<span class="nc" id="L80">                .contains(</span>
+                        &quot;cron: \&quot;17 0 * * *\&quot;&quot;,
+                        &quot;cron: \&quot;17 6,12,18 * * *\&quot;&quot;,
+                        &quot;workflow_dispatch:&quot;,
+                        &quot;operation:&quot;,
+                        &quot;fuzz_seconds:&quot;);
+<span class="nc" id="L86">        assertThat(pruneJob)</span>
+<span class="nc" id="L87">                .contains(</span>
+                        &quot;github.ref == 'refs/heads/main'&quot;,
+                        &quot;inputs.operation == 'prune'&quot;,
+                        &quot;github.event.schedule == '17 0 * * *'&quot;,
+                        &quot;always()&quot;,
+                        &quot;needs: batch&quot;,
+                        &quot;fuzz-seconds: 600&quot;,
+                        &quot;mode: prune&quot;,
+                        &quot;scripts/verify-clusterfuzzlite-storage corpus&quot;)
+<span class="nc" id="L96">                .doesNotContain(&quot;blacksmith-&quot;);</span>
+<span class="nc" id="L97">    }</span>
+
+    @Test
+    void usefulClusterFuzzLiteModesUseDedicatedVerifiedStorage() throws IOException {
+        // given
+<span class="nc" id="L102">        String source = workflowSource();</span>
+
+        // when
+<span class="nc" id="L105">        String codeChangeJob =</span>
+<span class="nc" id="L106">                source.substring(source.indexOf(&quot;  code-change:&quot;), source.indexOf(&quot;  continuous-build:&quot;));</span>
+<span class="nc" id="L107">        String continuousBuildJob = source.substring(source.indexOf(&quot;  continuous-build:&quot;), source.indexOf(&quot;  batch:&quot;));</span>
+<span class="nc" id="L108">        String coverageJob = coverageJobSource(source);</span>
+
+        // then
+<span class="nc" id="L111">        assertThat(codeChangeJob)</span>
+<span class="nc" id="L112">                .contains(</span>
+                        &quot;github.event_name == 'pull_request'&quot;,
+                        &quot;fuzz-seconds: 300&quot;,
+                        &quot;mode: code-change&quot;,
+                        &quot;minimize-crashes: true&quot;,
+                        &quot;output-sarif: true&quot;,
+                        &quot;storage-repo: https://github.com/martin-francois/symphony-trello-fuzzing-storage.git&quot;,
+                        &quot;storage-repo-branch: main&quot;,
+                        &quot;storage-repo-branch-coverage: gh-pages&quot;,
+                        &quot;github.event.pull_request.head.repo.full_name == github.repository&quot;)
+<span class="nc" id="L122">                .doesNotContain(&quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;, &quot;parallel-fuzzing: true&quot;);</span>
+<span class="nc" id="L123">        assertThat(continuousBuildJob).contains(&quot;github.event_name == 'push'&quot;, &quot;upload-build: true&quot;);</span>
+<span class="nc" id="L124">        assertThat(continuousBuildJob).doesNotContain(&quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;, &quot;storage-repo:&quot;);</span>
+<span class="nc" id="L125">        assertThat(coverageJob)</span>
+<span class="nc" id="L126">                .contains(</span>
+                        &quot;github.event.schedule == '17 0 * * *'&quot;,
+                        &quot;Generate and publish Java 25 fuzzing coverage&quot;,
+                        &quot;sanitizer: coverage&quot;,
+                        &quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;,
+                        &quot;scripts/run-clusterfuzzlite-coverage&quot;,
+                        &quot;scripts/verify-clusterfuzzlite-storage coverage&quot;);
+<span class="nc" id="L133">        assertThat(source)</span>
+<span class="nc" id="L134">                .contains(</span>
+                        &quot;storage-repo-branch: main&quot;,
+                        &quot;storage-repo-branch-coverage: gh-pages&quot;,
+                        &quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;)
+<span class="nc" id="L138">                .doesNotContain(&quot;blacksmith-&quot;, &quot;PERSONAL_ACCESS_TOKEN&quot;, &quot;contents: write&quot;);</span>
+<span class="nc" id="L139">    }</span>
+
+    @Test
+    void coverageInstallsJava25BeforeRunningTheHostMavenWrapper() throws IOException {
+        // given
+<span class="nc" id="L144">        String source = workflowSource();</span>
+
+        // when
+<span class="nc" id="L147">        String coverageJob = coverageJobSource(source);</span>
+
+        // then
+<span class="nc" id="L150">        assertThat(coverageJob)</span>
+<span class="nc" id="L151">                .containsSubsequence(</span>
+                        &quot;uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961&quot;,
+                        &quot;distribution: temurin&quot;,
+                        &quot;java-version: \&quot;25\&quot;&quot;,
+                        &quot;scripts/run-clusterfuzzlite-coverage&quot;);
+<span class="nc" id="L156">    }</span>
+
+    private static String coverageJobSource(String source) {
+<span class="nc" id="L159">        return source.substring(source.indexOf(&quot;  coverage:&quot;));</span>
+    }
+
+    @Test
+    void longRunningOperationsHaveIndependentConcurrencyGroups() throws IOException {
+        // given
+<span class="nc" id="L165">        List&lt;String&gt; expectedGroups = List.of(</span>
+                &quot;group: continuous-fuzzing-batch-main-${{ matrix.target }}&quot;,
+                &quot;group: continuous-fuzzing-prune-main&quot;,
+                &quot;group: continuous-fuzzing-coverage-main&quot;,
+                &quot;group: continuous-fuzzing-build-main&quot;,
+                &quot;group: continuous-fuzzing-code-change-${{ github.event.pull_request.number }}&quot;);
+
+        // when
+<span class="nc" id="L173">        String source = workflowSource();</span>
+
+        // then
+<span class="nc" id="L176">        assertThat(expectedGroups).allSatisfy(group -&gt; assertThat(source).containsOnlyOnce(group));</span>
+<span class="nc" id="L177">    }</span>
+
+    @Test
+    void workflowActionsArePinnedAndBuildIntegrationReusesOssFuzzPackaging() throws IOException {
+        // given
+<span class="nc" id="L182">        String workflow = workflowSource();</span>
+<span class="nc" id="L183">        String dockerfile = Files.readString(of(&quot;.clusterfuzzlite/Dockerfile&quot;));</span>
+<span class="nc" id="L184">        String coverageDockerfile = Files.readString(of(&quot;.clusterfuzzlite/coverage-runner.Dockerfile&quot;));</span>
+<span class="nc" id="L185">        String ossFuzzDockerfile = Files.readString(of(&quot;oss-fuzz/Dockerfile&quot;));</span>
+<span class="nc" id="L186">        String buildScript = Files.readString(of(&quot;.clusterfuzzlite/build.sh&quot;));</span>
+<span class="nc" id="L187">        String project = Files.readString(of(&quot;.clusterfuzzlite/project.yaml&quot;));</span>
+
+        // when
+<span class="nc" id="L190">        var unpinnedAction = UNPINNED_ACTION.matcher(workflow);</span>
+
+        // then
+<span class="nc" id="L193">        assertThat(unpinnedAction.find()).as(&quot;workflow has an unpinned action&quot;).isFalse();</span>
+<span class="nc" id="L194">        assertThat(dockerfile)</span>
+<span class="nc" id="L195">                .contains(</span>
+                        &quot;COPY --from=jdk /opt/java/openjdk/ \&quot;$JAVA_HOME/\&quot;&quot;,
+                        &quot;FROM gcr.io/oss-fuzz-base/base-builder-jvm@sha256:&quot;,
+                        &quot;COPY . /src/symphony-trello&quot;,
+                        &quot;COPY .clusterfuzzlite/build.sh /src/build.sh&quot;)
+<span class="nc" id="L200">                .doesNotContain(&quot;git clone&quot;, &quot;api.adoptium.net/v3/binary/latest&quot;);</span>
+<span class="nc" id="L201">        assertThat(dockerfile).containsPattern(PINNED_TEMURIN_IMAGE);</span>
+<span class="nc" id="L202">        assertThat(coverageDockerfile)</span>
+<span class="nc" id="L203">                .contains(</span>
+                        &quot;FROM gcr.io/oss-fuzz-base/clusterfuzzlite-run-fuzzers:v1@sha256:&quot;,
+                        &quot;COPY org.jacoco.agent-*-runtime.jar /opt/jacoco-agent.jar&quot;,
+                        &quot;COPY org.jacoco.cli-*-nodeps.jar /opt/jacoco-cli.jar&quot;)
+<span class="nc" id="L207">                .doesNotContain(&quot;clusterfuzzlite-run-fuzzers:v1\n&quot;);</span>
+<span class="nc" id="L208">        assertThat(ossFuzzDockerfile)</span>
+<span class="nc" id="L209">                .containsPattern(PINNED_TEMURIN_IMAGE)</span>
+<span class="nc" id="L210">                .contains(&quot;COPY --from=jdk /opt/java/openjdk/ \&quot;$JAVA_HOME/\&quot;&quot;)</span>
+<span class="nc" id="L211">                .doesNotContain(&quot;api.adoptium.net/v3/binary/latest&quot;);</span>
+<span class="nc" id="L212">        assertThat(buildScript).contains(&quot;exec bash \&quot;$SRC/symphony-trello/oss-fuzz/build.sh\&quot;&quot;);</span>
+<span class="nc" id="L213">        assertThat(of(&quot;oss-fuzz/build.sh&quot;))</span>
+<span class="nc" id="L214">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L215">                .contains(&quot;TestRepositoryUris*.class&quot;, &quot;ch/fmartin/symphony/trello/testsupport&quot;);</span>
+<span class="nc" id="L216">        assertThat(project).contains(&quot;language: jvm&quot;);</span>
+<span class="nc" id="L217">    }</span>
+
+    @Test
+    void everyStandaloneFuzzerHasASeedCorpus() throws IOException {
+        // given
+<span class="nc" id="L222">        Path corpora = of(&quot;oss-fuzz/corpora&quot;);</span>
+<span class="nc" id="L223">        Path fuzzers = of(&quot;src/test/java/ch/fmartin/symphony/trello/fuzz&quot;);</span>
+
+        // when
+<span class="nc" id="L226">        Set&lt;String&gt; fuzzerNames = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L227">        try (var sources = Files.newDirectoryStream(fuzzers, &quot;*Fuzzer.java&quot;)) {</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">            for (Path source : sources) {</span>
+<span class="nc" id="L229">                fuzzerNames.add(source.getFileName().toString().replace(&quot;.java&quot;, &quot;&quot;));</span>
+<span class="nc" id="L230">            }</span>
+        }
+<span class="nc" id="L232">        Map&lt;String, Integer&gt; seedCounts = new TreeMap&lt;&gt;();</span>
+<span class="nc" id="L233">        try (var directories = Files.newDirectoryStream(corpora)) {</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">            for (Path directory : directories) {</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">                if (!Files.isDirectory(directory)) {</span>
+<span class="nc" id="L236">                    continue;</span>
+                }
+                int count;
+<span class="nc" id="L239">                try (var seeds = Files.list(directory)) {</span>
+<span class="nc" id="L240">                    count = Math.toIntExact(seeds.count());</span>
+                }
+<span class="nc" id="L242">                seedCounts.put(directory.getFileName().toString(), count);</span>
+<span class="nc" id="L243">            }</span>
+        }
+
+        // then
+<span class="nc" id="L247">        assertThat(seedCounts).hasSameSizeAs(fuzzerNames).doesNotContainValue(0);</span>
+<span class="nc" id="L248">        assertThat(seedCounts.keySet())</span>
+<span class="nc" id="L249">                .as(&quot;every standalone fuzzer has exactly one corpus directory&quot;)</span>
+<span class="nc" id="L250">                .containsExactlyElementsOf(fuzzerNames);</span>
+<span class="nc" id="L251">    }</span>
+
+    private static String workflowSource() throws IOException {
+<span class="nc" id="L254">        return Files.readString(WORKFLOW);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

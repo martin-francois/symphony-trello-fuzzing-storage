@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodexModelDefaultsResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">CodexModelDefaultsResolver.java</span></div><h1>CodexModelDefaultsResolver.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static com.google.common.base.Preconditions.checkArgument;
+
+import ch.fmartin.symphony.trello.process.ProcessEnvironment;
+import ch.fmartin.symphony.trello.setup.CodexModelSelectionDefaults.ReasoningEffortOption;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.CodexModelDefaults;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+final class CodexModelDefaultsResolver {
+<span class="nc" id="L29">    private static final System.Logger LOG = System.getLogger(CodexModelDefaultsResolver.class.getName());</span>
+    private static final String CLIENT_NAME = &quot;symphony-trello-setup&quot;;
+    private static final String DEVELOPMENT_VERSION = &quot;development&quot;;
+    private static final String SYMPHONY_PREFERRED_CODEX_MODEL = &quot;gpt-5.6-terra&quot;;
+<span class="nc" id="L33">    private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);</span>
+    private static final int MAX_MODEL_LIST_PAGES = 20;
+<span class="nc" id="L35">    private static final Duration PROCESS_STOP_TIMEOUT = Duration.ofSeconds(2);</span>
+
+    private final ObjectMapper json;
+    private final List&lt;String&gt; command;
+    private final Map&lt;String, String&gt; environment;
+    private final Duration readTimeout;
+
+    CodexModelDefaultsResolver(ObjectMapper json) {
+<span class="nc" id="L43">        this(json, List.of(&quot;codex&quot;, &quot;app-server&quot;));</span>
+<span class="nc" id="L44">    }</span>
+
+    CodexModelDefaultsResolver(ObjectMapper json, List&lt;String&gt; command) {
+<span class="nc" id="L47">        this(json, command, Map.of());</span>
+<span class="nc" id="L48">    }</span>
+
+    CodexModelDefaultsResolver(ObjectMapper json, List&lt;String&gt; command, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L51">        this(json, command, environment, READ_TIMEOUT);</span>
+<span class="nc" id="L52">    }</span>
+
+    CodexModelDefaultsResolver(
+<span class="nc" id="L55">            ObjectMapper json, List&lt;String&gt; command, Map&lt;String, String&gt; environment, Duration readTimeout) {</span>
+<span class="nc" id="L56">        this.json = json;</span>
+<span class="nc" id="L57">        this.command = List.copyOf(command);</span>
+<span class="nc" id="L58">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L59">        this.readTimeout = readTimeout;</span>
+<span class="nc" id="L60">    }</span>
+
+    CodexModelDefaults resolve() {
+<span class="nc" id="L63">        return resolveSelectionDefaults().defaults();</span>
+    }
+
+    CodexModelSelectionDefaults resolveSelectionDefaults() {
+        try {
+<span class="nc" id="L68">            return queryAppServer();</span>
+<span class="nc" id="L69">        } catch (IOException | InterruptedException | RuntimeException e) {</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            if (e instanceof InterruptedException) {</span>
+<span class="nc" id="L71">                Thread.currentThread().interrupt();</span>
+            }
+<span class="nc" id="L73">            return CodexModelSelectionDefaults.of(CodexModelDefaults.unsupportedFirstClassFields());</span>
+        }
+    }
+
+    private CodexModelSelectionDefaults queryAppServer() throws IOException, InterruptedException {
+<span class="nc" id="L78">        ProcessBuilder processBuilder = new ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD);</span>
+<span class="nc" id="L79">        processBuilder.environment().putAll(environment);</span>
+<span class="nc" id="L80">        ProcessEnvironment.removeDefaultSecrets(processBuilder);</span>
+<span class="nc" id="L81">        Process process = processBuilder.start();</span>
+<span class="nc" id="L82">        var reader = new AppServerResponseReader(process.getInputStream());</span>
+<span class="nc" id="L83">        try (var writer = process.outputWriter(StandardCharsets.UTF_8)) {</span>
+<span class="nc" id="L84">            send(</span>
+                    writer,
+<span class="nc" id="L86">                    request(</span>
+                            1,
+                            &quot;initialize&quot;,
+<span class="nc" id="L89">                            object(</span>
+                                    &quot;clientInfo&quot;,
+<span class="nc" id="L91">                                    object(&quot;name&quot;, CLIENT_NAME, &quot;version&quot;, implementationVersion()),</span>
+                                    &quot;capabilities&quot;,
+<span class="nc" id="L93">                                    object())));</span>
+<span class="nc" id="L94">            readResponse(reader, 1);</span>
+<span class="nc" id="L95">            send(writer, notification(&quot;initialized&quot;, object()));</span>
+<span class="nc" id="L96">            ArrayNode models = json.createArrayNode();</span>
+<span class="nc" id="L97">            String cursor = null;</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">            for (int page = 0; page &lt; MAX_MODEL_LIST_PAGES; page++) {</span>
+<span class="nc" id="L99">                int id = page + 2;</span>
+<span class="nc" id="L100">                send(writer, request(id, &quot;model/list&quot;, modelListParams(cursor)));</span>
+<span class="nc" id="L101">                JsonNode response = readResponse(reader, id);</span>
+<span class="nc" id="L102">                JsonNode result = response.path(&quot;result&quot;);</span>
+<span class="nc" id="L103">                JsonNode pageModels = result.path(&quot;data&quot;);</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">                if (pageModels instanceof ArrayNode pageModelArray) {</span>
+<span class="nc" id="L105">                    models.addAll(pageModelArray);</span>
+                }
+<span class="nc" id="L107">                cursor = result.path(&quot;nextCursor&quot;).asText(null);</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                if (blank(cursor)) {</span>
+<span class="nc" id="L109">                    return fromModelList(models);</span>
+                }
+            }
+<span class="nc" id="L112">            throw new IOException(&quot;Codex app-server model list did not finish pagination.&quot;);</span>
+        } finally {
+            try {
+<span class="nc" id="L115">                stop(process);</span>
+            } finally {
+<span class="nc" id="L117">                reader.close();</span>
+            }
+        }
+    }
+
+    private ObjectNode modelListParams(String cursor) {
+<span class="nc" id="L123">        ObjectNode params = object(&quot;includeHidden&quot;, true);</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">        if (!blank(cursor)) {</span>
+<span class="nc" id="L125">            params.put(&quot;cursor&quot;, cursor);</span>
+        }
+<span class="nc" id="L127">        return params;</span>
+    }
+
+    private CodexModelSelectionDefaults fromModelList(JsonNode models) {
+<span class="nc bnc" id="L131" title="All 4 branches missed.">        if (!models.isArray() || models.isEmpty()) {</span>
+<span class="nc" id="L132">            return CodexModelSelectionDefaults.of(CodexModelDefaults.fallback());</span>
+        }
+<span class="nc" id="L134">        Map&lt;String, String&gt; reasoningEffortsByModel = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L135">        Map&lt;String, List&lt;ReasoningEffortOption&gt;&gt; reasoningEffortOptionsByModel = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L136">        JsonNode selected = null;</span>
+<span class="nc" id="L137">        boolean selectedIsSymphonyPreferred = false;</span>
+<span class="nc" id="L138">        boolean selectedIsDefault = false;</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        for (JsonNode model : models) {</span>
+<span class="nc" id="L140">            String modelName = validatedCatalogText(model, &quot;model&quot;);</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (blank(modelName)) {</span>
+<span class="nc" id="L142">                continue;</span>
+            }
+<span class="nc" id="L144">            List&lt;ReasoningEffortOption&gt; reasoningEffortOptions = supportedReasoningEfforts(model);</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">            if (!reasoningEffortOptions.isEmpty()) {</span>
+<span class="nc" id="L146">                reasoningEffortOptionsByModel.put(modelName, reasoningEffortOptions);</span>
+            }
+<span class="nc" id="L148">            boolean modelIsDefault = model.path(&quot;isDefault&quot;).asBoolean(false);</span>
+<span class="nc" id="L149">            boolean modelIsHidden = model.path(&quot;hidden&quot;).asBoolean(false);</span>
+<span class="nc" id="L150">            boolean modelIsSymphonyPreferred = SYMPHONY_PREFERRED_CODEX_MODEL.equals(modelName);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            if (!modelIsHidden</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">                    &amp;&amp; shouldSelectModel(</span>
+                            selected,
+                            selectedIsSymphonyPreferred,
+                            selectedIsDefault,
+                            modelIsSymphonyPreferred,
+                            modelIsDefault)) {
+<span class="nc" id="L158">                selected = model;</span>
+<span class="nc" id="L159">                selectedIsSymphonyPreferred = modelIsSymphonyPreferred;</span>
+<span class="nc" id="L160">                selectedIsDefault = modelIsDefault;</span>
+            }
+<span class="nc" id="L162">            String reasoningEffort = validatedCatalogText(model, &quot;defaultReasoningEffort&quot;);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (blank(reasoningEffort)) {</span>
+<span class="nc" id="L164">                continue;</span>
+            }
+<span class="nc" id="L166">            reasoningEffortsByModel.put(modelName, reasoningEffort);</span>
+<span class="nc" id="L167">        }</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (selected == null) {</span>
+<span class="nc" id="L169">            return CodexModelSelectionDefaults.withReasoningEffortOptions(</span>
+<span class="nc" id="L170">                    CodexModelDefaults.fallback(), reasoningEffortsByModel, reasoningEffortOptionsByModel);</span>
+        }
+<span class="nc" id="L172">        String modelName = validatedCatalogText(selected, &quot;model&quot;);</span>
+<span class="nc" id="L173">        String reasoningEffort = validatedCatalogText(selected, &quot;defaultReasoningEffort&quot;);</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (blank(modelName)) {</span>
+<span class="nc" id="L175">            return CodexModelSelectionDefaults.withReasoningEffortOptions(</span>
+<span class="nc" id="L176">                    CodexModelDefaults.fallback(), reasoningEffortsByModel, reasoningEffortOptionsByModel);</span>
+        }
+<span class="nc" id="L178">        return CodexModelSelectionDefaults.withReasoningEffortOptions(</span>
+<span class="nc" id="L179">                CodexModelDefaults.partial(modelName, reasoningEffort),</span>
+                reasoningEffortsByModel,
+                reasoningEffortOptionsByModel);
+    }
+
+    private static boolean shouldSelectModel(
+            JsonNode selected,
+            boolean selectedIsSymphonyPreferred,
+            boolean selectedIsDefault,
+            boolean modelIsSymphonyPreferred,
+            boolean modelIsDefault) {
+<span class="nc bnc" id="L190" title="All 10 branches missed.">        return selected == null</span>
+                || (!selectedIsSymphonyPreferred
+                        &amp;&amp; (modelIsSymphonyPreferred || (!selectedIsDefault &amp;&amp; modelIsDefault)));
+    }
+
+    private static List&lt;ReasoningEffortOption&gt; supportedReasoningEfforts(JsonNode model) {
+<span class="nc" id="L196">        return model.path(&quot;supportedReasoningEfforts&quot;)</span>
+<span class="nc" id="L197">                .valueStream()</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                .filter(option -&gt; !blank(option.path(&quot;reasoningEffort&quot;).asText(null)))</span>
+<span class="nc" id="L199">                .map(CodexModelDefaultsResolver::reasoningEffortOption)</span>
+<span class="nc" id="L200">                .toList();</span>
+    }
+
+    private static ReasoningEffortOption reasoningEffortOption(JsonNode option) {
+<span class="nc" id="L204">        return new ReasoningEffortOption(</span>
+<span class="nc" id="L205">                option.path(&quot;reasoningEffort&quot;).asText(null),</span>
+<span class="nc" id="L206">                option.path(&quot;description&quot;).asText(null));</span>
+    }
+
+    private static String validatedCatalogText(JsonNode value, String fieldName) {
+<span class="nc" id="L210">        String text = value.path(fieldName).asText(null);</span>
+<span class="nc" id="L211">        CodexModelSelectionDefaults.checkNoControlCharacters(text, fieldName);</span>
+<span class="nc" id="L212">        return text;</span>
+    }
+
+    private JsonNode readResponse(AppServerResponseReader reader, int id) throws IOException {
+<span class="nc" id="L216">        long deadline = System.nanoTime() + readTimeout.toNanos();</span>
+        while (true) {
+<span class="nc" id="L218">            long remainingNanos = deadline - System.nanoTime();</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            if (remainingNanos &lt;= 0) {</span>
+<span class="nc" id="L220">                throw new IOException(&quot;Timed out waiting for Codex app-server response&quot;);</span>
+            }
+<span class="nc" id="L222">            String line = reader.readLine(Duration.ofNanos(remainingNanos));</span>
+<span class="nc" id="L223">            JsonNode message = json.readTree(line);</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            if (message.path(&quot;id&quot;).asInt(-1) == id) {</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                if (message.has(&quot;error&quot;)) {</span>
+<span class="nc" id="L226">                    throw new IOException(&quot;Codex app-server returned error: &quot; + message.path(&quot;error&quot;));</span>
+                }
+<span class="nc" id="L228">                return message;</span>
+            }
+<span class="nc" id="L230">        }</span>
+    }
+
+    private void send(BufferedWriter writer, JsonNode message) throws IOException {
+<span class="nc" id="L234">        writer.write(json.writeValueAsString(message));</span>
+<span class="nc" id="L235">        writer.newLine();</span>
+<span class="nc" id="L236">        writer.flush();</span>
+<span class="nc" id="L237">    }</span>
+
+    private ObjectNode request(int id, String method, JsonNode params) {
+<span class="nc" id="L240">        return object(&quot;id&quot;, id, &quot;method&quot;, method, &quot;params&quot;, params);</span>
+    }
+
+    private ObjectNode notification(String method, JsonNode params) {
+<span class="nc" id="L244">        return object(&quot;method&quot;, method, &quot;params&quot;, params);</span>
+    }
+
+    private ObjectNode object(Object... entries) {
+<span class="nc" id="L248">        ObjectNode node = json.createObjectNode();</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">        checkArgument(entries.length % 2 == 0, &quot;Object entries must be key/value pairs&quot;);</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        for (int i = 0; i &lt; entries.length; i += 2) {</span>
+<span class="nc" id="L251">            var key = (String) entries[i];</span>
+<span class="nc" id="L252">            Object value = entries[i + 1];</span>
+<span class="nc bnc" id="L253" title="All 5 branches missed.">            switch (value) {</span>
+<span class="nc" id="L254">                case JsonNode jsonNode -&gt; node.set(key, jsonNode);</span>
+<span class="nc" id="L255">                case String string -&gt; node.put(key, string);</span>
+<span class="nc" id="L256">                case Integer integer -&gt; node.put(key, integer);</span>
+<span class="nc" id="L257">                case Boolean bool -&gt; node.put(key, bool);</span>
+<span class="nc" id="L258">                case null, default -&gt; node.set(key, json.valueToTree(value));</span>
+            }
+        }
+<span class="nc" id="L261">        return node;</span>
+    }
+
+    private static void stop(Process process) throws InterruptedException {
+<span class="nc" id="L265">        List&lt;ProcessHandle&gt; descendants = process.descendants().toList();</span>
+<span class="nc" id="L266">        process.destroy();</span>
+<span class="nc" id="L267">        descendants.forEach(ProcessHandle::destroy);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">        if (!waitForExit(process)) {</span>
+<span class="nc" id="L269">            process.destroyForcibly();</span>
+<span class="nc" id="L270">            waitForExit(process);</span>
+        }
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        for (ProcessHandle descendant : descendants) {</span>
+<span class="nc bnc" id="L273" title="All 4 branches missed.">            if (descendant.isAlive() &amp;&amp; !waitForExit(descendant)) {</span>
+<span class="nc" id="L274">                descendant.destroyForcibly();</span>
+<span class="nc" id="L275">                waitForExit(descendant);</span>
+            }
+<span class="nc" id="L277">        }</span>
+<span class="nc" id="L278">    }</span>
+
+    private static boolean waitForExit(Process process) throws InterruptedException {
+<span class="nc" id="L281">        return process.waitFor(PROCESS_STOP_TIMEOUT);</span>
+    }
+
+    private static boolean waitForExit(ProcessHandle process) throws InterruptedException {
+        try {
+<span class="nc" id="L286">            process.onExit().get(PROCESS_STOP_TIMEOUT.toNanos(), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L287">            return true;</span>
+<span class="nc" id="L288">        } catch (ExecutionException e) {</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">            return !process.isAlive();</span>
+<span class="nc" id="L290">        } catch (TimeoutException e) {</span>
+<span class="nc" id="L291">            return false;</span>
+        }
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L296" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+
+    private static String implementationVersion() {
+<span class="nc" id="L300">        String version = CodexModelDefaultsResolver.class.getPackage().getImplementationVersion();</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        return blank(version) ? DEVELOPMENT_VERSION : version;</span>
+    }
+
+    private static final class AppServerResponseReader {
+<span class="nc" id="L305">        private static final Object END_OF_STREAM = new Object();</span>
+
+<span class="nc" id="L307">        private final BlockingQueue&lt;Object&gt; lines = new LinkedBlockingQueue&lt;&gt;();</span>
+        // Enqueuing END_OF_STREAM publishes the preceding failure assignment to the reader.
+        private Throwable failure;
+        private final BufferedReader reader;
+
+<span class="nc" id="L312">        private AppServerResponseReader(InputStream input) {</span>
+<span class="nc" id="L313">            reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L314">            Thread.ofVirtual().name(&quot;codex-model-defaults-reader&quot;).start(this::readStdout);</span>
+<span class="nc" id="L315">        }</span>
+
+        private String readLine(Duration timeout) throws IOException {
+            try {
+<span class="nc" id="L319">                Object item = lines.poll(timeout.toNanos(), TimeUnit.NANOSECONDS);</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                if (item == null) {</span>
+<span class="nc" id="L321">                    throw new IOException(&quot;Timed out waiting for Codex app-server response&quot;);</span>
+                }
+<span class="nc bnc" id="L323" title="All 2 branches missed.">                if (item == END_OF_STREAM) {</span>
+<span class="nc" id="L324">                    Throwable cause = failure;</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">                    if (cause instanceof IOException ioException) {</span>
+<span class="nc" id="L326">                        throw ioException;</span>
+                    }
+<span class="nc bnc" id="L328" title="All 2 branches missed.">                    if (cause != null) {</span>
+<span class="nc" id="L329">                        throw new IOException(&quot;Codex app-server response reader failed&quot;, cause);</span>
+                    }
+<span class="nc" id="L331">                    throw new IOException(&quot;Codex app-server closed stdout&quot;);</span>
+                }
+<span class="nc" id="L333">                return (String) item;</span>
+<span class="nc" id="L334">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L335">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L336">                throw new IOException(&quot;Interrupted while waiting for Codex app-server response&quot;, e);</span>
+            }
+        }
+
+        private void readStdout() {
+            try {
+<span class="nc" id="L342">                String line = reader.readLine();</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                while (line != null) {</span>
+<span class="nc" id="L344">                    lines.add(line);</span>
+<span class="nc" id="L345">                    line = reader.readLine();</span>
+                }
+<span class="nc" id="L347">            } catch (Exception e) {</span>
+<span class="nc" id="L348">                failure = e;</span>
+            } finally {
+<span class="nc" id="L350">                lines.add(END_OF_STREAM);</span>
+            }
+<span class="nc" id="L352">        }</span>
+
+        private void close() {
+            try {
+<span class="nc" id="L356">                reader.close();</span>
+<span class="nc" id="L357">            } catch (IOException e) {</span>
+<span class="nc" id="L358">                LOG.log(System.Logger.Level.DEBUG, &quot;Codex app-server response reader cleanup failed&quot;, e);</span>
+<span class="nc" id="L359">            }</span>
+<span class="nc" id="L360">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

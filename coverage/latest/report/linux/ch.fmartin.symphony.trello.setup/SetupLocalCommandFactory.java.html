@@ -1,0 +1,703 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SetupLocalCommandFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">SetupLocalCommandFactory.java</span></div><h1>SetupLocalCommandFactory.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.CliExitCodes;
+import ch.fmartin.symphony.trello.TrelloEnvironment;
+import ch.fmartin.symphony.trello.setup.LocalSetupRequest.Action;
+import java.io.BufferedReader;
+import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+import picocli.CommandLine;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.IParameterExceptionHandler;
+import picocli.CommandLine.Mixin;
+import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Model.OptionSpec;
+import picocli.CommandLine.MutuallyExclusiveArgsException;
+import picocli.CommandLine.Option;
+import picocli.CommandLine.ParameterException;
+import picocli.CommandLine.Spec;
+
+<span class="nc" id="L28">final class SetupLocalCommandFactory {</span>
+<span class="nc" id="L29">    private static final List&lt;String&gt; WORKFLOW_AND_ACCESS_OPTIONS = List.of(</span>
+            &quot;--workspace-id&quot;,
+            &quot;--repository-url&quot;,
+            &quot;--active&quot;,
+            &quot;--terminal&quot;,
+            &quot;--in-progress&quot;,
+            &quot;--no-in-progress&quot;,
+            &quot;--blocked&quot;,
+            &quot;--workflow&quot;,
+            &quot;--workspace-root&quot;,
+            &quot;--server-port&quot;,
+            &quot;--max-agents&quot;,
+            &quot;--codex-model&quot;,
+            &quot;--codex-reasoning-effort&quot;,
+            &quot;--env&quot;,
+            &quot;--add-path&quot;,
+            &quot;--allow-all-paths&quot;,
+            &quot;--danger-full-access&quot;,
+            &quot;--no-start&quot;);
+<span class="nc" id="L48">    private static final List&lt;String&gt; CHECK_UNSUPPORTED_OPTIONS =</span>
+<span class="nc" id="L49">            optionNames(List.of(&quot;--dry-run&quot;, &quot;--force&quot;, &quot;--board-name&quot;), WORKFLOW_AND_ACCESS_OPTIONS);</span>
+<span class="nc" id="L50">    private static final List&lt;String&gt; REPAIR_PORT_UNSUPPORTED_OPTIONS = optionNames(</span>
+<span class="nc" id="L51">            List.of(&quot;--force&quot;, &quot;--key&quot;, &quot;--token&quot;, &quot;--board-name&quot;),</span>
+            WORKFLOW_AND_ACCESS_OPTIONS,
+<span class="nc" id="L53">            List.of(&quot;--endpoint&quot;, &quot;--github&quot;, &quot;--no-github&quot;));</span>
+<span class="nc" id="L54">    private static final List&lt;String&gt; CONFIGURE_GITHUB_UNSUPPORTED_OPTIONS = List.of(</span>
+            &quot;--dry-run&quot;,
+            &quot;--force&quot;,
+            &quot;--board-name&quot;,
+            &quot;--workspace-id&quot;,
+            &quot;--repository-url&quot;,
+            &quot;--active&quot;,
+            &quot;--terminal&quot;,
+            &quot;--in-progress&quot;,
+            &quot;--no-in-progress&quot;,
+            &quot;--blocked&quot;,
+            &quot;--workflow&quot;,
+            &quot;--workspace-root&quot;,
+            &quot;--server-port&quot;,
+            &quot;--env&quot;,
+            &quot;--no-github&quot;);
+
+    int execute(String[] args, LocalSetup setup, BufferedReader input, PrintStream out, PrintStream err) {
+<span class="nc" id="L72">        var commandLine = new CommandLine(new SetupLocalCommand(setup, input, out, err));</span>
+<span class="nc" id="L73">        hideUnsupportedSubcommandOptions(commandLine);</span>
+<span class="nc" id="L74">        commandLine</span>
+<span class="nc" id="L75">                .setOut(new PrintWriter(out, true, StandardCharsets.UTF_8))</span>
+<span class="nc" id="L76">                .setErr(new PrintWriter(err, true, StandardCharsets.UTF_8))</span>
+<span class="nc" id="L77">                .setExecutionExceptionHandler((exception, ignored, parseResult) -&gt; {</span>
+<span class="nc" id="L78">                    printExecutionFailure(err, exception, errorCode(exception));</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                    if (!(exception instanceof ParameterException)) {</span>
+<span class="nc" id="L80">                        SetupDiagnosticReporter.reportSetupLocalFailure(exception, args, input, out, err);</span>
+                    }
+<span class="nc" id="L82">                    return CliExitCodes.SETUP_FAILURE;</span>
+                })
+<span class="nc" id="L84">                .setParameterExceptionHandler(usageErrors());</span>
+<span class="nc" id="L85">        return commandLine.execute(args);</span>
+    }
+
+    @SafeVarargs
+    private static List&lt;String&gt; optionNames(List&lt;String&gt;... groups) {
+<span class="nc" id="L90">        return Arrays.stream(groups).flatMap(List::stream).toList();</span>
+    }
+
+    static void hideUnsupportedSubcommandOptions(CommandLine commandLine) {
+<span class="nc" id="L94">        hideUnsupportedOptions(commandLine.getSubcommands().get(&quot;check&quot;), CHECK_UNSUPPORTED_OPTIONS);</span>
+<span class="nc" id="L95">        hideUnsupportedOptions(commandLine.getSubcommands().get(&quot;repair-port&quot;), REPAIR_PORT_UNSUPPORTED_OPTIONS);</span>
+<span class="nc" id="L96">        hideUnsupportedOptions(</span>
+<span class="nc" id="L97">                commandLine.getSubcommands().get(&quot;configure-github&quot;), CONFIGURE_GITHUB_UNSUPPORTED_OPTIONS);</span>
+<span class="nc" id="L98">    }</span>
+
+    private static void hideUnsupportedOptions(CommandLine commandLine, List&lt;String&gt; optionNames) {
+<span class="nc" id="L101">        CommandSpec commandSpec = commandLine.getCommandSpec();</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        for (String optionName : optionNames) {</span>
+<span class="nc" id="L103">            OptionSpec option = commandSpec.optionsMap().get(optionName);</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            if (option == null) {</span>
+<span class="nc" id="L105">                continue;</span>
+            }
+<span class="nc" id="L107">            CommandSpec owner = option.command();</span>
+<span class="nc" id="L108">            owner.remove(option);</span>
+<span class="nc" id="L109">            owner.addOption(OptionSpec.builder(option).hidden(true).build());</span>
+<span class="nc" id="L110">        }</span>
+<span class="nc" id="L111">    }</span>
+
+    static void printExecutionFailure(PrintStream err, Exception exception, String errorCode) {
+<span class="nc" id="L114">        err.println(&quot;setup_failed code=%s message=%s&quot;.formatted(errorCode, exception.getMessage()));</span>
+<span class="nc" id="L115">        SetupDiagnosticReporter.userActionHint(exception).ifPresent(hint -&gt; err.println(&quot;Next step: &quot; + hint));</span>
+<span class="nc" id="L116">    }</span>
+
+    static IParameterExceptionHandler usageErrors() {
+<span class="nc" id="L119">        return (ParameterException exception, String[] ignored) -&gt; {</span>
+<span class="nc" id="L120">            CommandLine commandLine = exception.getCommandLine();</span>
+<span class="nc" id="L121">            commandLine</span>
+<span class="nc" id="L122">                    .getErr()</span>
+<span class="nc" id="L123">                    .println(&quot;setup_failed code=setup_invalid_arguments message=&quot;</span>
+<span class="nc" id="L124">                            + CliInputValidation.safeCliMessage(usageErrorMessage(exception)));</span>
+<span class="nc" id="L125">            commandLine.getErr().println(&quot;Try '&quot; + commandLine.getCommandName() + &quot; --help' for usage.&quot;);</span>
+<span class="nc" id="L126">            return CliExitCodes.SETUP_FAILURE;</span>
+        };
+    }
+
+    private static String usageErrorMessage(ParameterException exception) {
+<span class="nc" id="L131">        CommandLine commandLine = exception.getCommandLine();</span>
+<span class="nc bnc" id="L132" title="All 4 branches missed.">        if (&quot;diagnostics&quot;.equals(commandLine.getCommandName()) &amp;&amp; isDiagnosticsSelectorGroupError(exception)) {</span>
+<span class="nc" id="L133">            return &quot;Only one diagnostics selector may be provided.&quot;;</span>
+        }
+<span class="nc" id="L135">        return stripInternalArgumentIndex(exception.getMessage());</span>
+    }
+
+    /// The installed wrapper injects default options, so picocli's argument indexes do not match
+    /// the command line the user typed. The index adds nothing once the offending value is shown.
+    private static String stripInternalArgumentIndex(String message) {
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        return message == null ? null : message.replaceFirst(&quot;^(Unmatched arguments?) (at|from) index \\d+&quot;, &quot;$1&quot;);</span>
+    }
+
+    private static boolean isDiagnosticsSelectorGroupError(ParameterException exception) {
+<span class="nc" id="L145">        String message = exception.getMessage();</span>
+<span class="nc bnc" id="L146" title="All 4 branches missed.">        return exception instanceof MutuallyExclusiveArgsException</span>
+                || (message != null
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                        &amp;&amp; message.contains(&quot;expected only one match&quot;)</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">                        &amp;&amp; message.contains(&quot;[--board=&lt;board&gt; | --workflow=&lt;workflow&gt;]&quot;));</span>
+    }
+
+    private static String errorCode(Exception exception) {
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (exception instanceof ParameterException) {</span>
+<span class="nc" id="L154">            return &quot;setup_invalid_arguments&quot;;</span>
+        }
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        return exception instanceof TrelloBoardSetupException setupException</span>
+<span class="nc" id="L157">                ? setupException.code()</span>
+<span class="nc" id="L158">                : &quot;setup_local_failed&quot;;</span>
+    }
+
+    @Command(
+            name = &quot;setup-local&quot;,
+            description = &quot;Set up local Trello-driven Codex automation.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true,
+            subcommands = {CheckCommand.class, RepairPortCommand.class, ConfigureGithubCommand.class})
+    static final class SetupLocalCommand implements Callable&lt;Integer&gt; {
+        private final LocalSetup setup;
+        private final BufferedReader input;
+        private final PrintStream out;
+        private final PrintStream err;
+
+<span class="nc" id="L173">        @Mixin</span>
+        CommonOptions common = new CommonOptions();
+
+<span class="nc" id="L176">        SetupLocalCommand(LocalSetup setup, BufferedReader input, PrintStream out, PrintStream err) {</span>
+<span class="nc" id="L177">            this.setup = setup;</span>
+<span class="nc" id="L178">            this.input = input;</span>
+<span class="nc" id="L179">            this.out = out;</span>
+<span class="nc" id="L180">            this.err = err;</span>
+<span class="nc" id="L181">        }</span>
+
+        @Override
+        public Integer call() {
+<span class="nc" id="L185">            return setup.run(common.request(Action.SETUP), input, out, err);</span>
+        }
+    }
+
+    @Command(
+            name = &quot;check&quot;,
+            description = &quot;Check prerequisites and connected Trello boards.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L194">    static final class CheckCommand implements Callable&lt;Integer&gt; {</span>
+        @CommandLine.ParentCommand
+        SetupLocalCommand parent;
+
+<span class="nc" id="L198">        @Mixin</span>
+        CommonOptions common = new CommonOptions();
+
+        @Override
+        public Integer call() {
+<span class="nc" id="L203">            return parent.setup.run(</span>
+<span class="nc" id="L204">                    parent.common.merge(common).request(Action.CHECK), parent.input, parent.out, parent.err);</span>
+        }
+    }
+
+    @Command(
+            name = &quot;repair-port&quot;,
+            description = &quot;Move one connected board to a free local HTTP port.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L213">    static final class RepairPortCommand implements Callable&lt;Integer&gt; {</span>
+        @CommandLine.ParentCommand
+        SetupLocalCommand parent;
+
+<span class="nc" id="L217">        @Mixin</span>
+        CommonOptions common = new CommonOptions();
+
+        @Spec
+        CommandSpec spec;
+
+        @Override
+        public Integer call() {
+<span class="nc" id="L225">            CommonOptions options = parent.common.merge(common);</span>
+<span class="nc" id="L226">            LocalSetupRequest request = options.request(Action.REPAIR_PORT);</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">            if (options.board.isEmpty()) {</span>
+<span class="nc" id="L228">                throw new ParameterException(spec.commandLine(), &quot;Missing required option: '--board=&lt;board&gt;'&quot;);</span>
+            }
+<span class="nc" id="L230">            return parent.setup.run(request, parent.input, parent.out, parent.err);</span>
+        }
+    }
+
+    @Command(
+            name = &quot;configure-github&quot;,
+            description = &quot;Add GitHub pull-request flow to a connected Trello board.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L239">    static final class ConfigureGithubCommand implements Callable&lt;Integer&gt; {</span>
+        @CommandLine.ParentCommand
+        SetupLocalCommand parent;
+
+<span class="nc" id="L243">        @Mixin</span>
+        CommonOptions common = new CommonOptions();
+
+        @Spec
+        CommandSpec spec;
+
+        @Override
+        public Integer call() {
+<span class="nc bnc" id="L251" title="All 4 branches missed.">            if (parent.common.explicitNoGithub() || common.explicitNoGithub()) {</span>
+<span class="nc" id="L252">                throw new ParameterException(spec.commandLine(), &quot;--no-github cannot be used with configure-github.&quot;);</span>
+            }
+<span class="nc" id="L254">            CommonOptions options = parent.common.merge(common);</span>
+<span class="nc" id="L255">            options.githubMode = Optional.of(true);</span>
+<span class="nc" id="L256">            return parent.setup.run(options.request(Action.CONFIGURE_GITHUB), parent.input, parent.out, parent.err);</span>
+        }
+    }
+
+<span class="nc" id="L260">    static final class CommonOptions {</span>
+        @Option(names = &quot;--dry-run&quot;, description = &quot;Print planned setup work without changing files or Trello.&quot;)
+        boolean dryRun;
+
+        @Option(names = &quot;--non-interactive&quot;, description = &quot;Do not prompt; require required values up front.&quot;)
+        boolean nonInteractive;
+
+        @Option(names = &quot;--force&quot;, description = &quot;Overwrite the selected workflow file when needed.&quot;)
+        boolean force;
+
+<span class="nc" id="L270">        @Option(</span>
+                names = &quot;--key&quot;,
+                description = &quot;Trello API key. Defaults to &quot; + TrelloEnvironment.API_KEY
+                        + &quot; or the configured credential file.&quot;)
+<span class="nc" id="L274">        Optional&lt;String&gt; apiKey = Optional.empty();</span>
+
+<span class="nc" id="L276">        @Option(</span>
+                names = &quot;--token&quot;,
+                description = &quot;Trello API token. Defaults to &quot; + TrelloEnvironment.API_TOKEN
+                        + &quot; or the configured credential file.&quot;)
+<span class="nc" id="L280">        Optional&lt;String&gt; apiToken = Optional.empty();</span>
+
+<span class="nc" id="L282">        @Option(names = &quot;--board-name&quot;, description = &quot;Trello board name when creating a board.&quot;)</span>
+<span class="nc" id="L283">        Optional&lt;String&gt; boardName = Optional.empty();</span>
+
+<span class="nc" id="L285">        @Option(names = &quot;--board&quot;, description = &quot;Trello board URL, short link, id, or connected board name.&quot;)</span>
+<span class="nc" id="L286">        Optional&lt;String&gt; board = Optional.empty();</span>
+
+<span class="nc" id="L288">        @Option(names = &quot;--workspace-id&quot;, description = &quot;Trello Workspace id for a new board.&quot;)</span>
+<span class="nc" id="L289">        Optional&lt;String&gt; workspaceId = Optional.empty();</span>
+
+<span class="nc" id="L291">        @Option(names = &quot;--repository-url&quot;, description = &quot;Repository clone URL for generated workflows.&quot;)</span>
+<span class="nc" id="L292">        Optional&lt;String&gt; repositoryUrl = Optional.empty();</span>
+
+<span class="nc" id="L294">        @Option(</span>
+                names = &quot;--active&quot;,
+                description = &quot;Existing-board queued-work list name. Repeat for multiple lists.&quot;,
+                preprocessor = TrelloBoardSetupMain.AttachedListSelectorPreprocessor.class)
+        List&lt;String&gt; activeStates = new ArrayList&lt;&gt;();
+
+<span class="nc" id="L300">        @Option(</span>
+                names = &quot;--terminal&quot;,
+                description = &quot;Existing-board terminal list name. Repeat for multiple lists.&quot;,
+                preprocessor = TrelloBoardSetupMain.AttachedListSelectorPreprocessor.class)
+        List&lt;String&gt; terminalStates = new ArrayList&lt;&gt;();
+
+        @Option(
+                names = &quot;--in-progress&quot;,
+                description = &quot;Existing-board in-progress list name.&quot;,
+                preprocessor = TrelloBoardSetupMain.AttachedListSelectorPreprocessor.class)
+        String inProgressState;
+
+        @Option(names = &quot;--no-in-progress&quot;, description = &quot;Do not configure an in-progress list.&quot;)
+        boolean noInProgress;
+
+        @Option(
+                names = &quot;--blocked&quot;,
+                description = &quot;Existing-board blocked list name.&quot;,
+                preprocessor = TrelloBoardSetupMain.AttachedListSelectorPreprocessor.class)
+        String blockedState;
+
+<span class="nc" id="L321">        @Option(names = &quot;--workflow&quot;, description = &quot;Workflow file to write.&quot;)</span>
+<span class="nc" id="L322">        Optional&lt;Path&gt; workflowPath = Optional.empty();</span>
+
+<span class="nc" id="L324">        Optional&lt;Path&gt; workspaceRoot = Optional.empty();</span>
+
+        @Option(names = &quot;--workspace-root&quot;, description = &quot;Directory for per-card workspaces.&quot;)
+        void workspaceRoot(Path workspaceRoot) {
+<span class="nc" id="L328">            this.workspaceRoot = Optional.of(workspaceRoot);</span>
+<span class="nc" id="L329">        }</span>
+
+<span class="nc" id="L331">        @Option(names = &quot;--config-dir&quot;, description = &quot;Directory for local .env, workflows, and board manifest.&quot;)</span>
+<span class="nc" id="L332">        Optional&lt;Path&gt; configDir = Optional.empty();</span>
+
+<span class="nc" id="L334">        @Option(names = &quot;--manifest&quot;, description = &quot;Connected-board manifest path.&quot;)</span>
+<span class="nc" id="L335">        Optional&lt;Path&gt; manifestPath = Optional.empty();</span>
+
+<span class="nc" id="L337">        @Option(names = &quot;--server-port&quot;, description = SetupOptionHelp.SERVER_PORT)</span>
+<span class="nc" id="L338">        Optional&lt;Integer&gt; serverPort = Optional.empty();</span>
+
+<span class="nc" id="L340">        @Option(names = &quot;--max-agents&quot;, description = SetupOptionHelp.MAX_AGENTS)</span>
+<span class="nc" id="L341">        Optional&lt;Integer&gt; maxAgents = Optional.empty();</span>
+
+<span class="nc" id="L343">        @Option(names = &quot;--codex-model&quot;, description = SetupOptionHelp.CODEX_MODEL)</span>
+<span class="nc" id="L344">        Optional&lt;String&gt; codexModel = Optional.empty();</span>
+
+<span class="nc" id="L346">        @Option(names = &quot;--codex-reasoning-effort&quot;, description = SetupOptionHelp.CODEX_REASONING_EFFORT)</span>
+<span class="nc" id="L347">        Optional&lt;String&gt; codexReasoningEffort = Optional.empty();</span>
+
+<span class="nc" id="L349">        @Option(names = &quot;--env&quot;, description = &quot;Dotenv file for Trello credentials.&quot;)</span>
+<span class="nc" id="L350">        Optional&lt;Path&gt; envPath = Optional.empty();</span>
+
+        @Option(names = &quot;--add-path&quot;, description = &quot;Allow sandboxed card runs to use this path.&quot;)
+        void additionalWritableRoot(String value) {
+<span class="nc" id="L354">            additionalWritableRoots.addAll(CliValueNormalizer.commaSeparatedPaths(value));</span>
+<span class="nc" id="L355">        }</span>
+
+<span class="nc" id="L357">        List&lt;Path&gt; additionalWritableRoots = new ArrayList&lt;&gt;();</span>
+
+        @Option(names = &quot;--allow-all-paths&quot;, description = &quot;Allow --add-path / in non-interactive setup.&quot;)
+        boolean allowAllPaths;
+
+        @Option(
+                names = &quot;--danger-full-access&quot;,
+                description = &quot;Disable Codex command/filesystem sandbox for this workflow.&quot;)
+        boolean dangerFullAccess;
+
+        @Option(names = &quot;--no-start&quot;, description = &quot;Do not start the managed worker after setup.&quot;)
+        boolean noStart;
+
+<span class="nc" id="L370">        @Option(names = &quot;--endpoint&quot;, description = &quot;Trello API endpoint.&quot;)</span>
+        URI endpoint = TrelloBoardSetup.DEFAULT_ENDPOINT;
+
+<span class="nc" id="L373">        @Mixin</span>
+        GitHubMode github = new GitHubMode();
+
+<span class="nc" id="L376">        Optional&lt;Boolean&gt; githubMode = Optional.empty();</span>
+
+        CommonOptions merge(CommonOptions child) {
+<span class="nc" id="L379">            return OptionMerger.merge(this, child);</span>
+        }
+
+        LocalSetupRequest request(Action action) {
+<span class="nc" id="L383">            validateLifecycleSharedOptions(action);</span>
+<span class="nc" id="L384">            rejectUnsupportedOptions(action);</span>
+<span class="nc" id="L385">            validateCliPaths();</span>
+<span class="nc" id="L386">            CliInputValidation.rejectBlankText(&quot;--board-name&quot;, boardName);</span>
+<span class="nc" id="L387">            CliInputValidation.rejectBlankBoardSelector(board);</span>
+<span class="nc" id="L388">            CliInputValidation.rejectBlankText(&quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L389">            CliInputValidation.rejectBlankTextValues(&quot;--active&quot;, activeStates);</span>
+<span class="nc" id="L390">            CliInputValidation.rejectBlankTextValues(&quot;--terminal&quot;, terminalStates);</span>
+<span class="nc" id="L391">            CliInputValidation.rejectBlankText(&quot;--in-progress&quot;, inProgressState);</span>
+<span class="nc" id="L392">            CliInputValidation.rejectBlankText(&quot;--blocked&quot;, blockedState);</span>
+<span class="nc" id="L393">            boardName.ifPresent(value -&gt; CliInputValidation.rejectControlCharacters(&quot;--board-name&quot;, value));</span>
+<span class="nc" id="L394">            CliInputValidation.rejectControlCharactersInText(&quot;--board&quot;, board);</span>
+<span class="nc" id="L395">            CliInputValidation.rejectControlCharactersInText(&quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L396">            CliInputValidation.rejectControlCharactersInTextValues(&quot;--active&quot;, activeStates);</span>
+<span class="nc" id="L397">            CliInputValidation.rejectControlCharactersInTextValues(&quot;--terminal&quot;, terminalStates);</span>
+<span class="nc" id="L398">            CliInputValidation.rejectControlCharacters(&quot;--in-progress&quot;, inProgressState);</span>
+<span class="nc" id="L399">            CliInputValidation.rejectControlCharacters(&quot;--blocked&quot;, blockedState);</span>
+<span class="nc" id="L400">            CliInputValidation.rejectWorkspaceIdReference(&quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L401">            repositoryUrl = RepositoryUrlInput.validateExplicit(repositoryUrl);</span>
+<span class="nc" id="L402">            github.validate();</span>
+<span class="nc" id="L403">            validateCodexModelOverrides();</span>
+<span class="nc" id="L404">            Optional&lt;Boolean&gt; resolvedGithubMode = githubMode.or(() -&gt; github.selected());</span>
+<span class="nc" id="L405">            List&lt;Path&gt; writableRoots = CliValueNormalizer.nonBlankTrimmedPaths(additionalWritableRoots);</span>
+<span class="nc" id="L406">            CliInputValidation.rejectRelativePathsExcept(</span>
+                    writableRoots, WorkspaceAccessFlow::isHomeShorthand, &quot;--add-path must be an absolute path.&quot;);
+<span class="nc" id="L408">            writableRoots = writableRoots.stream()</span>
+<span class="nc" id="L409">                    .map(WorkspaceAccessFlow::resolveCliAccessPath)</span>
+<span class="nc" id="L410">                    .toList();</span>
+<span class="nc" id="L411">            serverPort.ifPresent(LocalPort::validateCliServerPort);</span>
+<span class="nc" id="L412">            maxAgents.ifPresent(TrelloBoardSetup::validateSetupMaxAgents);</span>
+<span class="nc bnc" id="L413" title="All 6 branches missed.">            if (action == Action.SETUP &amp;&amp; board.isPresent() &amp;&amp; boardName.isPresent()) {</span>
+<span class="nc" id="L414">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_invalid_arguments&quot;, &quot;--board and --board-name cannot be used together.&quot;);
+            }
+<span class="nc bnc" id="L417" title="All 4 branches missed.">            if (allowAllPaths &amp;&amp; writableRoots.stream().noneMatch(LocalSetup::isBroadAccessPathForCli)) {</span>
+<span class="nc" id="L418">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_allow_all_paths_without_root&quot;,
+                        &quot;--allow-all-paths is only valid together with --add-path /.&quot;);
+            }
+<span class="nc bnc" id="L422" title="All 4 branches missed.">            if (dryRun || nonInteractive) {</span>
+<span class="nc" id="L423">                writableRoots.forEach(path -&gt; WorkspaceAccessFlow.rejectBroadAccessPath(path, allowAllPaths));</span>
+            }
+<span class="nc bnc" id="L425" title="All 4 branches missed.">            if (noInProgress &amp;&amp; inProgressState != null) {</span>
+<span class="nc" id="L426">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_invalid_arguments&quot;, &quot;--in-progress cannot be used with --no-in-progress.&quot;);
+            }
+<span class="nc bnc" id="L429" title="All 4 branches missed.">            boolean detectInProgressState = !noInProgress &amp;&amp; inProgressState == null;</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">            return new LocalSetupRequest(</span>
+                    action,
+                    dryRun,
+                    nonInteractive,
+                    force,
+<span class="nc bnc" id="L435" title="All 4 branches missed.">                    action == Action.SETUP &amp;&amp; hasExplicitBoardSetupRequest() &amp;&amp; !hasCodexAccessUpdateRequest(),</span>
+                    resolvedGithubMode,
+                    apiKey,
+                    apiToken,
+                    boardName,
+                    board,
+                    workspaceId,
+                    repositoryUrl,
+<span class="nc" id="L443">                    CliValueNormalizer.nonBlank(activeStates),</span>
+<span class="nc" id="L444">                    CliValueNormalizer.nonBlank(terminalStates),</span>
+<span class="nc" id="L445">                    CliValueNormalizer.nullIfBlank(inProgressState),</span>
+                    detectInProgressState,
+<span class="nc" id="L447">                    CliValueNormalizer.nullIfBlank(blockedState),</span>
+                    workflowPath,
+                    workspaceRoot,
+                    configDir,
+                    manifestPath,
+                    serverPort,
+<span class="nc" id="L453">                    maxAgents.orElse(TrelloBoardSetup.DEFAULT_MAX_CONCURRENT_AGENTS),</span>
+<span class="nc" id="L454">                    maxAgents.isPresent(),</span>
+<span class="nc bnc" id="L455" title="All 2 branches missed.">                    codexModel.map(String::strip).filter(value -&gt; !value.isBlank()),</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">                    codexReasoningEffort.map(String::strip).filter(value -&gt; !value.isBlank()),</span>
+                    envPath,
+                    writableRoots,
+                    allowAllPaths,
+                    dangerFullAccess,
+                    noStart,
+<span class="nc" id="L462">                    TrelloApiEndpoint.normalize(endpoint));</span>
+        }
+
+        private void validateLifecycleSharedOptions(Action action) {
+<span class="nc" id="L466">            CliInputValidation.rejectBlankPath(&quot;--config-dir&quot;, configDir, &quot;--config-dir must not be empty.&quot;);</span>
+<span class="nc" id="L467">            CliInputValidation.rejectBlankPath(&quot;--manifest&quot;, manifestPath, &quot;--manifest must not be empty.&quot;);</span>
+<span class="nc" id="L468">            CliInputValidation.rejectControlCharacters(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L469">            CliInputValidation.rejectControlCharacters(&quot;--manifest&quot;, manifestPath);</span>
+<span class="nc" id="L470">            configDir.ifPresent(path -&gt; CliInputValidation.rejectExistingNonDirectoryPath(&quot;--config-dir&quot;, path));</span>
+<span class="nc bnc" id="L471" title="All 4 branches missed.">            if (action == Action.REPAIR_PORT || action == Action.CONFIGURE_GITHUB) {</span>
+<span class="nc" id="L472">                CliInputValidation.rejectBlankBoardSelector(board);</span>
+<span class="nc" id="L473">                CliInputValidation.rejectControlCharactersInText(&quot;--board&quot;, board);</span>
+            }
+<span class="nc" id="L475">        }</span>
+
+        private boolean hasExplicitBoardSetupRequest() {
+<span class="nc bnc" id="L478" title="All 4 branches missed.">            return boardName.isPresent() || board.isPresent();</span>
+        }
+
+        private void rejectUnsupportedOptions(Action action) {
+<span class="nc" id="L482">            List&lt;String&gt; unsupported =</span>
+<span class="nc bnc" id="L483" title="All 4 branches missed.">                    switch (action) {</span>
+<span class="nc" id="L484">                        case SETUP -&gt; List.of();</span>
+<span class="nc" id="L485">                        case CHECK -&gt; unsupportedForCheck();</span>
+<span class="nc" id="L486">                        case REPAIR_PORT -&gt; unsupportedForRepairPort();</span>
+<span class="nc" id="L487">                        case CONFIGURE_GITHUB -&gt; unsupportedForConfigureGithub();</span>
+                    };
+<span class="nc bnc" id="L489" title="All 2 branches missed.">            if (!unsupported.isEmpty()) {</span>
+<span class="nc" id="L490">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_invalid_arguments&quot;,
+                        &quot;setup-local %s does not support %s.&quot;
+<span class="nc" id="L493">                                .formatted(commandName(action), String.join(&quot;, &quot;, unsupported)));</span>
+            }
+<span class="nc" id="L495">        }</span>
+
+        private List&lt;String&gt; unsupportedForCheck() {
+<span class="nc" id="L498">            List&lt;String&gt; unsupported = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L499">            addIfPresent(unsupported, &quot;--dry-run&quot;, dryRun);</span>
+<span class="nc" id="L500">            addIfPresent(unsupported, &quot;--force&quot;, force);</span>
+<span class="nc" id="L501">            addIfPresent(unsupported, &quot;--board-name&quot;, boardName);</span>
+<span class="nc" id="L502">            addWorkflowAndAccessOptions(unsupported);</span>
+<span class="nc" id="L503">            return unsupported;</span>
+        }
+
+        private List&lt;String&gt; unsupportedForRepairPort() {
+<span class="nc" id="L507">            List&lt;String&gt; unsupported = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L508">            addIfPresent(unsupported, &quot;--force&quot;, force);</span>
+<span class="nc" id="L509">            addIfPresent(unsupported, &quot;--key&quot;, apiKey);</span>
+<span class="nc" id="L510">            addIfPresent(unsupported, &quot;--token&quot;, apiToken);</span>
+<span class="nc" id="L511">            addIfPresent(unsupported, &quot;--board-name&quot;, boardName);</span>
+<span class="nc" id="L512">            addWorkflowAndAccessOptions(unsupported);</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">            addIfPresent(unsupported, &quot;--endpoint&quot;, !TrelloBoardSetup.DEFAULT_ENDPOINT.equals(endpoint));</span>
+<span class="nc" id="L514">            addGithubModeIfPresent(unsupported);</span>
+<span class="nc" id="L515">            return unsupported;</span>
+        }
+
+        private List&lt;String&gt; unsupportedForConfigureGithub() {
+<span class="nc" id="L519">            List&lt;String&gt; unsupported = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L520">            addIfPresent(unsupported, &quot;--dry-run&quot;, dryRun);</span>
+<span class="nc" id="L521">            addIfPresent(unsupported, &quot;--force&quot;, force);</span>
+<span class="nc" id="L522">            addIfPresent(unsupported, &quot;--board-name&quot;, boardName);</span>
+<span class="nc" id="L523">            addIfPresent(unsupported, &quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L524">            addIfPresent(unsupported, &quot;--repository-url&quot;, repositoryUrl);</span>
+<span class="nc" id="L525">            addListIfPresent(unsupported, &quot;--active&quot;, activeStates);</span>
+<span class="nc" id="L526">            addListIfPresent(unsupported, &quot;--terminal&quot;, terminalStates);</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">            addIfPresent(unsupported, &quot;--in-progress&quot;, inProgressState != null);</span>
+<span class="nc" id="L528">            addIfPresent(unsupported, &quot;--no-in-progress&quot;, noInProgress);</span>
+<span class="nc bnc" id="L529" title="All 2 branches missed.">            addIfPresent(unsupported, &quot;--blocked&quot;, blockedState != null);</span>
+<span class="nc" id="L530">            addIfPresent(unsupported, &quot;--workflow&quot;, workflowPath);</span>
+<span class="nc" id="L531">            addIfPresent(unsupported, &quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L532">            addIfPresent(unsupported, &quot;--server-port&quot;, serverPort);</span>
+<span class="nc" id="L533">            addIfPresent(unsupported, &quot;--env&quot;, envPath);</span>
+<span class="nc" id="L534">            return unsupported;</span>
+        }
+
+        private void addWorkflowAndAccessOptions(List&lt;String&gt; unsupported) {
+<span class="nc" id="L538">            addIfPresent(unsupported, &quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L539">            addIfPresent(unsupported, &quot;--repository-url&quot;, repositoryUrl);</span>
+<span class="nc" id="L540">            addListIfPresent(unsupported, &quot;--active&quot;, activeStates);</span>
+<span class="nc" id="L541">            addListIfPresent(unsupported, &quot;--terminal&quot;, terminalStates);</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">            addIfPresent(unsupported, &quot;--in-progress&quot;, inProgressState != null);</span>
+<span class="nc" id="L543">            addIfPresent(unsupported, &quot;--no-in-progress&quot;, noInProgress);</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">            addIfPresent(unsupported, &quot;--blocked&quot;, blockedState != null);</span>
+<span class="nc" id="L545">            addIfPresent(unsupported, &quot;--workflow&quot;, workflowPath);</span>
+<span class="nc" id="L546">            addIfPresent(unsupported, &quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L547">            addIfPresent(unsupported, &quot;--server-port&quot;, serverPort);</span>
+<span class="nc" id="L548">            addIfPresent(unsupported, &quot;--max-agents&quot;, maxAgents);</span>
+<span class="nc" id="L549">            addIfPresent(unsupported, &quot;--codex-model&quot;, codexModel);</span>
+<span class="nc" id="L550">            addIfPresent(unsupported, &quot;--codex-reasoning-effort&quot;, codexReasoningEffort);</span>
+<span class="nc" id="L551">            addIfPresent(unsupported, &quot;--env&quot;, envPath);</span>
+<span class="nc" id="L552">            addListIfPresent(unsupported, &quot;--add-path&quot;, additionalWritableRoots);</span>
+<span class="nc" id="L553">            addIfPresent(unsupported, &quot;--allow-all-paths&quot;, allowAllPaths);</span>
+<span class="nc" id="L554">            addIfPresent(unsupported, &quot;--danger-full-access&quot;, dangerFullAccess);</span>
+<span class="nc" id="L555">            addIfPresent(unsupported, &quot;--no-start&quot;, noStart);</span>
+<span class="nc" id="L556">        }</span>
+
+        private void addGithubModeIfPresent(List&lt;String&gt; unsupported) {
+<span class="nc" id="L559">            githubMode</span>
+<span class="nc" id="L560">                    .or(() -&gt; github.selected())</span>
+<span class="nc bnc" id="L561" title="All 2 branches missed.">                    .ifPresent(selected -&gt; unsupported.add(selected ? &quot;--github&quot; : &quot;--no-github&quot;));</span>
+<span class="nc" id="L562">        }</span>
+
+        private static void addIfPresent(List&lt;String&gt; unsupported, String optionName, Optional&lt;?&gt; value) {
+<span class="nc bnc" id="L565" title="All 2 branches missed.">            if (value.isPresent()) {</span>
+<span class="nc" id="L566">                unsupported.add(optionName);</span>
+            }
+<span class="nc" id="L568">        }</span>
+
+        private static void addIfPresent(List&lt;String&gt; unsupported, String optionName, boolean present) {
+<span class="nc bnc" id="L571" title="All 2 branches missed.">            if (present) {</span>
+<span class="nc" id="L572">                unsupported.add(optionName);</span>
+            }
+<span class="nc" id="L574">        }</span>
+
+        private static void addListIfPresent(List&lt;String&gt; unsupported, String optionName, List&lt;?&gt; values) {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">            if (!values.isEmpty()) {</span>
+<span class="nc" id="L578">                unsupported.add(optionName);</span>
+            }
+<span class="nc" id="L580">        }</span>
+
+        private static String commandName(Action action) {
+<span class="nc bnc" id="L583" title="All 4 branches missed.">            return switch (action) {</span>
+<span class="nc" id="L584">                case SETUP -&gt; &quot;setup&quot;;</span>
+<span class="nc" id="L585">                case CHECK -&gt; &quot;check&quot;;</span>
+<span class="nc" id="L586">                case REPAIR_PORT -&gt; &quot;repair-port&quot;;</span>
+<span class="nc" id="L587">                case CONFIGURE_GITHUB -&gt; &quot;configure-github&quot;;</span>
+            };
+        }
+
+        private void validateCliPaths() {
+<span class="nc" id="L592">            CliInputValidation.rejectControlCharacters(&quot;--workflow&quot;, workflowPath);</span>
+<span class="nc" id="L593">            CliInputValidation.rejectBlankWorkflowSelector(workflowPath);</span>
+<span class="nc" id="L594">            CliInputValidation.rejectBlankPath(&quot;--config-dir&quot;, configDir, &quot;--config-dir must not be empty.&quot;);</span>
+<span class="nc" id="L595">            CliInputValidation.rejectBlankPath(&quot;--manifest&quot;, manifestPath, &quot;--manifest must not be empty.&quot;);</span>
+<span class="nc" id="L596">            CliInputValidation.rejectControlCharacters(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L597">            CliInputValidation.rejectControlCharacters(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L598">            CliInputValidation.rejectControlCharacters(&quot;--manifest&quot;, manifestPath);</span>
+<span class="nc" id="L599">            CliInputValidation.rejectBlankPath(</span>
+                    &quot;--workspace-root&quot;, workspaceRoot, &quot;--workspace-root must not be empty.&quot;);
+<span class="nc" id="L601">            CliInputValidation.rejectRelativePath(</span>
+                    &quot;--workspace-root&quot;, workspaceRoot, &quot;--workspace-root must be an absolute path.&quot;);
+<span class="nc" id="L603">            CliInputValidation.rejectExistingNonDirectoryPath(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L604">            configDir.ifPresent(path -&gt; CliInputValidation.rejectExistingNonDirectoryPath(&quot;--config-dir&quot;, path));</span>
+<span class="nc" id="L605">            TrelloCredentialStore.validateEnvPathOption(envPath);</span>
+<span class="nc" id="L606">            CliInputValidation.rejectBlankPaths(&quot;--add-path&quot;, additionalWritableRoots, &quot;--add-path must not be empty.&quot;);</span>
+<span class="nc" id="L607">            CliInputValidation.rejectControlCharactersInPaths(&quot;--add-path&quot;, additionalWritableRoots);</span>
+<span class="nc" id="L608">        }</span>
+
+        private void validateCodexModelOverrides() {
+<span class="nc" id="L611">            CliInputValidation.rejectBlankText(&quot;--codex-model&quot;, codexModel);</span>
+<span class="nc" id="L612">            CliInputValidation.rejectBlankText(&quot;--codex-reasoning-effort&quot;, codexReasoningEffort);</span>
+<span class="nc" id="L613">            CliInputValidation.rejectControlCharactersInText(&quot;--codex-model&quot;, codexModel);</span>
+<span class="nc" id="L614">            CliInputValidation.rejectControlCharactersInText(&quot;--codex-reasoning-effort&quot;, codexReasoningEffort);</span>
+<span class="nc" id="L615">        }</span>
+
+        private boolean hasCodexAccessUpdateRequest() {
+<span class="nc bnc" id="L618" title="All 4 branches missed.">            return !additionalWritableRoots.isEmpty() || dangerFullAccess;</span>
+        }
+
+        private boolean explicitNoGithub() {
+<span class="nc" id="L622">            return githubMode</span>
+<span class="nc" id="L623">                    .or(() -&gt; github.selected())</span>
+<span class="nc bnc" id="L624" title="All 2 branches missed.">                    .filter(selected -&gt; !selected)</span>
+<span class="nc" id="L625">                    .isPresent();</span>
+        }
+    }
+
+    private static final class OptionMerger {
+        private OptionMerger() {}
+
+        static CommonOptions merge(CommonOptions parent, CommonOptions child) {
+<span class="nc" id="L633">            CommonOptions merged = copy(parent);</span>
+<span class="nc bnc" id="L634" title="All 4 branches missed.">            merged.dryRun = merged.dryRun || child.dryRun;</span>
+<span class="nc bnc" id="L635" title="All 4 branches missed.">            merged.nonInteractive = merged.nonInteractive || child.nonInteractive;</span>
+<span class="nc bnc" id="L636" title="All 4 branches missed.">            merged.force = merged.force || child.force;</span>
+<span class="nc" id="L637">            merged.apiKey = child.apiKey.or(() -&gt; merged.apiKey);</span>
+<span class="nc" id="L638">            merged.apiToken = child.apiToken.or(() -&gt; merged.apiToken);</span>
+<span class="nc" id="L639">            merged.boardName = child.boardName.or(() -&gt; merged.boardName);</span>
+<span class="nc" id="L640">            merged.board = child.board.or(() -&gt; merged.board);</span>
+<span class="nc" id="L641">            merged.workspaceId = child.workspaceId.or(() -&gt; merged.workspaceId);</span>
+<span class="nc" id="L642">            merged.repositoryUrl = child.repositoryUrl.or(() -&gt; merged.repositoryUrl);</span>
+<span class="nc" id="L643">            merged.activeStates.addAll(child.activeStates);</span>
+<span class="nc" id="L644">            merged.terminalStates.addAll(child.terminalStates);</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">            merged.inProgressState = child.inProgressState == null ? merged.inProgressState : child.inProgressState;</span>
+<span class="nc bnc" id="L646" title="All 4 branches missed.">            merged.noInProgress = merged.noInProgress || child.noInProgress;</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">            merged.blockedState = child.blockedState == null ? merged.blockedState : child.blockedState;</span>
+<span class="nc" id="L648">            merged.workflowPath = child.workflowPath.or(() -&gt; merged.workflowPath);</span>
+<span class="nc" id="L649">            merged.workspaceRoot = child.workspaceRoot.or(() -&gt; merged.workspaceRoot);</span>
+<span class="nc" id="L650">            merged.configDir = child.configDir.or(() -&gt; merged.configDir);</span>
+<span class="nc" id="L651">            merged.manifestPath = child.manifestPath.or(() -&gt; merged.manifestPath);</span>
+<span class="nc" id="L652">            merged.serverPort = child.serverPort.or(() -&gt; merged.serverPort);</span>
+<span class="nc" id="L653">            merged.maxAgents = child.maxAgents.or(() -&gt; merged.maxAgents);</span>
+<span class="nc" id="L654">            merged.codexModel = child.codexModel.or(() -&gt; merged.codexModel);</span>
+<span class="nc" id="L655">            merged.codexReasoningEffort = child.codexReasoningEffort.or(() -&gt; merged.codexReasoningEffort);</span>
+<span class="nc" id="L656">            merged.envPath = child.envPath.or(() -&gt; merged.envPath);</span>
+<span class="nc" id="L657">            merged.additionalWritableRoots.addAll(child.additionalWritableRoots);</span>
+<span class="nc bnc" id="L658" title="All 4 branches missed.">            merged.allowAllPaths = merged.allowAllPaths || child.allowAllPaths;</span>
+<span class="nc bnc" id="L659" title="All 4 branches missed.">            merged.dangerFullAccess = merged.dangerFullAccess || child.dangerFullAccess;</span>
+<span class="nc bnc" id="L660" title="All 4 branches missed.">            merged.noStart = merged.noStart || child.noStart;</span>
+<span class="nc" id="L661">            merged.endpoint =</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                    TrelloBoardSetup.DEFAULT_ENDPOINT.equals(child.endpoint) ? merged.endpoint : child.endpoint;</span>
+<span class="nc" id="L663">            merged.githubMode =</span>
+<span class="nc" id="L664">                    child.githubMode.or(() -&gt; child.github.selected()).or(() -&gt; merged.githubMode);</span>
+<span class="nc" id="L665">            return merged;</span>
+        }
+
+        private static CommonOptions copy(CommonOptions source) {
+<span class="nc" id="L669">            var copy = new CommonOptions();</span>
+<span class="nc" id="L670">            copy.dryRun = source.dryRun;</span>
+<span class="nc" id="L671">            copy.nonInteractive = source.nonInteractive;</span>
+<span class="nc" id="L672">            copy.force = source.force;</span>
+<span class="nc" id="L673">            copy.apiKey = source.apiKey;</span>
+<span class="nc" id="L674">            copy.apiToken = source.apiToken;</span>
+<span class="nc" id="L675">            copy.boardName = source.boardName;</span>
+<span class="nc" id="L676">            copy.board = source.board;</span>
+<span class="nc" id="L677">            copy.workspaceId = source.workspaceId;</span>
+<span class="nc" id="L678">            copy.repositoryUrl = source.repositoryUrl;</span>
+<span class="nc" id="L679">            copy.activeStates = new ArrayList&lt;&gt;(source.activeStates);</span>
+<span class="nc" id="L680">            copy.terminalStates = new ArrayList&lt;&gt;(source.terminalStates);</span>
+<span class="nc" id="L681">            copy.inProgressState = source.inProgressState;</span>
+<span class="nc" id="L682">            copy.noInProgress = source.noInProgress;</span>
+<span class="nc" id="L683">            copy.blockedState = source.blockedState;</span>
+<span class="nc" id="L684">            copy.workflowPath = source.workflowPath;</span>
+<span class="nc" id="L685">            copy.workspaceRoot = source.workspaceRoot;</span>
+<span class="nc" id="L686">            copy.configDir = source.configDir;</span>
+<span class="nc" id="L687">            copy.manifestPath = source.manifestPath;</span>
+<span class="nc" id="L688">            copy.serverPort = source.serverPort;</span>
+<span class="nc" id="L689">            copy.maxAgents = source.maxAgents;</span>
+<span class="nc" id="L690">            copy.codexModel = source.codexModel;</span>
+<span class="nc" id="L691">            copy.codexReasoningEffort = source.codexReasoningEffort;</span>
+<span class="nc" id="L692">            copy.envPath = source.envPath;</span>
+<span class="nc" id="L693">            copy.additionalWritableRoots = new ArrayList&lt;&gt;(source.additionalWritableRoots);</span>
+<span class="nc" id="L694">            copy.allowAllPaths = source.allowAllPaths;</span>
+<span class="nc" id="L695">            copy.dangerFullAccess = source.dangerFullAccess;</span>
+<span class="nc" id="L696">            copy.noStart = source.noStart;</span>
+<span class="nc" id="L697">            copy.endpoint = source.endpoint;</span>
+<span class="nc" id="L698">            copy.githubMode = source.githubMode.or(() -&gt; source.github.selected());</span>
+<span class="nc" id="L699">            return copy;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HookRunner.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.workspace</a> &gt; <span class="el_source">HookRunner.java</span></div><h1>HookRunner.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.workspace;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.process.ProcessEnvironment;
+import jakarta.enterprise.context.ApplicationScoped;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
+import org.jboss.logging.Logger;
+import org.jspecify.annotations.Nullable;
+
+@ApplicationScoped
+<span class="nc" id="L15">public class HookRunner {</span>
+<span class="nc" id="L16">    private static final Logger LOG = Logger.getLogger(HookRunner.class);</span>
+    private static final int LOG_OUTPUT_LIMIT = 4_096;
+
+    public void runRequired(String name, @Nullable String script, Path cwd, EffectiveConfig.HooksConfig hooks) {
+<span class="nc bnc" id="L20" title="All 4 branches missed.">        if (script == null || script.isBlank()) {</span>
+<span class="nc" id="L21">            return;</span>
+        }
+<span class="nc" id="L23">        HookResult result = run(name, script, cwd, hooks.timeout());</span>
+<span class="nc bnc" id="L24" title="All 2 branches missed.">        if (!result.success()) {</span>
+<span class="nc" id="L25">            throw new WorkspaceException(&quot;hook_failed&quot;, &quot;Hook &quot; + name + &quot; failed: &quot; + result.summary());</span>
+        }
+<span class="nc" id="L27">    }</span>
+
+    public void runBestEffort(
+            String name, @Nullable String script, @Nullable Path cwd, EffectiveConfig.HooksConfig hooks) {
+<span class="nc bnc" id="L31" title="All 6 branches missed.">        if (script == null || script.isBlank() || cwd == null) {</span>
+<span class="nc" id="L32">            return;</span>
+        }
+<span class="nc" id="L34">        HookResult result = run(name, script, cwd, hooks.timeout());</span>
+<span class="nc bnc" id="L35" title="All 2 branches missed.">        if (!result.success()) {</span>
+<span class="nc" id="L36">            LOG.warnf(&quot;hook=%s outcome=failed reason=%s&quot;, name, result.summary());</span>
+        }
+<span class="nc" id="L38">    }</span>
+
+    private HookResult run(String name, String script, Path cwd, Duration timeout) {
+<span class="nc" id="L41">        LOG.infof(&quot;hook=%s cwd=%s outcome=started&quot;, name, cwd);</span>
+        Process process;
+        try {
+<span class="nc" id="L44">            ProcessBuilder processBuilder = new ProcessBuilder(List.of(&quot;bash&quot;, &quot;-c&quot;, script))</span>
+<span class="nc" id="L45">                    .directory(cwd.toFile())</span>
+<span class="nc" id="L46">                    .redirectErrorStream(true);</span>
+<span class="nc" id="L47">            ProcessEnvironment.removeDefaultSecrets(processBuilder);</span>
+<span class="nc" id="L48">            Path workspaceParent = cwd.toAbsolutePath().normalize().getParent();</span>
+<span class="nc bnc" id="L49" title="All 2 branches missed.">            if (workspaceParent != null) {</span>
+<span class="nc" id="L50">                ProcessEnvironment.limitGitDiscovery(processBuilder, workspaceParent);</span>
+            }
+<span class="nc" id="L52">            process = processBuilder.start();</span>
+<span class="nc" id="L53">        } catch (IOException e) {</span>
+<span class="nc" id="L54">            return HookResult.failure(&quot;start_failed: &quot; + e.getMessage());</span>
+<span class="nc" id="L55">        }</span>
+        try {
+<span class="nc" id="L57">            boolean finished = process.waitFor(timeout);</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">            if (!finished) {</span>
+<span class="nc" id="L59">                process.destroyForcibly();</span>
+<span class="nc" id="L60">                return HookResult.failure(&quot;timeout after &quot; + timeout.toMillis() + &quot; ms&quot;);</span>
+            }
+<span class="nc" id="L62">            String output = truncate(new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">            if (process.exitValue() == 0) {</span>
+<span class="nc" id="L64">                LOG.infof(&quot;hook=%s cwd=%s outcome=completed&quot;, name, cwd);</span>
+<span class="nc" id="L65">                return HookResult.success(output);</span>
+            }
+<span class="nc" id="L67">            return HookResult.failure(&quot;exit_code=&quot; + process.exitValue() + &quot; output=&quot; + output);</span>
+<span class="nc" id="L68">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L69">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L70">            process.destroyForcibly();</span>
+<span class="nc" id="L71">            return HookResult.failure(&quot;interrupted&quot;);</span>
+<span class="nc" id="L72">        } catch (IOException e) {</span>
+<span class="nc" id="L73">            return HookResult.failure(&quot;output_read_failed: &quot; + e.getMessage());</span>
+        }
+    }
+
+    private static String truncate(String output) {
+<span class="nc bnc" id="L78" title="All 4 branches missed.">        if (output == null || output.length() &lt;= LOG_OUTPUT_LIMIT) {</span>
+<span class="nc" id="L79">            return output;</span>
+        }
+<span class="nc" id="L81">        return output.substring(0, LOG_OUTPUT_LIMIT) + &quot;...&quot;;</span>
+    }
+
+<span class="nc" id="L84">    private record HookResult(boolean success, String summary) {</span>
+        static HookResult success(String output) {
+<span class="nc" id="L86">            return new HookResult(true, output);</span>
+        }
+
+        static HookResult failure(String reason) {
+<span class="nc" id="L90">            return new HookResult(false, reason);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

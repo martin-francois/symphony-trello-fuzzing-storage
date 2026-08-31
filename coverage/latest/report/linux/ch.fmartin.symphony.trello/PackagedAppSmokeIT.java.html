@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PackagedAppSmokeIT.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello</a> &gt; <span class="el_source">PackagedAppSmokeIT.java</span></div><h1>PackagedAppSmokeIT.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+<span class="nc" id="L30">final class PackagedAppSmokeIT {</span>
+<span class="nc" id="L31">    private static final Path QUARKUS_RUNNER = Path.of(&quot;target/quarkus-app/quarkus-run.jar&quot;);</span>
+    private static final String BOARD_ID = &quot;smoke-board-id&quot;;
+<span class="nc" id="L33">    private static final Duration STARTUP_TIMEOUT = Duration.ofSeconds(45);</span>
+<span class="nc" id="L34">    private static final Duration STARTUP_POLL_INTERVAL = Duration.ofMillis(250);</span>
+
+<span class="nc" id="L36">    private final ObjectMapper json = new ObjectMapper();</span>
+<span class="nc" id="L37">    private final HttpClient http =</span>
+<span class="nc" id="L38">            HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void packagedRunnerServesLocalStatusForMinimalWorkflow() throws Exception {
+        // given
+<span class="nc" id="L46">        assertThat(QUARKUS_RUNNER)</span>
+<span class="nc" id="L47">                .as(&quot;Run through Maven verify so the Quarkus runner has been packaged.&quot;)</span>
+<span class="nc" id="L48">                .isRegularFile();</span>
+<span class="nc" id="L49">        int trelloPort = freePort();</span>
+<span class="nc" id="L50">        int appPort = freePortExcept(trelloPort);</span>
+<span class="nc" id="L51">        Path workflow = tempDir.resolve(&quot;WORKFLOW.smoke.md&quot;);</span>
+<span class="nc" id="L52">        Path workspaceRoot = tempDir.resolve(&quot;workspaces&quot;);</span>
+<span class="nc" id="L53">        Path stdout = tempDir.resolve(&quot;symphony.log&quot;);</span>
+<span class="nc" id="L54">        Path stderr = tempDir.resolve(&quot;symphony.err&quot;);</span>
+<span class="nc" id="L55">        Files.writeString(workflow, workflow(trelloPort, appPort, workspaceRoot));</span>
+
+<span class="nc" id="L57">        FakeTrelloEndpoint trello = FakeTrelloEndpoint.start(trelloPort);</span>
+<span class="nc" id="L58">        try (trello) {</span>
+<span class="nc" id="L59">            Process process = startPackagedRunner(workflow, stdout, stderr);</span>
+            try {
+
+                // when
+<span class="nc" id="L63">                JsonNode localStatus = waitForLocalStatus(appPort, stdout, stderr);</span>
+<span class="nc" id="L64">                assertDoesNotExitAfterHealthyStartup(process, Duration.ofSeconds(2));</span>
+
+                // then
+<span class="nc" id="L67">                assertThat(localStatus.get(&quot;boardId&quot;).asText()).isEqualTo(BOARD_ID);</span>
+<span class="nc" id="L68">                assertThat(localStatus.get(&quot;configuredBoardId&quot;).asText()).isEqualTo(BOARD_ID);</span>
+<span class="nc" id="L69">                assertThat(localStatus.get(&quot;workflowPath&quot;).asText())</span>
+<span class="nc" id="L70">                        .isEqualTo(workflow.toAbsolutePath().normalize().toString());</span>
+            } finally {
+<span class="nc" id="L72">                stop(process);</span>
+            }
+        }
+<span class="nc" id="L75">    }</span>
+
+    private Process startPackagedRunner(Path workflow, Path stdout, Path stderr) throws IOException {
+<span class="nc" id="L78">        Path java = Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, executable(&quot;java&quot;));</span>
+<span class="nc" id="L79">        ProcessBuilder builder = new ProcessBuilder(</span>
+<span class="nc" id="L80">                        java.toString(), &quot;-jar&quot;, QUARKUS_RUNNER.toString(), workflow.toString())</span>
+<span class="nc" id="L81">                .redirectOutput(stdout.toFile())</span>
+<span class="nc" id="L82">                .redirectError(stderr.toFile());</span>
+<span class="nc" id="L83">        builder.environment().remove(&quot;SYMPHONY_HTTP_PORT&quot;);</span>
+<span class="nc" id="L84">        builder.environment().remove(&quot;QUARKUS_HTTP_PORT&quot;);</span>
+<span class="nc" id="L85">        return builder.start();</span>
+    }
+
+    private JsonNode waitForLocalStatus(int port, Path stdout, Path stderr) throws Exception {
+<span class="nc" id="L89">        URI uri = URI.create(&quot;http://127.0.0.1:&quot; + port + &quot;/api/v1/local-status&quot;);</span>
+<span class="nc" id="L90">        HttpRequest request =</span>
+<span class="nc" id="L91">                HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(2)).GET().build();</span>
+<span class="nc" id="L92">        Instant deadline = now().plus(STARTUP_TIMEOUT);</span>
+<span class="nc" id="L93">        Throwable lastFailure = null;</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        while (now().isBefore(deadline)) {</span>
+            try {
+<span class="nc" id="L96">                HttpResponse&lt;String&gt; response = http.send(request, HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                if (response.statusCode() == 200) {</span>
+<span class="nc" id="L98">                    return json.readTree(response.body());</span>
+                }
+<span class="nc" id="L100">                lastFailure = new AssertionError(&quot;HTTP &quot; + response.statusCode() + &quot;: &quot; + response.body());</span>
+<span class="nc" id="L101">            } catch (IOException e) {</span>
+<span class="nc" id="L102">                lastFailure = e;</span>
+<span class="nc" id="L103">            }</span>
+<span class="nc" id="L104">            pollDelayForBoundedStartupWait();</span>
+        }
+<span class="nc" id="L106">        throw new AssertionError(</span>
+<span class="nc" id="L107">                &quot;Packaged app did not serve /api/v1/local-status. stdout=&quot; + read(stdout) + &quot;\nstderr=&quot; + read(stderr),</span>
+                lastFailure);
+    }
+
+    private static void pollDelayForBoundedStartupWait() throws InterruptedException {
+<span class="nc" id="L112">        Thread.sleep(STARTUP_POLL_INTERVAL);</span>
+<span class="nc" id="L113">    }</span>
+
+    private static void assertDoesNotExitAfterHealthyStartup(Process process, Duration duration)
+            throws InterruptedException {
+        try {
+<span class="nc" id="L118">            ProcessHandle exited = process.toHandle().onExit().get(duration.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L119">            fail(&quot;Packaged worker exited within %s after first healthy startup response, pid=%s&quot;</span>
+<span class="nc" id="L120">                    .formatted(duration, exited.pid()));</span>
+<span class="nc" id="L121">        } catch (TimeoutException expected) {</span>
+<span class="nc" id="L122">            assertThat(process.isAlive())</span>
+<span class="nc" id="L123">                    .as(&quot;packaged worker should stay alive after first healthy startup response&quot;)</span>
+<span class="nc" id="L124">                    .isTrue();</span>
+<span class="nc" id="L125">        } catch (ExecutionException e) {</span>
+<span class="nc" id="L126">            throw new AssertionError(&quot;Could not observe packaged worker process lifetime&quot;, e);</span>
+<span class="nc" id="L127">        }</span>
+<span class="nc" id="L128">    }</span>
+
+    private static String workflow(int trelloPort, int appPort, Path workspaceRoot) {
+<span class="nc" id="L131">        return &quot;&quot;&quot;</span>
+                ---
+                tracker:
+                  kind: trello
+                  endpoint: http://127.0.0.1:%d/1
+                  api_key: test-key
+                  api_token: test-token
+                  board_id: %s
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                polling:
+                  interval_ms: 600000
+                workspace:
+                  root: %s
+                server:
+                  port: %d
+                agent:
+                  max_concurrent_agents: 1
+                codex:
+                  command: codex app-server
+                ---
+                Smoke test workflow.
+                &quot;&quot;&quot;
+<span class="nc" id="L156">                .formatted(trelloPort, BOARD_ID, workspaceRoot, appPort);</span>
+    }
+
+    private static int freePort() throws IOException {
+<span class="nc" id="L160">        try (var socket = new ServerSocket(0)) {</span>
+<span class="nc" id="L161">            return socket.getLocalPort();</span>
+        }
+    }
+
+    private static int freePortExcept(int reservedPort) throws IOException {
+<span class="nc" id="L166">        int port = freePort();</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        while (port == reservedPort) {</span>
+<span class="nc" id="L168">            port = freePort();</span>
+        }
+<span class="nc" id="L170">        return port;</span>
+    }
+
+    private static void stop(Process process) throws InterruptedException {
+<span class="nc" id="L174">        process.destroy();</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">        if (!process.waitFor(Duration.ofSeconds(5))) {</span>
+<span class="nc" id="L176">            process.destroyForcibly();</span>
+<span class="nc" id="L177">            process.waitFor(Duration.ofSeconds(5));</span>
+        }
+<span class="nc" id="L179">    }</span>
+
+    private static String read(Path path) {
+        try {
+<span class="nc" id="L183">            return Files.readString(path);</span>
+<span class="nc" id="L184">        } catch (IOException e) {</span>
+<span class="nc" id="L185">            return &quot;&lt;unreadable: &quot; + e.getMessage() + &quot;&gt;&quot;;</span>
+        }
+    }
+
+    private static String executable(String name) {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">        return System.getProperty(&quot;os.name&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;) ? name + &quot;.exe&quot; : name;</span>
+    }
+
+    private static Instant now() {
+<span class="nc" id="L194">        return Instant.ofEpochMilli(System.currentTimeMillis());</span>
+    }
+
+    private static final class FakeTrelloEndpoint implements AutoCloseable {
+        private final HttpServer server;
+
+<span class="nc" id="L200">        private FakeTrelloEndpoint(HttpServer server) {</span>
+<span class="nc" id="L201">            this.server = server;</span>
+<span class="nc" id="L202">        }</span>
+
+        static FakeTrelloEndpoint start(int port) throws IOException {
+<span class="nc" id="L205">            HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);</span>
+<span class="nc" id="L206">            server.createContext(&quot;/1/boards/&quot; + BOARD_ID, exchange -&gt; {</span>
+<span class="nc" id="L207">                byte[] body = json(Map.of(&quot;id&quot;, BOARD_ID, &quot;name&quot;, &quot;Smoke Board&quot;, &quot;closed&quot;, false));</span>
+<span class="nc" id="L208">                exchange.getResponseHeaders().add(&quot;Content-Type&quot;, &quot;application/json&quot;);</span>
+<span class="nc" id="L209">                exchange.sendResponseHeaders(200, body.length);</span>
+<span class="nc" id="L210">                try (OutputStream response = exchange.getResponseBody()) {</span>
+<span class="nc" id="L211">                    response.write(body);</span>
+                }
+<span class="nc" id="L213">            });</span>
+<span class="nc" id="L214">            server.start();</span>
+<span class="nc" id="L215">            return new FakeTrelloEndpoint(server);</span>
+        }
+
+        @Override
+        public void close() {
+<span class="nc" id="L220">            server.stop(0);</span>
+<span class="nc" id="L221">        }</span>
+
+        private static byte[] json(Map&lt;String, Object&gt; value) throws IOException {
+<span class="nc" id="L224">            return new ObjectMapper().writeValueAsBytes(value);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

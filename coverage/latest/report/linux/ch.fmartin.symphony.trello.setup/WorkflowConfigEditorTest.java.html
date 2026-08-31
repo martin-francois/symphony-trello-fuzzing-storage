@@ -1,0 +1,746 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowConfigEditorTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">WorkflowConfigEditorTest.java</span></div><h1>WorkflowConfigEditorTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.WorkflowServerPortClassification;
+import ch.fmartin.symphony.trello.workflow.CodexSandboxPolicy;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L26">final class WorkflowConfigEditorTest {</span>
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void readsAndUpdatesCrLfWorkflowFrontMatter() throws Exception {
+        // given
+<span class="nc" id="L33">        Path workflow = tempDir.resolve(&quot;WORKFLOW.crlf.md&quot;);</span>
+<span class="nc" id="L34">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---\r
+                tracker:\r
+                  kind: trello\r
+                  board_id: &quot;board-1&quot;\r
+                  active_states:\r
+                    - &quot;Ready for Codex&quot;\r
+                  terminal_states:\r
+                    - &quot;Done&quot;\r
+                server:\r
+                  port: 18080\r
+                codex:\r
+                  command: codex app-server\r
+                ---\r
+                # Body\r
+                &quot;&quot;&quot;);
+<span class="nc" id="L52">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L55">        WorkflowListConfiguration lists = editor.listConfiguration(workflow);</span>
+<span class="nc" id="L56">        editor.updateServerPort(workflow, 18081);</span>
+
+        // then
+<span class="nc" id="L59">        assertThat(lists.activeStates()).containsExactly(&quot;Ready for Codex&quot;);</span>
+<span class="nc" id="L60">        assertThat(editor.serverPort(workflow)).hasValue(18081);</span>
+<span class="nc" id="L61">        assertThat(workflow).content(StandardCharsets.UTF_8).contains(&quot;# Body&quot;);</span>
+<span class="nc" id="L62">    }</span>
+
+    @Test
+    void updatesOneCharacterWorkflowFileName() throws Exception {
+        // given
+<span class="nc" id="L67">        Path workflow = tempDir.resolve(&quot;x&quot;);</span>
+<span class="nc" id="L68">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                # Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L86">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L89">        editor.updateServerPort(workflow, 18081);</span>
+
+        // then
+<span class="nc" id="L92">        assertThat(editor.serverPort(workflow)).hasValue(18081);</span>
+<span class="nc" id="L93">        assertThat(workflow).content(StandardCharsets.UTF_8).contains(&quot;# Body&quot;);</span>
+<span class="nc" id="L94">    }</span>
+
+    @Test
+    void updateServerPortPreservesWorkflowSymlinkAndUpdatesTarget() throws Exception {
+        // given
+<span class="nc" id="L99">        Path target = tempDir.resolve(&quot;WORKFLOW.target.md&quot;);</span>
+<span class="nc" id="L100">        Path link = tempDir.resolve(&quot;WORKFLOW.link.md&quot;);</span>
+<span class="nc" id="L101">        Files.writeString(target, workflowWithBody(&quot;# Body&quot;));</span>
+        try {
+<span class="nc" id="L103">            Files.createSymbolicLink(link, target.getFileName());</span>
+<span class="nc" id="L104">        } catch (IOException | UnsupportedOperationException e) {</span>
+<span class="nc" id="L105">            assumeTrue(false, &quot;symbolic links are not available: &quot; + e.getMessage());</span>
+<span class="nc" id="L106">        }</span>
+<span class="nc" id="L107">        assertThat(link).isSymbolicLink();</span>
+<span class="nc" id="L108">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L111">        editor.updateServerPort(link, 18081);</span>
+
+        // then
+<span class="nc" id="L114">        assertThat(link).isSymbolicLink();</span>
+<span class="nc" id="L115">        assertThat(editor.serverPort(target)).hasValue(18081);</span>
+<span class="nc" id="L116">        assertThat(link).content(StandardCharsets.UTF_8).contains(&quot;port: 18081&quot;, &quot;# Body&quot;);</span>
+<span class="nc" id="L117">        assertThat(target).content(StandardCharsets.UTF_8).contains(&quot;port: 18081&quot;, &quot;# Body&quot;);</span>
+<span class="nc" id="L118">    }</span>
+
+    @Test
+    void updateServerPortPreservesPosixPermissionsWhenSupported() throws Exception {
+        // given
+<span class="nc" id="L123">        Path workflow = tempDir.resolve(&quot;WORKFLOW.permissions.md&quot;);</span>
+<span class="nc" id="L124">        Files.writeString(workflow, workflowWithBody(&quot;# Body&quot;));</span>
+<span class="nc" id="L125">        assumeTrue(Files.getFileStore(workflow).supportsFileAttributeView(&quot;posix&quot;));</span>
+<span class="nc" id="L126">        Set&lt;PosixFilePermission&gt; permissions = Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);</span>
+<span class="nc" id="L127">        Files.setPosixFilePermissions(workflow, permissions);</span>
+<span class="nc" id="L128">        assertThat(Files.getPosixFilePermissions(workflow)).hasSameElementsAs(permissions);</span>
+<span class="nc" id="L129">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L132">        editor.updateServerPort(workflow, 18081);</span>
+
+        // then
+<span class="nc" id="L135">        assertThat(editor.serverPort(workflow)).hasValue(18081);</span>
+<span class="nc" id="L136">        assertThat(Files.getPosixFilePermissions(workflow)).hasSameElementsAs(permissions);</span>
+<span class="nc" id="L137">    }</span>
+
+    @Test
+    void updateServerPortLeavesOriginalContentWhenWorkflowIsReadOnly() throws Exception {
+        // given
+<span class="nc" id="L142">        Path workflow = tempDir.resolve(&quot;WORKFLOW.read-only-update.md&quot;);</span>
+<span class="nc" id="L143">        String original = workflowWithBody(&quot;# Body&quot;);</span>
+<span class="nc" id="L144">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L145">        assumeTrue(Files.getFileStore(workflow).supportsFileAttributeView(&quot;posix&quot;));</span>
+<span class="nc" id="L146">        Set&lt;PosixFilePermission&gt; readOnlyPermissions = Set.of(PosixFilePermission.OWNER_READ);</span>
+<span class="nc" id="L147">        Files.setPosixFilePermissions(workflow, readOnlyPermissions);</span>
+<span class="nc" id="L148">        assertThat(Files.getPosixFilePermissions(workflow)).hasSameElementsAs(readOnlyPermissions);</span>
+<span class="nc" id="L149">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L152">        Throwable thrown = catchThrowable(() -&gt; editor.updateServerPort(workflow, 18081));</span>
+
+        // then
+<span class="nc" id="L155">        assertThat(thrown).isInstanceOf(IOException.class).hasMessageContaining(&quot;cannot be updated&quot;);</span>
+<span class="nc" id="L156">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L157">        Files.setPosixFilePermissions(</span>
+<span class="nc" id="L158">                workflow, Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));</span>
+<span class="nc" id="L159">    }</span>
+
+    @MethodSource(&quot;serverPortClassifications&quot;)
+    @ParameterizedTest
+    void classifiesWorkflowServerPortForDiagnostics(
+            String name, String portLine, WorkflowServerPortClassification.Kind expected) throws Exception {
+        // given
+<span class="nc" id="L166">        Path workflow = tempDir.resolve(&quot;WORKFLOW.classify.md&quot;);</span>
+<span class="nc" id="L167">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                %s
+                ---
+                Body
+                &quot;&quot;&quot;
+<span class="nc" id="L178">                        .formatted(portLine));</span>
+<span class="nc" id="L179">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L182">        WorkflowServerPortClassification classification = editor.classifyServerPortForDiagnostics(workflow);</span>
+
+        // then
+<span class="nc" id="L185">        assertThat(classification.kind()).as(name).isEqualTo(expected);</span>
+<span class="nc" id="L186">    }</span>
+
+    private static Stream&lt;Arguments&gt; serverPortClassifications() {
+<span class="nc" id="L189">        return Stream.of(</span>
+<span class="nc" id="L190">                Arguments.of(&quot;valid port&quot;, &quot;server:\n  port: 18080&quot;, WorkflowServerPortClassification.Kind.VALID),</span>
+<span class="nc" id="L191">                Arguments.of(&quot;omitted port&quot;, &quot;server: {}&quot;, WorkflowServerPortClassification.Kind.OMITTED),</span>
+<span class="nc" id="L192">                Arguments.of(</span>
+                        &quot;negative port&quot;, &quot;server:\n  port: -1&quot;, WorkflowServerPortClassification.Kind.OUT_OF_RANGE),
+<span class="nc" id="L194">                Arguments.of(</span>
+                        &quot;port above range&quot;,
+                        &quot;server:\n  port: 99999&quot;,
+                        WorkflowServerPortClassification.Kind.OUT_OF_RANGE),
+<span class="nc" id="L198">                Arguments.of(</span>
+                        &quot;non-numeric port&quot;,
+                        &quot;server:\n  port: \&quot;not-a-port\&quot;&quot;,
+                        WorkflowServerPortClassification.Kind.INVALID_VALUE),
+<span class="nc" id="L202">                Arguments.of(</span>
+                        &quot;unresolved environment reference&quot;,
+                        &quot;server:\n  port: $MISSING_PORT_VARIABLE&quot;,
+                        WorkflowServerPortClassification.Kind.OMITTED),
+<span class="nc" id="L206">                Arguments.of(</span>
+                        &quot;whole-valued float normalizes&quot;,
+                        &quot;server:\n  port: 18080.0&quot;,
+                        WorkflowServerPortClassification.Kind.VALID),
+<span class="nc" id="L210">                Arguments.of(</span>
+                        &quot;fractional port is invalid, not truncated&quot;,
+                        &quot;server:\n  port: 18080.5&quot;,
+                        WorkflowServerPortClassification.Kind.INVALID_VALUE),
+<span class="nc" id="L214">                Arguments.of(</span>
+                        &quot;whole but huge port is invalid&quot;,
+                        &quot;server:\n  port: 99999999999999999999999&quot;,
+                        WorkflowServerPortClassification.Kind.INVALID_VALUE),
+<span class="nc" id="L218">                Arguments.of(</span>
+                        &quot;zero stays in range for ephemeral runs&quot;,
+                        &quot;server:\n  port: 0&quot;,
+                        WorkflowServerPortClassification.Kind.VALID));
+    }
+
+    @MethodSource(&quot;environmentResolvedServerPortClassifications&quot;)
+    @ParameterizedTest
+    void classifiesEnvironmentResolvedServerPortForDiagnostics(
+            String caseName, String resolvedValue, WorkflowServerPortClassification.Kind expected) throws Exception {
+        // given
+<span class="nc" id="L229">        Path workflow = tempDir.resolve(&quot;WORKFLOW.env-classify.md&quot;);</span>
+<span class="nc" id="L230">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                server:
+                  port: $STATUS_PORT
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L242">        var editor = new WorkflowConfigEditor();</span>
+<span class="nc" id="L243">        Function&lt;String, Optional&lt;String&gt;&gt; resolver =</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                variable -&gt; &quot;STATUS_PORT&quot;.equals(variable) ? Optional.ofNullable(resolvedValue) : Optional.empty();</span>
+
+        // when
+<span class="nc" id="L247">        WorkflowServerPortClassification classification = editor.classifyServerPortForDiagnostics(workflow, resolver);</span>
+
+        // then
+<span class="nc" id="L250">        assertThat(classification.kind()).as(caseName).isEqualTo(expected);</span>
+<span class="nc" id="L251">    }</span>
+
+    private static Stream&lt;Arguments&gt; environmentResolvedServerPortClassifications() {
+<span class="nc" id="L254">        return Stream.of(</span>
+<span class="nc" id="L255">                Arguments.of(&quot;resolved valid port&quot;, &quot;20991&quot;, WorkflowServerPortClassification.Kind.VALID),</span>
+<span class="nc" id="L256">                Arguments.of(&quot;resolved out-of-range port&quot;, &quot;99999&quot;, WorkflowServerPortClassification.Kind.OUT_OF_RANGE),</span>
+<span class="nc" id="L257">                Arguments.of(</span>
+                        &quot;resolved non-numeric port&quot;, &quot;not-a-port&quot;, WorkflowServerPortClassification.Kind.INVALID_VALUE),
+<span class="nc" id="L259">                Arguments.of(</span>
+                        &quot;resolved whole-valued float normalizes&quot;,
+                        &quot;18080.0&quot;,
+                        WorkflowServerPortClassification.Kind.VALID),
+<span class="nc" id="L263">                Arguments.of(</span>
+                        &quot;resolved fractional port is invalid, not truncated&quot;,
+                        &quot;18080.5&quot;,
+                        WorkflowServerPortClassification.Kind.INVALID_VALUE),
+<span class="nc" id="L267">                Arguments.of(&quot;unresolved reference&quot;, null, WorkflowServerPortClassification.Kind.OMITTED),</span>
+<span class="nc" id="L268">                Arguments.of(&quot;blank resolved value&quot;, &quot;   &quot;, WorkflowServerPortClassification.Kind.OMITTED));</span>
+    }
+
+    @Test
+    void classifiesMissingWorkflowFileAsUnreadableForDiagnostics() {
+        // given
+<span class="nc" id="L274">        Path workflow = tempDir.resolve(&quot;WORKFLOW.does-not-exist.md&quot;);</span>
+<span class="nc" id="L275">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L278">        WorkflowServerPortClassification classification = editor.classifyServerPortForDiagnostics(workflow);</span>
+
+        // then
+<span class="nc" id="L281">        assertThat(classification.kind()).isEqualTo(WorkflowServerPortClassification.Kind.UNREADABLE);</span>
+<span class="nc" id="L282">        assertThat(classification.probeOrSkipPort()).isEmpty();</span>
+<span class="nc" id="L283">    }</span>
+
+    @Test
+    void treatsNullYamlFrontMatterAsMissingMaxAgents() throws Exception {
+        // given
+<span class="nc" id="L288">        Path workflow = tempDir.resolve(&quot;WORKFLOW.null.md&quot;);</span>
+<span class="nc" id="L289">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                null
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L297">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L300">        var maxAgents = editor.maxAgents(workflow);</span>
+<span class="nc" id="L301">        var maxAgentsSetting = editor.maxAgentsSetting(workflow);</span>
+
+        // then
+<span class="nc" id="L304">        assertThat(maxAgents).isEmpty();</span>
+<span class="nc" id="L305">        assertThat(maxAgentsSetting.diagnosticsCell()).isEmpty();</span>
+<span class="nc" id="L306">    }</span>
+
+    @Test
+    void reportsOverlappingListRolesAsInvalidWorkflowConfiguration() throws Exception {
+        // given
+<span class="nc" id="L311">        Path workflow = tempDir.resolve(&quot;WORKFLOW.overlap.md&quot;);</span>
+<span class="nc" id="L312">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                  in_progress_state: &quot;In Progress&quot;
+                  blocked_state: &quot;Ready  for Codex&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L332">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L335">        WorkflowValidation validation = editor.diagnosticsValidation(workflow);</span>
+
+        // then
+<span class="nc" id="L338">        assertThat(validation).isEqualTo(WorkflowValidation.warn(&quot;overlapping tracker list roles&quot;));</span>
+<span class="nc" id="L339">    }</span>
+
+    @Test
+    void validateReportsOverlappingListRolesForConnectedBoard() throws Exception {
+        // given
+<span class="nc" id="L344">        Path workflow = tempDir.resolve(&quot;WORKFLOW.connected-overlap.md&quot;);</span>
+<span class="nc" id="L345">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Ready  for Codex&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L363">        ConnectedBoard board = ConnectedBoardBuilder.connectedBoard(workflow)</span>
+<span class="nc" id="L364">                .withBoardId(&quot;board-1&quot;)</span>
+<span class="nc" id="L365">                .withBoardKey(&quot;abc123&quot;)</span>
+<span class="nc" id="L366">                .withBoardName(&quot;Overlap Queue&quot;)</span>
+<span class="nc" id="L367">                .withBoardUrl(&quot;https://trello.example/abc123&quot;)</span>
+<span class="nc" id="L368">                .withEnvPath(tempDir.resolve(&quot;.env&quot;))</span>
+<span class="nc" id="L369">                .withWorkspaceRoot(tempDir.resolve(&quot;workspaces&quot;))</span>
+<span class="nc" id="L370">                .build();</span>
+<span class="nc" id="L371">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L374">        WorkflowValidation validation = editor.validate(board, ignored -&gt; Optional.empty());</span>
+
+        // then
+<span class="nc" id="L377">        assertThat(validation)</span>
+<span class="nc" id="L378">                .isEqualTo(WorkflowValidation.warn(</span>
+                        &quot;Workflow tracker list roles overlap for \&quot;Overlap Queue\&quot;: overlapping tracker list roles&quot;));
+<span class="nc" id="L380">    }</span>
+
+    @Test
+    void permitsOverlappingListNamesWhenListIdsAreAuthoritative() throws Exception {
+        // given
+<span class="nc" id="L385">        Path workflow = tempDir.resolve(&quot;WORKFLOW.list-ids.md&quot;);</span>
+<span class="nc" id="L386">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Done&quot;
+                  active_list_ids:
+                    - &quot;list-active-done&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                  terminal_list_ids:
+                    - &quot;list-terminal-done&quot;
+                  blocked_state: &quot;Done&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L409">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L412">        WorkflowValidation validation = editor.diagnosticsValidation(workflow);</span>
+
+        // then
+<span class="nc" id="L415">        assertThat(validation).isEqualTo(WorkflowValidation.valid());</span>
+<span class="nc" id="L416">    }</span>
+
+    @Test
+    void reportsOverlappingListIdsAsInvalidWorkflowConfiguration() throws Exception {
+        // given
+<span class="nc" id="L421">        Path workflow = tempDir.resolve(&quot;WORKFLOW.list-id-overlap.md&quot;);</span>
+<span class="nc" id="L422">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  active_list_ids:
+                    - &quot;shared-list-id&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                  terminal_list_ids:
+                    - &quot;shared-list-id&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L444">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L447">        WorkflowValidation validation = editor.diagnosticsValidation(workflow);</span>
+
+        // then
+<span class="nc" id="L450">        assertThat(validation).isEqualTo(WorkflowValidation.warn(&quot;overlapping tracker list roles&quot;));</span>
+<span class="nc" id="L451">    }</span>
+
+    @Test
+    void codexAccessUpdateRejectsWritableRootsForExplicitReadOnlySandboxWithoutRewriting() throws Exception {
+        // given
+<span class="nc" id="L456">        Path privateRoot = tempDir.resolve(&quot;Jane Doe&quot;);</span>
+<span class="nc" id="L457">        Path workflow = privateRoot.resolve(&quot;WORKFLOW.read-only.md&quot;);</span>
+<span class="nc" id="L458">        Files.createDirectories(privateRoot);</span>
+<span class="nc" id="L459">        String original = workflowWithCodex(</span>
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy:
+                    type: readOnly
+                &quot;&quot;&quot;,
+<span class="nc" id="L466">                currentWorkflowBody());</span>
+<span class="nc" id="L467">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L468">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L471">        Throwable thrown =</span>
+<span class="nc" id="L472">                catchThrowable(() -&gt; editor.applyCodexAccess(workflow, List.of(privateRoot.resolve(&quot;repo&quot;)), false));</span>
+
+        // then
+<span class="nc" id="L475">        assertThat(thrown).isInstanceOfSatisfying(TrelloBoardSetupException.class, failure -&gt; {</span>
+<span class="nc" id="L476">            assertThat(failure.code()).isEqualTo(&quot;setup_workflow_invalid&quot;);</span>
+<span class="nc" id="L477">            assertThat(failure.getMessage())</span>
+<span class="nc" id="L478">                    .contains(</span>
+                            &quot;Cannot update Codex access&quot;,
+                            &quot;codex.additional_writable_roots require a workspaceWrite or dangerFullAccess sandbox policy&quot;)
+<span class="nc" id="L481">                    .doesNotContain(workflow.toString(), privateRoot.toString(), tempDir.toString(), &quot;Jane Doe&quot;);</span>
+<span class="nc" id="L482">            assertThat(failure.getCause()).isInstanceOf(CodexSandboxPolicy.InvalidPolicyException.class);</span>
+<span class="nc" id="L483">        });</span>
+<span class="nc" id="L484">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L485">    }</span>
+
+    @Test
+    void rejectsCurrentWorkflowWithNullSandboxPolicyWithoutRewriting() throws Exception {
+        // given
+<span class="nc" id="L490">        Path workflow = tempDir.resolve(&quot;WORKFLOW.null-policy.md&quot;);</span>
+<span class="nc" id="L491">        String original = workflowWithCodex(</span>
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy:
+                &quot;&quot;&quot;,
+<span class="nc" id="L497">                currentWorkflowBody());</span>
+<span class="nc" id="L498">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L499">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L502">        Throwable thrown =</span>
+<span class="nc" id="L503">                catchThrowable(() -&gt; editor.applyCodexAccess(workflow, List.of(tempDir.resolve(&quot;repo&quot;)), false));</span>
+
+        // then
+<span class="nc" id="L506">        assertThat(thrown)</span>
+<span class="nc" id="L507">                .isInstanceOf(TrelloBoardSetupException.class)</span>
+<span class="nc" id="L508">                .hasMessageContaining(&quot;codex.turn_sandbox_policy must be an object&quot;)</span>
+<span class="nc" id="L509">                .hasMessageNotContaining(workflow.toString());</span>
+<span class="nc" id="L510">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L511">    }</span>
+
+    @Test
+    void launchHonorsForcedDangerFullAccessBeforeConfiguredSandboxPolicyValidation() throws Exception {
+        // given
+<span class="nc" id="L516">        Path workflow = tempDir.resolve(&quot;WORKFLOW.force-danger-invalid-sandbox.md&quot;);</span>
+<span class="nc" id="L517">        String original =</span>
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                  turn_sandbox_policy: []
+                ---
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L535">                        .formatted(currentWorkflowBody());</span>
+<span class="nc" id="L536">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L537">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L540">        EffectiveConfig config = editor.prepareLaunchWorkflow(workflow, trelloCredentialsAndForcedDanger(), true);</span>
+
+        // then
+<span class="nc" id="L543">        assertThat(config.codex())</span>
+<span class="nc" id="L544">                .as(&quot;Codex config [forceDangerFullAccess, turnSandboxPolicy]&quot;)</span>
+<span class="nc" id="L545">                .extracting(</span>
+                        EffectiveConfig.CodexConfig::forceDangerFullAccess,
+                        EffectiveConfig.CodexConfig::turnSandboxPolicy)
+<span class="nc" id="L548">                .containsExactly(true, List.of());</span>
+<span class="nc" id="L549">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L550">    }</span>
+
+    @Test
+    void launchPreparationDoesNotRewriteExistingWorkflowContent() throws Exception {
+        // given
+<span class="nc" id="L555">        Path workflow = tempDir.resolve(&quot;WORKFLOW.current-unmarked.md&quot;);</span>
+<span class="nc" id="L556">        String original =</span>
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: literal-key
+                  api_token: literal-token
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                ## Operating Posture
+
+                This is an existing private workflow. It may mention that operators should record the branch,
+                commit, and validation evidence.
+                &quot;&quot;&quot;;
+<span class="nc" id="L578">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L579">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L582">        EffectiveConfig config = editor.prepareLaunchWorkflow(workflow, ignored -&gt; Optional.empty(), true);</span>
+
+        // then
+<span class="nc" id="L585">        assertThat(config.codex().turnSandboxPolicy()).isNull();</span>
+<span class="nc" id="L586">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L587">    }</span>
+
+    @Test
+    void launchValidationDoesNotRewriteCurrentWorkflowWhenTrackerStructureIsInvalid() throws Exception {
+        // given
+<span class="nc" id="L592">        Path workflow = tempDir.resolve(&quot;WORKFLOW.invalid-tracker.md&quot;);</span>
+<span class="nc" id="L593">        String original =</span>
+                &quot;&quot;&quot;
+                ---
+                tracker: []
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;;
+<span class="nc" id="L604">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L605">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L608">        Throwable thrown = catchThrowable(() -&gt; editor.prepareLaunchWorkflow(workflow, trelloCredentials(), true));</span>
+
+        // then
+<span class="nc" id="L611">        assertThat(thrown).isInstanceOfSatisfying(TrelloBoardSetupException.class, failure -&gt; {</span>
+<span class="nc" id="L612">            assertThat(failure.code()).isEqualTo(&quot;setup_workflow_invalid&quot;);</span>
+<span class="nc" id="L613">            assertThat(failure.getMessage()).contains(&quot;tracker must be an object&quot;, &quot;selected workflow file&quot;);</span>
+<span class="nc" id="L614">        });</span>
+<span class="nc" id="L615">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L616">    }</span>
+
+    @Test
+    void launchValidationDoesNotRewriteCurrentWorkflowWhenEnvironmentReferenceIsUnresolved() throws Exception {
+        // given
+<span class="nc" id="L621">        Path workflow = tempDir.resolve(&quot;WORKFLOW.unresolved-env.md&quot;);</span>
+<span class="nc" id="L622">        String original =</span>
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;$MISSING_TRELLO_BOARD&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;;
+<span class="nc" id="L639">        Files.writeString(workflow, original);</span>
+<span class="nc" id="L640">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L643">        Throwable thrown = catchThrowable(() -&gt; editor.prepareLaunchWorkflow(workflow, trelloCredentials(), true));</span>
+
+        // then
+<span class="nc" id="L646">        assertThat(thrown).isInstanceOfSatisfying(TrelloBoardSetupException.class, failure -&gt; {</span>
+<span class="nc" id="L647">            assertThat(failure.code()).isEqualTo(&quot;setup_workflow_invalid&quot;);</span>
+<span class="nc" id="L648">            assertThat(failure.getMessage()).contains(&quot;tracker.board_id&quot;, &quot;selected workflow file&quot;);</span>
+<span class="nc" id="L649">        });</span>
+<span class="nc" id="L650">        assertThat(workflow).content(StandardCharsets.UTF_8).isEqualTo(original);</span>
+<span class="nc" id="L651">    }</span>
+
+    @Test
+    void permitsDuplicateValuesWithinOneListRole() throws Exception {
+        // given
+<span class="nc" id="L656">        Path workflow = tempDir.resolve(&quot;WORKFLOW.duplicate-role-values.md&quot;);</span>
+<span class="nc" id="L657">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                    - &quot;Ready  for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                    - &quot;Done &quot;
+                server:
+                  port: 18080
+                codex:
+                  command: codex app-server
+                ---
+                Body
+                &quot;&quot;&quot;);
+<span class="nc" id="L677">        var editor = new WorkflowConfigEditor();</span>
+
+        // when
+<span class="nc" id="L680">        WorkflowValidation validation = editor.diagnosticsValidation(workflow);</span>
+
+        // then
+<span class="nc" id="L683">        assertThat(validation).isEqualTo(WorkflowValidation.valid());</span>
+<span class="nc" id="L684">    }</span>
+
+    private static String workflowWithBody(String body) {
+<span class="nc" id="L687">        return workflowWithCodex(</span>
+                &quot;&quot;&quot;
+                codex:
+                  command: codex app-server
+                &quot;&quot;&quot;, body);
+    }
+
+    private static String workflowWithCodex(String codexYaml, String body) {
+<span class="nc" id="L695">        return &quot;&quot;&quot;</span>
+                ---
+                tracker:
+                  kind: trello
+                  board_id: &quot;board-1&quot;
+                  active_states:
+                    - &quot;Ready for Codex&quot;
+                  terminal_states:
+                    - &quot;Done&quot;
+                server:
+                  port: 18080
+                %s
+                ---
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L710">                .formatted(codexYaml.stripTrailing(), body);</span>
+    }
+
+    private static Function&lt;String, Optional&lt;String&gt;&gt; trelloCredentials() {
+<span class="nc bnc" id="L714" title="All 3 branches missed.">        return name -&gt; switch (name) {</span>
+<span class="nc" id="L715">            case &quot;TRELLO_API_KEY&quot; -&gt; Optional.of(&quot;test-key&quot;);</span>
+<span class="nc" id="L716">            case &quot;TRELLO_API_TOKEN&quot; -&gt; Optional.of(&quot;test-token&quot;);</span>
+<span class="nc" id="L717">            default -&gt; Optional.empty();</span>
+        };
+    }
+
+    private static Function&lt;String, Optional&lt;String&gt;&gt; trelloCredentialsAndForcedDanger() {
+<span class="nc bnc" id="L722" title="All 4 branches missed.">        return name -&gt; switch (name) {</span>
+<span class="nc" id="L723">            case &quot;TRELLO_API_KEY&quot; -&gt; Optional.of(&quot;test-key&quot;);</span>
+<span class="nc" id="L724">            case &quot;TRELLO_API_TOKEN&quot; -&gt; Optional.of(&quot;test-token&quot;);</span>
+<span class="nc" id="L725">            case &quot;SYMPHONY_CODEX_DANGER_FULL_ACCESS&quot; -&gt; Optional.of(&quot;true&quot;);</span>
+<span class="nc" id="L726">            default -&gt; Optional.empty();</span>
+        };
+    }
+
+    private static String currentWorkflowBody() {
+<span class="nc" id="L731">        return &quot;&quot;&quot;</span>
+                ## Operating Posture
+
+                This is an unattended orchestration run. Do not ask a human to perform routine follow-up actions.
+
+                ## Pull Request Publication
+
+                Create a pull request when needed.
+
+                ## Trello List Routing
+
+                Card URL: {{ card.url }}
+                &quot;&quot;&quot;;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

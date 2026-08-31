@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalHealthChecker.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalHealthChecker.java</span></div><h1>LocalHealthChecker.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.ws.rs.core.Response.Status;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.URI;
+import java.net.UnknownHostException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.BooleanSupplier;
+
+final class LocalHealthChecker {
+<span class="nc" id="L24">    static final List&lt;String&gt; HTTP_PORT_ENVIRONMENT_NAMES = List.of(&quot;SYMPHONY_HTTP_PORT&quot;, &quot;QUARKUS_HTTP_PORT&quot;);</span>
+    static final String LOOPBACK_HOST = &quot;127.0.0.1&quot;;
+
+<span class="nc" id="L27">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+<span class="nc" id="L28">    private static final TypeReference&lt;Map&lt;String, Object&gt;&gt; JSON_MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L29">    private static final Duration LOCAL_STATUS_TIMEOUT = Duration.ofMillis(500);</span>
+<span class="nc" id="L30">    private static final Duration PORT_USED_RETRY_DELAY = Duration.ofMillis(150);</span>
+<span class="nc" id="L31">    private static final Duration SAME_WORKFLOW_POLL_DELAY = Duration.ofMillis(200);</span>
+    // Covers cold JVM startup on slow shared-CPU hosts; a healthy container worker was observed
+    // binding after 9.4 seconds, just past the previous fixed 10-second window.
+<span class="nc" id="L34">    private static final Duration STARTUP_ALIVE_WAIT = Duration.ofSeconds(60);</span>
+<span class="nc" id="L35">    private static final InetAddress LOOPBACK_IPV4 = loopbackIpv4();</span>
+
+    private final Map&lt;String, String&gt; environment;
+    private final HttpClient httpClient;
+    private final WorkflowConfigEditor workflowConfig;
+
+    LocalHealthChecker(Map&lt;String, String&gt; environment, WorkflowConfigEditor workflowConfig) {
+<span class="nc" id="L42">        this(</span>
+                environment,
+                workflowConfig,
+<span class="nc" id="L45">                HttpClient.newBuilder().connectTimeout(LOCAL_STATUS_TIMEOUT).build());</span>
+<span class="nc" id="L46">    }</span>
+
+<span class="nc" id="L48">    LocalHealthChecker(Map&lt;String, String&gt; environment, WorkflowConfigEditor workflowConfig, HttpClient httpClient) {</span>
+<span class="nc" id="L49">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L50">        this.workflowConfig = workflowConfig;</span>
+<span class="nc" id="L51">        this.httpClient = httpClient;</span>
+<span class="nc" id="L52">    }</span>
+
+    BoardHealth boardHealth(ConnectedBoard board) {
+<span class="nc" id="L55">        int port = managedHealthPort(board.workflowPath(), board.serverPort(), board.envPath());</span>
+<span class="nc" id="L56">        return workflowHealth(board.workflowPath(), board.boardId(), board.boardKey(), port);</span>
+    }
+
+    BoardHealth waitForSameWorkflow(ConnectedBoard board, int port, BooleanSupplier processAlive) {
+<span class="nc" id="L60">        return waitForSameWorkflow(board, port, processAlive, STARTUP_ALIVE_WAIT);</span>
+    }
+
+    /// Waits for the freshly started worker to report the expected workflow. A cold JVM on a slow
+    /// host can need well over ten seconds to bind its HTTP port, so the budget is generous while
+    /// the process is still alive; a worker whose process has died can never become healthy, so
+    /// that case returns immediately instead of burning the remaining budget.
+    ///
+    /// This polls instead of waiting for a worker-side readiness event. A readiness marker file
+    /// watched with `WatchService` was considered and deferred: the HTTP probe stays
+    /// mandatory because only the answer on the port proves the listener is the expected worker
+    /// for this workflow and board, and the event would save at most one poll interval on a wait
+    /// dominated by multi-second JVM startup. See
+    /// docs/adr/0053-sleep-based-waits-kept-as-polling-boundaries.md.
+    BoardHealth waitForSameWorkflow(ConnectedBoard board, int port, BooleanSupplier processAlive, Duration aliveWait) {
+<span class="nc" id="L75">        long deadline = System.nanoTime() + aliveWait.toNanos();</span>
+        while (true) {
+<span class="nc" id="L77">            BoardHealth last = workflowHealth(board.workflowPath(), board.boardId(), board.boardKey(), port);</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (last.kind() == BoardHealthKind.SAME_WORKFLOW</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                    || !processAlive.getAsBoolean()</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                    || System.nanoTime() &gt;= deadline</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                    || !sleptWithoutInterrupt(SAME_WORKFLOW_POLL_DELAY)) {</span>
+<span class="nc" id="L82">                return last;</span>
+            }
+<span class="nc" id="L84">        }</span>
+    }
+
+    BoardHealth workflowHealth(Path expectedWorkflowPath, String expectedBoardId, String expectedBoardKey, int port) {
+<span class="nc" id="L88">        BoardHealth health = probeWorkflowHealth(expectedWorkflowPath, expectedBoardId, expectedBoardKey, port);</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (health.kind() != BoardHealthKind.PORT_USED) {</span>
+<span class="nc" id="L90">            return health;</span>
+        }
+        // A briefly busy worker can miss the short local-status timeout; one delayed re-probe keeps
+        // healthy managed workers from transiently showing up as PORT_USED. A longer timeout would
+        // slow every probe of a genuinely foreign port instead. This covers occasional GC or CPU
+        // pauses without weakening the normal port-conflict signal.
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (!sleptWithoutInterrupt(PORT_USED_RETRY_DELAY)) {</span>
+<span class="nc" id="L97">            return health;</span>
+        }
+<span class="nc" id="L99">        return probeWorkflowHealth(expectedWorkflowPath, expectedBoardId, expectedBoardKey, port);</span>
+    }
+
+    /// Returns false when interrupted, so callers report the freshest health instead of probing on.
+    private static boolean sleptWithoutInterrupt(Duration delay) {
+        try {
+<span class="nc" id="L105">            Thread.sleep(delay);</span>
+<span class="nc" id="L106">            return true;</span>
+<span class="nc" id="L107">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L108">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L109">            return false;</span>
+        }
+    }
+
+    private BoardHealth probeWorkflowHealth(
+            Path expectedWorkflowPath, String expectedBoardId, String expectedBoardKey, int port) {
+<span class="nc bnc" id="L115" title="All 4 branches missed.">        if (port &lt;= 0 || !portAcceptsConnections(port)) {</span>
+<span class="nc" id="L116">            return new BoardHealth(BoardHealthKind.STOPPED, port, Optional.empty(), Optional.empty());</span>
+        }
+        try {
+<span class="nc" id="L119">            HttpRequest request = HttpRequest.newBuilder(localStatusUri(port))</span>
+<span class="nc" id="L120">                    .timeout(LOCAL_STATUS_TIMEOUT)</span>
+<span class="nc" id="L121">                    .GET()</span>
+<span class="nc" id="L122">                    .build();</span>
+<span class="nc" id="L123">            HttpResponse&lt;String&gt; response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            if (response.statusCode() != Status.OK.getStatusCode()) {</span>
+<span class="nc" id="L125">                return new BoardHealth(BoardHealthKind.PORT_USED, port, Optional.empty(), Optional.empty());</span>
+            }
+<span class="nc" id="L127">            Map&lt;String, Object&gt; status = JSON.readValue(response.body(), JSON_MAP_TYPE);</span>
+<span class="nc" id="L128">            Optional&lt;String&gt; actualWorkflowPath = optionalString(status.get(&quot;workflowPath&quot;));</span>
+<span class="nc" id="L129">            Optional&lt;String&gt; actualBoardId = optionalString(status.get(&quot;boardId&quot;));</span>
+<span class="nc" id="L130">            Optional&lt;String&gt; actualConfiguredBoardId = optionalString(status.get(&quot;configuredBoardId&quot;));</span>
+<span class="nc" id="L131">            Optional&lt;Long&gt; workerPid = optionalPid(status.get(&quot;pid&quot;));</span>
+<span class="nc" id="L132">            if (actualWorkflowPath</span>
+<span class="nc" id="L133">                            .filter(path -&gt; PathsEqual.samePath(Path.of(path), expectedWorkflowPath))</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                            .isPresent()</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                    &amp;&amp; boardIdMatches(actualBoardId, actualConfiguredBoardId, expectedBoardId, expectedBoardKey)) {</span>
+<span class="nc" id="L136">                return new BoardHealth(</span>
+                        BoardHealthKind.SAME_WORKFLOW, port, actualWorkflowPath, actualBoardId, workerPid);
+            }
+<span class="nc" id="L139">            return new BoardHealth(BoardHealthKind.WRONG_WORKFLOW, port, actualWorkflowPath, actualBoardId, workerPid);</span>
+<span class="nc" id="L140">        } catch (IOException | InterruptedException | IllegalArgumentException e) {</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (e instanceof InterruptedException) {</span>
+<span class="nc" id="L142">                Thread.currentThread().interrupt();</span>
+            }
+<span class="nc" id="L144">            return new BoardHealth(BoardHealthKind.PORT_USED, port, Optional.empty(), Optional.empty());</span>
+        }
+    }
+
+    int managedHealthPort(Path workflowPath) {
+<span class="nc" id="L149">        return managedHealthPort(workflowPath, TrelloBoardSetup.DEFAULT_SERVER_PORT, null);</span>
+    }
+
+    int managedHealthPort(Path workflowPath, int fallbackPort) {
+<span class="nc" id="L153">        return managedHealthPort(workflowPath, fallbackPort, null);</span>
+    }
+
+    int managedHealthPort(Path workflowPath, int fallbackPort, Path envPath) {
+<span class="nc" id="L157">        return externalHttpPortOverride(envPath)</span>
+<span class="nc" id="L158">                .map(LocalHealthChecker::requireStableExternalPort)</span>
+<span class="nc" id="L159">                .orElseGet(() -&gt; stableWorkflowPort(workflowPath, fallbackPort, envPath));</span>
+    }
+
+    private int stableWorkflowPort(Path workflowPath, int fallbackPort, Path envPath) {
+<span class="nc" id="L163">        int port = workflowConfig</span>
+<span class="nc" id="L164">                .serverPort(workflowPath, WorkflowEnvironmentResolver.resolver(environment, envPath))</span>
+<span class="nc" id="L165">                .orElse(fallbackPort);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (port == 0) {</span>
+<span class="nc" id="L167">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_managed_port_required&quot;,
+                    &quot;Managed local setup needs a stable HTTP port. Use a positive server.port for setup-local managed workers.&quot;);
+        }
+<span class="nc" id="L171">        return port;</span>
+    }
+
+    Optional&lt;String&gt; externalHttpPortOverrideSource(Path envPath) {
+<span class="nc" id="L175">        return WorkflowEnvironmentResolver.externalHttpPortOverrideSource(environment, envPath);</span>
+    }
+
+    static boolean portAcceptsConnections(int port) {
+<span class="nc bnc" id="L179" title="All 2 branches missed.">        if (port &lt;= 0) {</span>
+<span class="nc" id="L180">            return false;</span>
+        }
+<span class="nc" id="L182">        try (var socket = new Socket()) {</span>
+<span class="nc" id="L183">            socket.connect(new InetSocketAddress(LOOPBACK_IPV4, port), 150);</span>
+<span class="nc" id="L184">            return true;</span>
+<span class="nc" id="L185">        } catch (IOException e) {</span>
+<span class="nc" id="L186">            return false;</span>
+        }
+    }
+
+    static InetAddress loopbackIpv4ForTests() {
+<span class="nc" id="L191">        return LOOPBACK_IPV4;</span>
+    }
+
+    private static InetAddress loopbackIpv4() {
+        try {
+<span class="nc" id="L196">            return InetAddress.getByAddress(new byte[] {127, 0, 0, 1});</span>
+<span class="nc" id="L197">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L198">            throw new ExceptionInInitializerError(e);</span>
+        }
+    }
+
+    static URI localStatusUri(int port) {
+<span class="nc" id="L203">        return URI.create(localServerUrl(port) + &quot;/api/v1/local-status&quot;);</span>
+    }
+
+    static String localStateUrl(int port) {
+<span class="nc" id="L207">        return localServerUrl(port) + &quot;/api/v1/state&quot;;</span>
+    }
+
+    static String localServerUrl(int port) {
+<span class="nc" id="L211">        return &quot;http://&quot; + LOOPBACK_HOST + &quot;:&quot; + port;</span>
+    }
+
+    private Optional&lt;Integer&gt; externalHttpPortOverride(Path envPath) {
+<span class="nc bnc" id="L215" title="All 2 branches missed.">        Path dotenv = envPath == null ? Path.of(&quot;.env&quot;) : envPath;</span>
+<span class="nc" id="L216">        return LocalEnvironment.firstPresent(dotenv, environment, HTTP_PORT_ENVIRONMENT_NAMES.toArray(String[]::new))</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                .filter(value -&gt; !blank(value))</span>
+<span class="nc" id="L218">                .map(value -&gt; {</span>
+                    try {
+<span class="nc" id="L220">                        int port = Integer.parseInt(value.trim());</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                        if (!LocalPort.isValid(port)) {</span>
+<span class="nc" id="L222">                            throw new TrelloBoardSetupException(</span>
+                                    &quot;setup_invalid_http_port_override&quot;,
+                                    &quot;SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT must be between 1 and 65535.&quot;);
+                        }
+<span class="nc" id="L226">                        return port;</span>
+<span class="nc" id="L227">                    } catch (NumberFormatException e) {</span>
+<span class="nc" id="L228">                        throw new TrelloBoardSetupException(</span>
+                                &quot;setup_invalid_http_port_override&quot;,
+                                &quot;SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT must be an integer.&quot;,
+                                e);
+                    }
+                });
+    }
+
+    private static boolean boardIdMatches(
+            Optional&lt;String&gt; actualBoardId,
+            Optional&lt;String&gt; actualConfiguredBoardId,
+            String expectedBoardId,
+            String expectedBoardKey) {
+<span class="nc" id="L241">        return actualBoardId</span>
+<span class="nc" id="L242">                        .filter(actual -&gt; boardIdMatches(actual, expectedBoardId, expectedBoardKey))</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                        .isPresent()</span>
+                || actualConfiguredBoardId
+<span class="nc" id="L245">                        .filter(actual -&gt; boardIdMatches(actual, expectedBoardId, expectedBoardKey))</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">                        .isPresent();</span>
+    }
+
+    private static boolean boardIdMatches(String actualBoardId, String expectedBoardId, String expectedBoardKey) {
+<span class="nc bnc" id="L250" title="All 4 branches missed.">        return actualBoardId.equals(expectedBoardId) || actualBoardId.equals(expectedBoardKey);</span>
+    }
+
+    private static int requireStableExternalPort(int port) {
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        if (port == 0) {</span>
+<span class="nc" id="L255">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_managed_port_required&quot;,
+                    &quot;Managed local setup needs a stable HTTP port. Remove SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT=0 or set a positive workflow server.port.&quot;);
+        }
+<span class="nc" id="L259">        return port;</span>
+    }
+
+    private static Optional&lt;Long&gt; optionalPid(Object value) {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        if (value instanceof Number number) {</span>
+<span class="nc" id="L264">            long pid = number.longValue();</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            return pid &gt; 0 ? Optional.of(pid) : Optional.empty();</span>
+        }
+<span class="nc" id="L267">        return Optional.empty();</span>
+    }
+
+    private static Optional&lt;String&gt; optionalString(Object value) {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        String text = value == null ? null : String.valueOf(value);</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        return blank(text) ? Optional.empty() : Optional.of(text);</span>
+    }
+
+    private static boolean blank(String value) {
+<span class="nc bnc" id="L276" title="All 4 branches missed.">        return value == null || value.isBlank();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

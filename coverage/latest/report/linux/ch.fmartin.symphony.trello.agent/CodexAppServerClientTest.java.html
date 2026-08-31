@@ -1,0 +1,1466 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodexAppServerClientTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">CodexAppServerClientTest.java</span></div><h1>CodexAppServerClientTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatObject;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L38">final class CodexAppServerClientTest {</span>
+    private static final int TEST_PROTOCOL_TIMEOUT_MILLIS = 5_000;
+    private static final int TEST_EXTENDED_TURN_TIMEOUT_MILLIS = 10_000;
+
+<span class="nc" id="L42">    private final ObjectMapper json = new ObjectMapper();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void launchesCodexWithGitDiscoveryLimitedToWorkspacesRoot() throws Exception {
+        // given
+<span class="nc" id="L50">        Path ceilingOutput = tempDir.resolve(&quot;ceiling.txt&quot;);</span>
+<span class="nc" id="L51">        Path appServer = writeExecutableScript(</span>
+                &quot;ceiling-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                # Absolute output path: the codex launch uses a login shell, and hosted CI login
+                # profiles can change the working directory before the script body runs.
+                printf '%s' &quot;$GIT_CEILING_DIRECTORIES&quot; &gt; '__CEILING_OUTPUT__'
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;ceiling-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-ceiling&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-ceiling&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-ceiling&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-ceiling&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;
+<span class="nc" id="L69">                        .replace(&quot;__CEILING_OUTPUT__&quot;, ceilingOutput.toString()));</span>
+<span class="nc" id="L70">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L71">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-ceiling&quot;);</span>
+<span class="nc" id="L72">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L73">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L76">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L78">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-ceiling&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a no-op turn.&quot;,
+                &quot;worker-ceiling&quot;,
+<span class="nc" id="L82">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L85">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L86">        assertThat(ceilingOutput)</span>
+<span class="nc" id="L87">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L88">                .isEqualTo(</span>
+<span class="nc" id="L89">                        config.workspace().root().toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L90">    }</span>
+
+    @Test
+    void handlesTurnCompletedArrivingBeforeAwaiterIsRegistered() throws Exception {
+        // given
+<span class="nc" id="L95">        Path appServer = writeExecutableScript(</span>
+                &quot;fast-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;fast-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-fast&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-fast&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-fast&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-fast&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L110">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L111">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-fast&quot;);</span>
+<span class="nc" id="L112">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L113">        Instant eventTime = Instant.parse(&quot;2026-05-11T12:34:56Z&quot;);</span>
+<span class="nc" id="L114">        var client = new CodexAppServerClient(</span>
+                json,
+                new TrelloHandoffToolHandler(json, new TrelloClient(json)),
+<span class="nc" id="L117">                Clock.fixed(eventTime, ZoneOffset.UTC));</span>
+<span class="nc" id="L118">        List&lt;AgentEvent&gt; events = new ArrayList&lt;&gt;();</span>
+
+        // when
+<span class="nc" id="L121">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L123">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-fast&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a fast no-op turn.&quot;,
+                &quot;worker-fast&quot;,
+<span class="nc" id="L127">                events::add);</span>
+
+        // then
+<span class="nc" id="L130">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L131">        assertThat(events).allSatisfy(event -&gt; assertThat(event.timestamp()).isEqualTo(eventTime));</span>
+<span class="nc" id="L132">    }</span>
+
+    @Test
+    void keepsQueuedTurnCompletionWhenAppServerExitsBeforeAwaiterIsRegistered() throws Exception {
+        // given
+<span class="nc" id="L137">        Path appServer = writeExecutableScript(</span>
+                &quot;completed-then-exit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;completed-exit-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-completed-exit\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-completed-exit\\&quot;}}}&quot;
+                      echo &quot;{\\&quot;method\\&quot;:\\&quot;turn/completed\\&quot;,\\&quot;params\\&quot;:{\\&quot;threadId\\&quot;:\\&quot;thread-completed-exit\\&quot;,\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-completed-exit\\&quot;,\\&quot;error\\&quot;:null}}}&quot;
+                      exit 0
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L154">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L156">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L158">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L160">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L161">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-completed-exit&quot;);</span>
+<span class="nc" id="L162">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L163">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L166">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L168">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-completed-exit&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a completed exit no-op turn.&quot;,
+                &quot;worker-completed-exit&quot;,
+<span class="nc" id="L172">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L175">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L176">    }</span>
+
+    @Test
+    void preservesAppServerErrorResponseMessage() throws Exception {
+        // given
+<span class="nc" id="L181">        Path appServer = writeExecutableScript(</span>
+                &quot;error-response-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;error\\&quot;:{\\&quot;code\\&quot;:-32000,\\&quot;message\\&quot;:\\&quot;bad initialize\\&quot;}}&quot;
+                      exit 0
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L195">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L196">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-error-response&quot;);</span>
+<span class="nc" id="L197">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L198">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L201">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L203">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-error-response&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do an error-response turn.&quot;,
+                &quot;worker-error-response&quot;,
+<span class="nc" id="L207">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L210">        assertThat(result)</span>
+<span class="nc" id="L211">                .isEqualTo(</span>
+<span class="nc" id="L212">                        AgentRunResult.fail(&quot;codex_protocol_error: {\&quot;code\&quot;:-32000,\&quot;message\&quot;:\&quot;bad initialize\&quot;}&quot;));</span>
+<span class="nc" id="L213">    }</span>
+
+    @Test
+    void sendsAdditionalWritableRootsAsWorkspaceWriteSandboxPolicy() throws Exception {
+        // given
+<span class="nc" id="L218">        Path capture = tempDir.resolve(&quot;turn-start.jsonl&quot;);</span>
+<span class="nc" id="L219">        Path appServer = writeExecutableScript(</span>
+                &quot;capturing-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                capture=&quot;$1&quot;
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;capture-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-capture&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      printf '%s\\n' &quot;$line&quot; &gt; &quot;$capture&quot;
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-capture&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-capture&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-capture&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L236">        Path extraRoot = tempDir.resolve(&quot;allowed-project&quot;);</span>
+<span class="nc" id="L237">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+                appServer + &quot; &quot; + capture,
+                &quot;additional_writable_roots&quot;,
+<span class="nc" id="L241">                List.of(extraRoot.toString()),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L243">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L245">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L246">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-capture&quot;);</span>
+<span class="nc" id="L247">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L248">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L251">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L253">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-capture&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a capture no-op turn.&quot;,
+                &quot;worker-capture&quot;,
+<span class="nc" id="L257">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L260">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L261">        assertThat(json.readTree(Files.readString(capture))</span>
+<span class="nc" id="L262">                        .path(&quot;params&quot;)</span>
+<span class="nc" id="L263">                        .path(&quot;sandboxPolicy&quot;)</span>
+<span class="nc" id="L264">                        .path(&quot;writableRoots&quot;))</span>
+<span class="nc" id="L265">                .extracting(JsonNode::asText)</span>
+<span class="nc" id="L266">                .contains(extraRoot.toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L267">    }</span>
+
+    @Test
+    void preservesWorkspaceWriteNetworkAccessWhenMergingWritableRoots() throws Exception {
+        // given
+<span class="nc" id="L272">        Path capture = tempDir.resolve(&quot;turn-start-network.jsonl&quot;);</span>
+<span class="nc" id="L273">        Path appServer = writeExecutableScript(</span>
+                &quot;capturing-network-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                capture=&quot;$1&quot;
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;capture-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-capture&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      printf '%s\\n' &quot;$line&quot; &gt; &quot;$capture&quot;
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-capture&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-capture&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-capture&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L290">        Path extraRoot = tempDir.resolve(&quot;allowed-project&quot;);</span>
+<span class="nc" id="L291">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+                appServer + &quot; &quot; + capture,
+                &quot;turn_sandbox_policy&quot;,
+<span class="nc" id="L295">                Map.of(&quot;type&quot;, &quot;workspaceWrite&quot;, &quot;networkAccess&quot;, true),</span>
+                &quot;additional_writable_roots&quot;,
+<span class="nc" id="L297">                List.of(extraRoot.toString()),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L299">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L301">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L302">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-capture-network&quot;);</span>
+<span class="nc" id="L303">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L304">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L307">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L309">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-capture-network&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a capture no-op turn.&quot;,
+                &quot;worker-capture&quot;,
+<span class="nc" id="L313">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L316">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L317">        JsonNode sandboxPolicy =</span>
+<span class="nc" id="L318">                json.readTree(Files.readString(capture)).path(&quot;params&quot;).path(&quot;sandboxPolicy&quot;);</span>
+<span class="nc" id="L319">        assertThat(sandboxPolicy.path(&quot;type&quot;).asText()).isEqualTo(&quot;workspaceWrite&quot;);</span>
+<span class="nc" id="L320">        assertThat(sandboxPolicy.path(&quot;networkAccess&quot;))</span>
+<span class="nc" id="L321">                .as(&quot;workspace-write sandbox policy networkAccess&quot;)</span>
+<span class="nc" id="L322">                .isEqualTo(json.getNodeFactory().booleanNode(true));</span>
+<span class="nc" id="L323">        assertThat(sandboxPolicy.path(&quot;writableRoots&quot;))</span>
+<span class="nc" id="L324">                .extracting(JsonNode::asText)</span>
+<span class="nc" id="L325">                .contains(extraRoot.toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L326">    }</span>
+
+    @Test
+    void sendsConfiguredModelAndReasoningEffortToCodexAppServer() throws Exception {
+        // given
+<span class="nc" id="L331">        Path capture = tempDir.resolve(&quot;model-requests.jsonl&quot;);</span>
+<span class="nc" id="L332">        Path appServer = writeExecutableScript(</span>
+                &quot;model-capturing-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                capture=&quot;$1&quot;
+                : &gt; &quot;$capture&quot;
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;model-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*)
+                      printf '%s\\n' &quot;$line&quot; &gt;&gt; &quot;$capture&quot;
+                      echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-model&quot;}}}'
+                      ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      printf '%s\\n' &quot;$line&quot; &gt;&gt; &quot;$capture&quot;
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-model&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-model&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-model&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L353">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+                appServer + &quot; &quot; + capture,
+                &quot;model&quot;,
+                &quot;gpt-5.5&quot;,
+                &quot;reasoning_effort&quot;,
+                &quot;xhigh&quot;,
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L361">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L363">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L364">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-model&quot;);</span>
+<span class="nc" id="L365">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L366">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L369">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L371">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-model&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a model capture no-op turn.&quot;,
+                &quot;worker-model&quot;,
+<span class="nc" id="L375">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L378">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L379">        List&lt;JsonNode&gt; requests = capturedRequests(capture);</span>
+<span class="nc" id="L380">        assertThat(requests)</span>
+<span class="nc" id="L381">                .extracting(request -&gt; request.path(&quot;method&quot;).asText())</span>
+<span class="nc" id="L382">                .containsExactly(&quot;thread/start&quot;, &quot;turn/start&quot;);</span>
+<span class="nc" id="L383">        assertThat(requests.getFirst().path(&quot;params&quot;).path(&quot;model&quot;).asText()).isEqualTo(&quot;gpt-5.5&quot;);</span>
+<span class="nc" id="L384">        assertThat(requests.get(1).path(&quot;params&quot;).path(&quot;model&quot;).asText()).isEqualTo(&quot;gpt-5.5&quot;);</span>
+<span class="nc" id="L385">        assertThat(requests.get(1).path(&quot;params&quot;).path(&quot;effort&quot;).asText()).isEqualTo(&quot;xhigh&quot;);</span>
+<span class="nc" id="L386">    }</span>
+
+    @Test
+    void omitsModelAndReasoningEffortWhenWorkflowDoesNotConfigureThem() throws Exception {
+        // given
+<span class="nc" id="L391">        Path capture = tempDir.resolve(&quot;default-model-requests.jsonl&quot;);</span>
+<span class="nc" id="L392">        Path appServer = writeExecutableScript(</span>
+                &quot;default-model-capturing-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                capture=&quot;$1&quot;
+                : &gt; &quot;$capture&quot;
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;default-model-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*)
+                      printf '%s\\n' &quot;$line&quot; &gt;&gt; &quot;$capture&quot;
+                      echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-default-model&quot;}}}'
+                      ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      printf '%s\\n' &quot;$line&quot; &gt;&gt; &quot;$capture&quot;
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-default-model&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-default-model&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-default-model&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L413">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+                appServer + &quot; &quot; + capture,
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L417">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L419">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L420">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-default-model&quot;);</span>
+<span class="nc" id="L421">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L422">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L425">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L427">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-default-model&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a default model capture no-op turn.&quot;,
+                &quot;worker-default-model&quot;,
+<span class="nc" id="L431">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L434">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L435">        List&lt;JsonNode&gt; requests = capturedRequests(capture);</span>
+<span class="nc" id="L436">        assertThat(requests)</span>
+<span class="nc" id="L437">                .extracting(request -&gt; request.path(&quot;method&quot;).asText())</span>
+<span class="nc" id="L438">                .containsExactly(&quot;thread/start&quot;, &quot;turn/start&quot;);</span>
+<span class="nc" id="L439">        assertThat(requests)</span>
+<span class="nc" id="L440">                .satisfiesExactly(</span>
+<span class="nc" id="L441">                        request -&gt; assertThat(request.path(&quot;params&quot;))</span>
+<span class="nc" id="L442">                                .as(&quot;thread/start params&quot;)</span>
+<span class="nc" id="L443">                                .isInstanceOfSatisfying(ObjectNode.class, params -&gt; assertThat(params.path(&quot;model&quot;))</span>
+<span class="nc" id="L444">                                        .as(&quot;thread/start omitted model&quot;)</span>
+<span class="nc" id="L445">                                        .isEqualTo(json.missingNode())),</span>
+<span class="nc" id="L446">                        request -&gt; assertThat(request.path(&quot;params&quot;))</span>
+<span class="nc" id="L447">                                .as(&quot;turn/start params&quot;)</span>
+<span class="nc" id="L448">                                .isInstanceOfSatisfying(ObjectNode.class, params -&gt; assertThatObject(params)</span>
+<span class="nc" id="L449">                                        .as(&quot;turn/start omitted [model, effort]&quot;)</span>
+<span class="nc" id="L450">                                        .extracting(node -&gt; node.path(&quot;model&quot;), node -&gt; node.path(&quot;effort&quot;))</span>
+<span class="nc" id="L451">                                        .containsExactly(json.missingNode(), json.missingNode())));</span>
+<span class="nc" id="L452">    }</span>
+
+    @Test
+    void continuesMultipleTurnsOnOneThreadWhenControllerRequestsIt() throws Exception {
+        // given
+<span class="nc" id="L457">        Path capture = tempDir.resolve(&quot;turns.jsonl&quot;);</span>
+<span class="nc" id="L458">        Path appServer = writeExecutableScript(</span>
+                &quot;multi-turn-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                capture=&quot;$1&quot;
+                turn_count=0
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;multi-turn-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-shared\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      turn_count=$((turn_count + 1))
+                      printf '%s\\n' &quot;$line&quot; &gt;&gt; &quot;$capture&quot;
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-$turn_count\\&quot;}}}&quot;
+                      echo &quot;{\\&quot;method\\&quot;:\\&quot;turn/completed\\&quot;,\\&quot;params\\&quot;:{\\&quot;threadId\\&quot;:\\&quot;thread-shared\\&quot;,\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-$turn_count\\&quot;,\\&quot;error\\&quot;:null}}}&quot;
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L478">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+                appServer + &quot; &quot; + capture,
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L482">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L484">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L485">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-multi-turn&quot;);</span>
+<span class="nc" id="L486">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L487">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L490">        AgentRunResult result = client.runSession(</span>
+                config,
+<span class="nc" id="L492">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-multi-turn&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;first turn&quot;,
+                &quot;worker-multi-turn&quot;,
+<span class="nc" id="L496">                event -&gt; {},</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">                completedTurns -&gt; completedTurns == 1</span>
+<span class="nc" id="L498">                        ? CodexAppServerClient.TurnDecision.continueWith(&quot;second turn&quot;)</span>
+<span class="nc" id="L499">                        : CodexAppServerClient.TurnDecision.stop());</span>
+
+        // then
+<span class="nc" id="L502">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L503">        List&lt;JsonNode&gt; turns = Files.readAllLines(capture).stream()</span>
+<span class="nc" id="L504">                .map(line -&gt; {</span>
+                    try {
+<span class="nc" id="L506">                        return json.readTree(line);</span>
+<span class="nc" id="L507">                    } catch (Exception e) {</span>
+<span class="nc" id="L508">                        throw new AssertionError(e);</span>
+                    }
+                })
+<span class="nc" id="L511">                .toList();</span>
+<span class="nc" id="L512">        assertThat(turns).hasSize(2);</span>
+<span class="nc" id="L513">        assertThat(turns)</span>
+<span class="nc" id="L514">                .extracting(turn -&gt; turn.path(&quot;params&quot;).path(&quot;threadId&quot;).asText())</span>
+<span class="nc" id="L515">                .containsExactly(&quot;thread-shared&quot;, &quot;thread-shared&quot;);</span>
+<span class="nc" id="L516">        assertThat(turns)</span>
+<span class="nc" id="L517">                .extracting(turn -&gt; turn.at(&quot;/params/input/0/text&quot;).asText())</span>
+<span class="nc" id="L518">                .containsExactly(&quot;first turn&quot;, &quot;second turn&quot;);</span>
+<span class="nc" id="L519">    }</span>
+
+    @Test
+    void failsPromptlyWhenAppServerExitsBeforeTurnCompletion() throws Exception {
+        // given
+<span class="nc" id="L524">        Path appServer = writeExecutableScript(</span>
+                &quot;exiting-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;exit-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-exit\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-exit\\&quot;}}}&quot;
+                      exit 0
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L540">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L542">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L544">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L546">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L547">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-exit&quot;);</span>
+<span class="nc" id="L548">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L549">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L552">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L554">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-exit&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do an exit no-op turn.&quot;,
+                &quot;worker-exit&quot;,
+<span class="nc" id="L558">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L561">        assertThat(result)</span>
+<span class="nc" id="L562">                .isEqualTo(AgentRunResult.fail(</span>
+                        &quot;process_exit: codex app-server stdout closed before active turn completed&quot;));
+<span class="nc" id="L564">    }</span>
+
+    @Test
+    void failsPromptlyWhenAppServerExitsBeforeRequestResponse() throws Exception {
+        // given
+<span class="nc" id="L569">        Path appServer = writeExecutableScript(</span>
+                &quot;exiting-before-request-response-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;exit-before-response-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) exit 0 ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L581">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L583">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L585">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L587">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L588">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-exit-request&quot;);</span>
+<span class="nc" id="L589">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L590">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L593">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L595">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-exit-request&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do an exit before response turn.&quot;,
+                &quot;worker-exit-request&quot;,
+<span class="nc" id="L599">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L602">        assertThat(result)</span>
+<span class="nc" id="L603">                .isEqualTo(AgentRunResult.fail(</span>
+                        &quot;process_exit: codex app-server stdout closed before active turn completed&quot;));
+<span class="nc" id="L605">    }</span>
+
+    @Test
+    void failsTurnWhenAppServerEmitsTurnFailureNotification() throws Exception {
+        // given
+<span class="nc" id="L610">        Path appServer = writeExecutableScript(</span>
+                &quot;failed-turn-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;failed-turn-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-failed\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-failed\\&quot;}}}&quot;
+                      echo &quot;{\\&quot;method\\&quot;:\\&quot;turn/failed\\&quot;,\\&quot;params\\&quot;:{\\&quot;threadId\\&quot;:\\&quot;thread-failed\\&quot;,\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-failed\\&quot;},\\&quot;message\\&quot;:\\&quot;tool failed\\&quot;}}&quot;
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L626">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L627">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-failed&quot;);</span>
+<span class="nc" id="L628">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L629">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L632">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L634">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-failed&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a failed turn.&quot;,
+                &quot;worker-failed&quot;,
+<span class="nc" id="L638">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L641">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: tool failed&quot;));</span>
+<span class="nc" id="L642">    }</span>
+
+    @Test
+    void preservesGenericTurnFailureFormattingForNestedBadRequest() throws Exception {
+        // given
+<span class="nc" id="L647">        Path appServer = writeExecutableScript(</span>
+                &quot;nested-bad-request-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;bad-request-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-bad-request&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-bad-request&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/failed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-bad-request&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-bad-request&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;unknown model&quot;,&quot;codexErrorInfo&quot;:&quot;badRequest&quot;}}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L664">        AgentRunResult result = runFailureTurn(</span>
+<span class="nc" id="L665">                appServer, Clock.fixed(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;), ZoneOffset.UTC), &quot;nested-bad-request&quot;);</span>
+
+        // then
+<span class="nc" id="L668">        assertThat(result)</span>
+<span class="nc" id="L669">                .isEqualTo(</span>
+<span class="nc" id="L670">                        AgentRunResult.fail(</span>
+                                &quot;turn_failed: {\&quot;threadId\&quot;:\&quot;thread-bad-request\&quot;,\&quot;turn\&quot;:{\&quot;id\&quot;:\&quot;turn-bad-request\&quot;,\&quot;error\&quot;:{\&quot;message\&quot;:\&quot;unknown model\&quot;,\&quot;codexErrorInfo\&quot;:\&quot;badRequest\&quot;}}}&quot;));
+<span class="nc" id="L672">    }</span>
+
+    @Test
+    void failsTurnWhenAppServerEmitsTerminalErrorNotification() throws Exception {
+        // given
+<span class="nc" id="L677">        Path appServer = writeExecutableScript(</span>
+                &quot;terminal-error-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;terminal-error-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-error\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-error\\&quot;}}}&quot;
+                      echo &quot;{\\&quot;method\\&quot;:\\&quot;error\\&quot;,\\&quot;params\\&quot;:{\\&quot;threadId\\&quot;:\\&quot;thread-error\\&quot;,\\&quot;turnId\\&quot;:\\&quot;turn-error\\&quot;,\\&quot;willRetry\\&quot;:false,\\&quot;error\\&quot;:{\\&quot;message\\&quot;:\\&quot;model request failed\\&quot;,\\&quot;codexErrorInfo\\&quot;:\\&quot;badRequest\\&quot;}}}&quot;
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L693">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L694">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-error&quot;);</span>
+<span class="nc" id="L695">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L696">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L699">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L701">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-error&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a terminal error turn.&quot;,
+                &quot;worker-error&quot;,
+<span class="nc" id="L705">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L708">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: model request failed&quot;));</span>
+<span class="nc" id="L709">    }</span>
+
+    @Test
+    void classifiesCompletedUsageLimitAndUsesLatestExhaustedWindowResetWithoutLeakingDetails() throws Exception {
+        // given
+<span class="nc" id="L714">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L715">        Instant primaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L716">        Instant secondaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L717">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;completed-usage-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__},&quot;secondary&quot;:{&quot;usedPercent&quot;:101,&quot;resetsAt&quot;:__SECONDARY_RESET__}}}}'
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;additionalDetails&quot;:&quot;private account payload&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L723">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(primaryReset.getEpochSecond()))</span>
+<span class="nc" id="L724">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(secondaryReset.getEpochSecond())));</span>
+
+        // when
+<span class="nc" id="L727">        List&lt;AgentEvent&gt; events = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L728">        AgentRunResult result =</span>
+<span class="nc" id="L729">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;completed-usage&quot;, events::add);</span>
+
+        // then
+<span class="nc" id="L732">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L733">        assertThat(result.reason()).isEqualTo(&quot;turn_failed: Usage is unavailable.&quot;);</span>
+<span class="nc" id="L734">        assertThat(result.reason()).doesNotContain(&quot;private account payload&quot;, &quot;additionalDetails&quot;, &quot;rateLimits&quot;);</span>
+<span class="nc" id="L735">        assertThat(result.retryNotBefore()).hasValue(secondaryReset);</span>
+<span class="nc" id="L736">        assertThat(events.stream()</span>
+<span class="nc" id="L737">                        .filter(event -&gt; event.event().equals(&quot;turn/completed&quot;))</span>
+<span class="nc" id="L738">                        .map(AgentEvent::message))</span>
+<span class="nc" id="L739">                .containsExactly(&quot;Usage is unavailable.&quot;)</span>
+<span class="nc" id="L740">                .allSatisfy(message -&gt; assertThat(message)</span>
+<span class="nc" id="L741">                        .doesNotContain(&quot;private account payload&quot;, &quot;additionalDetails&quot;, &quot;codexErrorInfo&quot;));</span>
+<span class="nc" id="L742">    }</span>
+
+    @Test
+    void rejectedRateLimitEventCannotSupplyAUsageRetryDeadline() throws Exception {
+        // given
+<span class="nc" id="L747">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L748">        Instant rejectedReset = now.plusSeconds(120);</span>
+<span class="nc" id="L749">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;rejected-rate-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__}}}}'
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L755">                        .replace(&quot;__RESET__&quot;, Long.toString(rejectedReset.getEpochSecond())));</span>
+<span class="nc" id="L756">        List&lt;AgentEvent&gt; acceptedEvents = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L757">        AgentEventListener listener = new AgentEventListener() {</span>
+            @Override
+            public void onEvent(AgentEvent event) {
+<span class="nc" id="L760">                acceptedEvents.add(event);</span>
+<span class="nc" id="L761">            }</span>
+
+            @Override
+            public boolean onEventAndReportAccepted(AgentEvent event) {
+<span class="nc bnc" id="L765" title="All 2 branches missed.">                if (event.event().equals(&quot;account/rateLimits/updated&quot;)) {</span>
+<span class="nc" id="L766">                    return false;</span>
+                }
+<span class="nc" id="L768">                onEvent(event);</span>
+<span class="nc" id="L769">                return true;</span>
+            }
+        };
+
+        // when
+<span class="nc" id="L774">        AgentRunResult result =</span>
+<span class="nc" id="L775">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;rejected-rate-limit&quot;, listener);</span>
+
+        // then
+<span class="nc" id="L778">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L779">        assertThat(result.retryNotBefore()).isEmpty();</span>
+<span class="nc" id="L780">        assertThat(acceptedEvents).noneMatch(event -&gt; event.event().equals(&quot;account/rateLimits/updated&quot;));</span>
+<span class="nc" id="L781">    }</span>
+
+    @Test
+    void preservesSchemaValidFarFutureUsageResetThatExceedsMillisecondDurationRange() throws Exception {
+        // given
+<span class="nc" id="L786">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L787">        Instant farFutureReset = Instant.ofEpochSecond(Instant.MAX.getEpochSecond() - 1);</span>
+<span class="nc" id="L788">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;far-future-usage-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__},&quot;secondary&quot;:null}}}'
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L794">                        .replace(&quot;__RESET__&quot;, Long.toString(farFutureReset.getEpochSecond())));</span>
+
+        // when
+<span class="nc" id="L797">        AgentRunResult result = runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;far-future-usage&quot;);</span>
+
+        // then
+<span class="nc" id="L800">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L801">        assertThat(result.retryNotBefore()).hasValue(farFutureReset);</span>
+<span class="nc" id="L802">    }</span>
+
+    @Test
+    void mergesSparseRollingRateLimitWindowsWithoutClearingUnavailableValues() throws Exception {
+        // given
+<span class="nc" id="L807">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L808">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L809">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L810">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L811">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;sparse-rate-limit-updates-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__}}}}'
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:null,&quot;secondary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__SECONDARY_RESET__}}}}'
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:null}}}}'
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L819">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
+<span class="nc" id="L820">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
+
+        // when
+<span class="nc" id="L823">        AgentRunResult result =</span>
+<span class="nc" id="L824">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;sparse-rate-limits&quot;, event -&gt; {</span>
+<span class="nc bnc" id="L825" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L826">                        publishedRateLimits.add(event.payload());</span>
+                    }
+<span class="nc" id="L828">                });</span>
+
+        // then
+<span class="nc" id="L831">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L832">        assertThat(result.retryNotBefore()).hasValue(laterPrimaryReset);</span>
+<span class="nc" id="L833">        assertThat(publishedRateLimits).hasSize(3);</span>
+<span class="nc" id="L834">        assertThat(publishedRateLimits.get(1).path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L835">                .isEqualTo(laterPrimaryReset.getEpochSecond());</span>
+<span class="nc" id="L836">        assertThat(publishedRateLimits.get(2).path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L837">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
+<span class="nc" id="L838">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;\&quot;rateLimits\&quot;:null&quot;, &quot;&quot;, &quot;\&quot;rateLimits\&quot;:\&quot;malformed\&quot;&quot;, &quot;\&quot;rateLimits\&quot;:[]&quot;})
+    void malformedRateLimitUpdatesRetainCanonicalSnapshot(String malformedRateLimits) throws Exception {
+        // given
+<span class="nc" id="L844">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L845">        Instant reset = now.plusSeconds(120);</span>
+<span class="nc" id="L846">        String notifications =</span>
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__},&quot;planType&quot;:&quot;team&quot;}}}'
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{__MALFORMED_RATE_LIMITS__}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L851">                        .replace(&quot;__RESET__&quot;, Long.toString(reset.getEpochSecond()))</span>
+<span class="nc" id="L852">                        .replace(&quot;__MALFORMED_RATE_LIMITS__&quot;, malformedRateLimits);</span>
+<span class="nc" id="L853">        Path appServer = writeRateLimitNotificationScript(</span>
+<span class="nc" id="L854">                &quot;malformed-after-valid-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()) + &quot;.sh&quot;,</span>
+                notifications);
+<span class="nc" id="L856">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+
+        // when
+<span class="nc" id="L859">        AgentRunResult result = runFailureTurn(</span>
+                appServer,
+<span class="nc" id="L861">                Clock.fixed(now, ZoneOffset.UTC),</span>
+<span class="nc" id="L862">                &quot;malformed-after-valid-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()),</span>
+                event -&gt; {
+<span class="nc bnc" id="L864" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L865">                        publishedRateLimits.add(event.payload());</span>
+                    }
+<span class="nc" id="L867">                });</span>
+
+        // then
+<span class="nc" id="L870">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L871">        assertThat(publishedRateLimits).hasSize(2);</span>
+<span class="nc" id="L872">        JsonNode canonical = publishedRateLimits.getFirst();</span>
+<span class="nc" id="L873">        assertThat(canonical.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong()).isEqualTo(reset.getEpochSecond());</span>
+<span class="nc" id="L874">        assertThat(canonical.path(&quot;planType&quot;).asText()).isEqualTo(&quot;team&quot;);</span>
+<span class="nc" id="L875">        assertThat(publishedRateLimits.get(1)).isEqualTo(canonical);</span>
+<span class="nc" id="L876">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;\&quot;rateLimits\&quot;:null&quot;, &quot;&quot;, &quot;\&quot;rateLimits\&quot;:\&quot;malformed\&quot;&quot;, &quot;\&quot;rateLimits\&quot;:[]&quot;})
+    void malformedFirstRateLimitUpdatePublishesAbsentCanonicalState(String malformedRateLimits) throws Exception {
+        // given
+<span class="nc" id="L882">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L883">        String notifications =</span>
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{__MALFORMED_RATE_LIMITS__}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L887">                        .replace(&quot;__MALFORMED_RATE_LIMITS__&quot;, malformedRateLimits);</span>
+<span class="nc" id="L888">        Path appServer = writeRateLimitNotificationScript(</span>
+<span class="nc" id="L889">                &quot;malformed-first-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()) + &quot;.sh&quot;, notifications);</span>
+<span class="nc" id="L890">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+
+        // when
+<span class="nc" id="L893">        AgentRunResult result = runFailureTurn(</span>
+                appServer,
+<span class="nc" id="L895">                Clock.fixed(now, ZoneOffset.UTC),</span>
+<span class="nc" id="L896">                &quot;malformed-first-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()),</span>
+                event -&gt; {
+<span class="nc bnc" id="L898" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L899">                        publishedRateLimits.add(event.payload());</span>
+                    }
+<span class="nc" id="L901">                });</span>
+
+        // then
+<span class="nc" id="L904">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L905">        assertThat(publishedRateLimits).containsExactly(json.nullNode());</span>
+<span class="nc" id="L906">    }</span>
+
+    @Test
+    void sharesSparseRateLimitsAndMetadataAcrossSequentialAppServerSessions() throws Exception {
+        // given
+<span class="nc" id="L911">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L912">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L913">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L914">        Path firstSessionMarker = tempDir.resolve(&quot;sequential-rate-limit-first-session&quot;);</span>
+<span class="nc" id="L915">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L916">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;sequential-shared-rate-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                if mkdir '__FIRST_SESSION_MARKER__' 2&gt;/dev/null; then
+                  session=first
+                else
+                  session=second
+                fi
+                &quot;&quot;&quot;
+<span class="nc" id="L925">                        .replace(&quot;__FIRST_SESSION_MARKER__&quot;, firstSessionMarker.toString()),</span>
+                &quot;&quot;&quot;
+                if [ &quot;$session&quot; = first ]; then
+                  echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__},&quot;credits&quot;:{&quot;balance&quot;:&quot;7&quot;,&quot;hasCredits&quot;:true,&quot;unlimited&quot;:false},&quot;planType&quot;:&quot;team&quot;,&quot;limitId&quot;:&quot;limit-a&quot;,&quot;limitName&quot;:&quot;Initial limit&quot;,&quot;individualLimit&quot;:{&quot;limit&quot;:&quot;100&quot;,&quot;remainingPercent&quot;:25,&quot;resetsAt&quot;:__PRIMARY_RESET__,&quot;used&quot;:&quot;75&quot;},&quot;rateLimitReachedType&quot;:&quot;rate_limit_reached&quot;,&quot;futureMetadata&quot;:{&quot;opaque&quot;:&quot;preserve-me&quot;}}}}'
+                  echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
+                else
+                  echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:null,&quot;secondary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__SECONDARY_RESET__},&quot;credits&quot;:null,&quot;limitId&quot;:null,&quot;limitName&quot;:&quot;Updated limit&quot;,&quot;individualLimit&quot;:null,&quot;rateLimitReachedType&quot;:null,&quot;futureMetadata&quot;:null,&quot;futureAdded&quot;:&quot;available&quot;}}}'
+                  echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                fi
+                &quot;&quot;&quot;
+<span class="nc" id="L935">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
+<span class="nc" id="L936">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
+<span class="nc" id="L937">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L938">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L939">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L940">        AgentEventListener listener = event -&gt; {</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">            if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L942">                publishedRateLimits.add(event.payload());</span>
+            }
+<span class="nc" id="L944">        };</span>
+
+        // when
+<span class="nc" id="L947">        AgentRunResult first = runTurn(client, config, &quot;sequential-rate-limit-first&quot;, listener);</span>
+<span class="nc" id="L948">        AgentRunResult second = runTurn(client, config, &quot;sequential-rate-limit-second&quot;, listener);</span>
+
+        // then
+<span class="nc" id="L951">        assertThat(first).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L952">        assertThat(second.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L953">        assertThat(second.retryNotBefore()).hasValue(laterPrimaryReset);</span>
+<span class="nc" id="L954">        assertThat(publishedRateLimits).hasSize(2);</span>
+<span class="nc" id="L955">        JsonNode merged = publishedRateLimits.get(1);</span>
+<span class="nc" id="L956">        assertThat(merged.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong()).isEqualTo(laterPrimaryReset.getEpochSecond());</span>
+<span class="nc" id="L957">        assertThat(merged.path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L958">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
+<span class="nc" id="L959">        assertThat(merged.path(&quot;credits&quot;).path(&quot;balance&quot;).asText()).isEqualTo(&quot;7&quot;);</span>
+<span class="nc" id="L960">        assertThat(merged.path(&quot;planType&quot;).asText()).isEqualTo(&quot;team&quot;);</span>
+<span class="nc" id="L961">        assertThat(merged.path(&quot;limitId&quot;).asText()).isEqualTo(&quot;limit-a&quot;);</span>
+<span class="nc" id="L962">        assertThat(merged.path(&quot;limitName&quot;).asText()).isEqualTo(&quot;Updated limit&quot;);</span>
+<span class="nc" id="L963">        assertThat(merged.path(&quot;individualLimit&quot;).path(&quot;used&quot;).asText()).isEqualTo(&quot;75&quot;);</span>
+<span class="nc" id="L964">        assertThat(merged.path(&quot;rateLimitReachedType&quot;).asText()).isEqualTo(&quot;rate_limit_reached&quot;);</span>
+<span class="nc" id="L965">        assertThat(merged.path(&quot;futureMetadata&quot;).path(&quot;opaque&quot;).asText()).isEqualTo(&quot;preserve-me&quot;);</span>
+<span class="nc" id="L966">        assertThat(merged.path(&quot;futureAdded&quot;).asText()).isEqualTo(&quot;available&quot;);</span>
+<span class="nc" id="L967">    }</span>
+
+    @Test
+    void isolatesRateLimitSnapshotsForDifferentConfiguredCodexCommands() throws Exception {
+        // given
+<span class="nc" id="L972">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L973">        Instant firstAccountReset = now.plusSeconds(120);</span>
+<span class="nc" id="L974">        Instant secondAccountReset = now.plusSeconds(60);</span>
+<span class="nc" id="L975">        Path firstAppServer = writeUsageFixtureScript(</span>
+                &quot;first-account-rate-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__FIRST_RESET__},&quot;planType&quot;:&quot;first-account&quot;}}}'
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L981">                        .replace(&quot;__FIRST_RESET__&quot;, Long.toString(firstAccountReset.getEpochSecond())));</span>
+<span class="nc" id="L982">        Path secondAppServer = writeUsageFixtureScript(</span>
+                &quot;second-account-rate-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;secondary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__SECOND_RESET__}}}}'
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L988">                        .replace(&quot;__SECOND_RESET__&quot;, Long.toString(secondAccountReset.getEpochSecond())));</span>
+<span class="nc" id="L989">        EffectiveConfig firstConfig = config(firstAppServer);</span>
+<span class="nc" id="L990">        EffectiveConfig secondConfig = config(secondAppServer);</span>
+<span class="nc" id="L991">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L992">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L993">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L994">        AgentEventListener listener = event -&gt; {</span>
+<span class="nc bnc" id="L995" title="All 2 branches missed.">            if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L996">                publishedRateLimits.add(event.payload());</span>
+            }
+<span class="nc" id="L998">        };</span>
+
+        // when
+<span class="nc" id="L1001">        AgentRunResult first = runTurn(client, firstConfig, &quot;first-rate-limit-account&quot;, listener);</span>
+<span class="nc" id="L1002">        AgentRunResult second = runTurn(client, secondConfig, &quot;second-rate-limit-account&quot;, listener);</span>
+
+        // then
+<span class="nc" id="L1005">        assertThat(first).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1006">        assertThat(second.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L1007">        assertThat(second.retryNotBefore()).hasValue(secondAccountReset);</span>
+<span class="nc" id="L1008">        assertThat(publishedRateLimits)</span>
+<span class="nc" id="L1009">                .hasSize(2)</span>
+<span class="nc" id="L1010">                .element(1)</span>
+<span class="nc" id="L1011">                .isInstanceOfSatisfying(ObjectNode.class, snapshot -&gt; assertThatObject(snapshot)</span>
+<span class="nc" id="L1012">                        .as(&quot;second rate-limit snapshot omitted [primary, planType]&quot;)</span>
+<span class="nc" id="L1013">                        .extracting(node -&gt; node.path(&quot;primary&quot;), node -&gt; node.path(&quot;planType&quot;))</span>
+<span class="nc" id="L1014">                        .containsExactly(json.missingNode(), json.missingNode()));</span>
+<span class="nc" id="L1015">    }</span>
+
+    @Test
+    void atomicallySharesConcurrentSparseRateLimitsWithUsageDeadline() throws Exception {
+        // given
+<span class="nc" id="L1020">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1021">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L1022">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L1023">        Path primaryRole = tempDir.resolve(&quot;concurrent-primary-role&quot;);</span>
+<span class="nc" id="L1024">        Path primaryReady = tempDir.resolve(&quot;concurrent-primary-ready&quot;);</span>
+<span class="nc" id="L1025">        Path secondaryReady = tempDir.resolve(&quot;concurrent-secondary-ready&quot;);</span>
+<span class="nc" id="L1026">        Path primaryObserved = tempDir.resolve(&quot;concurrent-primary-observed&quot;);</span>
+<span class="nc" id="L1027">        Path secondaryObserved = tempDir.resolve(&quot;concurrent-secondary-observed&quot;);</span>
+<span class="nc" id="L1028">        List&lt;JsonNode&gt; publishedRateLimits = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L1029">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;concurrent-shared-rate-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                if mkdir '__PRIMARY_ROLE__' 2&gt;/dev/null; then
+                  session=primary
+                else
+                  session=secondary
+                fi
+                &quot;&quot;&quot;
+<span class="nc" id="L1038">                        .replace(&quot;__PRIMARY_ROLE__&quot;, primaryRole.toString()),</span>
+                &quot;&quot;&quot;
+                if [ &quot;$session&quot; = primary ]; then
+                  touch '__PRIMARY_READY__'
+                else
+                  touch '__SECONDARY_READY__'
+                fi
+                while [ ! -f '__PRIMARY_READY__' ] || [ ! -f '__SECONDARY_READY__' ]; do sleep 0.01; done
+                if [ &quot;$session&quot; = primary ]; then
+                  echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__}}}}'
+                else
+                  echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;secondary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__SECONDARY_RESET__}}}}'
+                fi
+                while [ ! -f '__PRIMARY_OBSERVED__' ] || [ ! -f '__SECONDARY_OBSERVED__' ]; do sleep 0.01; done
+                if [ &quot;$session&quot; = primary ]; then
+                  echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
+                else
+                  echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                fi
+                &quot;&quot;&quot;
+<span class="nc" id="L1058">                        .replace(&quot;__PRIMARY_READY__&quot;, primaryReady.toString())</span>
+<span class="nc" id="L1059">                        .replace(&quot;__SECONDARY_READY__&quot;, secondaryReady.toString())</span>
+<span class="nc" id="L1060">                        .replace(&quot;__PRIMARY_OBSERVED__&quot;, primaryObserved.toString())</span>
+<span class="nc" id="L1061">                        .replace(&quot;__SECONDARY_OBSERVED__&quot;, secondaryObserved.toString())</span>
+<span class="nc" id="L1062">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
+<span class="nc" id="L1063">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
+<span class="nc" id="L1064">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L1066">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L1068">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L1070">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L1071">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L1072">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L1073">        AgentEventListener listener = event -&gt; {</span>
+<span class="nc bnc" id="L1074" title="All 2 branches missed.">            if (!&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L1075">                return;</span>
+            }
+<span class="nc" id="L1077">            publishedRateLimits.add(event.payload());</span>
+<span class="nc bnc" id="L1078" title="All 2 branches missed.">            if (event.payload().path(&quot;primary&quot;).isObject()) {</span>
+<span class="nc" id="L1079">                markObserved(primaryObserved);</span>
+            }
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">            if (event.payload().path(&quot;secondary&quot;).isObject()) {</span>
+<span class="nc" id="L1082">                markObserved(secondaryObserved);</span>
+            }
+<span class="nc" id="L1084">        };</span>
+<span class="nc" id="L1085">        Path firstWorkspace = workspace(&quot;concurrent-rate-limit-first&quot;);</span>
+<span class="nc" id="L1086">        Path secondWorkspace = workspace(&quot;concurrent-rate-limit-second&quot;);</span>
+
+        // when
+        List&lt;AgentRunResult&gt; results;
+<span class="nc" id="L1090">        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {</span>
+<span class="nc" id="L1091">            var first = executor.submit(() -&gt; client.runTurn(</span>
+                    config,
+<span class="nc" id="L1093">                    TestCards.card(&quot;card-1&quot;, &quot;TRELLO-concurrent-rate-limit-first&quot;, &quot;Ready for Codex&quot;),</span>
+                    firstWorkspace,
+                    &quot;Run the concurrent fixture.&quot;,
+                    &quot;worker-concurrent-rate-limit-first&quot;,
+                    listener));
+<span class="nc" id="L1098">            var second = executor.submit(() -&gt; client.runTurn(</span>
+                    config,
+<span class="nc" id="L1100">                    TestCards.card(&quot;card-2&quot;, &quot;TRELLO-concurrent-rate-limit-second&quot;, &quot;Ready for Codex&quot;),</span>
+                    secondWorkspace,
+                    &quot;Run the concurrent fixture.&quot;,
+                    &quot;worker-concurrent-rate-limit-second&quot;,
+                    listener));
+<span class="nc" id="L1105">            results = List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));</span>
+        }
+
+        // then
+<span class="nc" id="L1109">        assertThat(results).contains(AgentRunResult.ok());</span>
+<span class="nc" id="L1110">        AgentRunResult usageLimit = results.stream()</span>
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">                .filter(result -&gt; result.failureCategory() == AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT)</span>
+<span class="nc" id="L1112">                .findFirst()</span>
+<span class="nc" id="L1113">                .orElseThrow();</span>
+<span class="nc" id="L1114">        assertThat(usageLimit.retryNotBefore()).hasValue(laterPrimaryReset);</span>
+<span class="nc" id="L1115">        assertThat(publishedRateLimits).hasSize(2);</span>
+<span class="nc" id="L1116">        JsonNode latestPublished = publishedRateLimits.getLast();</span>
+<span class="nc" id="L1117">        assertThat(latestPublished.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L1118">                .isEqualTo(laterPrimaryReset.getEpochSecond());</span>
+<span class="nc" id="L1119">        assertThat(latestPublished.path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L1120">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
+<span class="nc" id="L1121">    }</span>
+
+    @ParameterizedTest(name = &quot;accepted={0}&quot;)
+    @ValueSource(booleans = {true, false})
+    void usageDeadlineWaitsForAnInFlightRateLimitUpdateDecision(boolean accepted) throws Exception {
+        // given
+<span class="nc" id="L1127">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1128">        Instant reset = now.plusSeconds(120);</span>
+<span class="nc" id="L1129">        Path rateLimitRole = tempDir.resolve(&quot;inflight-rate-limit-role&quot;);</span>
+<span class="nc" id="L1130">        Path acceptanceEntered = tempDir.resolve(&quot;inflight-rate-limit-acceptance-entered&quot;);</span>
+<span class="nc" id="L1131">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;inflight-accepted-rate-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                if mkdir '__RATE_LIMIT_ROLE__' 2&gt;/dev/null; then
+                  session=rate-limit
+                else
+                  session=usage
+                fi
+                &quot;&quot;&quot;
+<span class="nc" id="L1140">                        .replace(&quot;__RATE_LIMIT_ROLE__&quot;, rateLimitRole.toString()),</span>
+                &quot;&quot;&quot;
+                if [ &quot;$session&quot; = rate-limit ]; then
+                  echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__}}}}'
+                  echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
+                else
+                  while [ ! -f '__ACCEPTANCE_ENTERED__' ]; do sleep 0.01; done
+                  echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
+                fi
+                &quot;&quot;&quot;
+<span class="nc" id="L1150">                        .replace(&quot;__ACCEPTANCE_ENTERED__&quot;, acceptanceEntered.toString())</span>
+<span class="nc" id="L1151">                        .replace(&quot;__RESET__&quot;, Long.toString(reset.getEpochSecond())));</span>
+<span class="nc" id="L1152">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L1154">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L1156">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L1158">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L1159">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L1160">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L1161">        var releaseAcceptance = new CountDownLatch(1);</span>
+<span class="nc" id="L1162">        var usageFailurePublished = new CountDownLatch(1);</span>
+<span class="nc" id="L1163">        var usageWorker = new AtomicReference&lt;String&gt;();</span>
+<span class="nc" id="L1164">        AgentEventListener listener = new AgentEventListener() {</span>
+            @Override
+            public void onEvent(AgentEvent event) {
+<span class="nc bnc" id="L1167" title="All 2 branches missed.">                if (isTypedUsageFailure(event)) {</span>
+<span class="nc" id="L1168">                    usageWorker.set(event.workerIdentity());</span>
+<span class="nc" id="L1169">                    usageFailurePublished.countDown();</span>
+                }
+<span class="nc" id="L1171">            }</span>
+
+            @Override
+            public boolean onEventAndReportAccepted(AgentEvent event) {
+<span class="nc bnc" id="L1175" title="All 2 branches missed.">                if (event.event().equals(&quot;account/rateLimits/updated&quot;)) {</span>
+<span class="nc" id="L1176">                    markObserved(acceptanceEntered);</span>
+                    try {
+<span class="nc" id="L1178">                        assertThat(releaseAcceptance.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1179">                                .as(&quot;the test releases in-flight rate-limit acceptance within 5 seconds&quot;)</span>
+<span class="nc" id="L1180">                                .isTrue();</span>
+<span class="nc" id="L1181">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L1182">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1183">                        throw new AssertionError(e);</span>
+<span class="nc" id="L1184">                    }</span>
+                }
+<span class="nc" id="L1186">                onEvent(event);</span>
+<span class="nc" id="L1187">                return accepted;</span>
+            }
+        };
+
+        // when
+        List&lt;AgentRunResult&gt; results;
+<span class="nc" id="L1193">        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {</span>
+<span class="nc" id="L1194">            Future&lt;AgentRunResult&gt; first =</span>
+<span class="nc" id="L1195">                    executor.submit(() -&gt; runTurn(client, config, &quot;inflight-rate-limit-first&quot;, listener));</span>
+<span class="nc" id="L1196">            Future&lt;AgentRunResult&gt; second =</span>
+<span class="nc" id="L1197">                    executor.submit(() -&gt; runTurn(client, config, &quot;inflight-rate-limit-second&quot;, listener));</span>
+            try {
+<span class="nc" id="L1199">                assertThat(usageFailurePublished.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1200">                        .as(&quot;the usage-limit event is published within 5 seconds&quot;)</span>
+<span class="nc" id="L1201">                        .isTrue();</span>
+<span class="nc bnc" id="L1202" title="All 2 branches missed.">                Future&lt;AgentRunResult&gt; usageResult = usageWorker.get().endsWith(&quot;first&quot;) ? first : second;</span>
+<span class="nc" id="L1203">                assertThatThrownBy(() -&gt; usageResult.get(500, TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L1204">                        .as(&quot;the usage-limit run remains incomplete while event acceptance is in flight&quot;)</span>
+<span class="nc" id="L1205">                        .isInstanceOf(TimeoutException.class);</span>
+            } finally {
+<span class="nc" id="L1207">                releaseAcceptance.countDown();</span>
+            }
+<span class="nc" id="L1209">            results = List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));</span>
+        }
+
+        // then
+<span class="nc" id="L1213">        AgentRunResult usageLimit = results.stream()</span>
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">                .filter(result -&gt; result.failureCategory() == AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT)</span>
+<span class="nc" id="L1215">                .findFirst()</span>
+<span class="nc" id="L1216">                .orElseThrow();</span>
+<span class="nc bnc" id="L1217" title="All 2 branches missed.">        if (accepted) {</span>
+<span class="nc" id="L1218">            assertThat(usageLimit.retryNotBefore()).hasValue(reset);</span>
+        } else {
+<span class="nc" id="L1220">            assertThat(usageLimit.retryNotBefore()).isEmpty();</span>
+        }
+<span class="nc" id="L1222">    }</span>
+
+    @Test
+    void classifiesTerminalUsageLimitWithoutInventingResetFromMessageOrMalformedWindows() throws Exception {
+        // given
+<span class="nc" id="L1227">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1228">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;terminal-usage-limit-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__OVERSIZED_RESET__},&quot;secondary&quot;:{&quot;usedPercent&quot;:2147483648,&quot;resetsAt&quot;:4102444800}}}}'
+                echo '{&quot;method&quot;:&quot;error&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turnId&quot;:&quot;turn-usage&quot;,&quot;willRetry&quot;:false,&quot;error&quot;:{&quot;message&quot;:&quot;Try again tomorrow at a localized time.&quot;,&quot;additionalDetails&quot;:&quot;private provider payload&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L1234">                        .replace(&quot;__OVERSIZED_RESET__&quot;, &quot;9&quot;.repeat(24)));</span>
+
+        // when
+<span class="nc" id="L1237">        List&lt;AgentEvent&gt; events = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L1238">        AgentRunResult result =</span>
+<span class="nc" id="L1239">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;terminal-usage&quot;, events::add);</span>
+
+        // then
+<span class="nc" id="L1242">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L1243">        assertThat(result.reason()).isEqualTo(&quot;turn_failed: Try again tomorrow at a localized time.&quot;);</span>
+<span class="nc" id="L1244">        assertThat(result.reason()).doesNotContain(&quot;private provider payload&quot;, &quot;additionalDetails&quot;);</span>
+<span class="nc" id="L1245">        assertThat(result.retryNotBefore()).isEmpty();</span>
+<span class="nc" id="L1246">        assertThat(events.stream()</span>
+<span class="nc" id="L1247">                        .filter(event -&gt; event.event().equals(&quot;error&quot;))</span>
+<span class="nc" id="L1248">                        .map(AgentEvent::message))</span>
+<span class="nc" id="L1249">                .containsExactly(&quot;Try again tomorrow at a localized time.&quot;)</span>
+<span class="nc" id="L1250">                .allSatisfy(message -&gt; assertThat(message)</span>
+<span class="nc" id="L1251">                        .doesNotContain(&quot;private provider payload&quot;, &quot;additionalDetails&quot;, &quot;codexErrorInfo&quot;));</span>
+<span class="nc" id="L1252">    }</span>
+
+    @Test
+    void keepsMessageOnlyUsageWordingGeneric() throws Exception {
+        // given
+<span class="nc" id="L1257">        Path appServer = writeUsageFixtureScript(</span>
+                &quot;message-only-usage-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;You have hit your usage limit.&quot;}}}}'
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L1264">        AgentRunResult result = runFailureTurn(</span>
+<span class="nc" id="L1265">                appServer, Clock.fixed(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;), ZoneOffset.UTC), &quot;message-only-usage&quot;);</span>
+
+        // then
+<span class="nc" id="L1268">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: You have hit your usage limit.&quot;));</span>
+<span class="nc" id="L1269">    }</span>
+
+    @Test
+    void failsTurnWhenAppServerEmitsTurnCancellationNotification() throws Exception {
+        // given
+<span class="nc" id="L1274">        Path appServer = writeExecutableScript(</span>
+                &quot;cancelled-turn-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;cancelled-turn-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-cancelled\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-cancelled\\&quot;}}}&quot;
+                      echo &quot;{\\&quot;method\\&quot;:\\&quot;turn/cancelled\\&quot;,\\&quot;params\\&quot;:{\\&quot;threadId\\&quot;:\\&quot;thread-cancelled\\&quot;,\\&quot;turnId\\&quot;:\\&quot;turn-cancelled\\&quot;,\\&quot;message\\&quot;:\\&quot;operator cancelled\\&quot;}}&quot;
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L1290">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1291">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-cancelled&quot;);</span>
+<span class="nc" id="L1292">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L1293">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L1296">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L1298">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-cancelled&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do a cancelled turn.&quot;,
+                &quot;worker-cancelled&quot;,
+<span class="nc" id="L1302">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L1305">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_cancelled: operator cancelled&quot;));</span>
+<span class="nc" id="L1306">    }</span>
+
+    @Test
+    void failsTurnWhenAppServerCompletesTurnAsInterrupted() throws Exception {
+        // given
+<span class="nc" id="L1311">        Path appServer = writeExecutableScript(</span>
+                &quot;interrupted-turn-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  [[ &quot;$line&quot; =~ \\&quot;id\\&quot;:([0-9]+) ]] &amp;&amp; id=&quot;${BASH_REMATCH[1]}&quot;
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;userAgent\\&quot;:\\&quot;interrupted-turn-test\\&quot;}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;thread\\&quot;:{\\&quot;id\\&quot;:\\&quot;thread-interrupted\\&quot;}}}&quot; ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo &quot;{\\&quot;id\\&quot;:$id,\\&quot;result\\&quot;:{\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-interrupted\\&quot;}}}&quot;
+                      echo &quot;{\\&quot;method\\&quot;:\\&quot;turn/completed\\&quot;,\\&quot;params\\&quot;:{\\&quot;threadId\\&quot;:\\&quot;thread-interrupted\\&quot;,\\&quot;turn\\&quot;:{\\&quot;id\\&quot;:\\&quot;turn-interrupted\\&quot;,\\&quot;items\\&quot;:[],\\&quot;status\\&quot;:\\&quot;interrupted\\&quot;,\\&quot;error\\&quot;:null}}}&quot;
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L1327">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1328">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-interrupted&quot;);</span>
+<span class="nc" id="L1329">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L1330">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L1333">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L1335">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-interrupted&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Do an interrupted turn.&quot;,
+                &quot;worker-interrupted&quot;,
+<span class="nc" id="L1339">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L1342">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_interrupted: turn status interrupted&quot;));</span>
+<span class="nc" id="L1343">    }</span>
+
+    private EffectiveConfig config(Path appServer) {
+<span class="nc" id="L1346">        return config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L1348">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L1350">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L1352">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+    }
+
+    private AgentRunResult runFailureTurn(Path appServer, Clock clock, String identifier) throws Exception {
+<span class="nc" id="L1356">        return runFailureTurn(appServer, clock, identifier, event -&gt; {});</span>
+    }
+
+    private AgentRunResult runFailureTurn(Path appServer, Clock clock, String identifier, AgentEventListener listener)
+            throws Exception {
+<span class="nc" id="L1361">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1362">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), clock);</span>
+<span class="nc" id="L1363">        return runTurn(client, config, identifier, listener);</span>
+    }
+
+    private AgentRunResult runTurn(
+            CodexAppServerClient client, EffectiveConfig config, String identifier, AgentEventListener listener)
+            throws Exception {
+<span class="nc" id="L1369">        return client.runTurn(</span>
+                config,
+<span class="nc" id="L1371">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-&quot; + identifier, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1372">                workspace(identifier),</span>
+                &quot;Run the failure fixture.&quot;,
+                &quot;worker-&quot; + identifier,
+                listener);
+    }
+
+    private Path workspace(String identifier) throws IOException {
+<span class="nc" id="L1379">        Path workspace = tempDir.resolve(&quot;workspaces&quot;).resolve(&quot;TRELLO-&quot; + identifier);</span>
+<span class="nc" id="L1380">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L1381">        return workspace;</span>
+    }
+
+    private void markObserved(Path marker) {
+        try {
+<span class="nc" id="L1386">            Files.writeString(marker, &quot;observed&quot;);</span>
+<span class="nc" id="L1387">        } catch (IOException e) {</span>
+<span class="nc" id="L1388">            throw new UncheckedIOException(e);</span>
+<span class="nc" id="L1389">        }</span>
+<span class="nc" id="L1390">    }</span>
+
+    private static boolean isTypedUsageFailure(AgentEvent event) {
+<span class="nc bnc" id="L1393" title="All 2 branches missed.">        return event.event().equals(&quot;turn/completed&quot;)</span>
+<span class="nc bnc" id="L1394" title="All 2 branches missed.">                &amp;&amp; event.payload() != null</span>
+<span class="nc bnc" id="L1395" title="All 2 branches missed.">                &amp;&amp; event.payload().at(&quot;/turn/error/codexErrorInfo&quot;).asText().equals(&quot;usageLimitExceeded&quot;);</span>
+    }
+
+    private Path writeRateLimitNotificationScript(String fileName, String notifications) throws Exception {
+<span class="nc" id="L1399">        return writeUsageFixtureScript(</span>
+                fileName,
+                &quot;&quot;&quot;
+                __RATE_LIMIT_NOTIFICATIONS__
+                echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
+                &quot;&quot;&quot;
+<span class="nc" id="L1405">                        .replace(&quot;__RATE_LIMIT_NOTIFICATIONS__&quot;, notifications));</span>
+    }
+
+    private Path writeUsageFixtureScript(String fileName, String turnResponses) throws Exception {
+<span class="nc" id="L1409">        return writeUsageFixtureScript(fileName, &quot;&quot;, turnResponses);</span>
+    }
+
+    private Path writeUsageFixtureScript(String fileName, String setup, String turnResponses) throws Exception {
+<span class="nc" id="L1413">        return writeExecutableScript(</span>
+                fileName,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                __SETUP__
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;usage-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-usage&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;}}}'
+                      __TURN_RESPONSES__
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;
+<span class="nc" id="L1429">                        .replace(&quot;__SETUP__&quot;, setup)</span>
+<span class="nc" id="L1430">                        .replace(&quot;__TURN_RESPONSES__&quot;, turnResponses));</span>
+    }
+
+    private Path writeExecutableScript(String fileName, String content) throws Exception {
+<span class="nc" id="L1434">        Path script = tempDir.resolve(fileName);</span>
+<span class="nc" id="L1435">        Files.writeString(script, content);</span>
+<span class="nc" id="L1436">        script.toFile().setExecutable(true);</span>
+<span class="nc" id="L1437">        return script;</span>
+    }
+
+    private List&lt;JsonNode&gt; capturedRequests(Path capture) throws Exception {
+<span class="nc" id="L1441">        return Files.readAllLines(capture).stream().map(this::readJsonLine).toList();</span>
+    }
+
+    private JsonNode readJsonLine(String line) {
+        try {
+<span class="nc" id="L1446">            return json.readTree(line);</span>
+<span class="nc" id="L1447">        } catch (Exception e) {</span>
+<span class="nc" id="L1448">            throw new IllegalStateException(e);</span>
+        }
+    }
+
+    private EffectiveConfig config(Map&lt;String, Object&gt; codexConfig) {
+<span class="nc" id="L1453">        return new ConfigResolver()</span>
+<span class="nc" id="L1454">                .resolve(new WorkflowDefinition(</span>
+<span class="nc" id="L1455">                        tempDir.resolve(&quot;WORKFLOW.md&quot;),</span>
+<span class="nc" id="L1456">                        Map.of(</span>
+                                &quot;tracker&quot;,
+<span class="nc" id="L1458">                                Map.of(&quot;kind&quot;, &quot;trello&quot;, &quot;api_key&quot;, &quot;key&quot;, &quot;api_token&quot;, &quot;token&quot;, &quot;board_id&quot;, &quot;board&quot;),</span>
+                                &quot;workspace&quot;,
+<span class="nc" id="L1460">                                Map.of(&quot;root&quot;, tempDir.resolve(&quot;workspaces&quot;).toString()),</span>
+                                &quot;codex&quot;,
+                                codexConfig),
+                        &quot;&quot;));
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

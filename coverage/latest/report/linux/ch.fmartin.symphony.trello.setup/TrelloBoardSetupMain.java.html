@@ -1,0 +1,1117 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloBoardSetupMain.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TrelloBoardSetupMain.java</span></div><h1>TrelloBoardSetupMain.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.CliExitCodes;
+import ch.fmartin.symphony.trello.TrelloEnvironment;
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import ch.fmartin.symphony.trello.setup.SetupDiagnosticReporter.DiagnosticsRequest;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.GitHubIntegration;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.ImportBoardRequest;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.NewBoardRequest;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.TrelloCredentials;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.WorkspaceListRequest;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Stack;
+import java.util.concurrent.Callable;
+import java.util.function.Supplier;
+import picocli.CommandLine;
+import picocli.CommandLine.ArgGroup;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.IParameterPreprocessor;
+import picocli.CommandLine.Mixin;
+import picocli.CommandLine.Model.ArgSpec;
+import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Option;
+import picocli.CommandLine.ParameterException;
+import picocli.CommandLine.ParentCommand;
+import picocli.CommandLine.Spec;
+
+@Command(
+        name = &quot;symphony-trello&quot;,
+        description = &quot;Set up and run Symphony for Trello.&quot;,
+        mixinStandardHelpOptions = true,
+        versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+        subcommands = {
+            TrelloBoardSetupMain.NewBoardCommand.class,
+            TrelloBoardSetupMain.ImportBoardCommand.class,
+            TrelloBoardSetupMain.ListWorkspacesCommand.class,
+            TrelloBoardSetupMain.StartCommand.class,
+            TrelloBoardSetupMain.StopCommand.class,
+            TrelloBoardSetupMain.StatusCommand.class,
+            TrelloBoardSetupMain.LogsCommand.class,
+            TrelloBoardSetupMain.DiagnosticsCommand.class
+        })
+public final class TrelloBoardSetupMain implements Callable&lt;Integer&gt; {
+    private static final String CONFIG_DIR_PROPERTY = &quot;symphony.trello.config.dir&quot;;
+    private static final String CLI_COMMAND_PROPERTY = &quot;symphony.trello.command&quot;;
+
+    private final TrelloBoardSetupService boardSetup;
+    private final LocalWorkerManager workerManager;
+    private final BufferedReader input;
+    private final PrintStream out;
+    private final PrintStream err;
+
+    @Spec
+    CommandSpec spec;
+
+    TrelloBoardSetupMain(
+            TrelloBoardSetupService boardSetup,
+            LocalWorkerManager workerManager,
+            BufferedReader input,
+            PrintStream out,
+<span class="nc" id="L74">            PrintStream err) {</span>
+<span class="nc" id="L75">        this.boardSetup = boardSetup;</span>
+<span class="nc" id="L76">        this.workerManager = workerManager;</span>
+<span class="nc" id="L77">        this.input = input;</span>
+<span class="nc" id="L78">        this.out = out;</span>
+<span class="nc" id="L79">        this.err = err;</span>
+<span class="nc" id="L80">    }</span>
+
+    public static void main(String... args) {
+<span class="nc" id="L83">        System.exit(run(args, System.out, System.err));</span>
+<span class="nc" id="L84">    }</span>
+
+    static int run(String[] args, PrintStream out, PrintStream err) {
+<span class="nc" id="L87">        var json = new ObjectMapper();</span>
+<span class="nc" id="L88">        return runWithSelectionDefaults(</span>
+<span class="nc" id="L89">                args, out, err, () -&gt; new CodexModelDefaultsResolver(json).resolveSelectionDefaults());</span>
+    }
+
+    static int run(
+            String[] args, PrintStream out, PrintStream err, TrelloBoardSetup.CodexModelDefaults codexModelDefaults) {
+<span class="nc" id="L94">        return runWithSelectionDefaults(args, out, err, () -&gt; codexModelSelectionDefaults(codexModelDefaults));</span>
+    }
+
+    static int run(
+            String[] args,
+            PrintStream out,
+            PrintStream err,
+            TrelloBoardSetup.CodexModelDefaults codexModelDefaults,
+            Map&lt;String, String&gt; properties) {
+<span class="nc" id="L103">        return SetupSystemProperties.withLookup(properties::get, () -&gt; run(args, out, err, codexModelDefaults));</span>
+    }
+
+    static int run(
+            String[] args,
+            PrintStream out,
+            PrintStream err,
+            Supplier&lt;TrelloBoardSetup.CodexModelDefaults&gt; codexModelDefaults) {
+<span class="nc" id="L111">        return runWithSelectionDefaults(args, out, err, () -&gt; CodexModelSelectionDefaults.of(codexModelDefaults.get()));</span>
+    }
+
+    private static int runWithSelectionDefaults(
+            String[] args,
+            PrintStream out,
+            PrintStream err,
+            Supplier&lt;CodexModelSelectionDefaults&gt; codexModelSelectionDefaults) {
+<span class="nc" id="L119">        var json = new ObjectMapper();</span>
+<span class="nc" id="L120">        var boardSetup = new TrelloBoardSetup(json, codexModelSelectionDefaults);</span>
+<span class="nc" id="L121">        var workerManager = new LocalWorkerManager(System.getenv());</span>
+<span class="nc" id="L122">        return run(</span>
+                args,
+<span class="nc" id="L124">                new TrelloBoardSetupService(boardSetup, workerManager, System.getenv()),</span>
+                new LocalSetup(boardSetup, new ProcessCommandRunner()),
+                workerManager,
+                out,
+                err);
+    }
+
+    private static CodexModelSelectionDefaults codexModelSelectionDefaults(
+            TrelloBoardSetup.CodexModelDefaults codexModelDefaults) {
+<span class="nc" id="L133">        return CodexModelSelectionDefaults.of(codexModelDefaults);</span>
+    }
+
+    private static BufferedReader standardInputReader() {
+        // System.in is process-owned. Picocli/setup commands borrow it and must not close it.
+<span class="nc" id="L138">        return new BufferedReader(</span>
+                new InputStreamReader(System.in, StandardCharsets.UTF_8)); // NOPMD - borrows System.in.
+    }
+
+    static int run(
+            String[] args,
+            TrelloBoardSetupService boardSetup,
+            LocalSetup localSetup,
+            LocalWorkerManager workerManager,
+            PrintStream out,
+            PrintStream err) {
+<span class="nc" id="L149">        String[] effectiveArgs = InstalledCliDefaults.apply(args, System.getenv());</span>
+<span class="nc" id="L150">        BufferedReader input = standardInputReader(); // NOPMD - System.in is process-owned.</span>
+<span class="nc" id="L151">        CommandLine commandLine = new CommandLine(new TrelloBoardSetupMain(boardSetup, workerManager, input, out, err))</span>
+<span class="nc" id="L152">                .addSubcommand(</span>
+                        &quot;setup-local&quot;, new SetupLocalCommandFactory.SetupLocalCommand(localSetup, input, out, err))
+<span class="nc" id="L154">                .setOut(new PrintWriter(out, true, StandardCharsets.UTF_8))</span>
+<span class="nc" id="L155">                .setErr(new PrintWriter(err, true, StandardCharsets.UTF_8))</span>
+<span class="nc" id="L156">                .setExecutionExceptionHandler((exception, ignored, parseResult) -&gt; {</span>
+<span class="nc" id="L157">                    SetupLocalCommandFactory.printExecutionFailure(err, exception, errorCode(exception));</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">                    if (!(exception instanceof ParameterException)) {</span>
+<span class="nc" id="L159">                        SetupDiagnosticReporter.reportFailure(exception, effectiveArgs, input, out, err);</span>
+                    }
+<span class="nc" id="L161">                    return CliExitCodes.SETUP_FAILURE;</span>
+                })
+<span class="nc" id="L163">                .setParameterExceptionHandler(SetupLocalCommandFactory.usageErrors());</span>
+<span class="nc" id="L164">        SetupLocalCommandFactory.hideUnsupportedSubcommandOptions(</span>
+<span class="nc" id="L165">                commandLine.getSubcommands().get(&quot;setup-local&quot;));</span>
+<span class="nc" id="L166">        return commandLine.execute(effectiveArgs);</span>
+    }
+
+    @Override
+    public Integer call() {
+<span class="nc" id="L171">        spec.commandLine().usage(out);</span>
+<span class="nc" id="L172">        return 0;</span>
+    }
+
+    private static String errorCode(Exception e) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        return e instanceof TrelloBoardSetupException setupException</span>
+<span class="nc" id="L177">                ? setupException.code()</span>
+<span class="nc" id="L178">                : &quot;setup_invalid_arguments&quot;;</span>
+    }
+
+<span class="nc" id="L181">    static final class ProjectVersion implements CommandLine.IVersionProvider {</span>
+        @Override
+        public String[] getVersion() {
+<span class="nc" id="L184">            String version = TrelloBoardSetupMain.class.getPackage().getImplementationVersion();</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">            return new String[] {&quot;symphony-trello &quot; + (version == null ? &quot;0.1.0-SNAPSHOT&quot; : version)};</span>
+        }
+    }
+
+    @Command(
+            name = &quot;new-board&quot;,
+            description = &quot;Create the recommended Trello board and workflow.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L194">    static final class NewBoardCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L198">        @Mixin</span>
+        BoardSetupOptions options = new BoardSetupOptions();
+
+        @Option(names = &quot;--name&quot;, required = true, description = &quot;Trello board name to create.&quot;)
+        String boardName;
+
+        @Option(names = &quot;--workspace-id&quot;, description = &quot;Trello Workspace id for the new board.&quot;)
+        String workspaceId;
+
+        @Override
+        public Integer call() throws IOException {
+            try {
+<span class="nc" id="L210">                CliInputValidation.rejectBlankText(&quot;--name&quot;, boardName);</span>
+<span class="nc" id="L211">                CliInputValidation.rejectBlankText(&quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L212">                CliInputValidation.rejectControlCharacters(&quot;--name&quot;, boardName);</span>
+<span class="nc" id="L213">                CliInputValidation.rejectControlCharacters(&quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L214">                CliInputValidation.rejectWorkspaceIdReference(&quot;--workspace-id&quot;, workspaceId);</span>
+<span class="nc" id="L215">                options.validateCliPaths();</span>
+<span class="nc" id="L216">                options.validateRuntimeEnvTarget();</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">                if (options.workflowPathExplicit) {</span>
+<span class="nc" id="L218">                    parent.boardSetup.preflightWorkflowWrite(options.workflowPath, options.force);</span>
+                }
+<span class="nc" id="L220">                parent.boardSetup.preflightConnectedBoardManifest(</span>
+<span class="nc" id="L221">                        options.manifestPath(parent.boardSetup.environment()));</span>
+<span class="nc" id="L222">                parent.boardSetup.preflightRequestedServerPort(</span>
+                        options.serverPort,
+                        options.workflowPath,
+                        options.force,
+<span class="nc" id="L226">                        options.manifestPath(parent.boardSetup.environment()));</span>
+<span class="nc" id="L227">                NewBoardRequest request =</span>
+<span class="nc" id="L228">                        options.newBoardRequest(boardName, workspaceId, parent.boardSetup.repositoryDefaults(options));</span>
+<span class="nc" id="L229">                TrelloBoardSetup.NewBoardResult result = parent.boardSetup.createRecommendedBoard(request, options);</span>
+<span class="nc" id="L230">                options.persistRuntimeCredentials(parent.input, parent.out, parent.err);</span>
+<span class="nc" id="L231">                parent.boardSetup.persistConnectedBoard(</span>
+                        result,
+<span class="nc" id="L233">                        options.runtimeEnvPath(),</span>
+                        options.workspaceRoot,
+<span class="nc" id="L235">                        options.gitHubIntegration(),</span>
+<span class="nc" id="L236">                        options.manifestPath(parent.boardSetup.environment()),</span>
+                        parent.out);
+<span class="nc" id="L238">                printNewBoardResult(parent.out, result, options.runtimeEnvPath(), request.repositoryDefaults());</span>
+<span class="nc" id="L239">                return 0;</span>
+<span class="nc" id="L240">            } catch (TrelloBoardSetupException exception) {</span>
+<span class="nc" id="L241">                throw options.withRuntimeEnvHint(exception);</span>
+            }
+        }
+    }
+
+    @Command(
+            name = &quot;import-board&quot;,
+            description = &quot;Create a workflow for an existing Trello board.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L251">    static final class ImportBoardCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L255">        @Mixin</span>
+        BoardSetupOptions options = new BoardSetupOptions();
+
+        @Option(names = &quot;--board&quot;, required = true, description = &quot;Trello board URL, short link, or id.&quot;)
+        String boardId;
+
+<span class="nc" id="L261">        @Option(</span>
+                names = &quot;--active&quot;,
+                description = &quot;Queued-work Trello list name. Repeat for multiple lists.&quot;,
+                preprocessor = AttachedListSelectorPreprocessor.class)
+        List&lt;String&gt; activeStates = new ArrayList&lt;&gt;();
+
+<span class="nc" id="L267">        @Option(</span>
+                names = &quot;--terminal&quot;,
+                description = &quot;Terminal Trello list name. Repeat for multiple lists.&quot;,
+                preprocessor = AttachedListSelectorPreprocessor.class)
+        List&lt;String&gt; terminalStates = new ArrayList&lt;&gt;();
+
+        @Option(
+                names = &quot;--in-progress&quot;,
+                description = &quot;In-progress Trello list name.&quot;,
+                preprocessor = AttachedListSelectorPreprocessor.class)
+        String inProgressState;
+
+        @Option(names = &quot;--no-in-progress&quot;, description = &quot;Do not configure an in-progress list.&quot;)
+        boolean noInProgress;
+
+        @Option(
+                names = &quot;--blocked&quot;,
+                description = &quot;Blocked Trello list name.&quot;,
+                preprocessor = AttachedListSelectorPreprocessor.class)
+        String blockedState;
+
+        @Spec
+        CommandSpec spec;
+
+        @Override
+        public Integer call() throws IOException {
+<span class="nc bnc" id="L293" title="All 4 branches missed.">            if (noInProgress &amp;&amp; inProgressState != null) {</span>
+<span class="nc" id="L294">                throw new ParameterException(spec.commandLine(), &quot;--in-progress cannot be used with --no-in-progress.&quot;);</span>
+            }
+            try {
+<span class="nc" id="L297">                CliInputValidation.rejectBlankText(&quot;--board&quot;, boardId);</span>
+<span class="nc" id="L298">                CliInputValidation.rejectControlCharacters(&quot;--board&quot;, boardId);</span>
+<span class="nc" id="L299">                CliInputValidation.rejectBlankTextValues(&quot;--active&quot;, activeStates);</span>
+<span class="nc" id="L300">                CliInputValidation.rejectBlankTextValues(&quot;--terminal&quot;, terminalStates);</span>
+<span class="nc" id="L301">                CliInputValidation.rejectBlankText(&quot;--in-progress&quot;, inProgressState);</span>
+<span class="nc" id="L302">                CliInputValidation.rejectBlankText(&quot;--blocked&quot;, blockedState);</span>
+<span class="nc" id="L303">                CliInputValidation.rejectControlCharactersInTextValues(&quot;--active&quot;, activeStates);</span>
+<span class="nc" id="L304">                CliInputValidation.rejectControlCharactersInTextValues(&quot;--terminal&quot;, terminalStates);</span>
+<span class="nc" id="L305">                CliInputValidation.rejectControlCharacters(&quot;--in-progress&quot;, inProgressState);</span>
+<span class="nc" id="L306">                CliInputValidation.rejectControlCharacters(&quot;--blocked&quot;, blockedState);</span>
+<span class="nc" id="L307">                options.validateCliPaths();</span>
+<span class="nc" id="L308">                options.validateRuntimeEnvTarget();</span>
+<span class="nc" id="L309">                parent.boardSetup.preflightWorkflowWrite(options.workflowPath, options.force);</span>
+<span class="nc" id="L310">                parent.boardSetup.preflightConnectedBoardManifest(</span>
+<span class="nc" id="L311">                        options.manifestPath(parent.boardSetup.environment()));</span>
+<span class="nc" id="L312">                parent.boardSetup.preflightRequestedServerPort(</span>
+                        options.serverPort,
+                        options.workflowPath,
+                        options.force,
+<span class="nc" id="L316">                        options.manifestPath(parent.boardSetup.environment()));</span>
+<span class="nc" id="L317">                ImportBoardRequest request = options.importBoardRequest(</span>
+<span class="nc bnc" id="L318" title="All 4 branches missed.">                        TrelloBoardIds.parseImportBoardSelector(boardId),</span>
+                        activeStates,
+                        terminalStates,
+                        inProgressState,
+                        !noInProgress &amp;&amp; inProgressState == null,
+                        blockedState,
+<span class="nc" id="L324">                        parent.boardSetup.repositoryDefaults(options));</span>
+<span class="nc" id="L325">                TrelloBoardSetup.ImportBoardResult result = parent.boardSetup.importExistingBoard(request, options);</span>
+<span class="nc" id="L326">                options.persistRuntimeCredentials(parent.input, parent.out, parent.err);</span>
+<span class="nc" id="L327">                parent.boardSetup.persistConnectedBoard(</span>
+                        result,
+<span class="nc" id="L329">                        options.runtimeEnvPath(),</span>
+                        options.workspaceRoot,
+<span class="nc" id="L331">                        options.gitHubIntegration(),</span>
+<span class="nc" id="L332">                        options.manifestPath(parent.boardSetup.environment()),</span>
+                        parent.out);
+<span class="nc" id="L334">                printImportBoardResult(parent.out, result, options.runtimeEnvPath(), request.repositoryDefaults());</span>
+<span class="nc" id="L335">                return 0;</span>
+<span class="nc" id="L336">            } catch (TrelloBoardSetupException exception) {</span>
+<span class="nc" id="L337">                throw options.withRuntimeEnvHint(exception);</span>
+            }
+        }
+    }
+
+    @Command(
+            name = &quot;list-workspaces&quot;,
+            description = &quot;List Trello Workspaces visible to the token.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L347">    static final class ListWorkspacesCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L351">        @Mixin</span>
+        TrelloAuthOptions auth = new TrelloAuthOptions();
+
+<span class="nc" id="L354">        @Option(names = &quot;--endpoint&quot;, description = &quot;Trello API endpoint.&quot;)</span>
+        URI endpoint = TrelloBoardSetup.DEFAULT_ENDPOINT;
+
+<span class="nc" id="L357">        @Option(names = &quot;--env&quot;, description = &quot;Dotenv file with Trello credentials. Defaults to the installed .env.&quot;)</span>
+<span class="nc" id="L358">        Optional&lt;Path&gt; envPath = Optional.empty();</span>
+
+<span class="nc" id="L360">        @Option(</span>
+                names = &quot;--config-dir&quot;,
+                description = &quot;Directory whose .env file provides Trello credentials. --env wins when both are set.&quot;)
+<span class="nc" id="L363">        Optional&lt;Path&gt; configDir = Optional.empty();</span>
+
+        @Override
+        public Integer call() {
+<span class="nc" id="L367">            TrelloCredentialStore.validateEnvPathOption(envPath);</span>
+<span class="nc" id="L368">            CliInputValidation.rejectBlankPath(&quot;--config-dir&quot;, configDir, &quot;--config-dir must not be empty.&quot;);</span>
+<span class="nc" id="L369">            CliInputValidation.rejectControlCharacters(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L370">            CliInputValidation.rejectExistingNonDirectoryPath(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L371">            Path dotenv = envPath.or(() -&gt; configDir.map(dir -&gt; dir.resolve(&quot;.env&quot;)))</span>
+<span class="nc" id="L372">                    .map(path -&gt; path.toAbsolutePath().normalize())</span>
+<span class="nc" id="L373">                    .orElseGet(LocalEnvironment::defaultDotenv);</span>
+            try {
+<span class="nc" id="L375">                parent.boardSetup.listWorkspaces(</span>
+<span class="nc" id="L376">                        new WorkspaceListRequest(TrelloApiEndpoint.normalize(endpoint), auth.credentials(dotenv)),</span>
+                        parent.out);
+<span class="nc" id="L378">            } catch (TrelloBoardSetupException exception) {</span>
+<span class="nc" id="L379">                throw withListWorkspaceEnvHint(exception, dotenv);</span>
+<span class="nc" id="L380">            }</span>
+<span class="nc" id="L381">            return 0;</span>
+        }
+
+        private static TrelloBoardSetupException withListWorkspaceEnvHint(
+                TrelloBoardSetupException exception, Path dotenv) {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">            return switch (exception.code()) {</span>
+                case &quot;setup_missing_api_key&quot;, &quot;setup_missing_api_token&quot;, &quot;setup_missing_trello_credentials&quot; -&gt;
+<span class="nc" id="L388">                    exception.withDotenvPath(dotenv);</span>
+<span class="nc" id="L389">                default -&gt; exception;</span>
+            };
+        }
+    }
+
+    @Command(
+            name = &quot;start&quot;,
+            description = &quot;Start managed local Symphony workers.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L399">    static final class StartCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L403">        @Mixin</span>
+        LifecycleOptions options = new LifecycleOptions();
+
+<span class="nc" id="L406">        @Option(names = &quot;--env&quot;, description = &quot;Dotenv file with Trello credentials for this worker.&quot;)</span>
+<span class="nc" id="L407">        Optional&lt;Path&gt; envPath = Optional.empty();</span>
+
+        @Option(names = &quot;--all&quot;, description = &quot;Start all connected Trello boards from the connected-board manifest.&quot;)
+        boolean all;
+
+        @Override
+        public Integer call() throws Exception {
+<span class="nc" id="L414">            options.validateCliPaths();</span>
+<span class="nc" id="L415">            TrelloCredentialStore.validateEnvPathOption(envPath);</span>
+<span class="nc" id="L416">            return parent.workerManager.start(</span>
+                    new StartWorkerRequest(
+                            options.board,
+                            options.workflow,
+                            envPath,
+                            options.appHome,
+                            options.configDir,
+                            options.workspaceRoot,
+                            options.stateHome,
+                            all),
+                    parent.out);
+        }
+    }
+
+    @Command(
+            name = &quot;stop&quot;,
+            description = &quot;Stop managed local Symphony workers.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L435">    static final class StopCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L439">        @Mixin</span>
+        LifecycleOptions options = new LifecycleOptions();
+
+        @Override
+        public Integer call() throws Exception {
+<span class="nc" id="L444">            options.validateCliPaths();</span>
+<span class="nc" id="L445">            return parent.workerManager.stop(</span>
+                    new StopWorkerRequest(
+                            options.board,
+                            options.workflow,
+                            options.appHome,
+                            options.configDir,
+                            options.workspaceRoot,
+                            options.stateHome),
+                    parent.out);
+        }
+    }
+
+    @Command(
+            name = &quot;status&quot;,
+            description = &quot;Show the current runtime state of selected Symphony workflows.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L462">    static final class StatusCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L466">        @Mixin</span>
+        LifecycleOptions options = new LifecycleOptions();
+
+        @Override
+        public Integer call() throws Exception {
+<span class="nc" id="L471">            options.validateCliPaths();</span>
+<span class="nc" id="L472">            return parent.workerManager.status(</span>
+                    new WorkerStatusRequest(
+                            options.board,
+                            options.workflow,
+                            options.appHome,
+                            options.configDir,
+                            options.workspaceRoot,
+                            options.stateHome),
+                    parent.out);
+        }
+    }
+
+    @Command(
+            name = &quot;logs&quot;,
+            description = &quot;Show managed local Symphony worker logs.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L489">    static final class LogsCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L493">        @Mixin</span>
+        LifecycleOptions options = new LifecycleOptions();
+
+        @Option(names = &quot;--follow&quot;, description = &quot;Keep streaming appended log lines.&quot;)
+        boolean follow;
+
+        @Override
+        public Integer call() throws Exception {
+<span class="nc" id="L501">            options.validateCliPaths();</span>
+<span class="nc" id="L502">            return parent.workerManager.logs(</span>
+                    new WorkerLogsRequest(
+                            options.board,
+                            options.workflow,
+                            follow,
+                            options.appHome,
+                            options.configDir,
+                            options.workspaceRoot,
+                            options.stateHome),
+                    parent.out);
+        }
+    }
+
+    @Command(
+            name = &quot;diagnostics&quot;,
+            description = &quot;Print sanitized diagnostics for issue reports.&quot;,
+            versionProvider = TrelloBoardSetupMain.ProjectVersion.class,
+            mixinStandardHelpOptions = true)
+<span class="nc" id="L520">    static final class DiagnosticsCommand implements Callable&lt;Integer&gt; {</span>
+        @ParentCommand
+        TrelloBoardSetupMain parent;
+
+<span class="nc" id="L524">        @Mixin</span>
+        DiagnosticsOptions options = new DiagnosticsOptions();
+
+<span class="nc" id="L527">        @Option(names = &quot;--output&quot;, description = &quot;Write diagnostics to this file instead of stdout.&quot;)</span>
+<span class="nc" id="L528">        Optional&lt;Path&gt; output = Optional.empty();</span>
+
+        @Option(names = &quot;--json&quot;, description = &quot;Write a JSON object containing the sanitized diagnostics.&quot;)
+        boolean json;
+
+        @Option(
+                names = &quot;--deep&quot;,
+                description = &quot;Run deeper public-safe diagnostics, including Codex and GitHub auth-status commands.&quot;)
+        boolean deep;
+
+        @Option(
+                names = &quot;--show-private-context&quot;,
+                description = &quot;Show private Trello identifiers, URLs, and local paths for local troubleshooting.&quot;)
+        boolean privateContext;
+
+<span class="nc" id="L543">        @Option(names = &quot;--lookup&quot;, description = &quot;Resolve one diagnostics token. Requires --show-private-context.&quot;)</span>
+<span class="nc" id="L544">        Optional&lt;String&gt; lookup = Optional.empty();</span>
+
+        @Spec
+        CommandSpec spec;
+
+        @Override
+        public Integer call() throws Exception {
+<span class="nc" id="L551">            options.validateCliPaths();</span>
+<span class="nc" id="L552">            CliInputValidation.rejectControlCharacters(&quot;--output&quot;, output);</span>
+<span class="nc" id="L553">            CliInputValidation.rejectDashOutputFile(output);</span>
+<span class="nc" id="L554">            CliInputValidation.rejectStandardStreamOutputFile(output);</span>
+<span class="nc" id="L555">            CliInputValidation.rejectNonRegularOutputFile(output);</span>
+<span class="nc" id="L556">            rejectLookupWithoutPrivateContext();</span>
+<span class="nc" id="L557">            var reporter = new SetupDiagnosticReporter(System.getenv(), new ProcessCommandRunner());</span>
+<span class="nc" id="L558">            var request = new DiagnosticsRequest(</span>
+<span class="nc" id="L559">                    options.board(),</span>
+                    output,
+                    json,
+                    deep,
+                    options.appHome,
+                    options.configDir,
+                    options.workspaceRoot,
+                    options.stateHome,
+                    options.manifest,
+<span class="nc" id="L568">                    options.workflow(),</span>
+                    lookup);
+<span class="nc" id="L570">            String report = reporter.renderReport(request, privateContext);</span>
+<span class="nc bnc" id="L571" title="All 2 branches missed.">            String body = json ? jsonReport(report) : report;</span>
+<span class="nc" id="L572">            output.ifPresentOrElse(path -&gt; writeOutputFile(path, body), () -&gt; printDiagnostics(body));</span>
+<span class="nc" id="L573">            return 0;</span>
+        }
+
+        private void rejectLookupWithoutPrivateContext() {
+<span class="nc bnc" id="L577" title="All 4 branches missed.">            if (lookup.isPresent() &amp;&amp; !privateContext) {</span>
+<span class="nc" id="L578">                throw new ParameterException(spec.commandLine(), &quot;--lookup requires --show-private-context.&quot;);</span>
+            }
+<span class="nc" id="L580">        }</span>
+
+        private void writeOutputFile(Path path, String body) {
+            try {
+<span class="nc" id="L584">                writeOutput(path, body);</span>
+<span class="nc" id="L585">            } catch (IOException e) {</span>
+<span class="nc" id="L586">                throw new ParameterException(</span>
+<span class="nc" id="L587">                        spec.commandLine(), &quot;Could not write diagnostics output. Choose a writable file.&quot;, e);</span>
+<span class="nc" id="L588">            }</span>
+<span class="nc" id="L589">            parent.out.println(&quot;Diagnostics written.&quot;);</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">            if (privateContext) {</span>
+<span class="nc" id="L591">                parent.out.println(&quot;Review it before sharing. It contains private diagnostics context.&quot;);</span>
+            } else {
+<span class="nc" id="L593">                parent.out.println(&quot;Review it before sharing. It is intended to omit secrets and private context.&quot;);</span>
+            }
+<span class="nc" id="L595">        }</span>
+
+        private void printDiagnostics(String body) {
+<span class="nc" id="L598">            parent.out.print(body);</span>
+<span class="nc bnc" id="L599" title="All 2 branches missed.">            if (!body.endsWith(&quot;\n&quot;)) {</span>
+<span class="nc" id="L600">                parent.out.println();</span>
+            }
+<span class="nc" id="L602">        }</span>
+
+        private static String jsonReport(String report) throws IOException {
+<span class="nc" id="L605">            return new ObjectMapper().writeValueAsString(Map.of(&quot;format&quot;, &quot;markdown&quot;, &quot;report&quot;, report))</span>
+<span class="nc" id="L606">                    + System.lineSeparator();</span>
+        }
+
+        private static void writeOutput(Path path, String body) throws IOException {
+<span class="nc" id="L610">            Path absolute = path.toAbsolutePath().normalize();</span>
+<span class="nc" id="L611">            Path parent = absolute.getParent();</span>
+<span class="nc bnc" id="L612" title="All 2 branches missed.">            if (parent != null) {</span>
+<span class="nc" id="L613">                Files.createDirectories(parent);</span>
+            }
+<span class="nc" id="L615">            Files.writeString(absolute, body);</span>
+<span class="nc" id="L616">        }</span>
+    }
+
+<span class="nc" id="L619">    static final class LifecycleOptions {</span>
+<span class="nc" id="L620">        @Option(names = &quot;--board&quot;, description = &quot;Connected Trello board name, id, or short link.&quot;)</span>
+<span class="nc" id="L621">        Optional&lt;String&gt; board = Optional.empty();</span>
+
+<span class="nc" id="L623">        @Option(names = &quot;--workflow&quot;, description = &quot;Workflow file to manage.&quot;)</span>
+<span class="nc" id="L624">        Optional&lt;Path&gt; workflow = Optional.empty();</span>
+
+<span class="nc" id="L626">        @Option(names = &quot;--config-dir&quot;, description = &quot;Directory for local .env, workflows, and board manifest.&quot;)</span>
+<span class="nc" id="L627">        Optional&lt;Path&gt; configDir = Optional.empty();</span>
+
+<span class="nc" id="L629">        @Option(names = &quot;--workspace-root&quot;, description = &quot;Directory for per-card workspaces.&quot;)</span>
+<span class="nc" id="L630">        Optional&lt;Path&gt; workspaceRoot = Optional.empty();</span>
+
+<span class="nc" id="L632">        @Option(names = &quot;--state-home&quot;, description = &quot;Directory for managed worker PID and log files.&quot;)</span>
+<span class="nc" id="L633">        Optional&lt;Path&gt; stateHome = Optional.empty();</span>
+
+<span class="nc" id="L635">        @Option(names = &quot;--app-home&quot;, hidden = true)</span>
+<span class="nc" id="L636">        Optional&lt;Path&gt; appHome = Optional.empty();</span>
+
+        private void validateCliPaths() {
+<span class="nc" id="L639">            CliInputValidation.rejectBlankBoardSelector(board);</span>
+<span class="nc" id="L640">            CliInputValidation.rejectBlankWorkflowSelector(workflow);</span>
+<span class="nc" id="L641">            CliInputValidation.rejectControlCharactersInText(&quot;--board&quot;, board);</span>
+<span class="nc" id="L642">            CliInputValidation.rejectControlCharacters(&quot;--workflow&quot;, workflow);</span>
+<span class="nc" id="L643">            CliInputValidation.rejectBlankPath(&quot;--config-dir&quot;, configDir, &quot;--config-dir must not be empty.&quot;);</span>
+<span class="nc" id="L644">            CliInputValidation.rejectBlankPath(</span>
+                    &quot;--workspace-root&quot;, workspaceRoot, &quot;--workspace-root must not be empty.&quot;);
+<span class="nc" id="L646">            CliInputValidation.rejectBlankPath(&quot;--state-home&quot;, stateHome, &quot;--state-home must not be empty.&quot;);</span>
+<span class="nc" id="L647">            CliInputValidation.rejectBlankPath(&quot;--app-home&quot;, appHome, &quot;--app-home must not be empty.&quot;);</span>
+<span class="nc" id="L648">            CliInputValidation.rejectControlCharacters(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L649">            CliInputValidation.rejectControlCharacters(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L650">            CliInputValidation.rejectControlCharacters(&quot;--state-home&quot;, stateHome);</span>
+<span class="nc" id="L651">            CliInputValidation.rejectControlCharacters(&quot;--app-home&quot;, appHome);</span>
+<span class="nc" id="L652">        }</span>
+    }
+
+<span class="nc" id="L655">    static final class DiagnosticsOptions {</span>
+<span class="nc" id="L656">        @ArgGroup(exclusive = true, multiplicity = &quot;0..1&quot;)</span>
+        DiagnosticsSelector selector = new DiagnosticsSelector();
+
+<span class="nc" id="L659">        @Option(names = &quot;--config-dir&quot;, description = &quot;Directory for local .env, workflows, and board manifest.&quot;)</span>
+<span class="nc" id="L660">        Optional&lt;Path&gt; configDir = Optional.empty();</span>
+
+<span class="nc" id="L662">        @Option(names = &quot;--workspace-root&quot;, description = &quot;Directory for per-card workspaces.&quot;)</span>
+<span class="nc" id="L663">        Optional&lt;Path&gt; workspaceRoot = Optional.empty();</span>
+
+<span class="nc" id="L665">        @Option(names = &quot;--state-home&quot;, description = &quot;Directory for managed worker PID and log files.&quot;)</span>
+<span class="nc" id="L666">        Optional&lt;Path&gt; stateHome = Optional.empty();</span>
+
+<span class="nc" id="L668">        @Option(names = &quot;--manifest&quot;, description = &quot;Connected-board manifest path.&quot;)</span>
+<span class="nc" id="L669">        Optional&lt;Path&gt; manifest = Optional.empty();</span>
+
+<span class="nc" id="L671">        @Option(names = &quot;--app-home&quot;, hidden = true)</span>
+<span class="nc" id="L672">        Optional&lt;Path&gt; appHome = Optional.empty();</span>
+
+        Optional&lt;String&gt; board() {
+<span class="nc" id="L675">            return selector.board;</span>
+        }
+
+        Optional&lt;Path&gt; workflow() {
+<span class="nc" id="L679">            return selector.workflow;</span>
+        }
+
+        private void validateCliPaths() {
+<span class="nc" id="L683">            CliInputValidation.rejectBlankBoardSelector(board());</span>
+<span class="nc" id="L684">            CliInputValidation.rejectControlCharactersInText(&quot;--board&quot;, board());</span>
+<span class="nc" id="L685">            rejectBlankDiagnosticsPath(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L686">            rejectBlankDiagnosticsPath(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L687">            rejectBlankDiagnosticsPath(&quot;--state-home&quot;, stateHome);</span>
+<span class="nc" id="L688">            rejectBlankDiagnosticsPath(&quot;--manifest&quot;, manifest);</span>
+<span class="nc" id="L689">            CliInputValidation.rejectBlankWorkflowSelector(workflow());</span>
+<span class="nc" id="L690">            CliInputValidation.rejectControlCharacters(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L691">            CliInputValidation.rejectControlCharacters(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L692">            CliInputValidation.rejectControlCharacters(&quot;--state-home&quot;, stateHome);</span>
+<span class="nc" id="L693">            CliInputValidation.rejectControlCharacters(&quot;--manifest&quot;, manifest);</span>
+<span class="nc" id="L694">            CliInputValidation.rejectControlCharacters(&quot;--app-home&quot;, appHome);</span>
+<span class="nc" id="L695">            CliInputValidation.rejectControlCharacters(&quot;--workflow&quot;, workflow());</span>
+<span class="nc" id="L696">            CliInputValidation.rejectExistingNonDirectoryPath(&quot;--config-dir&quot;, configDir);</span>
+<span class="nc" id="L697">        }</span>
+
+        private static void rejectBlankDiagnosticsPath(String optionName, Optional&lt;Path&gt; path) {
+<span class="nc" id="L700">            CliInputValidation.rejectBlankPath(optionName, path, optionName + &quot; must not be empty.&quot;);</span>
+<span class="nc" id="L701">        }</span>
+    }
+
+<span class="nc" id="L704">    static final class DiagnosticsSelector {</span>
+<span class="nc" id="L705">        @Option(names = &quot;--board&quot;, description = &quot;Connected Trello board name, id, or short link.&quot;)</span>
+<span class="nc" id="L706">        Optional&lt;String&gt; board = Optional.empty();</span>
+
+<span class="nc" id="L708">        @Option(names = &quot;--workflow&quot;, description = &quot;Workflow file to include.&quot;)</span>
+<span class="nc" id="L709">        Optional&lt;Path&gt; workflow = Optional.empty();</span>
+    }
+
+<span class="nc" id="L712">    static final class BoardSetupOptions {</span>
+<span class="nc" id="L713">        @Mixin</span>
+        TrelloAuthOptions auth = new TrelloAuthOptions();
+
+<span class="nc" id="L716">        @Mixin</span>
+        GitHubMode github = new GitHubMode();
+
+<span class="nc" id="L719">        @Option(names = &quot;--endpoint&quot;, description = &quot;Trello API endpoint.&quot;)</span>
+        URI endpoint = TrelloBoardSetup.DEFAULT_ENDPOINT;
+
+<span class="nc" id="L722">        Path workflowPath = defaultWorkflowPath();</span>
+
+        boolean workflowPathExplicit;
+
+        @Option(names = &quot;--workflow&quot;, description = &quot;Workflow file to write.&quot;)
+        void workflowPath(Path workflowPath) {
+<span class="nc" id="L728">            this.workflowPath = workflowPath;</span>
+<span class="nc" id="L729">            this.workflowPathExplicit = true;</span>
+<span class="nc" id="L730">        }</span>
+
+<span class="nc" id="L732">        Path workspaceRoot = TrelloBoardSetup.DEFAULT_WORKSPACE_ROOT;</span>
+
+        boolean workspaceRootExplicit;
+
+        @Option(names = &quot;--workspace-root&quot;, description = &quot;Directory for per-card workspaces.&quot;)
+        void workspaceRoot(Path workspaceRoot) {
+<span class="nc" id="L738">            this.workspaceRoot = workspaceRoot;</span>
+<span class="nc" id="L739">            this.workspaceRootExplicit = true;</span>
+<span class="nc" id="L740">        }</span>
+
+<span class="nc" id="L742">        @Option(names = &quot;--env&quot;, description = &quot;Dotenv file to save Trello credentials for the generated worker.&quot;)</span>
+<span class="nc" id="L743">        Optional&lt;Path&gt; envPath = Optional.empty();</span>
+
+<span class="nc" id="L745">        @Option(names = &quot;--manifest&quot;, description = &quot;Connected-board manifest path.&quot;)</span>
+<span class="nc" id="L746">        Optional&lt;Path&gt; manifest = Optional.empty();</span>
+
+<span class="nc" id="L748">        @Option(names = &quot;--repository-url&quot;, description = &quot;Repository clone URL for generated workflows.&quot;)</span>
+<span class="nc" id="L749">        Optional&lt;String&gt; repositoryUrl = Optional.empty();</span>
+
+        @Option(names = &quot;--server-port&quot;, description = SetupOptionHelp.SERVER_PORT)
+        Integer serverPort;
+
+<span class="nc" id="L754">        @Option(names = &quot;--max-agents&quot;, description = SetupOptionHelp.MAX_AGENTS)</span>
+        int maxConcurrentAgents = TrelloBoardSetup.DEFAULT_MAX_CONCURRENT_AGENTS;
+
+<span class="nc" id="L757">        @Option(names = &quot;--codex-model&quot;, description = SetupOptionHelp.CODEX_MODEL)</span>
+<span class="nc" id="L758">        Optional&lt;String&gt; codexModel = Optional.empty();</span>
+
+<span class="nc" id="L760">        @Option(names = &quot;--codex-reasoning-effort&quot;, description = SetupOptionHelp.CODEX_REASONING_EFFORT)</span>
+<span class="nc" id="L761">        Optional&lt;String&gt; codexReasoningEffort = Optional.empty();</span>
+
+        @Option(names = &quot;--force&quot;, description = &quot;Overwrite the workflow file when needed.&quot;)
+        boolean force;
+
+        NewBoardRequest newBoardRequest(
+                String boardName, String workspaceId, TrelloBoardSetup.RepositoryDefaults repositoryDefaults) {
+<span class="nc" id="L768">            validate();</span>
+<span class="nc" id="L769">            return new NewBoardRequest(</span>
+                    endpoint,
+<span class="nc bnc" id="L771" title="All 2 branches missed.">                    auth.credentials(runtimeEnvPath()),</span>
+                    boardName,
+                    workspaceId,
+                    workflowPath,
+                    workspaceRoot,
+                    serverPort,
+                    maxConcurrentAgents,
+                    force,
+                    !workflowPathExplicit,
+<span class="nc" id="L780">                    gitHubIntegration(),</span>
+<span class="nc" id="L781">                    runtimeEnvPath(),</span>
+                    true,
+                    false,
+                    repositoryDefaults);
+        }
+
+        ImportBoardRequest importBoardRequest(
+                String boardId,
+                List&lt;String&gt; activeStates,
+                List&lt;String&gt; terminalStates,
+                String inProgressState,
+                boolean detectInProgressState,
+                String blockedState,
+                TrelloBoardSetup.RepositoryDefaults repositoryDefaults) {
+<span class="nc" id="L795">            validate();</span>
+<span class="nc" id="L796">            return new ImportBoardRequest(</span>
+                    endpoint,
+<span class="nc" id="L798">                    auth.credentials(runtimeEnvPath()),</span>
+                    boardId,
+<span class="nc" id="L800">                    CliValueNormalizer.nonBlank(activeStates),</span>
+<span class="nc" id="L801">                    CliValueNormalizer.nonBlank(terminalStates),</span>
+<span class="nc" id="L802">                    CliValueNormalizer.nullIfBlank(inProgressState),</span>
+                    detectInProgressState,
+<span class="nc" id="L804">                    CliValueNormalizer.nullIfBlank(blockedState),</span>
+                    workflowPath,
+                    workspaceRoot,
+                    serverPort,
+                    maxConcurrentAgents,
+                    force,
+<span class="nc" id="L810">                    gitHubIntegration(),</span>
+                    false,
+<span class="nc" id="L812">                    runtimeEnvPath(),</span>
+                    false,
+                    repositoryDefaults);
+        }
+
+        private GitHubIntegration gitHubIntegration() {
+<span class="nc bnc" id="L818" title="All 2 branches missed.">            return github.selected().orElse(true) ? GitHubIntegration.ENABLED : GitHubIntegration.DISABLED;</span>
+        }
+
+        private void validateRuntimeEnvTarget() throws IOException {
+<span class="nc bnc" id="L822" title="All 2 branches missed.">            if (!shouldUseRuntimeEnvTarget()) {</span>
+<span class="nc" id="L823">                return;</span>
+            }
+<span class="nc" id="L825">            TrelloCredentialStore.validateEnvPath(runtimeEnvPath());</span>
+<span class="nc" id="L826">            TrelloCredentialStore.CredentialSelection credentials = auth.credentialSelection(runtimeEnvPath());</span>
+<span class="nc bnc" id="L827" title="All 2 branches missed.">            if (credentials.persist()) {</span>
+                try {
+<span class="nc" id="L829">                    TrelloCredentialStore.validateWritableEnvUpdate(credentials, runtimeEnvPath(), true);</span>
+<span class="nc" id="L830">                } catch (IOException exception) {</span>
+<span class="nc" id="L831">                    throw envWriteFailure(exception);</span>
+<span class="nc" id="L832">                }</span>
+            }
+<span class="nc" id="L834">        }</span>
+
+        private void persistRuntimeCredentials(BufferedReader input, PrintStream out, PrintStream err)
+                throws IOException {
+<span class="nc bnc" id="L838" title="All 2 branches missed.">            if (!shouldUseRuntimeEnvTarget()) {</span>
+<span class="nc" id="L839">                return;</span>
+            }
+<span class="nc" id="L841">            TrelloCredentialStore.CredentialSelection credentials = auth.credentialSelection(runtimeEnvPath());</span>
+<span class="nc bnc" id="L842" title="All 2 branches missed.">            if (!credentials.persist()) {</span>
+<span class="nc" id="L843">                return;</span>
+            }
+            try {
+<span class="nc" id="L846">                new TrelloCredentialStore(System.getenv())</span>
+<span class="nc" id="L847">                        .write(credentials, runtimeEnvPath(), new StreamTerminal(input, out, err), true);</span>
+<span class="nc" id="L848">            } catch (IOException exception) {</span>
+<span class="nc" id="L849">                throw envWriteFailure(exception);</span>
+<span class="nc" id="L850">            }</span>
+<span class="nc" id="L851">        }</span>
+
+        /// The appended cause summary keeps local CLI stderr diagnosable: without it the underlying
+        /// filesystem exception is invisible and a transient write-probe failure cannot be
+        /// root-caused (issue #388). The actionable first sentences stay unchanged so existing user
+        /// guidance and the `setup_env_write_failed` hint mapping remain valid.
+        private static TrelloBoardSetupException envWriteFailure(IOException exception) {
+<span class="nc" id="L858">            return new TrelloBoardSetupException(</span>
+                    &quot;setup_env_write_failed&quot;,
+                    &quot;Could not write Trello credentials to the selected .env file. Choose a writable .env or&quot;
+<span class="nc" id="L861">                            + &quot; .env.NAME file. (&quot; + SetupDiagnosticReporter.pathFreeExceptionSummary(exception) + &quot;)&quot;,</span>
+                    exception);
+        }
+
+        private Path manifestPath(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L866">            return manifest.map(path -&gt; path.toAbsolutePath().normalize())</span>
+<span class="nc" id="L867">                    .or(TrelloBoardSetupMain::configuredConfigDirManifestPath)</span>
+<span class="nc" id="L868">                    .orElseGet(() -&gt; LocalWorkerPaths.defaultManifestPath(environment));</span>
+        }
+
+        private boolean shouldUseRuntimeEnvTarget() {
+<span class="nc bnc" id="L872" title="All 2 branches missed.">            return envPath.isPresent()</span>
+<span class="nc bnc" id="L873" title="All 2 branches missed.">                    || LocalEnvironment.configuredDotenv().isPresent()</span>
+<span class="nc bnc" id="L874" title="All 2 branches missed.">                    || auth.hasDirectCredentials();</span>
+        }
+
+        private Path runtimeEnvPath() {
+<span class="nc" id="L878">            return envPath.orElseGet(LocalEnvironment::defaultDotenv)</span>
+<span class="nc" id="L879">                    .toAbsolutePath()</span>
+<span class="nc" id="L880">                    .normalize();</span>
+        }
+
+        private TrelloBoardSetupException withRuntimeEnvHint(TrelloBoardSetupException exception) {
+<span class="nc bnc" id="L884" title="All 2 branches missed.">            return switch (exception.code()) {</span>
+                case &quot;setup_missing_api_key&quot;, &quot;setup_missing_api_token&quot;, &quot;setup_missing_trello_credentials&quot; -&gt;
+<span class="nc" id="L886">                    exception.withDotenvPath(runtimeEnvPath());</span>
+<span class="nc" id="L887">                default -&gt; exception;</span>
+            };
+        }
+
+        boolean hasExplicitCodexModelRequest() {
+<span class="nc bnc" id="L892" title="All 4 branches missed.">            return codexModel().isPresent() || codexReasoningEffort().isPresent();</span>
+        }
+
+        private void validateCliPaths() {
+<span class="nc" id="L896">            CliInputValidation.rejectControlCharacters(&quot;--workflow&quot;, workflowPath);</span>
+<span class="nc" id="L897">            CliInputValidation.rejectBlankPath(&quot;--workflow&quot;, workflowPath);</span>
+<span class="nc" id="L898">            CliInputValidation.rejectControlCharacters(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc bnc" id="L899" title="All 2 branches missed.">            if (workspaceRootExplicit) {</span>
+<span class="nc" id="L900">                CliInputValidation.rejectBlankPath(</span>
+                        &quot;--workspace-root&quot;, workspaceRoot, &quot;--workspace-root must not be empty.&quot;);
+<span class="nc" id="L902">                CliInputValidation.rejectRelativePath(</span>
+                        &quot;--workspace-root&quot;, workspaceRoot, &quot;--workspace-root must be an absolute path.&quot;);
+            }
+<span class="nc" id="L905">            CliInputValidation.rejectExistingNonDirectoryPath(&quot;--workspace-root&quot;, workspaceRoot);</span>
+<span class="nc" id="L906">            CliInputValidation.rejectBlankPath(&quot;--manifest&quot;, manifest, &quot;--manifest must not be empty.&quot;);</span>
+<span class="nc" id="L907">            CliInputValidation.rejectControlCharacters(&quot;--manifest&quot;, manifest);</span>
+<span class="nc" id="L908">            manifest.ifPresent(path -&gt; CliInputValidation.rejectDirectoryPath(&quot;--manifest&quot;, path));</span>
+<span class="nc" id="L909">            TrelloCredentialStore.validateEnvPathOption(envPath);</span>
+<span class="nc" id="L910">            validateCodexModelOverrides();</span>
+<span class="nc" id="L911">            repositoryUrl = RepositoryUrlInput.validateExplicit(repositoryUrl);</span>
+<span class="nc bnc" id="L912" title="All 2 branches missed.">            if (serverPort != null) {</span>
+<span class="nc" id="L913">                LocalPort.validateCliServerPort(serverPort);</span>
+            }
+<span class="nc" id="L915">        }</span>
+
+        Optional&lt;String&gt; codexModel() {
+<span class="nc bnc" id="L918" title="All 2 branches missed.">            return codexModel.map(String::strip).filter(value -&gt; !value.isBlank());</span>
+        }
+
+        Optional&lt;String&gt; codexReasoningEffort() {
+<span class="nc bnc" id="L922" title="All 2 branches missed.">            return codexReasoningEffort.map(String::strip).filter(value -&gt; !value.isBlank());</span>
+        }
+
+        private void validate() {
+<span class="nc" id="L926">            endpoint = TrelloApiEndpoint.normalize(endpoint);</span>
+<span class="nc" id="L927">            github.validate();</span>
+<span class="nc" id="L928">            validateCodexModelOverrides();</span>
+<span class="nc" id="L929">            repositoryUrl = RepositoryUrlInput.validateExplicit(repositoryUrl);</span>
+<span class="nc" id="L930">            TrelloBoardSetup.validateSetupMaxAgents(maxConcurrentAgents);</span>
+<span class="nc" id="L931">        }</span>
+
+        private void validateCodexModelOverrides() {
+<span class="nc" id="L934">            CliInputValidation.rejectBlankText(&quot;--codex-model&quot;, codexModel);</span>
+<span class="nc" id="L935">            CliInputValidation.rejectBlankText(&quot;--codex-reasoning-effort&quot;, codexReasoningEffort);</span>
+<span class="nc" id="L936">            CliInputValidation.rejectControlCharactersInText(&quot;--codex-model&quot;, codexModel);</span>
+<span class="nc" id="L937">            CliInputValidation.rejectControlCharactersInText(&quot;--codex-reasoning-effort&quot;, codexReasoningEffort);</span>
+<span class="nc" id="L938">        }</span>
+    }
+
+<span class="nc" id="L941">    static final class TrelloAuthOptions {</span>
+        @Option(
+                names = &quot;--key&quot;,
+                description = &quot;Trello API key. Defaults to &quot; + TrelloEnvironment.API_KEY
+                        + &quot; or the configured credential file.&quot;)
+        String key;
+
+        @Option(
+                names = &quot;--token&quot;,
+                description = &quot;Trello API token. Defaults to &quot; + TrelloEnvironment.API_TOKEN
+                        + &quot; or the configured credential file.&quot;)
+        String token;
+
+        TrelloCredentials credentials() {
+<span class="nc" id="L955">            return credentials(LocalEnvironment.defaultDotenv());</span>
+        }
+
+        TrelloCredentials credentials(Path dotenv) {
+<span class="nc" id="L959">            TrelloCredentialStore.CredentialSelection selection = credentialSelection(dotenv);</span>
+<span class="nc" id="L960">            return selection.credentials();</span>
+        }
+
+        TrelloCredentialStore.CredentialSelection credentialSelection() {
+<span class="nc" id="L964">            return credentialSelection(LocalEnvironment.defaultDotenv());</span>
+        }
+
+        TrelloCredentialStore.CredentialSelection credentialSelection(Path dotenv) {
+<span class="nc" id="L968">            return new TrelloCredentialStore.CredentialSelection(</span>
+<span class="nc" id="L969">                    credentialValue(key, TrelloEnvironment.API_KEY, dotenv),</span>
+<span class="nc" id="L970">                    credentialValue(token, TrelloEnvironment.API_TOKEN, dotenv));</span>
+        }
+
+        boolean hasDirectCredentials() {
+<span class="nc bnc" id="L974" title="All 4 branches missed.">            return CliValueNormalizer.trimmedOrNull(key) != null || CliValueNormalizer.trimmedOrNull(token) != null;</span>
+        }
+
+        private static TrelloCredentialStore.CredentialValue credentialValue(
+                String directValue, String envName, Path dotenv) {
+<span class="nc bnc" id="L979" title="All 2 branches missed.">            if (directValue != null) {</span>
+<span class="nc" id="L980">                return TrelloCredentialStore.CredentialValue.direct(directValue);</span>
+            }
+<span class="nc" id="L982">            return processEnv(envName)</span>
+<span class="nc" id="L983">                    .map(TrelloCredentialStore.CredentialValue::environment)</span>
+<span class="nc" id="L984">                    .orElseGet(() -&gt; TrelloCredentialStore.dotenvCredential(</span>
+<span class="nc" id="L985">                            envName, LocalEnvironment.get(envName, dotenv).orElse(null)));</span>
+        }
+    }
+
+    private static Optional&lt;String&gt; processEnv(String name) {
+<span class="nc" id="L990">        String value = System.getenv(name);</span>
+<span class="nc bnc" id="L991" title="All 4 branches missed.">        return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);</span>
+    }
+
+    private static Optional&lt;Path&gt; configuredConfigDirManifestPath() {
+<span class="nc" id="L995">        String configDir = property(CONFIG_DIR_PROPERTY);</span>
+<span class="nc bnc" id="L996" title="All 4 branches missed.">        if (configDir == null || configDir.isBlank()) {</span>
+<span class="nc" id="L997">            return Optional.empty();</span>
+        }
+<span class="nc" id="L999">        return Optional.of(Path.of(configDir).toAbsolutePath().normalize().resolve(ConnectedBoardManifest.FILE_NAME));</span>
+    }
+
+    private static Path defaultWorkflowPath() {
+<span class="nc" id="L1003">        String configDir = property(CONFIG_DIR_PROPERTY);</span>
+<span class="nc bnc" id="L1004" title="All 4 branches missed.">        if (configDir == null || configDir.isBlank()) {</span>
+<span class="nc" id="L1005">            return TrelloBoardSetup.DEFAULT_WORKFLOW_PATH;</span>
+        }
+<span class="nc" id="L1007">        return Path.of(configDir).resolve(TrelloBoardSetup.DEFAULT_WORKFLOW_PATH);</span>
+    }
+
+    private static void printNewBoardResult(
+            PrintStream out,
+            TrelloBoardSetup.NewBoardResult result,
+            Path envPath,
+            TrelloBoardSetup.RepositoryDefaults repositoryDefaults) {
+<span class="nc" id="L1015">        out.println(&quot;Created Trello board: &quot; + DisplayNames.quotedName(result.boardName()));</span>
+<span class="nc bnc" id="L1016" title="All 4 branches missed.">        if (result.boardUrl() != null &amp;&amp; !result.boardUrl().isBlank()) {</span>
+<span class="nc" id="L1017">            out.println(&quot;Board URL: &quot; + result.boardUrl());</span>
+        }
+<span class="nc" id="L1019">        out.println(&quot;Board identifier for WORKFLOW.md: &quot; + result.boardKey());</span>
+<span class="nc" id="L1020">        out.println(&quot;Created lists: &quot; + DisplayNames.quotedList(result.lists()));</span>
+<span class="nc" id="L1021">        out.println(&quot;Wrote workflow: &quot; + result.workflowPath().toAbsolutePath().normalize());</span>
+<span class="nc" id="L1022">        RepositoryDefaultSummary.printDirect(out, repositoryDefaults, result.workflowPath());</span>
+<span class="nc" id="L1023">        out.println(&quot;HTTP status port: &quot; + result.serverPort());</span>
+<span class="nc" id="L1024">        out.println();</span>
+<span class="nc" id="L1025">        out.println(&quot;Next:&quot;);</span>
+<span class="nc" id="L1026">        printInstalledCliNextSteps(out, envPath, result.workflowPath());</span>
+<span class="nc" id="L1027">    }</span>
+
+    private static void printImportBoardResult(
+            PrintStream out,
+            TrelloBoardSetup.ImportBoardResult result,
+            Path envPath,
+            TrelloBoardSetup.RepositoryDefaults repositoryDefaults) {
+<span class="nc" id="L1034">        out.println(&quot;Imported Trello board: &quot; + DisplayNames.quotedName(result.boardName()));</span>
+<span class="nc bnc" id="L1035" title="All 4 branches missed.">        if (result.boardUrl() != null &amp;&amp; !result.boardUrl().isBlank()) {</span>
+<span class="nc" id="L1036">            out.println(&quot;Board URL: &quot; + result.boardUrl());</span>
+        }
+<span class="nc" id="L1038">        out.println(&quot;Board identifier for WORKFLOW.md: &quot; + result.boardKey());</span>
+<span class="nc" id="L1039">        out.println(&quot;Open lists: &quot; + DisplayNames.quotedList(result.openLists()));</span>
+<span class="nc" id="L1040">        out.println(&quot;Active lists: &quot; + DisplayNames.quotedList(result.activeStates()));</span>
+<span class="nc" id="L1041">        out.println(&quot;In-progress list: &quot; + optionalListName(result.inProgressState()));</span>
+<span class="nc" id="L1042">        out.println(&quot;Terminal lists: &quot; + DisplayNames.quotedList(result.terminalStates()));</span>
+<span class="nc" id="L1043">        out.println(&quot;Blocked list: &quot; + optionalListName(result.blockedState()));</span>
+<span class="nc" id="L1044">        out.println(&quot;Wrote workflow: &quot; + result.workflowPath().toAbsolutePath().normalize());</span>
+<span class="nc" id="L1045">        RepositoryDefaultSummary.printDirect(out, repositoryDefaults, result.workflowPath());</span>
+<span class="nc" id="L1046">        out.println(&quot;HTTP status port: &quot; + result.serverPort());</span>
+<span class="nc" id="L1047">        out.println();</span>
+<span class="nc" id="L1048">        out.println(&quot;Next:&quot;);</span>
+<span class="nc" id="L1049">        printInstalledCliNextSteps(out, envPath, result.workflowPath());</span>
+<span class="nc" id="L1050">    }</span>
+
+    private static void printInstalledCliNextSteps(PrintStream out, Path envPath, Path workflowPath) {
+<span class="nc" id="L1053">        Path dotenv = envPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L1054">        Path workflow = workflowPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L1055">        String command = shellCommand(installedCliCommand());</span>
+<span class="nc" id="L1056">        out.println(&quot;  &quot; + command + &quot; start --env &quot; + shellQuote(dotenv.toString()) + &quot; --workflow &quot;</span>
+<span class="nc" id="L1057">                + shellQuote(workflow.toString()));</span>
+<span class="nc" id="L1058">        out.println(&quot;  &quot; + command + &quot; logs --workflow &quot; + shellQuote(workflow.toString()));</span>
+<span class="nc" id="L1059">    }</span>
+
+    private static String installedCliCommand() {
+<span class="nc" id="L1062">        String configured = property(CLI_COMMAND_PROPERTY);</span>
+<span class="nc bnc" id="L1063" title="All 4 branches missed.">        if (configured == null || configured.isBlank()) {</span>
+<span class="nc" id="L1064">            return ShellCommandRenderer.DEFAULT_CLI_COMMAND;</span>
+        }
+<span class="nc" id="L1066">        return configured;</span>
+    }
+
+    private static String shellCommand(String command) {
+<span class="nc" id="L1070">        return ShellCommandRenderer.executable(command, property(ShellCommandRenderer.SHELL_PROPERTY));</span>
+    }
+
+    private static String shellQuote(String value) {
+<span class="nc" id="L1074">        return ShellCommandRenderer.argument(value, property(ShellCommandRenderer.SHELL_PROPERTY));</span>
+    }
+
+    private static String property(String name) {
+<span class="nc" id="L1078">        return SetupSystemProperties.get(name);</span>
+    }
+
+    private static String optionalListName(String value) {
+<span class="nc bnc" id="L1082" title="All 4 branches missed.">        return value == null || value.isBlank() ? &quot;&lt;none&gt;&quot; : DisplayNames.quotedName(value);</span>
+    }
+
+<span class="nc" id="L1085">    public static final class AttachedListSelectorPreprocessor implements IParameterPreprocessor {</span>
+        @Override
+        @SuppressWarnings(&quot;unchecked&quot;)
+        public boolean preprocess(
+                Stack&lt;String&gt; args, CommandSpec commandSpec, ArgSpec argSpec, Map&lt;String, Object&gt; info) {
+<span class="nc bnc" id="L1090" title="All 2 branches missed.">            boolean attached = !&quot; &quot;.equals(info.get(&quot;separator&quot;));</span>
+<span class="nc bnc" id="L1091" title="All 4 branches missed.">            if (args.empty() &amp;&amp; !attached) {</span>
+<span class="nc" id="L1092">                return false;</span>
+            }
+<span class="nc bnc" id="L1094" title="All 4 branches missed.">            if (!attached &amp;&amp; isKnownOptionToken(commandSpec, args.peek())) {</span>
+<span class="nc" id="L1095">                return false;</span>
+            }
+<span class="nc bnc" id="L1097" title="All 2 branches missed.">            String value = args.empty() ? &quot;&quot; : args.pop();</span>
+<span class="nc" id="L1098">            Object currentValue = argSpec.getValue();</span>
+<span class="nc bnc" id="L1099" title="All 2 branches missed.">            if (currentValue instanceof List&lt;?&gt;) {</span>
+<span class="nc" id="L1100">                argSpec.&lt;List&lt;String&gt;&gt;getValue().add(value);</span>
+            } else {
+<span class="nc" id="L1102">                argSpec.setValue(value, commandSpec.commandLine());</span>
+            }
+<span class="nc" id="L1104">            return true;</span>
+        }
+
+        private static boolean isKnownOptionToken(CommandSpec commandSpec, String value) {
+<span class="nc bnc" id="L1108" title="All 2 branches missed.">            return commandSpec.findOption(optionName(value)) != null;</span>
+        }
+
+        private static String optionName(String value) {
+<span class="nc" id="L1112">            int separator = value.indexOf('=');</span>
+<span class="nc bnc" id="L1113" title="All 2 branches missed.">            return separator &lt; 0 ? value : value.substring(0, separator);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,1061 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstallerScriptFixture.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">InstallerScriptFixture.java</span></div><h1>InstallerScriptFixture.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+final class InstallerScriptFixture {
+    private static final int PROCESS_DESCENDANT_DISCOVERY_MILLIS = 1_000;
+    private static final int PROCESS_TERMINATION_SECONDS = 5;
+    private static final int TEMP_FILE_DELETION_SECONDS = 5;
+    private static final String REPOSITORY_ENVIRONMENT_PREFIX = &quot;SYMPHONY_&quot;;
+<span class="nc" id="L30">    private static final Pattern POSIX_INSTALLER_DEFAULT_VERSION =</span>
+<span class="nc" id="L31">            Pattern.compile(&quot;(?m)^DEFAULT_VERSION=\&quot;([^\&quot;]+)\&quot; # x-release-please-version$&quot;);</span>
+
+    private InstallerScriptFixture() {}
+
+    static void writeExecutable(Path path, String content) throws IOException {
+<span class="nc" id="L36">        Files.writeString(path, content);</span>
+<span class="nc" id="L37">        path.toFile().setExecutable(true);</span>
+<span class="nc" id="L38">    }</span>
+
+    static void writeCommandProxy(Path directory, String name, String target) throws IOException {
+<span class="nc" id="L41">        writeExecutable(</span>
+<span class="nc" id="L42">                directory.resolve(name),</span>
+                &quot;&quot;&quot;
+                #!/bin/sh
+                exec %s &quot;$@&quot;
+<span class="nc" id="L46">                &quot;&quot;&quot;.formatted(target));</span>
+<span class="nc" id="L47">    }</span>
+
+    static ProcessResult runWithPseudoTerminal(Map&lt;String, String&gt; environment, String input, String command)
+            throws IOException, InterruptedException {
+<span class="nc" id="L51">        var processBuilder = new ProcessBuilder(&quot;script&quot;, &quot;-q&quot;, &quot;-e&quot;, &quot;-c&quot;, command, &quot;/dev/null&quot;);</span>
+<span class="nc" id="L52">        return runWithTestEnvironment(environment, processBuilder, input);</span>
+    }
+
+    static ProcessResult run(Map&lt;String, String&gt; environment, String... command)
+            throws IOException, InterruptedException {
+<span class="nc" id="L57">        return run(environment, new ProcessBuilder(command));</span>
+    }
+
+    static ProcessResult run(Map&lt;String, String&gt; environment, Path workingDirectory, String... command)
+            throws IOException, InterruptedException {
+<span class="nc" id="L62">        var processBuilder = new ProcessBuilder(command);</span>
+<span class="nc" id="L63">        processBuilder.directory(workingDirectory.toFile());</span>
+<span class="nc" id="L64">        return run(environment, processBuilder);</span>
+    }
+
+    static ProcessResult run(Map&lt;String, String&gt; environment, ProcessBuilder processBuilder)
+            throws IOException, InterruptedException {
+<span class="nc" id="L69">        return runWithTestEnvironment(environment, processBuilder, &quot;&quot;);</span>
+    }
+
+    private static ProcessResult runWithTestEnvironment(
+            Map&lt;String, String&gt; environment, ProcessBuilder processBuilder, String input)
+            throws IOException, InterruptedException {
+<span class="nc" id="L75">        try (AppliedTestEnvironment ignored = applyTestEnvironment(processBuilder, environment)) {</span>
+<span class="nc" id="L76">            return run(processBuilder, input, 60);</span>
+        }
+    }
+
+    private static AppliedTestEnvironment applyTestEnvironment(
+            ProcessBuilder processBuilder, Map&lt;String, String&gt; environment) throws IOException {
+<span class="nc" id="L82">        Map&lt;String, String&gt; processEnvironment = processBuilder.environment();</span>
+<span class="nc" id="L83">        processEnvironment.keySet().removeIf(InstallerScriptFixture::isRepositoryEnvironmentControl);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (!environment.containsKey(&quot;PATH&quot;)) {</span>
+<span class="nc" id="L85">            String inheritedPath = processEnvironment.getOrDefault(&quot;PATH&quot;, &quot;&quot;);</span>
+<span class="nc" id="L86">            String javaBin = Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;).toString();</span>
+<span class="nc" id="L87">            processEnvironment.put(</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">                    &quot;PATH&quot;, inheritedPath.isEmpty() ? javaBin : javaBin + File.pathSeparator + inheritedPath);</span>
+        }
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        for (String xdgHome : List.of(&quot;XDG_DATA_HOME&quot;, &quot;XDG_CONFIG_HOME&quot;, &quot;XDG_STATE_HOME&quot;, &quot;XDG_CACHE_HOME&quot;)) {</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            if (!environment.containsKey(xdgHome)) {</span>
+<span class="nc" id="L92">                processEnvironment.remove(xdgHome);</span>
+            }
+<span class="nc" id="L94">        }</span>
+<span class="nc" id="L95">        processEnvironment.putAll(environment);</span>
+<span class="nc bnc" id="L96" title="All 4 branches missed.">        if (!environment.containsKey(&quot;SYMPHONY_TRELLO_TEST_OS&quot;) &amp;&amp; isLinux()) {</span>
+<span class="nc" id="L97">            processEnvironment.put(&quot;SYMPHONY_TRELLO_TEST_OS&quot;, &quot;Linux&quot;);</span>
+        }
+<span class="nc" id="L99">        applyDeterministicLinuxDistro(processEnvironment);</span>
+<span class="nc" id="L100">        applyDeterministicLinuxFilesystem(processEnvironment);</span>
+<span class="nc" id="L101">        List&lt;Path&gt; cleanupRoots = List.of();</span>
+<span class="nc bnc" id="L102" title="All 4 branches missed.">        if (!environment.containsKey(&quot;HOME&quot;) &amp;&amp; !isWindows()) {</span>
+<span class="nc" id="L103">            String symphonyHome = environment.get(&quot;SYMPHONY_HOME&quot;);</span>
+            Path home;
+<span class="nc bnc" id="L105" title="All 4 branches missed.">            Path symphonyHomePath = symphonyHome == null || symphonyHome.isBlank() ? null : Path.of(symphonyHome);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (symphonyHomePath != null</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.isAbsolute()</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.getParent() != null</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.getFileName() != null) {</span>
+<span class="nc" id="L110">                Files.createDirectories(symphonyHomePath.getParent());</span>
+<span class="nc" id="L111">                home = symphonyHomePath.resolveSibling(symphonyHomePath.getFileName() + &quot;-user-home&quot;);</span>
+            } else {
+<span class="nc" id="L113">                home = Files.createTempDirectory(&quot;symphony-trello-installer-home-&quot;);</span>
+<span class="nc" id="L114">                cleanupRoots = List.of(home);</span>
+            }
+<span class="nc" id="L116">            Files.createDirectories(home);</span>
+<span class="nc" id="L117">            processEnvironment.put(&quot;HOME&quot;, home.toString());</span>
+        }
+<span class="nc" id="L119">        return new AppliedTestEnvironment(cleanupRoots);</span>
+    }
+
+    static boolean isRepositoryEnvironmentControl(String name) {
+<span class="nc" id="L123">        return name.regionMatches(true, 0, REPOSITORY_ENVIRONMENT_PREFIX, 0, REPOSITORY_ENVIRONMENT_PREFIX.length());</span>
+    }
+
+    private static void applyDeterministicLinuxDistro(Map&lt;String, String&gt; processEnvironment) {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (!&quot;Linux&quot;.equals(processEnvironment.get(&quot;SYMPHONY_TRELLO_TEST_OS&quot;))) {</span>
+<span class="nc" id="L128">            return;</span>
+        }
+<span class="nc" id="L130">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_ID&quot;, &quot;debian&quot;);</span>
+<span class="nc" id="L131">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_ID_LIKE&quot;, &quot;debian&quot;);</span>
+<span class="nc" id="L132">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_PRETTY_NAME&quot;, &quot;Debian GNU/Linux&quot;);</span>
+<span class="nc" id="L133">    }</span>
+
+    private static void applyDeterministicLinuxFilesystem(Map&lt;String, String&gt; processEnvironment) {
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (!&quot;Linux&quot;.equals(processEnvironment.get(&quot;SYMPHONY_TRELLO_TEST_OS&quot;))) {</span>
+<span class="nc" id="L137">            return;</span>
+        }
+<span class="nc" id="L139">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_HOME_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
+<span class="nc" id="L140">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_ROOT_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
+<span class="nc" id="L141">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_VAR_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
+<span class="nc" id="L142">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_HOME_SIZE_KB&quot;, &quot;1048576&quot;);</span>
+<span class="nc" id="L143">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_VAR_SIZE_KB&quot;, &quot;1048576&quot;);</span>
+<span class="nc" id="L144">    }</span>
+
+    private static boolean isLinux() {
+<span class="nc" id="L147">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).equalsIgnoreCase(&quot;Linux&quot;);</span>
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (!Files.exists(root)) {</span>
+<span class="nc" id="L152">            return;</span>
+        }
+<span class="nc" id="L154">        Files.walkFileTree(root, new SimpleFileVisitor&lt;&gt;() {</span>
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+<span class="nc" id="L157">                Files.delete(file);</span>
+<span class="nc" id="L158">                return FileVisitResult.CONTINUE;</span>
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path directory, IOException failure) throws IOException {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                if (failure != null) {</span>
+<span class="nc" id="L164">                    throw failure;</span>
+                }
+<span class="nc" id="L166">                Files.delete(directory);</span>
+<span class="nc" id="L167">                return FileVisitResult.CONTINUE;</span>
+            }
+        });
+<span class="nc" id="L170">    }</span>
+
+    static ProcessResult run(ProcessBuilder processBuilder, String input, int timeoutSeconds)
+            throws IOException, InterruptedException {
+<span class="nc" id="L174">        Path stdout = Files.createTempFile(&quot;symphony-trello-installer-stdout-&quot;, &quot;.log&quot;);</span>
+<span class="nc" id="L175">        Path stderr = null;</span>
+<span class="nc" id="L176">        Path stdin = null;</span>
+<span class="nc" id="L177">        Process process = null;</span>
+        try {
+<span class="nc" id="L179">            stderr = Files.createTempFile(&quot;symphony-trello-installer-stderr-&quot;, &quot;.log&quot;);</span>
+<span class="nc" id="L180">            stdin = Files.createTempFile(&quot;symphony-trello-installer-stdin-&quot;, &quot;.log&quot;);</span>
+<span class="nc" id="L181">            Files.writeString(stdin, input);</span>
+<span class="nc" id="L182">            processBuilder.redirectInput(stdin.toFile());</span>
+<span class="nc" id="L183">            processBuilder.redirectOutput(stdout.toFile());</span>
+<span class="nc" id="L184">            processBuilder.redirectError(stderr.toFile());</span>
+<span class="nc" id="L185">            process = processBuilder.start();</span>
+<span class="nc" id="L186">            boolean completed = process.waitFor(Duration.ofSeconds(timeoutSeconds));</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (!completed) {</span>
+<span class="nc" id="L188">                terminateProcessTree(process);</span>
+            }
+<span class="nc" id="L190">            String output = decodeCapturedOutput(stdout) + decodeCapturedOutput(stderr);</span>
+<span class="nc" id="L191">            assertThat(completed)</span>
+<span class="nc" id="L192">                    .as(&quot;process timed out: %s output:%n%s&quot;, processBuilder.command(), output)</span>
+<span class="nc" id="L193">                    .isTrue();</span>
+<span class="nc" id="L194">            return new ProcessResult(process.exitValue(), output);</span>
+        } finally {
+<span class="nc bnc" id="L196" title="All 4 branches missed.">            if (process != null &amp;&amp; process.isAlive()) {</span>
+<span class="nc" id="L197">                terminateProcessTreeImmediately(process);</span>
+            }
+<span class="nc" id="L199">            deleteTempFiles(stdout, stderr, stdin);</span>
+        }
+    }
+
+    private static void deleteTempFiles(Path... files) throws IOException, InterruptedException {
+<span class="nc" id="L204">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TEMP_FILE_DELETION_SECONDS);</span>
+<span class="nc" id="L205">        Map&lt;Path, IOException&gt; failures = new LinkedHashMap&lt;&gt;();</span>
+        do {
+<span class="nc" id="L207">            failures.clear();</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            for (Path file : files) {</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                if (file == null) {</span>
+<span class="nc" id="L210">                    continue;</span>
+                }
+                try {
+<span class="nc" id="L213">                    Files.deleteIfExists(file);</span>
+<span class="nc" id="L214">                } catch (IOException exception) {</span>
+<span class="nc" id="L215">                    failures.put(file, exception);</span>
+<span class="nc" id="L216">                }</span>
+            }
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (failures.isEmpty()) {</span>
+<span class="nc" id="L219">                return;</span>
+            }
+<span class="nc" id="L221">            pollDelayForBoundedProcessWait();</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">        } while (System.nanoTime() &lt; deadline);</span>
+
+<span class="nc" id="L224">        var failure = new IOException(&quot;Temporary process files remain locked: &quot; + failures.keySet());</span>
+<span class="nc" id="L225">        failures.values().forEach(failure::addSuppressed);</span>
+<span class="nc" id="L226">        throw failure;</span>
+    }
+
+    private static String decodeCapturedOutput(Path output) throws IOException {
+<span class="nc" id="L230">        return StandardCharsets.UTF_8</span>
+<span class="nc" id="L231">                .newDecoder()</span>
+<span class="nc" id="L232">                .onMalformedInput(CodingErrorAction.REPLACE)</span>
+<span class="nc" id="L233">                .onUnmappableCharacter(CodingErrorAction.REPLACE)</span>
+<span class="nc" id="L234">                .decode(ByteBuffer.wrap(Files.readAllBytes(output)))</span>
+<span class="nc" id="L235">                .toString();</span>
+    }
+
+    private static void terminateProcessTree(Process process) throws InterruptedException {
+<span class="nc" id="L239">        Map&lt;Long, ProcessHandle&gt; observedDescendants = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L240">        long discoveryDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PROCESS_DESCENDANT_DISCOVERY_MILLIS);</span>
+        List&lt;ProcessHandle&gt; currentDescendants;
+        do {
+<span class="nc" id="L243">            currentDescendants = terminateCurrentDescendants(process, observedDescendants);</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">            if (currentDescendants.isEmpty()) {</span>
+<span class="nc" id="L245">                break;</span>
+            }
+<span class="nc" id="L247">            pollDelayForBoundedProcessWait();</span>
+<span class="nc bnc" id="L248" title="All 4 branches missed.">        } while (process.isAlive() &amp;&amp; System.nanoTime() &lt; discoveryDeadline);</span>
+<span class="nc" id="L249">        terminateCurrentDescendants(process, observedDescendants);</span>
+<span class="nc" id="L250">        process.destroyForcibly();</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        for (ProcessHandle descendant : observedDescendants.values()) {</span>
+<span class="nc" id="L252">            descendant.destroyForcibly();</span>
+<span class="nc" id="L253">        }</span>
+<span class="nc" id="L254">        long terminationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(PROCESS_TERMINATION_SECONDS);</span>
+<span class="nc bnc" id="L255" title="All 4 branches missed.">        while ((process.isAlive() || observedDescendants.values().stream().anyMatch(ProcessHandle::isAlive))</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                &amp;&amp; System.nanoTime() &lt; terminationDeadline) {</span>
+<span class="nc" id="L257">            pollDelayForBoundedProcessWait();</span>
+        }
+<span class="nc bnc" id="L259" title="All 4 branches missed.">        assertThat(process.isAlive() || observedDescendants.values().stream().anyMatch(ProcessHandle::isAlive))</span>
+<span class="nc" id="L260">                .as(&quot;timed-out process tree terminates: root pid %s&quot;, process.pid())</span>
+<span class="nc" id="L261">                .isFalse();</span>
+<span class="nc" id="L262">    }</span>
+
+    private static List&lt;ProcessHandle&gt; terminateCurrentDescendants(
+            Process process, Map&lt;Long, ProcessHandle&gt; observedDescendants) {
+<span class="nc" id="L266">        List&lt;ProcessHandle&gt; currentDescendants = process.descendants().toList();</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        for (ProcessHandle descendant : currentDescendants.reversed()) {</span>
+<span class="nc" id="L268">            observedDescendants.put(descendant.pid(), descendant);</span>
+<span class="nc" id="L269">            descendant.destroyForcibly();</span>
+<span class="nc" id="L270">        }</span>
+<span class="nc" id="L271">        return currentDescendants;</span>
+    }
+
+    private static void terminateProcessTreeImmediately(Process process) {
+<span class="nc" id="L275">        List&lt;ProcessHandle&gt; descendants = process.descendants().toList();</span>
+<span class="nc" id="L276">        descendants.reversed().forEach(ProcessHandle::destroyForcibly);</span>
+<span class="nc" id="L277">        process.destroyForcibly();</span>
+<span class="nc" id="L278">    }</span>
+
+    static Path singleFile(Path directory, String suffix) throws IOException {
+<span class="nc" id="L281">        try (Stream&lt;Path&gt; files = Files.list(directory)) {</span>
+<span class="nc" id="L282">            return files.filter(path -&gt; path.getFileName().toString().endsWith(suffix))</span>
+<span class="nc" id="L283">                    .reduce((first, second) -&gt; {</span>
+<span class="nc" id="L284">                        throw new IllegalStateException(&quot;Expected one &quot; + suffix + &quot; file, found at least two&quot;);</span>
+                    })
+<span class="nc" id="L286">                    .orElseThrow(() -&gt; new IllegalStateException(&quot;Expected one &quot; + suffix + &quot; file in &quot; + directory));</span>
+        }
+    }
+
+    static List&lt;Path&gt; regularFilesUnder(Path directory) throws IOException {
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        if (!Files.exists(directory)) {</span>
+<span class="nc" id="L292">            return List.of();</span>
+        }
+<span class="nc" id="L294">        try (Stream&lt;Path&gt; files = Files.walk(directory)) {</span>
+<span class="nc" id="L295">            return files.filter(Files::isRegularFile).toList();</span>
+        }
+    }
+
+    static boolean processIsRunning(long pid) throws IOException, InterruptedException {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        return run(Map.of(), &quot;bash&quot;, &quot;-c&quot;, &quot;kill -0 &quot; + pid).exitCode() == 0;</span>
+    }
+
+    static boolean processStopsWithin(long pid, int timeoutSeconds) throws IOException, InterruptedException {
+<span class="nc" id="L304">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            if (!processIsRunning(pid)) {</span>
+<span class="nc" id="L307">                return true;</span>
+            }
+<span class="nc" id="L309">            pollDelayForBoundedProcessWait();</span>
+        }
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        return !processIsRunning(pid);</span>
+    }
+
+    private static void pollDelayForBoundedProcessWait() throws InterruptedException {
+<span class="nc" id="L315">        Thread.sleep(100);</span>
+<span class="nc" id="L316">    }</span>
+
+    static String shellQuote(String value) {
+<span class="nc" id="L319">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;'\&quot;'\&quot;'&quot;) + &quot;'&quot;;</span>
+    }
+
+    static boolean commandExists(String name) {
+        try {
+<span class="nc" id="L324">            Process process = new ProcessBuilder(name, &quot;--version&quot;).start();</span>
+<span class="nc bnc" id="L325" title="All 4 branches missed.">            return process.waitFor(Duration.ofSeconds(10)) &amp;&amp; process.exitValue() == 0;</span>
+<span class="nc" id="L326">        } catch (IOException e) {</span>
+<span class="nc" id="L327">            return false;</span>
+<span class="nc" id="L328">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L329">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L330">            return false;</span>
+        }
+    }
+
+    static boolean dockerDaemonIsUsable() {
+        try {
+<span class="nc" id="L336">            Process process = new ProcessBuilder(&quot;docker&quot;, &quot;info&quot;, &quot;--format&quot;, &quot;{{.ServerVersion}}&quot;)</span>
+<span class="nc" id="L337">                    .redirectErrorStream(true)</span>
+<span class="nc" id="L338">                    .start();</span>
+<span class="nc" id="L339">            boolean completed = process.waitFor(Duration.ofSeconds(10));</span>
+<span class="nc" id="L340">            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">            return completed</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">                    &amp;&amp; process.exitValue() == 0</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">                    &amp;&amp; !output.isBlank()</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">                    &amp;&amp; !output.toLowerCase(Locale.ROOT).contains(&quot;permission denied&quot;);</span>
+<span class="nc" id="L345">        } catch (IOException e) {</span>
+<span class="nc" id="L346">            return false;</span>
+<span class="nc" id="L347">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L348">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L349">            return false;</span>
+        }
+    }
+
+    static boolean isWindows() {
+<span class="nc" id="L354">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;);</span>
+    }
+
+    static List&lt;String&gt; powershellCommand() {
+<span class="nc" id="L358">        String configured = System.getenv(&quot;SYMPHONY_TRELLO_TEST_PWSH&quot;);</span>
+<span class="nc bnc" id="L359" title="All 4 branches missed.">        if (configured != null &amp;&amp; !configured.isBlank()) {</span>
+<span class="nc" id="L360">            Path command = Path.of(configured);</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            if (Files.isExecutable(command)) {</span>
+<span class="nc" id="L362">                return List.of(command.toString());</span>
+            }
+        }
+<span class="nc bnc" id="L365" title="All 2 branches missed.">        if (!isWindows()) {</span>
+<span class="nc" id="L366">            return List.of();</span>
+        }
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (commandExists(&quot;pwsh&quot;)) {</span>
+<span class="nc" id="L369">            return List.of(&quot;pwsh&quot;);</span>
+        }
+<span class="nc" id="L371">        return List.of();</span>
+    }
+
+    static List&lt;String&gt; command(List&lt;String&gt; executable, String... arguments) {
+<span class="nc" id="L375">        return Stream.concat(executable.stream(), Stream.of(arguments)).toList();</span>
+    }
+
+    static Map&lt;String, String&gt; nonWindowsPowerShellEnvironment() {
+<span class="nc bnc" id="L379" title="All 2 branches missed.">        if (System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;)) {</span>
+<span class="nc" id="L380">            return Map.of();</span>
+        }
+<span class="nc" id="L382">        return Map.of(&quot;SYMPHONY_TRELLO_ALLOW_NON_WINDOWS_PWSH_FOR_TEST&quot;, &quot;1&quot;);</span>
+    }
+
+    static String powerShellLiteral(String value) {
+<span class="nc" id="L386">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;''&quot;) + &quot;'&quot;;</span>
+    }
+
+    static String installerDefaultRef() throws IOException {
+<span class="nc" id="L390">        String installScript = Files.readString(Path.of(&quot;install.sh&quot;));</span>
+<span class="nc" id="L391">        return POSIX_INSTALLER_DEFAULT_VERSION</span>
+<span class="nc" id="L392">                .matcher(installScript)</span>
+<span class="nc" id="L393">                .results()</span>
+<span class="nc" id="L394">                .findAny()</span>
+<span class="nc" id="L395">                .map(match -&gt; &quot;v&quot; + match.group(1))</span>
+<span class="nc" id="L396">                .orElseThrow(() -&gt; new IllegalStateException(&quot;install.sh is missing the Release Please default ref&quot;));</span>
+    }
+
+    static Path createSourceRepository(Path temporaryDirectory) throws Exception {
+<span class="nc" id="L400">        Path repository = temporaryDirectory.resolve(&quot;source&quot;);</span>
+<span class="nc" id="L401">        Files.createDirectories(repository);</span>
+<span class="nc" id="L402">        Files.writeString(repository.resolve(&quot;pom.xml&quot;), &quot;&lt;project /&gt;\n&quot;);</span>
+<span class="nc" id="L403">        Files.writeString(repository.resolve(&quot;WORKFLOW.example.md&quot;), &quot;# Example workflow\n&quot;);</span>
+<span class="nc" id="L404">        Files.writeString(</span>
+<span class="nc" id="L405">                repository.resolve(&quot;mvnw&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo &quot;mvnw $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                app_home=&quot;$(cd &quot;$(dirname &quot;$0&quot;)&quot; &amp;&amp; pwd -P)&quot;
+                mkdir -p &quot;$app_home/target/quarkus-app/app&quot; &quot;$app_home/target/quarkus-app/lib/main&quot; &quot;$app_home/target/quarkus-app/quarkus&quot;
+                : &gt; &quot;$app_home/target/quarkus-app/quarkus-run.jar&quot;
+                &quot;&quot;&quot;);
+<span class="nc" id="L414">        repository.resolve(&quot;mvnw&quot;).toFile().setExecutable(true);</span>
+<span class="nc" id="L415">        initializeSourceRepository(repository);</span>
+<span class="nc" id="L416">        return repository;</span>
+    }
+
+    static Path createWindowsSourceRepository(Path temporaryDirectory) throws Exception {
+<span class="nc" id="L420">        Path repository = temporaryDirectory.resolve(&quot;windows source&quot;);</span>
+<span class="nc" id="L421">        Files.createDirectories(repository);</span>
+<span class="nc" id="L422">        Files.writeString(repository.resolve(&quot;pom.xml&quot;), &quot;&lt;project /&gt;\n&quot;);</span>
+<span class="nc" id="L423">        Files.writeString(repository.resolve(&quot;WORKFLOW.example.md&quot;), &quot;# Example workflow\n&quot;);</span>
+<span class="nc" id="L424">        Files.writeString(</span>
+<span class="nc" id="L425">                repository.resolve(&quot;mvnw.cmd&quot;),</span>
+                &quot;&quot;&quot;
+                @echo off
+                echo mvnw.cmd %* &gt;&gt; &quot;%SYMPHONY_FAKE_LOG%&quot;
+                mkdir target\\quarkus-app\\app 2&gt;nul
+                mkdir target\\quarkus-app\\lib\\main 2&gt;nul
+                mkdir target\\quarkus-app\\quarkus 2&gt;nul
+                type nul &gt; target\\quarkus-app\\quarkus-run.jar
+                &quot;&quot;&quot;);
+<span class="nc" id="L434">        initializeSourceRepository(repository);</span>
+<span class="nc" id="L435">        return repository;</span>
+    }
+
+    private static void initializeSourceRepository(Path repository) throws Exception {
+<span class="nc" id="L439">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;init&quot;, &quot;-b&quot;, &quot;main&quot;).assertSuccess();</span>
+<span class="nc" id="L440">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;config&quot;, &quot;user.name&quot;, &quot;Test User&quot;)</span>
+<span class="nc" id="L441">                .assertSuccess();</span>
+<span class="nc" id="L442">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;config&quot;, &quot;user.email&quot;, &quot;test@example.invalid&quot;)</span>
+<span class="nc" id="L443">                .assertSuccess();</span>
+<span class="nc" id="L444">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, &quot;.&quot;).assertSuccess();</span>
+<span class="nc" id="L445">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Initial test source&quot;)</span>
+<span class="nc" id="L446">                .assertSuccess();</span>
+<span class="nc" id="L447">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;tag&quot;, installerDefaultRef())</span>
+<span class="nc" id="L448">                .assertSuccess();</span>
+<span class="nc" id="L449">    }</span>
+
+    static void addSourceRepositoryCommit(Path repository, String relativePath, String content) throws Exception {
+<span class="nc" id="L452">        Files.writeString(repository.resolve(relativePath), content);</span>
+<span class="nc" id="L453">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, relativePath).assertSuccess();</span>
+<span class="nc" id="L454">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Update test source&quot;)</span>
+<span class="nc" id="L455">                .assertSuccess();</span>
+<span class="nc" id="L456">    }</span>
+
+    static String pinnedRef(Path repository, String refType) throws Exception {
+<span class="nc bnc" id="L459" title="All 3 branches missed.">        return switch (refType) {</span>
+            case &quot;tag&quot; -&gt; {
+<span class="nc" id="L461">                run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;tag&quot;, &quot;v-test-install&quot;)</span>
+<span class="nc" id="L462">                        .assertSuccess();</span>
+<span class="nc" id="L463">                yield &quot;v-test-install&quot;;</span>
+            }
+            case &quot;sha&quot; -&gt; {
+<span class="nc" id="L466">                ProcessResult result = run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;rev-parse&quot;, &quot;HEAD&quot;);</span>
+<span class="nc" id="L467">                result.assertSuccess();</span>
+<span class="nc" id="L468">                yield result.output().trim();</span>
+            }
+<span class="nc" id="L470">            default -&gt; throw new IllegalArgumentException(&quot;Unknown ref type: &quot; + refType);</span>
+        };
+    }
+
+    static Path createFakeToolchain(Path temporaryDirectory) throws IOException {
+<span class="nc" id="L475">        Path fakeBin = temporaryDirectory.resolve(&quot;fake-bin&quot;);</span>
+<span class="nc" id="L476">        Files.createDirectories(fakeBin);</span>
+<span class="nc" id="L477">        writeExecutable(</span>
+<span class="nc" id="L478">                fakeBin.resolve(&quot;codex&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo &quot;codex $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                if [[ &quot;${1:-}&quot; == &quot;login&quot; &amp;&amp; &quot;${2:-}&quot; == &quot;status&quot; ]]; then
+                  [[ -f &quot;$(dirname &quot;$SYMPHONY_FAKE_LOG&quot;)/codex-authenticated&quot; ]]
+                  exit $?
+                fi
+                if [[ &quot;${1:-}&quot; == &quot;login&quot; ]]; then
+                  : &gt; &quot;$(dirname &quot;$SYMPHONY_FAKE_LOG&quot;)/codex-authenticated&quot;
+                  exit 0
+                fi
+                exit 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L493">        writeExecutable(</span>
+<span class="nc" id="L494">                fakeBin.resolve(&quot;systemctl&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo &quot;systemctl $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                if [[ -n &quot;${SYMPHONY_FAKE_SYSTEMD_UNAVAILABLE:-}&quot; &amp;&amp; &quot;$*&quot; == &quot;--user show-environment&quot; ]]; then
+                  exit 1
+                fi
+                if [[ -n &quot;${SYMPHONY_FAKE_SYSTEMD_ENABLE_FAILURE:-}&quot; &amp;&amp; &quot;$*&quot; == &quot;--user enable symphony-trello.service&quot; ]]; then
+                  exit 1
+                fi
+                config_home=&quot;${XDG_CONFIG_HOME:-$HOME/.config}&quot;
+                service_file=&quot;$config_home/systemd/user/symphony-trello.service&quot;
+                command_path=&quot;&quot;
+                if [[ -f &quot;$service_file&quot; ]]; then
+                  command_path=&quot;$(sed -n 's/^ExecStart=&quot;\\([^&quot;]*symphony-trello\\)&quot; .*/\\1/p' &quot;$service_file&quot; | head -1)&quot;
+                fi
+                if [[ &quot;$*&quot; == &quot;--user restart symphony-trello.service&quot; &amp;&amp; -n &quot;$command_path&quot; ]]; then
+                  &quot;$command_path&quot; start --all
+                elif [[ &quot;$*&quot; == &quot;--user disable --now symphony-trello.service&quot; &amp;&amp; -n &quot;$command_path&quot; ]]; then
+                  &quot;$command_path&quot; stop
+                fi
+                exit 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L518">        writeExecutable(</span>
+<span class="nc" id="L519">                fakeBin.resolve(&quot;loginctl&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo &quot;loginctl $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                if [[ -n &quot;${SYMPHONY_FAKE_LINGER_FAILURE:-}&quot; ]]; then
+                  exit 1
+                fi
+                exit 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L529">        writeExecutable(</span>
+<span class="nc" id="L530">                fakeBin.resolve(&quot;java&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                if [[ &quot;${1:-}&quot; == &quot;-version&quot; ]]; then
+                  echo 'openjdk version &quot;25.0.1&quot; 2026-04-21' &gt;&amp;2
+                  exit 0
+                fi
+                if [[ &quot;$*&quot; == *&quot;ch.fmartin.symphony.trello.setup.TrelloBoardSetupMain&quot;* ]]; then
+                  java_args=()
+                  raw_cli_args=()
+                  found_main=false
+                  for value in &quot;$@&quot;; do
+                    if [[ &quot;$found_main&quot; == true ]]; then
+                      raw_cli_args+=(&quot;$value&quot;)
+                    elif [[ &quot;$value&quot; == &quot;ch.fmartin.symphony.trello.setup.TrelloBoardSetupMain&quot; ]]; then
+                      found_main=true
+                    else
+                      java_args+=(&quot;$value&quot;)
+                    fi
+                  done
+                  installed_property() {
+                    local name=&quot;$1&quot;
+                    for value in &quot;${java_args[@]}&quot;; do
+                      if [[ &quot;$value&quot; == &quot;-D${name}=&quot;* ]]; then
+                        printf '%s' &quot;${value#-D${name}=}&quot;
+                        return 0
+                      fi
+                    done
+                    return 1
+                  }
+                  same_path() {
+                    [[ &quot;$(/usr/bin/readlink -m &quot;$1&quot;)&quot; == &quot;$(/usr/bin/readlink -m &quot;$2&quot;)&quot; ]]
+                  }
+                  has_option() {
+                    local option=&quot;$1&quot;
+                    shift
+                    for value in &quot;$@&quot;; do
+                      if [[ &quot;$value&quot; == &quot;$option&quot; || &quot;$value&quot; == &quot;$option=&quot;* ]]; then
+                        return 0
+                      fi
+                    done
+                    return 1
+                  }
+                  option_value() {
+                    local option=&quot;$1&quot;
+                    shift
+                    local values=(&quot;$@&quot;)
+                    for ((index = 0; index &lt; ${#values[@]}; index++)); do
+                      local value=&quot;${values[$index]}&quot;
+                      if [[ &quot;$value&quot; == &quot;$option&quot; &amp;&amp; $((index + 1)) -lt ${#values[@]} ]]; then
+                        printf '%s' &quot;${values[$((index + 1))]}&quot;
+                        return 0
+                      fi
+                      if [[ &quot;$value&quot; == &quot;$option=&quot;* ]]; then
+                        printf '%s' &quot;${value#${option}=}&quot;
+                        return 0
+                      fi
+                    done
+                    return 1
+                  }
+                  setup_local_value_option() {
+                    case &quot;$1&quot; in
+                      --key|--token|--board-name|--board|--workspace-id|--active|--terminal|--in-progress|--blocked|--workflow|--workspace-root|--config-dir|--manifest|--server-port|--max-agents|--codex-model|--codex-reasoning-effort|--env|--add-path|--endpoint)
+                        return 0
+                        ;;
+                      *)
+                        return 1
+                        ;;
+                    esac
+                  }
+                  setup_local_lifecycle() {
+                    local values=(&quot;${raw_cli_args[@]:1}&quot;)
+                    for ((index = 0; index &lt; ${#values[@]}; index++)); do
+                      local value=&quot;${values[$index]}&quot;
+                      case &quot;$value&quot; in
+                        check|repair-port|configure-github)
+                          return 0
+                          ;;
+                      esac
+                      if setup_local_value_option &quot;$value&quot;; then
+                        index=$((index + 1))
+                      elif [[ &quot;$value&quot; != --* ]]; then
+                        return 1
+                      fi
+                    done
+                    return 1
+                  }
+                  config_dir=&quot;${SYMPHONY_TRELLO_CONFIG_DIR:-$(installed_property symphony.trello.installed.config.dir || true)}&quot;
+                  workspace_root=&quot;${SYMPHONY_TRELLO_WORKSPACE_ROOT:-}&quot;
+                  state_home=&quot;${SYMPHONY_TRELLO_STATE_HOME:-}&quot;
+                  app_home=&quot;${SYMPHONY_TRELLO_APP_HOME:-$(installed_property symphony.trello.installed.app.home || true)}&quot;
+                  installed_workspace_root=&quot;$(installed_property symphony.trello.installed.workspace.root || true)&quot;
+                  installed_state_home=&quot;$(installed_property symphony.trello.installed.state.home || true)&quot;
+                  workspace_from_user_environment=false
+                  state_from_user_environment=false
+                  if [[ -n &quot;$workspace_root&quot; &amp;&amp; -n &quot;$installed_workspace_root&quot; ]] &amp;&amp; ! same_path &quot;$workspace_root&quot; &quot;$installed_workspace_root&quot;; then
+                    workspace_from_user_environment=true
+                  fi
+                  if [[ -n &quot;$state_home&quot; &amp;&amp; -n &quot;$installed_state_home&quot; ]] &amp;&amp; ! same_path &quot;$state_home&quot; &quot;$installed_state_home&quot;; then
+                    state_from_user_environment=true
+                  fi
+                  defaults=()
+                  command=&quot;${raw_cli_args[0]:-}&quot;
+                  explicit_config=&quot;$(option_value --config-dir &quot;${raw_cli_args[@]}&quot; || true)&quot;
+                  case &quot;$command&quot; in
+                    setup-local)
+                      if ! has_option --config-dir &quot;${raw_cli_args[@]}&quot; &amp;&amp; [[ -n &quot;$config_dir&quot; ]]; then
+                        defaults+=(&quot;--config-dir&quot; &quot;$config_dir&quot;)
+                      fi
+                      if ! setup_local_lifecycle; then
+                        if [[ -z &quot;$explicit_config&quot; ]]; then
+                          if [[ -n &quot;$workspace_root&quot; ]] &amp;&amp; ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                            defaults+=(&quot;--workspace-root&quot; &quot;$workspace_root&quot;)
+                          fi
+                        else
+                          if [[ &quot;$workspace_from_user_environment&quot; == true ]]; then
+                            if ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                              defaults+=(&quot;--workspace-root&quot; &quot;$workspace_root&quot;)
+                            fi
+                          else
+                            if ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                              defaults+=(&quot;--workspace-root&quot; &quot;$(/usr/bin/readlink -m &quot;$explicit_config&quot;)/workspaces&quot;)
+                            fi
+                          fi
+                        fi
+                      fi
+                      ;;
+                    new-board|import-board)
+                      if [[ -n &quot;$workspace_root&quot; ]] &amp;&amp; ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                        defaults+=(&quot;--workspace-root&quot; &quot;$workspace_root&quot;)
+                      fi
+                      ;;
+                    start|stop|status|logs|diagnostics)
+                      if [[ -z &quot;$explicit_config&quot; ]]; then
+                        [[ -n &quot;$config_dir&quot; ]] &amp;&amp; defaults+=(&quot;--config-dir&quot; &quot;$config_dir&quot;)
+                        if [[ -n &quot;$workspace_root&quot; ]] &amp;&amp; ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                          defaults+=(&quot;--workspace-root&quot; &quot;$workspace_root&quot;)
+                        fi
+                        if [[ -n &quot;$state_home&quot; ]] &amp;&amp; ! has_option --state-home &quot;${raw_cli_args[@]}&quot;; then
+                          defaults+=(&quot;--state-home&quot; &quot;$state_home&quot;)
+                        fi
+                      else
+                        normalized_config=&quot;$(/usr/bin/readlink -m &quot;$explicit_config&quot;)&quot;
+                        if [[ &quot;$workspace_from_user_environment&quot; == true ]]; then
+                          if ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                            defaults+=(&quot;--workspace-root&quot; &quot;$workspace_root&quot;)
+                          fi
+                        else
+                          if ! has_option --workspace-root &quot;${raw_cli_args[@]}&quot;; then
+                            defaults+=(&quot;--workspace-root&quot; &quot;$normalized_config/workspaces&quot;)
+                          fi
+                        fi
+                        if [[ &quot;$state_from_user_environment&quot; == true ]]; then
+                          if ! has_option --state-home &quot;${raw_cli_args[@]}&quot;; then
+                            defaults+=(&quot;--state-home&quot; &quot;$state_home&quot;)
+                          fi
+                        else
+                          if ! has_option --state-home &quot;${raw_cli_args[@]}&quot;; then
+                            defaults+=(&quot;--state-home&quot; &quot;$(dirname &quot;$normalized_config&quot;)/state&quot;)
+                          fi
+                        fi
+                      fi
+                      if [[ -n &quot;$app_home&quot; ]] &amp;&amp; ! has_option --app-home &quot;${raw_cli_args[@]}&quot;; then
+                        defaults+=(&quot;--app-home&quot; &quot;$app_home&quot;)
+                      fi
+                      ;;
+                  esac
+                  effective_cli_args=(&quot;${raw_cli_args[@]}&quot;)
+                  if [[ ${#defaults[@]} -gt 0 ]]; then
+                    effective_cli_args=(&quot;${raw_cli_args[0]}&quot; &quot;${defaults[@]}&quot; &quot;${raw_cli_args[@]:1}&quot;)
+                  fi
+                  echo &quot;setup-cli cwd=$PWD ${java_args[*]} ch.fmartin.symphony.trello.setup.TrelloBoardSetupMain ${effective_cli_args[*]} dotenv=${SYMPHONY_TRELLO_DOTENV:-} workspace_env=${SYMPHONY_TRELLO_WORKSPACE_ROOT:-} state_env=${SYMPHONY_TRELLO_STATE_HOME:-} completion_mode=${SYMPHONY_TRELLO_INSTALLER_COMPLETION:-}&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                  if [[ &quot;$*&quot; == *&quot;definitely-not-a-command&quot;* ]]; then
+                    echo &quot;setup_failed code=setup_invalid_arguments message=Unmatched argument: 'definitely-not-a-command'&quot; &gt;&amp;2
+                    exit 2
+                  fi
+                  if [[ &quot;$*&quot; == *&quot;--help&quot;* || &quot;$*&quot; == *&quot; -h&quot;* ]]; then
+                    echo &quot;Usage: symphony-trello&quot;
+                    exit 0
+                  fi
+                  if [[ &quot;$*&quot; == *&quot;--version&quot;* ]]; then
+                    case &quot;${SYMPHONY_FAKE_VERSION_MODE:-ok}&quot; in
+                      fail)
+                        echo &quot;version failed&quot; &gt;&amp;2
+                        exit 23
+                        ;;
+                      malformed)
+                        echo &quot;not a symphony version&quot;
+                        exit 0
+                        ;;
+                      multiline)
+                        echo &quot;diagnostic preface&quot;
+                        echo &quot;symphony-trello test&quot;
+                        exit 0
+                        ;;
+                      *)
+                        echo &quot;symphony-trello test&quot;
+                        exit 0
+                        ;;
+                    esac
+                  fi
+	                if [[ -n &quot;${SYMPHONY_FAKE_START_ALL_FAILURE:-}&quot; &amp;&amp; &quot;${effective_cli_args[0]:-}&quot; == &quot;start&quot; &amp;&amp; &quot; ${effective_cli_args[*]} &quot; == *&quot; --all &quot;* ]]; then
+	                  echo &quot;managed start --all failed&quot; &gt;&amp;2
+	                  exit 29
+	                fi
+	                fi
+	                if [[ &quot;${effective_cli_args[0]:-}&quot; == &quot;start&quot; || &quot;${effective_cli_args[0]:-}&quot; == &quot;status&quot; || &quot;${effective_cli_args[0]:-}&quot; == &quot;stop&quot; || &quot;${effective_cli_args[0]:-}&quot; == &quot;logs&quot; || &quot;${effective_cli_args[0]:-}&quot; == &quot;diagnostics&quot; ]]; then
+	                  cli_args=(&quot;${effective_cli_args[@]}&quot;)
+	                  command=&quot;${cli_args[0]:-}&quot;
+		                  config_dir=&quot;.&quot;
+		                  state_home=&quot;.&quot;
+		                  app_home=&quot;$PWD&quot;
+		                  env_file=&quot;&quot;
+		                  workflow=&quot;&quot;
+	                  for ((i = 1; i &lt; ${#cli_args[@]}; i++)); do
+	                    case &quot;${cli_args[$i]}&quot; in
+		                      --config-dir) i=$((i + 1)); config_dir=&quot;${cli_args[$i]}&quot; ;;
+		                      --state-home) i=$((i + 1)); state_home=&quot;${cli_args[$i]}&quot; ;;
+		                      --app-home) i=$((i + 1)); app_home=&quot;${cli_args[$i]}&quot; ;;
+		                      --env) i=$((i + 1)); env_file=&quot;${cli_args[$i]}&quot; ;;
+	                      --workflow) i=$((i + 1)); workflow=&quot;${cli_args[$i]}&quot; ;;
+	                    esac
+	                  done
+		                  if [[ -z &quot;$workflow&quot; &amp;&amp; -f &quot;$config_dir/connected-boards.json&quot; ]]; then
+		                    workflow=&quot;$(sed -n 's/.*&quot;workflowPath&quot;[[:blank:]]*:[[:blank:]]*&quot;\\([^&quot;]*\\)&quot;.*/\\1/p' &quot;$config_dir/connected-boards.json&quot; | head -1)&quot;
+		                  fi
+		                  if [[ -z &quot;$env_file&quot; &amp;&amp; -f &quot;$config_dir/connected-boards.json&quot; ]]; then
+		                    env_file=&quot;$(sed -n 's/.*&quot;envPath&quot;[[:blank:]]*:[[:blank:]]*&quot;\\([^&quot;]*\\)&quot;.*/\\1/p' &quot;$config_dir/connected-boards.json&quot; | head -1)&quot;
+		                  fi
+		                  mkdir -p &quot;$state_home&quot;
+	                  display_name=&quot;$(basename &quot;${workflow:-WORKFLOW.md}&quot;)&quot;
+                  state_name=&quot;$display_name.abcdef123456&quot;
+	                  pid_file=&quot;$state_home/$state_name.pid&quot;
+	                  log_file=&quot;$state_home/$state_name.log&quot;
+	                  case &quot;$command&quot; in
+	                    start)
+		                      if [[ -f &quot;$pid_file&quot; ]]; then
+		                        echo &quot;Symphony for Trello is already running for $workflow pid=$(cat &quot;$pid_file&quot;)&quot;
+		                        exit 0
+		                      fi
+		                      bash -c '
+                        app_home=&quot;$1&quot;
+                        workflow=&quot;$2&quot;
+                        env_file=&quot;$3&quot;
+                        echo &quot;jar-start cwd=$PWD args=-jar quarkus-run.jar $workflow dotenv=$env_file&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                        trap '&quot;'&quot;'if [[ -n &quot;${SYMPHONY_FAKE_SLOW_TERM:-}&quot; ]]; then sleep 2; fi; if [[ -d &quot;$app_home&quot; ]]; then echo &quot;app-present-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; else echo &quot;app-missing-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; fi; echo &quot;jar-stopped&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; exit 0'&quot;'&quot;' TERM
+                        while true; do sleep 1; done
+                      ' symphony-worker &quot;$app_home&quot; &quot;$workflow&quot; &quot;$env_file&quot; &quot;-Dsymphony.trello.managed.app_home=$app_home&quot; &quot;$app_home/target/quarkus-app/quarkus-run.jar&quot; &gt;&quot;$log_file&quot; 2&gt;&quot;$log_file.err&quot; &amp;
+	                      echo &quot;$!&quot; &gt; &quot;$pid_file&quot;
+	                      echo &quot;Started Symphony for Trello: $workflow&quot;
+	                      echo &quot;Log: $log_file&quot;
+	                      exit 0
+	                      ;;
+	                    status)
+		                      if [[ -f &quot;$pid_file&quot; ]]; then
+		                        echo &quot;running $display_name pid=$(cat &quot;$pid_file&quot;)&quot;
+	                      elif [[ -n &quot;$workflow&quot; ]]; then
+	                        echo &quot;stopped $display_name&quot;
+	                      else
+	                        echo &quot;No managed Symphony process found&quot;
+	                      fi
+	                      exit 0
+	                      ;;
+	                    stop)
+	                      if [[ -f &quot;$pid_file&quot; ]]; then
+	                        worker_pid=&quot;$(cat &quot;$pid_file&quot;)&quot;
+	                        kill &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 || true
+	                        for _ in {1..50}; do
+	                          kill -0 &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 || break
+	                          sleep 0.1
+	                        done
+	                        rm -f &quot;$pid_file&quot;
+	                      fi
+	                      echo &quot;Stopped $display_name&quot;
+	                      exit 0
+	                      ;;
+	                    logs)
+	                      if [[ &quot; ${cli_args[*]} &quot; == *&quot; --follow &quot;* ]]; then
+	                        tail -n 100 -f &quot;$log_file&quot;
+	                      else
+	                        tail -n 100 &quot;$log_file&quot;
+	                      fi
+	                      exit 0
+	                      ;;
+	                  esac
+	                fi
+	                if [[ &quot;${effective_cli_args[0]:-}&quot; == &quot;setup-local&quot; ]]; then
+                  config_dir=&quot;.&quot;
+                  cli_args=(&quot;${effective_cli_args[@]}&quot;)
+                  for ((index = 1; index &lt; ${#cli_args[@]}; index++)); do
+                    if [[ &quot;${cli_args[$index]}&quot; == &quot;--config-dir&quot; &amp;&amp; $((index + 1)) -lt ${#cli_args[@]} ]]; then
+                      config_dir=&quot;${cli_args[$((index + 1))]}&quot;
+                      index=$((index + 1))
+                    elif [[ &quot;${cli_args[$index]}&quot; == &quot;--config-dir=&quot;* ]]; then
+                      config_dir=&quot;${cli_args[$index]#--config-dir=}&quot;
+                    else
+                      :
+                    fi
+                  done
+                  if [[ &quot;${SYMPHONY_TRELLO_INSTALLER_COMPLETION:-}&quot; == &quot;print&quot; ]]; then
+                    board=&quot;$(sed -n 's/.*&quot;boardName&quot;[[:blank:]]*:[[:blank:]]*&quot;\\([^&quot;]*\\)&quot;.*/\\1/p' &quot;$config_dir/connected-boards.json&quot; | head -1)&quot;
+                    workflow=&quot;$(sed -n 's/.*&quot;workflowPath&quot;[[:blank:]]*:[[:blank:]]*&quot;\\([^&quot;]*\\)&quot;.*/\\1/p' &quot;$config_dir/connected-boards.json&quot; | head -1)&quot;
+                    echo &quot;You're good to go - your Trello board is now a queue for Codex work.&quot;
+                    echo &quot;Connected board: \&quot;$board\&quot;&quot;
+                    echo &quot;Workflow: $workflow&quot;
+                    echo
+                    echo &quot;Create a Trello card with a clear task and move it to this workflow's configured queue list.&quot;
+                    echo
+                    echo &quot;Useful commands:&quot;
+                    echo &quot;  symphony-trello status&quot;
+                    printf &quot;  symphony-trello logs --workflow '%s'\\n&quot; &quot;$workflow&quot;
+                    exit 0
+                  fi
+                  mkdir -p &quot;$config_dir&quot;
+                  read -r key
+                  read -r token
+                  read -r board
+                  slug=&quot;$(printf '%s' &quot;$board&quot; | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//')&quot;
+                  workflow=&quot;$config_dir/WORKFLOW.${slug:-trello-board}.md&quot;
+                  printf 'TRELLO_API_KEY=%s\\nTRELLO_API_TOKEN=%s\\n' &quot;$key&quot; &quot;$token&quot; &gt; &quot;$config_dir/.env&quot;
+                  printf -- '---\\ntracker:\\n  kind: trello\\n---\\n# %s\\n' &quot;$board&quot; &gt; &quot;$workflow&quot;
+                  printf '{&quot;boards&quot;:[{&quot;boardId&quot;:&quot;board-1&quot;,&quot;boardName&quot;:&quot;%s&quot;,&quot;workflowPath&quot;:&quot;%s&quot;,&quot;envPath&quot;:&quot;%s/.env&quot;}]}\\n' &quot;$board&quot; &quot;$workflow&quot; &quot;$config_dir&quot; &gt; &quot;$config_dir/connected-boards.json&quot;
+	                  echo &quot;setup-local key=$key token=$token board=$board&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+	                  env -u SYMPHONY_TRELLO_INSTALLER_COMPLETION &quot;${SYMPHONY_TRELLO_COMMAND:?}&quot; start --env &quot;$config_dir/.env&quot; --workflow &quot;$workflow&quot;
+                  if [[ &quot;${SYMPHONY_TRELLO_INSTALLER_COMPLETION:-}&quot; != &quot;defer&quot; ]]; then
+                    echo &quot;You're good to go - your Trello board is now a queue for Codex work.&quot;
+                  fi
+                  exit 0
+                fi
+                if [[ &quot;$*&quot; == *&quot;-jar &quot;* ]]; then
+                  app_home=&quot;$PWD&quot;
+                  echo &quot;jar-start cwd=$PWD args=$* dotenv=${SYMPHONY_TRELLO_DOTENV:-}&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                  trap 'if [[ -n &quot;${SYMPHONY_FAKE_SLOW_TERM:-}&quot; ]]; then sleep 2; fi; if [[ -d &quot;$app_home&quot; ]]; then echo &quot;app-present-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; else echo &quot;app-missing-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; fi; echo &quot;jar-stopped&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; exit 0' TERM
+                  while true; do sleep 1; done
+                fi
+                echo &quot;java $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                exit 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L869">        writeExecutable(</span>
+<span class="nc" id="L870">                fakeBin.resolve(&quot;javac&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo 'javac 25.0.1'
+                &quot;&quot;&quot;);
+<span class="nc" id="L876">        return fakeBin;</span>
+    }
+
+    static Path createFakeWindowsToolchain(Path temporaryDirectory) throws IOException {
+<span class="nc" id="L880">        Path fakeBin = temporaryDirectory.resolve(&quot;fake-windows-bin&quot;);</span>
+<span class="nc" id="L881">        Files.createDirectories(fakeBin);</span>
+<span class="nc" id="L882">        Files.writeString(</span>
+<span class="nc" id="L883">                fakeBin.resolve(&quot;java.cmd&quot;),</span>
+                &quot;&quot;&quot;
+                @echo off
+                pwsh -NoProfile -File &quot;%SYMPHONY_FAKE_JAVA%&quot; %*
+                &quot;&quot;&quot;);
+<span class="nc" id="L888">        Files.writeString(</span>
+<span class="nc" id="L889">                fakeBin.resolve(&quot;javac.cmd&quot;),</span>
+                &quot;&quot;&quot;
+                @echo off
+                echo javac 25.0.1
+                &quot;&quot;&quot;);
+<span class="nc" id="L894">        Files.writeString(</span>
+<span class="nc" id="L895">                fakeBin.resolve(&quot;codex.cmd&quot;),</span>
+                &quot;&quot;&quot;
+                @echo off
+                if &quot;%1&quot;==&quot;login&quot; if &quot;%2&quot;==&quot;status&quot; exit /b 0
+                echo codex %* &gt;&gt; &quot;%SYMPHONY_FAKE_LOG%&quot;
+                exit /b 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L902">        Files.writeString(</span>
+<span class="nc" id="L903">                fakeBin.resolve(&quot;fake-java.ps1&quot;),</span>
+                &quot;&quot;&quot;
+                if ($args.Count -gt 0 -and $args[0] -eq &quot;-version&quot;) {
+                  [Console]::Error.WriteLine('openjdk version &quot;25.0.1&quot; 2026-04-21')
+                  exit 0
+                }
+                if (($args -join &quot; &quot;) -like &quot;* -jar *&quot;) {
+                  [ordered]@{
+                    event = &quot;jar-start&quot;
+                    args = $args
+                    dotenv = $env:SYMPHONY_TRELLO_DOTENV
+                  } | ConvertTo-Json -Compress -Depth 4 |
+                    Add-Content -Path $env:SYMPHONY_FAKE_LOG
+                  Write-Output &quot;fake wrapper log&quot;
+                  while ($true) { Start-Sleep -Seconds 1 }
+                }
+                if (($args -join &quot; &quot;) -like &quot;*ch.fmartin.symphony.trello.setup.TrelloBoardSetupMain*&quot;) {
+                  [ordered]@{
+                    event = &quot;setup-cli&quot;
+                    cwd = (Get-Location).Path
+                    args = $args
+                    dotenv = $env:SYMPHONY_TRELLO_DOTENV
+                  } | ConvertTo-Json -Compress -Depth 4 |
+                    Add-Content -Path $env:SYMPHONY_FAKE_LOG
+                  if (($args -join &quot; &quot;) -like &quot;*definitely-not-a-command*&quot;) {
+                    [Console]::Error.WriteLine(&quot;setup_failed code=setup_invalid_arguments message=Unmatched argument: 'definitely-not-a-command'&quot;)
+                    exit 2
+                  }
+                  if (($args -join &quot; &quot;) -like &quot;*--help*&quot; -or ($args -join &quot; &quot;) -like &quot;* -h*&quot;) {
+                    Write-Output &quot;Usage: symphony-trello&quot;
+                    exit 0
+                  }
+                  if (($args -join &quot; &quot;) -like &quot;*--version*&quot;) {
+                    if ($env:SYMPHONY_FAKE_VERSION_MODE -eq &quot;fail&quot;) {
+                      [Console]::Error.WriteLine(&quot;version failed&quot;)
+                      exit 23
+                    }
+                    if ($env:SYMPHONY_FAKE_VERSION_MODE -eq &quot;malformed&quot;) {
+                      Write-Output &quot;not a symphony version&quot;
+                      exit 0
+                    }
+                    if ($env:SYMPHONY_FAKE_VERSION_MODE -eq &quot;multiline&quot;) {
+                      Write-Output &quot;diagnostic preface&quot;
+                      Write-Output &quot;symphony-trello test&quot;
+                      exit 0
+                    }
+                    Write-Output &quot;symphony-trello test&quot;
+                    exit 0
+                  }
+	                  if (($args -join &quot; &quot;) -like &quot;*TrelloBoardSetupMain start*&quot; -or
+	                      ($args -join &quot; &quot;) -like &quot;*TrelloBoardSetupMain status*&quot; -or
+	                      ($args -join &quot; &quot;) -like &quot;*TrelloBoardSetupMain stop*&quot; -or
+	                      ($args -join &quot; &quot;) -like &quot;*TrelloBoardSetupMain logs*&quot; -or
+	                      ($args -join &quot; &quot;) -like &quot;*TrelloBoardSetupMain diagnostics*&quot;) {
+	                    $mainIndex = [Array]::IndexOf($args, &quot;ch.fmartin.symphony.trello.setup.TrelloBoardSetupMain&quot;)
+	                    $cliArgs = $args[($mainIndex + 1)..($args.Count - 1)]
+	                    $command = $cliArgs[0]
+	                    $stateHome = &quot;.&quot;
+	                    $workflow = &quot;WORKFLOW.md&quot;
+	                    for ($i = 1; $i -lt $cliArgs.Count; $i++) {
+	                      switch ($cliArgs[$i]) {
+	                        &quot;--state-home&quot; { $i++; $stateHome = $cliArgs[$i] }
+	                        &quot;--workflow&quot; { $i++; $workflow = $cliArgs[$i] }
+	                      }
+	                    }
+	                    New-Item -ItemType Directory -Force -Path $stateHome | Out-Null
+	                    $displayName = Split-Path -Leaf $workflow
+	                    $stateName = &quot;$displayName.abcdef123456&quot;
+	                    $pidFile = Join-Path $stateHome &quot;$stateName.pid&quot;
+	                    $logFile = Join-Path $stateHome &quot;$stateName.log&quot;
+	                    if ($command -eq &quot;start&quot;) {
+	                      Set-Content -Encoding ASCII -Path $pidFile -Value $PID
+	                      Set-Content -Encoding UTF8 -Path $logFile -Value &quot;fake wrapper log&quot;
+	                      Write-Output &quot;Started Symphony for Trello: $workflow&quot;
+	                      exit 0
+	                    }
+	                    if ($command -eq &quot;status&quot;) {
+	                      Write-Output &quot;running $displayName pid=$PID&quot;
+	                      exit 0
+	                    }
+	                    if ($command -eq &quot;stop&quot;) {
+	                      Remove-Item -Force -ErrorAction SilentlyContinue $pidFile
+	                      Write-Output &quot;Stopped $displayName&quot;
+	                      exit 0
+	                    }
+	                    if ($command -eq &quot;logs&quot;) {
+	                      Get-Content -Path $logFile
+	                      exit 0
+	                    }
+	                  }
+	                }
+                &quot;java $($args -join ' ')&quot; | Add-Content -Path $env:SYMPHONY_FAKE_LOG
+                exit 0
+                &quot;&quot;&quot;);
+<span class="nc" id="L997">        return fakeBin;</span>
+    }
+
+    static List&lt;String[]&gt; installedPicocliHelpCommands() {
+<span class="nc" id="L1001">        return List.of(</span>
+                new String[] {&quot;--help&quot;},
+                new String[] {&quot;--version&quot;},
+                new String[] {&quot;setup-local&quot;, &quot;--help&quot;},
+                new String[] {&quot;setup-local&quot;, &quot;check&quot;, &quot;--help&quot;},
+                new String[] {&quot;setup-local&quot;, &quot;repair-port&quot;, &quot;--help&quot;},
+                new String[] {&quot;setup-local&quot;, &quot;configure-github&quot;, &quot;--help&quot;},
+                new String[] {&quot;new-board&quot;, &quot;--help&quot;},
+                new String[] {&quot;import-board&quot;, &quot;--help&quot;},
+                new String[] {&quot;list-workspaces&quot;, &quot;--help&quot;},
+                new String[] {&quot;start&quot;, &quot;--help&quot;},
+                new String[] {&quot;stop&quot;, &quot;--help&quot;},
+                new String[] {&quot;status&quot;, &quot;--help&quot;},
+                new String[] {&quot;logs&quot;, &quot;--help&quot;},
+                new String[] {&quot;diagnostics&quot;, &quot;--help&quot;});
+    }
+
+    static String[] commandWithPrefix(String executable, String[] arguments) {
+<span class="nc" id="L1019">        String[] command = new String[arguments.length + 1];</span>
+<span class="nc" id="L1020">        command[0] = executable;</span>
+<span class="nc" id="L1021">        System.arraycopy(arguments, 0, command, 1, arguments.length);</span>
+<span class="nc" id="L1022">        return command;</span>
+    }
+
+    static String[] powerShellFileCommand(String script, String[] arguments) {
+<span class="nc" id="L1026">        String[] command = new String[arguments.length + 4];</span>
+<span class="nc" id="L1027">        command[0] = &quot;pwsh&quot;;</span>
+<span class="nc" id="L1028">        command[1] = &quot;-NoProfile&quot;;</span>
+<span class="nc" id="L1029">        command[2] = &quot;-File&quot;;</span>
+<span class="nc" id="L1030">        command[3] = script;</span>
+<span class="nc" id="L1031">        System.arraycopy(arguments, 0, command, 4, arguments.length);</span>
+<span class="nc" id="L1032">        return command;</span>
+    }
+
+    static String[] commandPromptCommand(String executable, String[] arguments) {
+<span class="nc" id="L1036">        String commandLine = Stream.concat(Stream.of(executable), Stream.of(arguments))</span>
+<span class="nc" id="L1037">                .map(InstallerScriptFixture::commandPromptLiteral)</span>
+<span class="nc" id="L1038">                .collect(Collectors.joining(&quot; &quot;));</span>
+<span class="nc" id="L1039">        return new String[] {&quot;cmd.exe&quot;, &quot;/d&quot;, &quot;/s&quot;, &quot;/c&quot;, &quot;\&quot;&quot; + commandLine + &quot;\&quot;&quot;};</span>
+    }
+
+    private static String commandPromptLiteral(String value) {
+<span class="nc" id="L1043">        return &quot;\&quot;&quot; + value.replace(&quot;\&quot;&quot;, &quot;\&quot;\&quot;&quot;) + &quot;\&quot;&quot;;</span>
+    }
+
+<span class="nc" id="L1046">    record ProcessResult(int exitCode, String output) {</span>
+        void assertSuccess() {
+<span class="nc" id="L1048">            assertThat(exitCode).as(output).isZero();</span>
+<span class="nc" id="L1049">        }</span>
+    }
+
+<span class="nc" id="L1052">    private record AppliedTestEnvironment(List&lt;Path&gt; cleanupRoots) implements AutoCloseable {</span>
+        @Override
+        public void close() throws IOException {
+<span class="nc bnc" id="L1055" title="All 2 branches missed.">            for (Path cleanupRoot : cleanupRoots) {</span>
+<span class="nc" id="L1056">                deleteRecursively(cleanupRoot);</span>
+<span class="nc" id="L1057">            }</span>
+<span class="nc" id="L1058">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

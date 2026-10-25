@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowBodyMigration.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">WorkflowBodyMigration.java</span></div><h1>WorkflowBodyMigration.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.CliExitCodes;
+import ch.fmartin.symphony.trello.setup.WorkflowBodyClassification.Action;
+import ch.fmartin.symphony.trello.setup.WorkflowBodyClassifier.WorkflowBodyAssessment;
+import ch.fmartin.symphony.trello.setup.WorkflowMigrationReporter.PreviewOutcome;
+import ch.fmartin.symphony.trello.workflow.WorkflowException;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.UnaryOperator;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/// Java-owned workflow body migration for `symphony-trello migrate-workflows` (ADR 0095). Both
+/// installers share this command so classification and write decisions follow the same flow.
+@NullMarked
+final class WorkflowBodyMigration {
+    static final String TARGET_BODY_FILE_INFIX = &quot;.symphony-&quot;;
+    static final String TARGET_BODY_FILE_SUFFIX = &quot;-body.txt&quot;;
+
+    private final String runningVersionText;
+    private final WorkflowBodyWriter writer;
+    private final String command;
+    private final UnaryOperator&lt;String&gt; shellArgument;
+
+    WorkflowBodyMigration(
+<span class="nc" id="L34">            String runningVersionText, WorkflowBodyWriter writer, String command, UnaryOperator&lt;String&gt; shellArgument) {</span>
+<span class="nc" id="L35">        this.runningVersionText = runningVersionText;</span>
+<span class="nc" id="L36">        this.writer = writer;</span>
+<span class="nc" id="L37">        this.command = command;</span>
+<span class="nc" id="L38">        this.shellArgument = shellArgument;</span>
+<span class="nc" id="L39">    }</span>
+
+    int run(WorkflowMigrationRequest request, Terminal terminal) throws IOException {
+<span class="nc bnc" id="L42" title="All 2 branches missed.">        if (request.markMigrated()</span>
+<span class="nc bnc" id="L43" title="All 2 branches missed.">                &amp;&amp; request.board().isEmpty()</span>
+<span class="nc bnc" id="L44" title="All 2 branches missed.">                &amp;&amp; request.workflow().isEmpty()) {</span>
+<span class="nc" id="L45">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;, &quot;--mark-migrated needs --board NAME or --workflow PATH.&quot;);
+        }
+<span class="nc" id="L48">        var report = new WorkflowMigrationReporter(</span>
+                runningVersionText,
+                command,
+                request,
+                shellArgument,
+<span class="nc" id="L53">                terminal.out()); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L54">        Optional&lt;SymphonyVersion&gt; running = SymphonyVersion.parse(runningVersionText);</span>
+<span class="nc" id="L55">        Optional&lt;SymphonyVersion&gt; from = request.fromVersion().flatMap(SymphonyVersion::parse);</span>
+<span class="nc" id="L56">        report.checkStarted();</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if (rejectsMajorDowngrade(from, running, report)) {</span>
+<span class="nc" id="L58">            return CliExitCodes.SETUP_FAILURE;</span>
+        }
+<span class="nc" id="L60">        List&lt;MigrationTarget&gt; targets = targets(request);</span>
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (targets.isEmpty()) {</span>
+<span class="nc" id="L62">            report.noConnectedWorkflows();</span>
+<span class="nc" id="L63">            return 0;</span>
+        }
+<span class="nc" id="L65">        GeneratedWorkflowStore store = GeneratedWorkflowStore.inConfigDir(request.configDir());</span>
+<span class="nc" id="L66">        List&lt;GeneratedWorkflowRecord&gt; records = records(store, report);</span>
+<span class="nc" id="L67">        List&lt;WorkflowMigrationItem&gt; items = targets.stream()</span>
+<span class="nc" id="L68">                .map(target -&gt; assess(target, records, from, running))</span>
+<span class="nc" id="L69">                .toList();</span>
+<span class="nc" id="L70">        report.comparison(items);</span>
+<span class="nc bnc" id="L71" title="All 4 branches missed.">        if (items.stream().anyMatch(item -&gt; item.action() == Action.REJECT)) {</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            items.stream().filter(item -&gt; item.action() == Action.REJECT).forEach(report::majorDowngradeNotMigrated);</span>
+<span class="nc" id="L73">            return CliExitCodes.SETUP_FAILURE;</span>
+        }
+
+<span class="nc" id="L76">        var context = new RunContext(request, store, items, terminal, report);</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        if (request.markMigrated()) {</span>
+<span class="nc" id="L78">            markManualMigrations(context);</span>
+<span class="nc" id="L79">            return 0;</span>
+        }
+<span class="nc" id="L81">        recordCurrentBodies(context);</span>
+<span class="nc" id="L82">        guideManualMigrations(context);</span>
+<span class="nc" id="L83">        int failedWrites = replaceGeneratedBodies(context);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (failedWrites &gt; 0) {</span>
+            // A failed workflow write is unexpected, so it goes through the CLI failure path that
+            // writes a sanitized troubleshooting report. The lines above already name each backup.
+<span class="nc" id="L87">            throw new TrelloBoardSetupException(</span>
+<span class="nc" id="L88">                    &quot;setup_workflow_migration_failed&quot;, WorkflowMigrationReporter.failedWritesMessage(failedWrites));</span>
+        }
+<span class="nc" id="L90">        return 0;</span>
+    }
+
+    private static boolean rejectsMajorDowngrade(
+            Optional&lt;SymphonyVersion&gt; from, Optional&lt;SymphonyVersion&gt; running, WorkflowMigrationReporter report) {
+<span class="nc" id="L95">        Optional&lt;SymphonyVersion&gt; newerMajor = from.filter(source -&gt; newerMajor(source, running));</span>
+<span class="nc" id="L96">        newerMajor.ifPresent(report::majorDowngradeRejected);</span>
+<span class="nc" id="L97">        return newerMajor.isPresent();</span>
+    }
+
+    private static List&lt;MigrationTarget&gt; targets(WorkflowMigrationRequest request) throws IOException {
+<span class="nc" id="L101">        ConnectedBoardManifest manifest = new ConnectedBoardRepository(</span>
+<span class="nc" id="L102">                        request.configDir().resolve(ConnectedBoardManifest.FILE_NAME))</span>
+<span class="nc" id="L103">                .loadForLifecycle();</span>
+<span class="nc" id="L104">        return request.board()</span>
+<span class="nc" id="L105">                .map(selector -&gt; List.of(MigrationTarget.of(manifest.selectBoard(selector))))</span>
+<span class="nc" id="L106">                .or(() -&gt; request.workflow().map(workflow -&gt; List.of(explicitTarget(manifest, workflow))))</span>
+<span class="nc" id="L107">                .orElseGet(() -&gt;</span>
+<span class="nc" id="L108">                        manifest.boards().stream().map(MigrationTarget::of).toList());</span>
+    }
+
+    private static MigrationTarget explicitTarget(ConnectedBoardManifest manifest, Path workflow) {
+<span class="nc" id="L112">        return manifest.selectWorkflow(workflow)</span>
+<span class="nc" id="L113">                .map(board -&gt; new MigrationTarget(board.boardName(), workflow, Optional.of(board.githubEnabled())))</span>
+<span class="nc" id="L114">                .orElseGet(() -&gt; new MigrationTarget(PathNames.fileName(workflow), workflow, Optional.empty()));</span>
+    }
+
+    private static List&lt;GeneratedWorkflowRecord&gt; records(
+            GeneratedWorkflowStore store, WorkflowMigrationReporter report) {
+        try {
+<span class="nc" id="L120">            return store.records();</span>
+<span class="nc" id="L121">        } catch (IOException | RuntimeException e) {</span>
+            // Without readable provenance every workflow falls back to the manual path, which never
+            // writes a workflow, so the check can still report safely.
+<span class="nc" id="L124">            report.storeUnreadable(store.storePath());</span>
+<span class="nc" id="L125">            return List.of();</span>
+        }
+    }
+
+    private WorkflowMigrationItem assess(
+            MigrationTarget target,
+            List&lt;GeneratedWorkflowRecord&gt; records,
+            Optional&lt;SymphonyVersion&gt; from,
+            Optional&lt;SymphonyVersion&gt; running) {
+<span class="nc" id="L134">        Path path = target.workflowPath();</span>
+<span class="nc" id="L135">        Optional&lt;GeneratedWorkflowRecord&gt; record = GeneratedWorkflowStore.find(records, path);</span>
+<span class="nc" id="L136">        WorkflowProvenance provenance = WorkflowProvenance.of(record, from, running);</span>
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (provenance.newerMajor()) {</span>
+<span class="nc" id="L138">            return provenance.item(target, WorkflowBodyClassification.UNSUPPORTED_MAJOR_DOWNGRADE);</span>
+        }
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        if (Files.isSymbolicLink(path)) {</span>
+<span class="nc" id="L141">            return provenance.malformed(</span>
+                    target, record, &quot;the workflow path is a symbolic link, and Symphony migrates only regular files&quot;);
+        }
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc" id="L145">            return provenance.malformed(target, record, &quot;the workflow file is missing&quot;);</span>
+        }
+        String content;
+        Map&lt;String, Object&gt; metadata;
+        try {
+<span class="nc" id="L150">            content = Files.readString(path);</span>
+<span class="nc" id="L151">            metadata = new WorkflowLoader().load(path).config();</span>
+<span class="nc" id="L152">        } catch (IOException | WorkflowException e) {</span>
+<span class="nc" id="L153">            return provenance.malformed(</span>
+                    target, record, &quot;the workflow file cannot be read or its front matter is invalid&quot;);
+<span class="nc" id="L155">        }</span>
+<span class="nc" id="L156">        return WorkflowFileText.parse(content)</span>
+<span class="nc" id="L157">                .map(text -&gt; assessParsed(target, text, metadata, record, provenance))</span>
+<span class="nc" id="L158">                .orElseGet(() -&gt; provenance.malformed(</span>
+                        target,
+                        record,
+                        &quot;the front matter is missing or unclosed, or the file uses lone carriage returns&quot;));
+    }
+
+    private WorkflowMigrationItem assessParsed(
+            MigrationTarget target,
+            WorkflowFileText text,
+            Map&lt;String, Object&gt; metadata,
+            Optional&lt;GeneratedWorkflowRecord&gt; record,
+            WorkflowProvenance provenance) {
+<span class="nc" id="L170">        return record.map(GeneratedWorkflowRecord::inputs)</span>
+<span class="nc" id="L171">                .or(() -&gt; GeneratedWorkflowBodyInputs.fromMetadata(metadata, target.githubEnabled()))</span>
+<span class="nc" id="L172">                .map(inputs -&gt; classify(target, text, inputs, record, provenance))</span>
+<span class="nc" id="L173">                .orElseGet(() -&gt; provenance.item(target, WorkflowBodyClassification.UNKNOWN_SOURCE));</span>
+    }
+
+    private static WorkflowMigrationItem classify(
+            MigrationTarget target,
+            WorkflowFileText text,
+            GeneratedWorkflowBodyInputs inputs,
+            Optional&lt;GeneratedWorkflowRecord&gt; record,
+            WorkflowProvenance provenance) {
+<span class="nc" id="L182">        String targetBody = TrelloBoardSetup.generatedWorkflowBody(inputs);</span>
+<span class="nc" id="L183">        WorkflowBodyAssessment assessment = WorkflowBodyClassifier.classify(</span>
+<span class="nc" id="L184">                text.normalizedBody(),</span>
+<span class="nc" id="L185">                record.map(GeneratedWorkflowRecord::body).map(WorkflowFileText::normalize),</span>
+                targetBody);
+        Optional&lt;WorkflowBodyReplacement&gt; replacement =
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                assessment.classification().action() == Action.REPLACE</span>
+<span class="nc" id="L189">                        ? Optional.of(new WorkflowBodyReplacement(</span>
+                                text,
+<span class="nc" id="L191">                                text.body().substring(0, text.rawBodyOffset(assessment.sourceStart())),</span>
+<span class="nc" id="L192">                                text.body().substring(text.rawBodyOffset(assessment.sourceEnd())),</span>
+                                targetBody))
+<span class="nc" id="L194">                        : Optional.empty();</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        boolean refreshRecord = assessment.classification() == WorkflowBodyClassification.ALREADY_CURRENT</span>
+<span class="nc" id="L196">                &amp;&amp; !record.map(GeneratedWorkflowRecord::body)</span>
+<span class="nc" id="L197">                        .map(targetBody::equals)</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                        .orElse(false);</span>
+<span class="nc" id="L199">        return new WorkflowMigrationItem(</span>
+                target,
+<span class="nc" id="L201">                assessment.classification(),</span>
+                &quot;&quot;,
+<span class="nc" id="L203">                provenance.sourceVersion(),</span>
+<span class="nc" id="L204">                provenance.downgrade(),</span>
+<span class="nc" id="L205">                Optional.of(inputs),</span>
+                replacement,
+                refreshRecord);
+    }
+
+    private void recordCurrentBodies(RunContext context) {
+<span class="nc bnc" id="L211" title="All 2 branches missed.">        if (context.request().dryRun()) {</span>
+<span class="nc" id="L212">            return;</span>
+        }
+<span class="nc" id="L214">        context.items().stream()</span>
+<span class="nc" id="L215">                .filter(WorkflowMigrationItem::refreshRecord)</span>
+<span class="nc" id="L216">                .forEach(item -&gt; recordTargetBody(context, item));</span>
+<span class="nc" id="L217">    }</span>
+
+    private void guideManualMigrations(RunContext context) {
+<span class="nc" id="L220">        List&lt;WorkflowMigrationItem&gt; manual = context.items().stream()</span>
+<span class="nc bnc" id="L221" title="All 4 branches missed.">                .filter(item -&gt; item.action() == Action.MANUAL || item.action() == Action.REJECT)</span>
+<span class="nc" id="L222">                .toList();</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        if (manual.isEmpty()) {</span>
+<span class="nc" id="L224">            return;</span>
+        }
+<span class="nc" id="L226">        WorkflowMigrationReporter report = context.report();</span>
+<span class="nc" id="L227">        report.manualMigrationsStarted();</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        for (WorkflowMigrationItem item : manual) {</span>
+<span class="nc" id="L229">            report.manualMigrationHeading(item);</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (item.action() == Action.REJECT) {</span>
+<span class="nc" id="L231">                report.majorDowngradeNotMigrated(item);</span>
+            } else {
+<span class="nc" id="L233">                item.targetBody()</span>
+<span class="nc" id="L234">                        .ifPresentOrElse(</span>
+<span class="nc" id="L235">                                targetBody -&gt; guideManualMigration(context.request(), item, targetBody, report),</span>
+<span class="nc" id="L236">                                report::fixWorkflowFile);</span>
+            }
+<span class="nc" id="L238">        }</span>
+<span class="nc" id="L239">    }</span>
+
+    private void guideManualMigration(
+            WorkflowMigrationRequest request,
+            WorkflowMigrationItem item,
+            String targetBody,
+            WorkflowMigrationReporter report) {
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (item.classification() == WorkflowBodyClassification.MALFORMED) {</span>
+<span class="nc" id="L247">            report.fixWorkflowFile();</span>
+        }
+<span class="nc" id="L249">        Path preview = targetBodyPath(item.workflowPath());</span>
+        PreviewOutcome outcome;
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        if (request.dryRun()) {</span>
+<span class="nc" id="L252">            outcome = PreviewOutcome.WOULD_WRITE;</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        } else if (request.nonInteractive()) {</span>
+            // Unattended updates only report, so they do not leave a preview file on every run.
+<span class="nc" id="L255">            outcome = PreviewOutcome.NOT_WRITTEN_UNATTENDED;</span>
+        } else {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            outcome = writeTargetBody(preview, targetBody) ? PreviewOutcome.WRITTEN : PreviewOutcome.WRITE_FAILED;</span>
+        }
+<span class="nc" id="L259">        report.manualMigrationSteps(item, preview, outcome);</span>
+<span class="nc" id="L260">    }</span>
+
+    /// Returns the number of confirmed replacements that failed.
+    private int replaceGeneratedBodies(RunContext context) throws IOException {
+<span class="nc" id="L264">        List&lt;WorkflowMigrationItem&gt; replaceable = context.items().stream()</span>
+<span class="nc" id="L265">                .filter(item -&gt; item.replacement().isPresent())</span>
+<span class="nc" id="L266">                .toList();</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (replaceable.isEmpty()) {</span>
+<span class="nc" id="L268">            return 0;</span>
+        }
+<span class="nc" id="L270">        WorkflowMigrationReporter report = context.report();</span>
+<span class="nc" id="L271">        report.replacementsStarted();</span>
+<span class="nc" id="L272">        replaceable.forEach(</span>
+<span class="nc" id="L273">                item -&gt; report.replacementExplained(item, item.replacement().orElseThrow()));</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">        if (context.request().dryRun()) {</span>
+<span class="nc" id="L275">            replaceable.forEach(report::wouldReplace);</span>
+<span class="nc" id="L276">            return 0;</span>
+        }
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        if (context.request().nonInteractive()) {</span>
+<span class="nc" id="L279">            report.replacementsLeftUnattended(replaceable);</span>
+<span class="nc" id="L280">            return 0;</span>
+        }
+<span class="nc" id="L282">        Terminal terminal = context.terminal();</span>
+        ConfirmationMode mode =
+<span class="nc bnc" id="L284" title="All 2 branches missed.">                replaceable.size() == 1 ? ConfirmationMode.EACH : ConfirmationMode.ask(terminal, replaceable.size());</span>
+<span class="nc" id="L285">        int failedWrites = 0;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        for (WorkflowMigrationItem item : replaceable) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            if (mode.confirms(terminal, item)) {</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">                failedWrites += replace(context, item) ? 0 : 1;</span>
+            } else {
+<span class="nc" id="L290">                report.declined(item);</span>
+            }
+<span class="nc" id="L292">        }</span>
+<span class="nc" id="L293">        return failedWrites;</span>
+    }
+
+    private boolean replace(RunContext context, WorkflowMigrationItem item) {
+<span class="nc" id="L297">        WorkflowBodyWriter.WriteResult result =</span>
+<span class="nc" id="L298">                writer.write(item.workflowPath(), item.replacement().orElseThrow());</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        if (!result.written()) {</span>
+<span class="nc" id="L300">            context.report().migrationFailed(item, result);</span>
+<span class="nc" id="L301">            return false;</span>
+        }
+<span class="nc" id="L303">        context.report().migrated(item, result.backup().orElseThrow());</span>
+<span class="nc" id="L304">        recordTargetBody(context, item);</span>
+<span class="nc" id="L305">        return true;</span>
+    }
+
+    private void markManualMigrations(RunContext context) {
+<span class="nc" id="L309">        WorkflowMigrationReporter report = context.report();</span>
+<span class="nc" id="L310">        report.manualRecordsStarted();</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        for (WorkflowMigrationItem item : context.items()) {</span>
+<span class="nc" id="L312">            Path workflow = item.workflowPath();</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            if (item.inputs().isEmpty()) {</span>
+<span class="nc" id="L314">                report.noManualRecordNeeded(workflow);</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">            } else if (context.request().dryRun()) {</span>
+<span class="nc" id="L316">                report.wouldRecordMigrated(workflow);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">            } else if (recordTargetBody(context, item)) {</span>
+<span class="nc" id="L318">                report.recordedMigrated(workflow);</span>
+            }
+<span class="nc" id="L320">        }</span>
+<span class="nc" id="L321">    }</span>
+
+    private boolean recordTargetBody(RunContext context, WorkflowMigrationItem item) {
+<span class="nc" id="L324">        Path workflow = item.workflowPath();</span>
+        try {
+<span class="nc" id="L326">            context.store()</span>
+<span class="nc" id="L327">                    .put(GeneratedWorkflowRecord.current(</span>
+<span class="nc" id="L328">                            workflow, runningVersionText, item.inputs().orElseThrow()));</span>
+<span class="nc" id="L329">            return true;</span>
+<span class="nc" id="L330">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L331">            context.report().recordFailed(workflow);</span>
+<span class="nc" id="L332">            return false;</span>
+        }
+    }
+
+    private static boolean writeTargetBody(Path preview, String targetBody) {
+<span class="nc bnc" id="L337" title="All 4 branches missed.">        if (Files.isSymbolicLink(preview) || Files.isDirectory(preview, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc" id="L338">            return false;</span>
+        }
+<span class="nc" id="L340">        @Nullable Path temporary = null;</span>
+        try {
+<span class="nc" id="L342">            temporary = AtomicFiles.siblingTemporaryFile(preview);</span>
+<span class="nc" id="L343">            Files.writeString(temporary, targetBody);</span>
+<span class="nc" id="L344">            AtomicFiles.replace(temporary, preview);</span>
+<span class="nc" id="L345">            return true;</span>
+<span class="nc" id="L346">        } catch (IOException e) {</span>
+<span class="nc" id="L347">            AtomicFiles.deleteQuietly(temporary);</span>
+<span class="nc" id="L348">            return false;</span>
+        }
+    }
+
+    Path targetBodyPath(Path workflowPath) {
+<span class="nc" id="L353">        return workflowPath.resolveSibling(PathNames.fileName(workflowPath)</span>
+                + TARGET_BODY_FILE_INFIX
+                + runningVersionText
+                + TARGET_BODY_FILE_SUFFIX);
+    }
+
+    private static boolean newerMajor(SymphonyVersion source, Optional&lt;SymphonyVersion&gt; running) {
+<span class="nc bnc" id="L360" title="All 2 branches missed.">        return running.map(current -&gt; source.major() &gt; current.major()).orElse(false);</span>
+    }
+
+    /// The state one `migrate-workflows` run shares between its steps.
+<span class="nc" id="L364">    private record RunContext(</span>
+            WorkflowMigrationRequest request,
+            GeneratedWorkflowStore store,
+            List&lt;WorkflowMigrationItem&gt; items,
+            Terminal terminal,
+            WorkflowMigrationReporter report) {}
+
+    record MigrationTarget(String label, Path workflowPath, Optional&lt;Boolean&gt; githubEnabled) {
+<span class="nc" id="L372">        MigrationTarget {</span>
+<span class="nc" id="L373">            workflowPath = workflowPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L374">        }</span>
+
+        static MigrationTarget of(ConnectedBoard board) {
+<span class="nc" id="L377">            return new MigrationTarget(board.boardName(), board.workflowPath(), Optional.of(board.githubEnabled()));</span>
+        }
+    }
+
+    /// The version a workflow body came from: the recorded version, or the previously installed version
+    /// passed by the installer for a workflow without a record.
+<span class="nc" id="L383">    private record WorkflowProvenance(</span>
+            Optional&lt;String&gt; sourceVersion,
+            Optional&lt;SymphonyVersion&gt; parsedSourceVersion,
+            Optional&lt;SymphonyVersion&gt; running) {
+        static WorkflowProvenance of(
+                Optional&lt;GeneratedWorkflowRecord&gt; record,
+                Optional&lt;SymphonyVersion&gt; from,
+                Optional&lt;SymphonyVersion&gt; running) {
+<span class="nc" id="L391">            Optional&lt;String&gt; recordedVersion = record.map(GeneratedWorkflowRecord::symphonyVersion);</span>
+<span class="nc" id="L392">            return new WorkflowProvenance(</span>
+<span class="nc" id="L393">                    recordedVersion.or(() -&gt; from.map(SymphonyVersion::toString)),</span>
+<span class="nc" id="L394">                    recordedVersion.flatMap(SymphonyVersion::parse).or(() -&gt; from),</span>
+                    running);
+        }
+
+        boolean downgrade() {
+<span class="nc" id="L399">            return parsedSourceVersion</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">                    .flatMap(source -&gt; running.map(current -&gt; source.compareTo(current) &gt; 0))</span>
+<span class="nc" id="L401">                    .orElse(false);</span>
+        }
+
+        boolean newerMajor() {
+<span class="nc" id="L405">            return parsedSourceVersion</span>
+<span class="nc" id="L406">                    .map(source -&gt; WorkflowBodyMigration.newerMajor(source, running))</span>
+<span class="nc" id="L407">                    .orElse(false);</span>
+        }
+
+        WorkflowMigrationItem malformed(
+                MigrationTarget target, Optional&lt;GeneratedWorkflowRecord&gt; record, String problem) {
+<span class="nc" id="L412">            return new WorkflowMigrationItem(</span>
+                    target,
+                    WorkflowBodyClassification.MALFORMED,
+                    problem,
+                    sourceVersion,
+<span class="nc" id="L417">                    downgrade(),</span>
+<span class="nc" id="L418">                    record.map(GeneratedWorkflowRecord::inputs),</span>
+<span class="nc" id="L419">                    Optional.empty(),</span>
+                    false);
+        }
+
+        WorkflowMigrationItem item(MigrationTarget target, WorkflowBodyClassification classification) {
+<span class="nc" id="L424">            return new WorkflowMigrationItem(</span>
+<span class="nc" id="L425">                    target, classification, &quot;&quot;, sourceVersion, downgrade(), Optional.empty(), Optional.empty(), false);</span>
+        }
+    }
+
+    /// How the operator confirms several replaceable workflows.
+<span class="nc" id="L430">    private enum ConfirmationMode {</span>
+<span class="nc" id="L431">        ALL,</span>
+<span class="nc" id="L432">        EACH,</span>
+<span class="nc" id="L433">        NONE;</span>
+
+        static ConfirmationMode ask(Terminal terminal, int count) throws IOException {
+<span class="nc" id="L436">            String answer = terminal.readLine(&quot;Replace the generated body in all &quot; + count</span>
+                    + &quot; workflows above? Enter all, each, or none [each]: &quot;);
+<span class="nc bnc" id="L438" title="All 2 branches missed.">            if (answer == null) {</span>
+<span class="nc" id="L439">                return NONE;</span>
+            }
+<span class="nc" id="L441">            String normalized = answer.strip().toLowerCase(Locale.ROOT);</span>
+<span class="nc bnc" id="L442" title="All 4 branches missed.">            if (normalized.isEmpty() || name(EACH).startsWith(normalized)) {</span>
+<span class="nc" id="L443">                return EACH;</span>
+            }
+<span class="nc bnc" id="L445" title="All 2 branches missed.">            return name(ALL).startsWith(normalized) ? ALL : NONE;</span>
+        }
+
+        boolean confirms(Terminal terminal, WorkflowMigrationItem item) throws IOException {
+<span class="nc bnc" id="L449" title="All 4 branches missed.">            return this == ALL</span>
+                    || (this == EACH
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                            &amp;&amp; PromptSupport.yes(</span>
+<span class="nc" id="L452">                                    terminal, &quot;Replace the generated body in &quot; + item.heading() + &quot;? [y/N] &quot;));</span>
+        }
+
+        private static String name(ConfirmationMode mode) {
+<span class="nc" id="L456">            return mode.name().toLowerCase(Locale.ROOT);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

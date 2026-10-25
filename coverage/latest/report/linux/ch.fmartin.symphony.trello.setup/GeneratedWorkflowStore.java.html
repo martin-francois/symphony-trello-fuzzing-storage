@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GeneratedWorkflowStore.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">GeneratedWorkflowStore.java</span></div><h1>GeneratedWorkflowStore.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
+import org.jspecify.annotations.NullMarked;
+
+/// Version provenance for generated workflow bodies (ADR 0095). The store keeps one record per
+/// workflow path: the latest body that Symphony generated, migrated, or confirmed as current for that
+/// workflow, the version that produced it, and the inputs it was rendered from. It lives beside the
+/// connected-board manifest, so it follows the same config directory and survives uninstall.
+@NullMarked
+final class GeneratedWorkflowStore {
+    static final String FILE_NAME = &quot;generated-workflows.json&quot;;
+    /// Written with every save so that a future incompatible store format can be told apart; readers
+    /// of format 1 do not need it because they ignore unknown fields.
+    static final int FORMAT_VERSION = 1;
+
+    private final ObjectMapper json;
+    private final Path storePath;
+
+<span class="nc" id="L30">    private GeneratedWorkflowStore(Path storePath) {</span>
+<span class="nc" id="L31">        this.storePath = storePath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L32">        this.json = ConnectedBoardRepository.jsonMapper();</span>
+<span class="nc" id="L33">    }</span>
+
+    static GeneratedWorkflowStore inConfigDir(Path configDir) {
+<span class="nc" id="L36">        return new GeneratedWorkflowStore(configDir.resolve(FILE_NAME));</span>
+    }
+
+    static GeneratedWorkflowStore besideManifest(Path manifestPath) {
+<span class="nc" id="L40">        Path manifest = manifestPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L41">        Path store = manifest.resolveSibling(FILE_NAME);</span>
+<span class="nc bnc" id="L42" title="All 2 branches missed.">        if (PathsEqual.samePath(store, manifest)) {</span>
+<span class="nc" id="L43">            throw new IllegalArgumentException(</span>
+                    &quot;cannot record generated workflows: use a manifest filename other than generated-workflows.json&quot;);
+        }
+<span class="nc" id="L46">        return new GeneratedWorkflowStore(store);</span>
+    }
+
+    /// Records the body that setup just generated with the running Symphony version. A failure here
+    /// must not undo a finished board setup, so it only returns a warning for the caller to print; a
+    /// later migration check then treats the workflow as having no recorded provenance.
+    static Optional&lt;String&gt; recordGenerated(Path manifestPath, Path workflowPath, GeneratedWorkflowBodyInputs inputs) {
+        try {
+<span class="nc" id="L54">            besideManifest(manifestPath)</span>
+<span class="nc" id="L55">                    .put(GeneratedWorkflowRecord.current(workflowPath, SymphonyVersion.currentText(), inputs));</span>
+<span class="nc" id="L56">            return Optional.empty();</span>
+<span class="nc" id="L57">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L58">            return Optional.of(&quot;  WARN  Could not record which Symphony version generated &quot;</span>
+<span class="nc" id="L59">                    + PathNames.fileName(workflowPath) + &quot; in the provenance store. Later updates will ask for a&quot;</span>
+                    + &quot; manual workflow migration if the generated workflow changes.&quot;);
+        }
+    }
+
+    Path storePath() {
+<span class="nc" id="L65">        return storePath;</span>
+    }
+
+    List&lt;GeneratedWorkflowRecord&gt; records() throws IOException {
+<span class="nc" id="L69">        return records(load());</span>
+    }
+
+    static Optional&lt;GeneratedWorkflowRecord&gt; find(List&lt;GeneratedWorkflowRecord&gt; records, Path workflowPath) {
+<span class="nc" id="L73">        return records.stream()</span>
+<span class="nc" id="L74">                .filter(record -&gt; PathsEqual.samePath(record.workflowPath(), workflowPath))</span>
+<span class="nc" id="L75">                .findAny();</span>
+    }
+
+    /// Replaces the record for the same workflow path, or adds it.
+    void put(GeneratedWorkflowRecord record) throws IOException {
+<span class="nc" id="L80">        ObjectNode document = load();</span>
+<span class="nc" id="L81">        List&lt;GeneratedWorkflowRecord&gt; stored = records(document);</span>
+<span class="nc" id="L82">        ArrayNode workflows = json.createArrayNode();</span>
+        // Keep untouched records as JSON so an older app preserves newer generator inputs.
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        for (int index = 0; index &lt; stored.size(); index++) {</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (!PathsEqual.samePath(stored.get(index).workflowPath(), record.workflowPath())) {</span>
+<span class="nc" id="L86">                workflows.add(document.path(&quot;workflows&quot;).get(index));</span>
+            }
+        }
+<span class="nc" id="L89">        workflows.add(json.valueToTree(record));</span>
+<span class="nc" id="L90">        document.put(&quot;formatVersion&quot;, FORMAT_VERSION);</span>
+<span class="nc" id="L91">        document.set(&quot;workflows&quot;, workflows);</span>
+<span class="nc" id="L92">        save(document);</span>
+<span class="nc" id="L93">    }</span>
+
+    private List&lt;GeneratedWorkflowRecord&gt; records(ObjectNode document) throws IOException {
+<span class="nc" id="L96">        return json.treeToValue(document, StoredRecords.class).workflows();</span>
+    }
+
+    private ObjectNode load() throws IOException {
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (!Files.isRegularFile(storePath)) {</span>
+<span class="nc" id="L101">            return json.createObjectNode();</span>
+        }
+        try {
+<span class="nc" id="L104">            JsonNode document = json.readTree(storePath.toFile());</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            if (!(document instanceof ObjectNode object)) {</span>
+<span class="nc" id="L106">                throw new IOException(&quot;cannot read generated workflow store: expected a JSON object&quot;);</span>
+            }
+<span class="nc" id="L108">            return object;</span>
+<span class="nc" id="L109">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L110">            throw new IOException(&quot;cannot read generated workflow store: expected valid JSON&quot;, e);</span>
+        }
+    }
+
+    private void save(ObjectNode records) throws IOException {
+<span class="nc" id="L115">        Path parent = storePath.getParent();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (parent != null) {</span>
+<span class="nc" id="L117">            Files.createDirectories(parent);</span>
+        }
+<span class="nc" id="L119">        Path temporary = AtomicFiles.siblingTemporaryFile(storePath);</span>
+        try {
+<span class="nc" id="L121">            json.writerWithDefaultPrettyPrinter().writeValue(temporary.toFile(), records);</span>
+<span class="nc" id="L122">            AtomicFiles.replace(temporary, storePath);</span>
+        } finally {
+<span class="nc" id="L124">            AtomicFiles.deleteQuietly(temporary);</span>
+        }
+<span class="nc" id="L126">    }</span>
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record StoredRecords(int formatVersion, List&lt;GeneratedWorkflowRecord&gt; workflows) {
+<span class="nc" id="L130">        StoredRecords {</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">            workflows = workflows == null ? List.of() : List.copyOf(workflows);</span>
+<span class="nc" id="L132">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

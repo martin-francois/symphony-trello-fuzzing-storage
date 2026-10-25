@@ -1,0 +1,528 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InMemoryTrelloBoard.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">InMemoryTrelloBoard.java</span></div><h1>InMemoryTrelloBoard.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.base.Splitter;
+import java.net.URI;
+import java.net.URLDecoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import javax.net.ssl.SSLSession;
+import org.jspecify.annotations.Nullable;
+
+/// One Trello board held in memory and served to a [TrelloClient] through its package-private transport
+/// seam. It answers the requests the Trello handoff tools send and records every write request, including
+/// writes it rejects, with the card that owned the written resource when the request arrived. Fuzz targets
+/// use it so that each execution runs the real client without a socket or a file.
+public final class InMemoryTrelloBoard {
+    /// The endpoint a configuration must use so its requests reach this board. Nothing resolves the host.
+    public static final String ENDPOINT = &quot;https://trello.invalid/1&quot;;
+    /// Trello card links start with this prefix and end with the card's short link.
+    public static final String CARD_URL_PREFIX = &quot;https://trello.com/c/&quot;;
+
+<span class="fc" id="L34">    private static final String API_PATH_PREFIX = URI.create(ENDPOINT).getPath() + &quot;/&quot;;</span>
+<span class="fc" id="L35">    private static final Splitter PATH_SEGMENTS = Splitter.on('/');</span>
+<span class="fc" id="L36">    private static final Splitter QUERY_PARAMETERS = Splitter.on('&amp;').omitEmptyStrings();</span>
+<span class="pc" id="L37">    private static final HttpHeaders NO_HEADERS = HttpHeaders.of(Map.of(), (name, value) -&gt; true);</span>
+    private static final int OK = 200;
+    private static final int NOT_FOUND = 404;
+    private static final String EMPTY_OBJECT = &quot;{}&quot;;
+    private static final String TRELLO_DEFAULT_ACTIONS_LIMIT = &quot;50&quot;;
+
+<span class="fc" id="L43">    private final ObjectMapper json = new ObjectMapper();</span>
+    private final String boardId;
+<span class="fc" id="L45">    private final List&lt;TrelloClient.BoardList&gt; lists = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L46">    private final Map&lt;String, CardState&gt; cards = new HashMap&lt;&gt;();</span>
+    // Owning card id by resource id, so a write to a comment, checklist, or check item resolves its card.
+<span class="fc" id="L48">    private final Map&lt;String, String&gt; commentOwners = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L49">    private final Map&lt;String, String&gt; checklistOwners = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L50">    private final Map&lt;String, String&gt; checkItemOwners = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L51">    private final Map&lt;String, ChecklistState&gt; checklists = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L52">    private final List&lt;Write&gt; writes = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L53">    private final Map&lt;Integer, Integer&gt; injectedStatuses = new HashMap&lt;&gt;();</span>
+    private int requests;
+    private int failedRequests;
+    private int nextId;
+
+    /// Initializes JDK request metadata before a guarded fuzz execution. The first header validation
+    /// reads the JDK's net.properties file even though the in-memory transport never opens a socket.
+    public static void initializeRequestMetadata() {
+<span class="nc" id="L61">        HttpRequest.newBuilder(URI.create(ENDPOINT))</span>
+<span class="nc" id="L62">                .header(&quot;Accept&quot;, &quot;application/json&quot;)</span>
+<span class="nc" id="L63">                .GET()</span>
+<span class="nc" id="L64">                .build();</span>
+<span class="nc" id="L65">    }</span>
+
+<span class="fc" id="L67">    public InMemoryTrelloBoard(String boardId) {</span>
+<span class="fc" id="L68">        this.boardId = boardId;</span>
+<span class="fc" id="L69">    }</span>
+
+    public InMemoryTrelloBoard list(String id, String name, boolean closed) {
+<span class="fc" id="L72">        lists.add(new TrelloClient.BoardList(id, name, closed));</span>
+<span class="fc" id="L73">        return this;</span>
+    }
+
+    public InMemoryTrelloBoard card(String id, String shortLink, String title, String listId) {
+<span class="fc" id="L77">        cards.put(id, new CardState(id, shortLink, title, listId));</span>
+<span class="fc" id="L78">        return this;</span>
+    }
+
+    /// Adds a comment below the card's existing comments, because Trello lists comments newest first.
+    public InMemoryTrelloBoard olderComment(String cardId, String actionId, String text) {
+<span class="fc" id="L83">        cards.get(cardId).comments().add(new CommentState(actionId, text));</span>
+<span class="fc" id="L84">        ownComment(cardId, actionId);</span>
+<span class="fc" id="L85">        return this;</span>
+    }
+
+    public InMemoryTrelloBoard checklist(String cardId, String checklistId, String name) {
+<span class="fc" id="L89">        addChecklist(cardId, checklistId, name);</span>
+<span class="fc" id="L90">        return this;</span>
+    }
+
+    public InMemoryTrelloBoard checkItem(String checklistId, String itemId, String name, boolean complete) {
+<span class="fc" id="L94">        addCheckItem(checklistId, itemId, name, complete);</span>
+<span class="fc" id="L95">        return this;</span>
+    }
+
+    /// Answers the request with the given ordinal, counted from 1, with an error status instead of serving it.
+    public InMemoryTrelloBoard failRequest(int ordinal, int status) {
+<span class="fc" id="L100">        injectedStatuses.put(ordinal, status);</span>
+<span class="fc" id="L101">        return this;</span>
+    }
+
+    public TrelloClient client() {
+<span class="fc" id="L105">        return new TrelloClient(json, this::send);</span>
+    }
+
+    public List&lt;Write&gt; writes() {
+<span class="fc" id="L109">        return List.copyOf(writes);</span>
+    }
+
+    /// Whether the board answered any request with an injected error status.
+    public boolean failedAnyRequest() {
+<span class="fc bfc" id="L114" title="All 2 branches covered.">        return failedRequests &gt; 0;</span>
+    }
+
+    public List&lt;TrelloClient.BoardList&gt; lists() {
+<span class="fc" id="L118">        return List.copyOf(lists);</span>
+    }
+
+    private HttpResponse&lt;String&gt; send(HttpRequest request) {
+<span class="fc" id="L122">        requests++;</span>
+<span class="fc" id="L123">        Request parsed = Request.of(request);</span>
+<span class="fc" id="L124">        Integer injectedStatus = injectedStatuses.get(requests);</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (injectedStatus != null) {</span>
+<span class="fc" id="L126">            failedRequests++;</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">            if (!parsed.isRead()) {</span>
+<span class="fc" id="L128">                writes.add(describeWrite(parsed, false));</span>
+            }
+<span class="fc" id="L130">            return new Response(request, injectedStatus, EMPTY_OBJECT);</span>
+        }
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        if (parsed.isRead()) {</span>
+<span class="fc" id="L133">            return read(request, parsed);</span>
+        }
+<span class="fc" id="L135">        Write write = describeWrite(parsed, true);</span>
+<span class="fc" id="L136">        writes.add(write);</span>
+<span class="fc" id="L137">        return apply(request, parsed, write);</span>
+    }
+
+    private HttpResponse&lt;String&gt; read(HttpRequest request, Request parsed) {
+<span class="fc" id="L141">        List&lt;String&gt; path = parsed.path();</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">        if (matches(path, &quot;boards&quot;, boardId)) {</span>
+<span class="fc" id="L143">            return ok(</span>
+                    request,
+                    JsonNodeFactory.instance
+<span class="fc" id="L146">                            .objectNode()</span>
+<span class="fc" id="L147">                            .put(&quot;id&quot;, boardId)</span>
+<span class="fc" id="L148">                            .put(&quot;name&quot;, &quot;Board&quot;)</span>
+<span class="fc" id="L149">                            .put(&quot;closed&quot;, false));</span>
+        }
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        if (matches(path, &quot;boards&quot;, boardId, &quot;lists&quot;)) {</span>
+<span class="fc" id="L152">            ArrayNode body = JsonNodeFactory.instance.arrayNode();</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">            for (int index = 0; index &lt; lists.size(); index++) {</span>
+<span class="fc" id="L154">                TrelloClient.BoardList list = lists.get(index);</span>
+<span class="fc" id="L155">                body.addObject()</span>
+<span class="fc" id="L156">                        .put(&quot;id&quot;, list.id())</span>
+<span class="fc" id="L157">                        .put(&quot;name&quot;, list.name())</span>
+<span class="fc" id="L158">                        .put(&quot;closed&quot;, list.closed())</span>
+<span class="fc" id="L159">                        .put(&quot;pos&quot;, index);</span>
+            }
+<span class="fc" id="L161">            return ok(request, body);</span>
+        }
+<span class="pc bpc" id="L163" title="2 of 4 branches missed.">        CardState card = path.size() &gt;= 2 &amp;&amp; path.getFirst().equals(&quot;cards&quot;) ? cards.get(path.get(1)) : null;</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (card == null) {</span>
+<span class="fc" id="L165">            return new Response(request, NOT_FOUND, EMPTY_OBJECT);</span>
+        }
+<span class="fc bfc" id="L167" title="All 2 branches covered.">        if (path.size() == 2) {</span>
+<span class="fc" id="L168">            return ok(request, cardJson(card, parsed.query()));</span>
+        }
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">        if (matches(path, &quot;cards&quot;, card.id(), &quot;checklists&quot;)) {</span>
+<span class="fc" id="L171">            return ok(request, checklistsJson(card));</span>
+        }
+<span class="nc" id="L173">        return new Response(request, NOT_FOUND, EMPTY_OBJECT);</span>
+    }
+
+    private Write describeWrite(Request request, boolean applied) {
+<span class="fc" id="L177">        List&lt;String&gt; path = request.path();</span>
+<span class="fc" id="L178">        Map&lt;String, String&gt; query = request.query();</span>
+<span class="fc" id="L179">        String method = request.method();</span>
+<span class="fc bfc" id="L180" title="All 4 branches covered.">        if (method.equals(&quot;POST&quot;) &amp;&amp; matches(path, &quot;cards&quot;, null, &quot;actions&quot;, &quot;comments&quot;)) {</span>
+<span class="fc" id="L181">            return cardWrite(WriteKind.COMMENT_CREATE, path.get(1), query.get(&quot;text&quot;), applied);</span>
+        }
+<span class="fc bfc" id="L183" title="All 4 branches covered.">        if (method.equals(&quot;PUT&quot;) &amp;&amp; matches(path, &quot;actions&quot;, null, &quot;text&quot;)) {</span>
+<span class="fc" id="L184">            return commentWrite(WriteKind.COMMENT_UPDATE, path.get(1), query.get(&quot;value&quot;), applied);</span>
+        }
+<span class="pc bpc" id="L186" title="1 of 4 branches missed.">        if (method.equals(&quot;DELETE&quot;) &amp;&amp; matches(path, &quot;actions&quot;, null)) {</span>
+<span class="fc" id="L187">            return commentWrite(WriteKind.COMMENT_DELETE, path.get(1), null, applied);</span>
+        }
+<span class="fc bfc" id="L189" title="All 4 branches covered.">        if (method.equals(&quot;PUT&quot;) &amp;&amp; matches(path, &quot;cards&quot;, null, &quot;idList&quot;)) {</span>
+<span class="fc" id="L190">            return cardWrite(WriteKind.CARD_MOVE, path.get(1), query.get(&quot;value&quot;), applied);</span>
+        }
+<span class="fc bfc" id="L192" title="All 4 branches covered.">        if (method.equals(&quot;POST&quot;) &amp;&amp; matches(path, &quot;cards&quot;, null, &quot;checklists&quot;)) {</span>
+<span class="fc" id="L193">            return cardWrite(WriteKind.CHECKLIST_CREATE, path.get(1), query.get(&quot;name&quot;), applied);</span>
+        }
+<span class="fc bfc" id="L195" title="All 4 branches covered.">        if (method.equals(&quot;POST&quot;) &amp;&amp; matches(path, &quot;checklists&quot;, null, &quot;checkItems&quot;)) {</span>
+<span class="fc" id="L196">            return new Write(</span>
+                    WriteKind.CHECK_ITEM_CREATE,
+<span class="fc" id="L198">                    checklistOwners.get(path.get(1)),</span>
+<span class="fc" id="L199">                    path.get(1),</span>
+<span class="fc" id="L200">                    query.get(&quot;name&quot;),</span>
+                    null,
+                    applied);
+        }
+<span class="pc bpc" id="L204" title="1 of 4 branches missed.">        if (method.equals(&quot;PUT&quot;) &amp;&amp; matches(path, &quot;cards&quot;, null, &quot;checkItem&quot;, null)) {</span>
+<span class="fc" id="L205">            String owner = checkItemOwners.get(path.get(3));</span>
+            // The path names a card, but the write lands on the card that owns the item.
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">            String target = path.get(1).equals(owner) ? owner : null;</span>
+<span class="fc" id="L208">            return new Write(WriteKind.CHECK_ITEM_UPDATE, target, path.get(3), query.get(&quot;state&quot;), null, applied);</span>
+        }
+<span class="pc bpc" id="L210" title="2 of 4 branches missed.">        if (method.equals(&quot;POST&quot;) &amp;&amp; matches(path, &quot;cards&quot;, null, &quot;attachments&quot;)) {</span>
+<span class="fc" id="L211">            return cardWrite(WriteKind.URL_ATTACHMENT_CREATE, path.get(1), query.get(&quot;url&quot;), applied);</span>
+        }
+<span class="nc" id="L213">        return new Write(WriteKind.UNKNOWN, null, method + &quot; &quot; + String.join(&quot;/&quot;, path), null, null, applied);</span>
+    }
+
+    private static Write cardWrite(WriteKind kind, String cardId, @Nullable String value, boolean applied) {
+<span class="fc" id="L217">        return new Write(kind, cardId, cardId, value, null, applied);</span>
+    }
+
+    private Write commentWrite(WriteKind kind, String actionId, @Nullable String value, boolean applied) {
+<span class="fc" id="L221">        String owner = commentOwners.get(actionId);</span>
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">        CommentState comment = owner == null ? null : comment(cards.get(owner), actionId);</span>
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">        return new Write(kind, owner, actionId, value, comment == null ? null : comment.text(), applied);</span>
+    }
+
+    private HttpResponse&lt;String&gt; apply(HttpRequest request, Request parsed, Write write) {
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">        CardState card = write.cardId() == null ? null : cards.get(write.cardId());</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        if (card == null) {</span>
+<span class="fc" id="L229">            return new Response(request, NOT_FOUND, EMPTY_OBJECT);</span>
+        }
+<span class="fc" id="L231">        Map&lt;String, String&gt; query = parsed.query();</span>
+<span class="pc bpc" id="L232" title="1 of 9 branches missed.">        return switch (write.kind()) {</span>
+            case COMMENT_CREATE -&gt; {
+<span class="fc" id="L234">                String actionId = newId(&quot;action&quot;);</span>
+<span class="fc" id="L235">                card.comments().addFirst(new CommentState(actionId, query.get(&quot;text&quot;)));</span>
+<span class="fc" id="L236">                ownComment(card.id(), actionId);</span>
+<span class="fc" id="L237">                yield created(request, actionId);</span>
+            }
+            case COMMENT_UPDATE -&gt; {
+<span class="fc" id="L240">                String actionId = write.resourceId();</span>
+<span class="fc" id="L241">                card.comments()</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">                        .replaceAll(comment -&gt; actionId.equals(comment.id())</span>
+<span class="fc" id="L243">                                ? new CommentState(actionId, query.get(&quot;value&quot;))</span>
+<span class="fc" id="L244">                                : comment);</span>
+<span class="fc" id="L245">                yield created(request, actionId);</span>
+            }
+            case COMMENT_DELETE -&gt; {
+<span class="fc" id="L248">                card.comments().remove(comment(card, write.resourceId()));</span>
+<span class="fc" id="L249">                commentOwners.remove(write.resourceId());</span>
+<span class="fc" id="L250">                yield new Response(request, OK, EMPTY_OBJECT);</span>
+            }
+            case CARD_MOVE -&gt; {
+<span class="fc" id="L253">                card.listId = query.get(&quot;value&quot;);</span>
+<span class="fc" id="L254">                yield created(request, card.id());</span>
+            }
+            case CHECKLIST_CREATE -&gt; {
+<span class="fc" id="L257">                String checklistId = newId(&quot;checklist&quot;);</span>
+<span class="fc" id="L258">                addChecklist(card.id(), checklistId, query.get(&quot;name&quot;));</span>
+<span class="fc" id="L259">                yield created(request, checklistId);</span>
+            }
+            case CHECK_ITEM_CREATE -&gt; {
+<span class="fc" id="L262">                String itemId = newId(&quot;check-item&quot;);</span>
+<span class="fc" id="L263">                addCheckItem(write.resourceId(), itemId, query.get(&quot;name&quot;), &quot;true&quot;.equals(query.get(&quot;checked&quot;)));</span>
+<span class="fc" id="L264">                yield created(request, itemId);</span>
+            }
+            case CHECK_ITEM_UPDATE -&gt; {
+<span class="fc" id="L267">                boolean complete = &quot;complete&quot;.equals(query.get(&quot;state&quot;));</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">                for (ChecklistState checklist : card.checklists()) {</span>
+<span class="fc" id="L269">                    checklist</span>
+<span class="fc" id="L270">                            .items()</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">                            .replaceAll(item -&gt; item.id().equals(write.resourceId())</span>
+<span class="fc" id="L272">                                    ? new CheckItemState(item.id(), item.name(), complete)</span>
+<span class="fc" id="L273">                                    : item);</span>
+<span class="fc" id="L274">                }</span>
+<span class="fc" id="L275">                yield created(request, write.resourceId());</span>
+            }
+            case URL_ATTACHMENT_CREATE -&gt; {
+<span class="fc" id="L278">                ArrayNode body = JsonNodeFactory.instance.arrayNode();</span>
+<span class="fc" id="L279">                body.addObject().put(&quot;id&quot;, newId(&quot;attachment&quot;));</span>
+<span class="fc" id="L280">                yield ok(request, body);</span>
+            }
+<span class="nc" id="L282">            case UNKNOWN -&gt; new Response(request, NOT_FOUND, EMPTY_OBJECT);</span>
+        };
+    }
+
+    private void ownComment(String cardId, String actionId) {
+        // Trello has no action with a blank id, so a write to one targets nothing on the board.
+<span class="fc bfc" id="L288" title="All 2 branches covered.">        if (!actionId.isBlank()) {</span>
+<span class="fc" id="L289">            commentOwners.put(actionId, cardId);</span>
+        }
+<span class="fc" id="L291">    }</span>
+
+    private void addChecklist(String cardId, String checklistId, String name) {
+<span class="fc" id="L294">        var checklist = new ChecklistState(checklistId, name, new ArrayList&lt;&gt;());</span>
+<span class="fc" id="L295">        cards.get(cardId).checklists().add(checklist);</span>
+<span class="fc" id="L296">        checklists.put(checklistId, checklist);</span>
+<span class="fc" id="L297">        checklistOwners.put(checklistId, cardId);</span>
+<span class="fc" id="L298">    }</span>
+
+    private void addCheckItem(String checklistId, String itemId, String name, boolean complete) {
+<span class="fc" id="L301">        checklists.get(checklistId).items().add(new CheckItemState(itemId, name, complete));</span>
+<span class="fc" id="L302">        checkItemOwners.put(itemId, checklistOwners.get(checklistId));</span>
+<span class="fc" id="L303">    }</span>
+
+    private static @Nullable CommentState comment(CardState card, String actionId) {
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">        for (CommentState comment : card.comments()) {</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">            if (actionId.equals(comment.id())) {</span>
+<span class="fc" id="L308">                return comment;</span>
+            }
+<span class="fc" id="L310">        }</span>
+<span class="nc" id="L311">        return null;</span>
+    }
+
+    private ObjectNode cardJson(CardState card, Map&lt;String, String&gt; query) {
+<span class="fc" id="L315">        ObjectNode body = JsonNodeFactory.instance</span>
+<span class="fc" id="L316">                .objectNode()</span>
+<span class="fc" id="L317">                .put(&quot;id&quot;, card.id())</span>
+<span class="fc" id="L318">                .put(&quot;name&quot;, card.title())</span>
+<span class="fc" id="L319">                .put(&quot;desc&quot;, &quot;&quot;)</span>
+<span class="fc" id="L320">                .put(&quot;idList&quot;, card.listId)</span>
+<span class="fc" id="L321">                .put(&quot;idBoard&quot;, boardId)</span>
+<span class="fc" id="L322">                .put(&quot;closed&quot;, false)</span>
+<span class="fc" id="L323">                .put(&quot;idShort&quot;, 1)</span>
+<span class="fc" id="L324">                .put(&quot;shortLink&quot;, card.shortLink())</span>
+<span class="fc" id="L325">                .put(&quot;url&quot;, CARD_URL_PREFIX + card.shortLink());</span>
+<span class="fc" id="L326">        body.putArray(&quot;labels&quot;);</span>
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">        if (&quot;commentCard&quot;.equals(query.get(&quot;actions&quot;))) {</span>
+<span class="fc" id="L328">            int limit = actionsLimit(query);</span>
+<span class="fc" id="L329">            boolean withIds = query.getOrDefault(&quot;action_fields&quot;, &quot;&quot;).contains(&quot;id&quot;);</span>
+<span class="fc" id="L330">            ArrayNode actions = body.putArray(&quot;actions&quot;);</span>
+            for (CommentState comment :
+<span class="fc bfc" id="L332" title="All 2 branches covered.">                    card.comments().subList(0, Math.min(limit, card.comments().size()))) {</span>
+<span class="fc" id="L333">                ObjectNode action = actions.addObject();</span>
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">                if (withIds) {</span>
+<span class="fc" id="L335">                    action.put(&quot;id&quot;, comment.id());</span>
+                }
+<span class="fc" id="L337">                action.putObject(&quot;data&quot;).put(&quot;text&quot;, comment.text());</span>
+<span class="fc" id="L338">            }</span>
+        }
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">        if (&quot;all&quot;.equals(query.get(&quot;checklists&quot;))) {</span>
+<span class="nc" id="L341">            body.set(&quot;checklists&quot;, checklistsJson(card));</span>
+        }
+<span class="fc" id="L343">        return body;</span>
+    }
+
+    // An AssertionError escapes the handler's catch-all, so a malformed client request fails the fuzz run.
+    private static int actionsLimit(Map&lt;String, String&gt; query) {
+<span class="fc" id="L348">        String limit = query.getOrDefault(&quot;actions_limit&quot;, TRELLO_DEFAULT_ACTIONS_LIMIT);</span>
+        try {
+<span class="fc" id="L350">            return Integer.parseInt(limit);</span>
+<span class="nc" id="L351">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L352">            throw new AssertionError(&quot;TrelloClient sent a non-numeric actions_limit: &quot; + limit, e);</span>
+        }
+    }
+
+    private static ArrayNode checklistsJson(CardState card) {
+<span class="fc" id="L357">        ArrayNode body = JsonNodeFactory.instance.arrayNode();</span>
+<span class="fc bfc" id="L358" title="All 2 branches covered.">        for (ChecklistState checklist : card.checklists()) {</span>
+<span class="fc" id="L359">            ObjectNode checklistJson =</span>
+<span class="fc" id="L360">                    body.addObject().put(&quot;id&quot;, checklist.id()).put(&quot;name&quot;, checklist.name());</span>
+<span class="fc" id="L361">            ArrayNode items = checklistJson.putArray(&quot;checkItems&quot;);</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">            for (CheckItemState item : checklist.items()) {</span>
+<span class="fc" id="L363">                items.addObject()</span>
+<span class="fc" id="L364">                        .put(&quot;id&quot;, item.id())</span>
+<span class="fc" id="L365">                        .put(&quot;name&quot;, item.name())</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">                        .put(&quot;state&quot;, item.complete() ? &quot;complete&quot; : &quot;incomplete&quot;);</span>
+<span class="fc" id="L367">            }</span>
+<span class="fc" id="L368">        }</span>
+<span class="fc" id="L369">        return body;</span>
+    }
+
+    /// Whether the path has the expected segments. A `null` segment matches any value.
+    private static boolean matches(List&lt;String&gt; path, @Nullable String... expected) {
+<span class="fc bfc" id="L374" title="All 2 branches covered.">        if (path.size() != expected.length) {</span>
+<span class="fc" id="L375">            return false;</span>
+        }
+<span class="fc bfc" id="L377" title="All 2 branches covered.">        for (int index = 0; index &lt; expected.length; index++) {</span>
+<span class="fc bfc" id="L378" title="All 4 branches covered.">            if (expected[index] != null &amp;&amp; !expected[index].equals(path.get(index))) {</span>
+<span class="fc" id="L379">                return false;</span>
+            }
+        }
+<span class="fc" id="L382">        return true;</span>
+    }
+
+    private String newId(String prefix) {
+<span class="fc" id="L386">        nextId++;</span>
+<span class="fc" id="L387">        return prefix + &quot;-new-&quot; + nextId;</span>
+    }
+
+    private HttpResponse&lt;String&gt; created(HttpRequest request, String id) {
+<span class="fc" id="L391">        return ok(request, JsonNodeFactory.instance.objectNode().put(&quot;id&quot;, id));</span>
+    }
+
+    private HttpResponse&lt;String&gt; ok(HttpRequest request, Object body) {
+        try {
+<span class="fc" id="L396">            return new Response(request, OK, json.writeValueAsString(body));</span>
+<span class="nc" id="L397">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L398">            throw new IllegalStateException(&quot;in-memory Trello response could not be serialized&quot;, e);</span>
+        }
+    }
+
+    /// The kind of Trello write a request asks for. `UNKNOWN` is any write request the handoff tools are
+    /// not expected to send.
+<span class="fc" id="L404">    public enum WriteKind {</span>
+<span class="fc" id="L405">        COMMENT_CREATE,</span>
+<span class="fc" id="L406">        COMMENT_UPDATE,</span>
+<span class="fc" id="L407">        COMMENT_DELETE,</span>
+<span class="fc" id="L408">        CARD_MOVE,</span>
+<span class="fc" id="L409">        CHECKLIST_CREATE,</span>
+<span class="fc" id="L410">        CHECK_ITEM_CREATE,</span>
+<span class="fc" id="L411">        CHECK_ITEM_UPDATE,</span>
+<span class="fc" id="L412">        URL_ATTACHMENT_CREATE,</span>
+<span class="fc" id="L413">        UNKNOWN</span>
+    }
+
+    /// One write request. `cardId` is the card the write lands on: the card in the request path for card
+    /// writes, or the card that owned the comment, checklist, or check item when the request arrived. It is
+    /// `null` when no card owns that resource. `resourceId` is the card, comment action, checklist, or check
+    /// item id from the request path. `value` is the written text, list id, name, state, or URL.
+    /// `previousText` is the text of an updated or deleted comment before the request. `applied` is false
+    /// when the board answered the request with an injected error status.
+<span class="fc" id="L422">    public record Write(</span>
+            WriteKind kind,
+            @Nullable String cardId,
+            String resourceId,
+            @Nullable String value,
+            @Nullable String previousText,
+            boolean applied) {}
+
+<span class="fc" id="L430">    private record Request(String method, List&lt;String&gt; path, Map&lt;String, String&gt; query) {</span>
+        static Request of(HttpRequest request) {
+<span class="fc" id="L432">            URI uri = request.uri();</span>
+<span class="fc" id="L433">            String rawPath = uri.getRawPath();</span>
+            String apiPath =
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">                    rawPath.startsWith(API_PATH_PREFIX) ? rawPath.substring(API_PATH_PREFIX.length()) : rawPath;</span>
+<span class="fc" id="L436">            List&lt;String&gt; path = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L437" title="All 2 branches covered.">            for (String segment : PATH_SEGMENTS.split(apiPath)) {</span>
+<span class="fc" id="L438">                path.add(decode(segment));</span>
+<span class="fc" id="L439">            }</span>
+<span class="fc" id="L440">            Map&lt;String, String&gt; query = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L441" title="All 2 branches covered.">            if (uri.getRawQuery() != null) {</span>
+<span class="fc bfc" id="L442" title="All 2 branches covered.">                for (String parameter : QUERY_PARAMETERS.split(uri.getRawQuery())) {</span>
+<span class="fc" id="L443">                    int separator = parameter.indexOf('=');</span>
+<span class="fc" id="L444">                    query.put(decode(parameter.substring(0, separator)), decode(parameter.substring(separator + 1)));</span>
+<span class="fc" id="L445">                }</span>
+            }
+<span class="fc" id="L447">            return new Request(request.method(), List.copyOf(path), Map.copyOf(query));</span>
+        }
+
+        boolean isRead() {
+<span class="fc" id="L451">            return method.equals(&quot;GET&quot;);</span>
+        }
+    }
+
+    private static String decode(String value) {
+<span class="fc" id="L456">        return URLDecoder.decode(value, StandardCharsets.UTF_8);</span>
+    }
+
+    private static final class CardState {
+        private final String id;
+        private final String shortLink;
+        private final String title;
+<span class="fc" id="L463">        private final List&lt;CommentState&gt; comments = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L464">        private final List&lt;ChecklistState&gt; checklists = new ArrayList&lt;&gt;();</span>
+        private String listId;
+
+<span class="fc" id="L467">        CardState(String id, String shortLink, String title, String listId) {</span>
+<span class="fc" id="L468">            this.id = id;</span>
+<span class="fc" id="L469">            this.shortLink = shortLink;</span>
+<span class="fc" id="L470">            this.title = title;</span>
+<span class="fc" id="L471">            this.listId = listId;</span>
+<span class="fc" id="L472">        }</span>
+
+        String id() {
+<span class="fc" id="L475">            return id;</span>
+        }
+
+        String shortLink() {
+<span class="fc" id="L479">            return shortLink;</span>
+        }
+
+        String title() {
+<span class="fc" id="L483">            return title;</span>
+        }
+
+        List&lt;CommentState&gt; comments() {
+<span class="fc" id="L487">            return comments;</span>
+        }
+
+        List&lt;ChecklistState&gt; checklists() {
+<span class="fc" id="L491">            return checklists;</span>
+        }
+    }
+
+<span class="fc" id="L495">    private record CommentState(String id, String text) {}</span>
+
+<span class="fc" id="L497">    private record ChecklistState(String id, String name, List&lt;CheckItemState&gt; items) {}</span>
+
+<span class="fc" id="L499">    private record CheckItemState(String id, String name, boolean complete) {}</span>
+
+<span class="fc" id="L501">    private record Response(HttpRequest request, int statusCode, String body) implements HttpResponse&lt;String&gt; {</span>
+        @Override
+        public Optional&lt;HttpResponse&lt;String&gt;&gt; previousResponse() {
+<span class="nc" id="L504">            return Optional.empty();</span>
+        }
+
+        @Override
+        public HttpHeaders headers() {
+<span class="nc" id="L509">            return NO_HEADERS;</span>
+        }
+
+        @Override
+        public Optional&lt;SSLSession&gt; sslSession() {
+<span class="nc" id="L514">            return Optional.empty();</span>
+        }
+
+        @Override
+        public URI uri() {
+<span class="nc" id="L519">            return request.uri();</span>
+        }
+
+        @Override
+        public HttpClient.Version version() {
+<span class="nc" id="L524">            return HttpClient.Version.HTTP_1_1;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

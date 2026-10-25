@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowBodyWriter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">WorkflowBodyWriter.java</span></div><h1>WorkflowBodyWriter.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.workflow.WorkflowException;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Optional;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/// Replaces one workflow file with a migrated body. It keeps a discoverable backup next to the
+/// workflow, writes a same-directory temporary copy that keeps the original file attributes, checks
+/// that copy before an atomic move, checks the result again, and restores the backup when the final
+/// check fails.
+@NullMarked
+final class WorkflowBodyWriter {
+    static final String BACKUP_INFIX = &quot;.backup-&quot;;
+
+<span class="nc" id="L25">    private static final DateTimeFormatter BACKUP_TIMESTAMP =</span>
+<span class="nc" id="L26">            DateTimeFormatter.ofPattern(&quot;yyyyMMdd'T'HHmmss'Z'&quot;).withZone(ZoneOffset.UTC);</span>
+
+    private final Clock clock;
+    private final FileReplacement replacement;
+    private final WorkflowCheck workflowCheck;
+
+    WorkflowBodyWriter(Clock clock) {
+<span class="nc" id="L33">        this(clock, AtomicFiles::replace, WorkflowBodyWriter::loadWithRuntimeLoader);</span>
+<span class="nc" id="L34">    }</span>
+
+<span class="nc" id="L36">    WorkflowBodyWriter(Clock clock, FileReplacement replacement, WorkflowCheck workflowCheck) {</span>
+<span class="nc" id="L37">        this.clock = clock;</span>
+<span class="nc" id="L38">        this.replacement = replacement;</span>
+<span class="nc" id="L39">        this.workflowCheck = workflowCheck;</span>
+<span class="nc" id="L40">    }</span>
+
+    WriteResult write(Path workflowPath, WorkflowBodyReplacement migration) {
+<span class="nc" id="L43">        Path target = workflowPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L44">        String expectedContent = migration.original().content();</span>
+<span class="nc" id="L45">        String newContent = migration.proposedContent();</span>
+        Path backup;
+        try {
+<span class="nc" id="L48">            requireUnchanged(target, expectedContent);</span>
+<span class="nc" id="L49">            backup = createBackup(target);</span>
+<span class="nc" id="L50">        } catch (IOException e) {</span>
+<span class="nc" id="L51">            return WriteResult.failed(</span>
+<span class="nc" id="L52">                    &quot;could not create a backup (&quot; + reason(e) + &quot;)&quot;, Optional.empty(), WriteOutcome.UNCHANGED);</span>
+<span class="nc" id="L53">        }</span>
+<span class="nc" id="L54">        @Nullable Path temporary = null;</span>
+        try {
+<span class="nc" id="L56">            temporary = AtomicFiles.siblingTemporaryFile(target);</span>
+            // Copying first keeps the workflow's permissions and other copyable attributes.
+<span class="nc" id="L58">            Files.copy(target, temporary, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);</span>
+<span class="nc" id="L59">            Files.writeString(temporary, newContent);</span>
+<span class="nc" id="L60">            check(temporary, newContent, migration.original().metadata());</span>
+<span class="nc" id="L61">            requireUnchanged(target, expectedContent);</span>
+<span class="nc" id="L62">            replacement.replace(temporary, target);</span>
+<span class="nc" id="L63">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L64">            AtomicFiles.deleteQuietly(temporary);</span>
+<span class="nc" id="L65">            return WriteResult.failed(</span>
+<span class="nc" id="L66">                    &quot;the workflow was not changed (&quot; + reason(e) + &quot;)&quot;, Optional.of(backup), WriteOutcome.UNCHANGED);</span>
+<span class="nc" id="L67">        }</span>
+        try {
+<span class="nc" id="L69">            check(target, newContent, migration.original().metadata());</span>
+<span class="nc" id="L70">            return WriteResult.written(backup);</span>
+<span class="nc" id="L71">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L72">            boolean restored = restore(backup, target);</span>
+<span class="nc" id="L73">            return WriteResult.failed(</span>
+<span class="nc" id="L74">                    &quot;the migrated workflow did not pass validation (&quot; + reason(e) + &quot;)&quot;,</span>
+<span class="nc" id="L75">                    Optional.of(backup),</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">                    restored ? WriteOutcome.RESTORED : WriteOutcome.RESTORE_FAILED);</span>
+        }
+    }
+
+    private void check(Path workflow, String expectedContent, String expectedMetadata) throws IOException {
+<span class="nc" id="L81">        String written = Files.readString(workflow);</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (!written.equals(expectedContent)) {</span>
+<span class="nc" id="L83">            throw new IOException(&quot;written text differs from the planned text&quot;);</span>
+        }
+<span class="nc" id="L85">        boolean metadataKept = WorkflowFileText.parse(written)</span>
+<span class="nc" id="L86">                .map(text -&gt; text.metadata().equals(expectedMetadata))</span>
+<span class="nc" id="L87">                .orElse(false);</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        if (!metadataKept) {</span>
+<span class="nc" id="L89">            throw new IOException(&quot;workflow metadata changed&quot;);</span>
+        }
+<span class="nc" id="L91">        workflowCheck.check(workflow);</span>
+<span class="nc" id="L92">    }</span>
+
+    private Path createBackup(Path target) throws IOException {
+<span class="nc" id="L95">        String baseName = PathNames.fileName(target) + BACKUP_INFIX + BACKUP_TIMESTAMP.format(clock.instant());</span>
+<span class="nc" id="L96">        Path backup = target.resolveSibling(baseName);</span>
+        // Several migrations in the same second keep every backup with a numeric suffix.
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        for (int attempt = 2; Files.exists(backup, LinkOption.NOFOLLOW_LINKS); attempt++) {</span>
+<span class="nc" id="L99">            backup = target.resolveSibling(baseName + &quot;-&quot; + attempt);</span>
+        }
+<span class="nc" id="L101">        Files.copy(target, backup, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);</span>
+<span class="nc" id="L102">        return backup;</span>
+    }
+
+    private boolean restore(Path backup, Path target) {
+<span class="nc" id="L106">        @Nullable Path temporary = null;</span>
+        try {
+<span class="nc" id="L108">            temporary = AtomicFiles.siblingTemporaryFile(target);</span>
+<span class="nc" id="L109">            Files.copy(backup, temporary, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);</span>
+<span class="nc" id="L110">            AtomicFiles.replace(temporary, target);</span>
+<span class="nc" id="L111">            return Files.readString(target).equals(Files.readString(backup));</span>
+<span class="nc" id="L112">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L113">            AtomicFiles.deleteQuietly(temporary);</span>
+<span class="nc" id="L114">            return false;</span>
+        }
+    }
+
+    private static void requireUnchanged(Path target, String expectedContent) throws IOException {
+<span class="nc bnc" id="L119" title="All 4 branches missed.">        if (Files.isSymbolicLink(target) || !Files.readString(target).equals(expectedContent)) {</span>
+<span class="nc" id="L120">            throw new IOException(&quot;the workflow changed after it was checked&quot;);</span>
+        }
+<span class="nc" id="L122">    }</span>
+
+    private static void loadWithRuntimeLoader(Path workflow) throws IOException {
+        try {
+<span class="nc" id="L126">            new WorkflowLoader().load(workflow);</span>
+<span class="nc" id="L127">        } catch (WorkflowException e) {</span>
+<span class="nc" id="L128">            throw new IOException(&quot;the runtime cannot load it: &quot; + e.getMessage(), e);</span>
+<span class="nc" id="L129">        }</span>
+<span class="nc" id="L130">    }</span>
+
+    private static String reason(Exception e) {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">        return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();</span>
+    }
+
+    @FunctionalInterface
+    interface FileReplacement {
+        void replace(Path source, Path target) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface WorkflowCheck {
+        void check(Path workflow) throws IOException;
+    }
+
+<span class="nc" id="L146">    enum WriteOutcome {</span>
+<span class="nc" id="L147">        WRITTEN,</span>
+<span class="nc" id="L148">        UNCHANGED,</span>
+<span class="nc" id="L149">        RESTORED,</span>
+<span class="nc" id="L150">        RESTORE_FAILED</span>
+    }
+
+<span class="nc" id="L153">    record WriteResult(WriteOutcome outcome, String failure, Optional&lt;Path&gt; backup) {</span>
+        boolean written() {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            return outcome == WriteOutcome.WRITTEN;</span>
+        }
+
+        static WriteResult written(Path backup) {
+<span class="nc" id="L159">            return new WriteResult(WriteOutcome.WRITTEN, &quot;&quot;, Optional.of(backup));</span>
+        }
+
+        static WriteResult failed(String failure, Optional&lt;Path&gt; backup, WriteOutcome outcome) {
+<span class="nc" id="L163">            return new WriteResult(outcome, failure, backup);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

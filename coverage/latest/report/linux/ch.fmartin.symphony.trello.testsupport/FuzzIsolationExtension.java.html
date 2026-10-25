@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FuzzIsolationExtension.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.testsupport</a> &gt; <span class="el_source">FuzzIsolationExtension.java</span></div><h1>FuzzIsolationExtension.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.testsupport;
+
+import static com.google.common.base.Preconditions.checkState;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.code_intelligence.jazzer.junit.FuzzTest;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import jdk.jfr.Event;
+import jdk.jfr.Name;
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordedEvent;
+import jdk.jfr.consumer.RecordedFrame;
+import jdk.jfr.consumer.RecordedStackTrace;
+import jdk.jfr.consumer.RecordingFile;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.extension.AfterAllCallback;
+import org.junit.jupiter.api.extension.BeforeAllCallback;
+import org.junit.jupiter.api.extension.ExtensionContext;
+import org.junit.jupiter.api.extension.InvocationInterceptor;
+import org.junit.jupiter.api.extension.ReflectiveInvocationContext;
+import org.junit.jupiter.api.parallel.Isolated;
+
+/// Fails a test class when one of its `@FuzzTest` executions reads or writes a file or a socket.
+///
+/// Java Flight Recorder records file and socket I/O for the whole JVM, so each `@FuzzTest` execution is
+/// wrapped in a [FuzzerExecution] event and only I/O on the same thread inside that event counts. The
+/// class must be `@Isolated` because other test classes would flood the JVM-wide recording with their own
+/// file events. Flight Recorder has no event for creating, deleting, or moving a file, for a connection
+/// attempt, or for a DNS lookup, so those stay unchecked. ADR 0091 records the trade-offs.
+<span class="nc" id="L40">public final class FuzzIsolationExtension implements BeforeAllCallback, InvocationInterceptor, AfterAllCallback {</span>
+<span class="nc" id="L41">    private static final ExtensionContext.Namespace NAMESPACE =</span>
+<span class="nc" id="L42">            ExtensionContext.Namespace.create(FuzzIsolationExtension.class);</span>
+    private static final String FILE_READ = &quot;jdk.FileRead&quot;;
+    private static final String FILE_WRITE = &quot;jdk.FileWrite&quot;;
+<span class="nc" id="L45">    private static final List&lt;String&gt; IO_EVENTS =</span>
+<span class="nc" id="L46">            List.of(FILE_READ, FILE_WRITE, &quot;jdk.FileForce&quot;, &quot;jdk.SocketRead&quot;, &quot;jdk.SocketWrite&quot;);</span>
+    // Every class loader, and the JVM when it resolves a class, enters loading through this method.
+    private static final String CLASS_LOADING_METHOD = &quot;loadClass&quot;;
+    private static final String ACTIVE_FUZZING_SWITCH = &quot;JAZZER_FUZZ&quot;;
+    // The values Jazzer itself accepts as &quot;on&quot; for JAZZER_FUZZ.
+<span class="nc" id="L51">    private static final Set&lt;String&gt; ACTIVE_FUZZING_VALUES = Set.of(&quot;1&quot;, &quot;true&quot;, &quot;yes&quot;);</span>
+
+    @Override
+    public void beforeAll(ExtensionContext context) {
+<span class="nc" id="L55">        Class&lt;?&gt; testClass = context.getRequiredTestClass();</span>
+<span class="nc" id="L56">        checkState(</span>
+<span class="nc" id="L57">                testClass.isAnnotationPresent(Isolated.class),</span>
+                &quot;%s uses FuzzIsolationExtension and must be @Isolated so other tests' I/O stays out of the recording&quot;,
+<span class="nc" id="L59">                testClass.getName());</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        if (activeFuzzing()) {</span>
+            // A fuzzing run writes its corpus and findings on the fuzzing thread, which is not target I/O.
+<span class="nc" id="L62">            return;</span>
+        }
+<span class="nc" id="L64">        context.getStore(NAMESPACE).put(IoRecording.class, new IoRecording());</span>
+<span class="nc" id="L65">    }</span>
+
+    @Override
+    public void interceptTestTemplateMethod(
+            Invocation&lt;@Nullable Void&gt; invocation,
+            ReflectiveInvocationContext&lt;Method&gt; invocationContext,
+            ExtensionContext extensionContext)
+            throws Throwable {
+<span class="nc" id="L73">        Method method = invocationContext.getExecutable();</span>
+<span class="nc" id="L74">        IoRecording recording = extensionContext.getStore(NAMESPACE).get(IoRecording.class, IoRecording.class);</span>
+<span class="nc bnc" id="L75" title="All 4 branches missed.">        if (recording == null || !method.isAnnotationPresent(FuzzTest.class)) {</span>
+<span class="nc" id="L76">            invocation.proceed();</span>
+<span class="nc" id="L77">            return;</span>
+        }
+<span class="nc" id="L79">        var execution = new FuzzerExecution();</span>
+<span class="nc" id="L80">        execution.target = method.getDeclaringClass().getSimpleName() + &quot;#&quot; + method.getName();</span>
+<span class="nc" id="L81">        recording.executions.incrementAndGet();</span>
+<span class="nc" id="L82">        execution.begin();</span>
+        try {
+<span class="nc" id="L84">            invocation.proceed();</span>
+        } finally {
+<span class="nc" id="L86">            execution.commit();</span>
+        }
+<span class="nc" id="L88">    }</span>
+
+    @Override
+    public void afterAll(ExtensionContext context) throws IOException {
+<span class="nc" id="L92">        IoRecording recording = context.getStore(NAMESPACE).remove(IoRecording.class, IoRecording.class);</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (recording == null) {</span>
+<span class="nc" id="L94">            return;</span>
+        }
+
+<span class="nc" id="L97">        List&lt;RecordedEvent&gt; executions = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L98">        List&lt;RecordedEvent&gt; io = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        for (RecordedEvent event : recording.stopAndRead()) {</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">            (FuzzerExecution.NAME.equals(event.getEventType().getName()) ? executions : io).add(event);</span>
+<span class="nc" id="L101">        }</span>
+<span class="nc" id="L102">        List&lt;String&gt; violations = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        for (RecordedEvent execution : executions) {</span>
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            for (RecordedEvent event : io) {</span>
+<span class="nc bnc" id="L105" title="All 4 branches missed.">                if (insideExecution(event, execution) &amp;&amp; !expectedIo(event)) {</span>
+<span class="nc" id="L106">                    violations.add(execution.getString(&quot;target&quot;) + &quot;: &quot; + describe(event));</span>
+                }
+<span class="nc" id="L108">            }</span>
+<span class="nc" id="L109">        }</span>
+
+<span class="nc" id="L111">        assertThat(executions)</span>
+<span class="nc" id="L112">                .as(&quot;Flight Recorder recorded every @FuzzTest execution&quot;)</span>
+<span class="nc" id="L113">                .hasSize(recording.executions.get());</span>
+<span class="nc" id="L114">        assertThat(violations)</span>
+<span class="nc" id="L115">                .as(&quot;fuzz tests must not touch files or sockets; rerun the named test to reproduce&quot;)</span>
+<span class="nc" id="L116">                .isEmpty();</span>
+<span class="nc" id="L117">    }</span>
+
+    private static boolean activeFuzzing() {
+<span class="nc bnc" id="L120" title="All 4 branches missed.">        return isOn(System.getenv(ACTIVE_FUZZING_SWITCH)) || isOn(System.getProperty(ACTIVE_FUZZING_SWITCH));</span>
+    }
+
+    private static boolean isOn(@Nullable String value) {
+<span class="nc bnc" id="L124" title="All 4 branches missed.">        return value != null &amp;&amp; ACTIVE_FUZZING_VALUES.contains(value.toLowerCase(Locale.ROOT));</span>
+    }
+
+    private static boolean insideExecution(RecordedEvent event, RecordedEvent execution) {
+<span class="nc" id="L128">        Instant start = event.getStartTime();</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        return event.getThread() != null</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                &amp;&amp; execution.getThread() != null</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                &amp;&amp; event.getThread().getJavaThreadId() == execution.getThread().getJavaThreadId()</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                &amp;&amp; !start.isBefore(execution.getStartTime())</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                &amp;&amp; !start.isAfter(execution.getEndTime());</span>
+    }
+
+    private static boolean expectedIo(RecordedEvent event) {
+<span class="nc bnc" id="L137" title="All 2 branches missed.">        if (!event.hasField(&quot;path&quot;)) {</span>
+<span class="nc" id="L138">            return false;</span>
+        }
+<span class="nc" id="L140">        String type = event.getEventType().getName();</span>
+<span class="nc" id="L141">        String path = event.getString(&quot;path&quot;);</span>
+        // A write without a path goes to a standard stream, such as a log line on stderr.
+<span class="nc bnc" id="L143" title="All 2 branches missed.">        if (path == null) {</span>
+<span class="nc" id="L144">            return FILE_WRITE.equals(type);</span>
+        }
+        // The first execution of each target loads its classes, which reads class files and jars.
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        return FILE_READ.equals(type)</span>
+<span class="nc bnc" id="L148" title="All 4 branches missed.">                &amp;&amp; (path.endsWith(&quot;.class&quot;) || path.endsWith(&quot;.jar&quot;))</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">                &amp;&amp; loadsAClass(event.getStackTrace());</span>
+    }
+
+    private static boolean loadsAClass(@Nullable RecordedStackTrace stackTrace) {
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if (stackTrace == null) {</span>
+<span class="nc" id="L154">            return false;</span>
+        }
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        for (RecordedFrame frame : stackTrace.getFrames()) {</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            if (CLASS_LOADING_METHOD.equals(frame.getMethod().getName())) {</span>
+<span class="nc" id="L158">                return true;</span>
+            }
+<span class="nc" id="L160">        }</span>
+<span class="nc" id="L161">        return false;</span>
+    }
+
+    private static String describe(RecordedEvent event) {
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        String target = event.hasField(&quot;path&quot;) ? event.getString(&quot;path&quot;) : event.getString(&quot;host&quot;);</span>
+<span class="nc" id="L166">        return event.getEventType().getName() + &quot; &quot; + target;</span>
+    }
+
+    /// The Flight Recorder recording of one test class and the number of fuzz test executions it wrapped.
+    private static final class IoRecording {
+<span class="nc" id="L171">        private final Recording recording = new Recording();</span>
+<span class="nc" id="L172">        private final AtomicInteger executions = new AtomicInteger();</span>
+
+<span class="nc" id="L174">        IoRecording() {</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">            for (String event : IO_EVENTS) {</span>
+<span class="nc" id="L176">                recording.enable(event).withThreshold(Duration.ZERO).withoutStackTrace();</span>
+<span class="nc" id="L177">            }</span>
+            // The stack tells class loading apart from a target that reads a .class or .jar file itself.
+<span class="nc" id="L179">            recording.enable(FILE_READ).withStackTrace();</span>
+<span class="nc" id="L180">            recording.enable(FuzzerExecution.class);</span>
+<span class="nc" id="L181">            recording.start();</span>
+<span class="nc" id="L182">        }</span>
+
+        List&lt;RecordedEvent&gt; stopAndRead() throws IOException {
+<span class="nc" id="L185">            Path dump = Files.createTempFile(&quot;fuzz-isolation&quot;, &quot;.jfr&quot;);</span>
+<span class="nc" id="L186">            try (recording) {</span>
+<span class="nc" id="L187">                recording.stop();</span>
+<span class="nc" id="L188">                recording.dump(dump);</span>
+<span class="nc" id="L189">                return RecordingFile.readAllEvents(dump);</span>
+            } finally {
+<span class="nc" id="L191">                Files.deleteIfExists(dump);</span>
+            }
+        }
+    }
+
+    @Name(FuzzerExecution.NAME)
+<span class="nc" id="L197">    static final class FuzzerExecution extends Event {</span>
+        static final String NAME = &quot;ch.fmartin.symphony.trello.FuzzerExecution&quot;;
+
+        String target;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,552 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstallerProgressOutputTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">InstallerProgressOutputTest.java</span></div><h1>InstallerProgressOutputTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.setup.InstallerScriptFixture.ProcessResult;
+import ch.fmartin.symphony.trello.setup.InstallerScriptFixture.PseudoTerminalResult;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/// Transcript-order contract for installer progress output: one plan, numbered phases, one result line per milestone,
+/// and a named failed phase. ADR 0122 records the contract; SPEC.md Section 19.4 states it.
+<span class="nc" id="L23">final class InstallerProgressOutputTest {</span>
+    private static final String RELEASE_VERSION = &quot;9.9.9&quot;;
+    private static final String HANDOFF = &quot;You're good to go - your Trello board is now a queue for Codex work.&quot;;
+    private static final String RUN_LINE = &quot;  RUN  &quot;;
+    private static final String ESCAPE = &quot;\u001B&quot;;
+    private static final int SHA3_256_HEX_LENGTH = 64;
+<span class="nc" id="L29">    private static final String[] DRY_RUN_FORBIDDEN_OUTPUT = {</span>
+        RUN_LINE,
+        ESCAPE,
+        &quot;OK  Command installed&quot;,
+        &quot;OK  Setup complete&quot;,
+        &quot;Symphony for Trello installed.&quot;,
+        &quot;Installer stopped during&quot;,
+        HANDOFF
+    };
+
+    @TempDir
+    Path temporaryDirectory;
+
+    @Test
+    void posixGuidedSourceInstallAndUpdateFollowThePlanAndPhaseOrder() throws Exception {
+        // given
+<span class="nc" id="L45">        assumeFalse(isWindows());</span>
+<span class="nc" id="L46">        assumeTrue(commandExists(&quot;bash&quot;));</span>
+<span class="nc" id="L47">        assumeTrue(commandExists(&quot;git&quot;));</span>
+<span class="nc" id="L48">        assumeTrue(commandExists(&quot;script&quot;));</span>
+<span class="nc" id="L49">        Path installScript = Path.of(&quot;install.sh&quot;).toAbsolutePath();</span>
+<span class="nc" id="L50">        Path sourceRepository = createSourceRepository(temporaryDirectory);</span>
+<span class="nc" id="L51">        Path fakeBin = createFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L52">        Path home = temporaryDirectory.resolve(&quot;guided-home&quot;);</span>
+<span class="nc" id="L53">        Path symphonyHome = temporaryDirectory.resolve(&quot;guided-symphony-home&quot;);</span>
+<span class="nc" id="L54">        Path binDirectory = temporaryDirectory.resolve(&quot;guided-bin&quot;);</span>
+<span class="nc" id="L55">        Path installedCommand = binDirectory.resolve(&quot;symphony-trello&quot;);</span>
+<span class="nc" id="L56">        Path workflow = symphonyHome.resolve(&quot;config/WORKFLOW.transcript-board.md&quot;);</span>
+<span class="nc" id="L57">        Files.createDirectories(home);</span>
+<span class="nc" id="L58">        Files.createFile(temporaryDirectory.resolve(&quot;codex-authenticated&quot;));</span>
+<span class="nc" id="L59">        Map&lt;String, String&gt; environment = Map.of(</span>
+<span class="nc" id="L60">                &quot;PATH&quot;, binDirectory + File.pathSeparator + fakeBin + File.pathSeparator + System.getenv(&quot;PATH&quot;),</span>
+<span class="nc" id="L61">                &quot;HOME&quot;, home.toString(),</span>
+                &quot;USER&quot;, &quot;symphony-test&quot;,
+<span class="nc" id="L63">                &quot;SYMPHONY_TRELLO_REPO_URL&quot;, sourceRepository.toUri().toString(),</span>
+                &quot;SYMPHONY_TRELLO_REF&quot;, &quot;main&quot;,
+<span class="nc" id="L65">                &quot;SYMPHONY_HOME&quot;, symphonyHome.toString(),</span>
+<span class="nc" id="L66">                &quot;SYMPHONY_FAKE_LOG&quot;, temporaryDirectory.resolve(&quot;guided.log&quot;).toString());</span>
+<span class="nc" id="L67">        String installerCommand =</span>
+<span class="nc" id="L68">                &quot;bash &quot; + shellQuote(installScript.toString()) + &quot; --bin-dir &quot; + shellQuote(binDirectory.toString());</span>
+<span class="nc" id="L69">        String setupAnswers = &quot;api-key\napi-token\nTranscript Board\n&quot;;</span>
+
+        try {
+
+            // when
+<span class="nc" id="L74">            PseudoTerminalResult install = runWithPseudoTerminal(environment, setupAnswers, installerCommand);</span>
+<span class="nc" id="L75">            addSourceRepositoryCommit(sourceRepository, &quot;UPDATED&quot;, &quot;updated\n&quot;);</span>
+<span class="nc" id="L76">            PseudoTerminalResult update = runWithPseudoTerminal(environment, setupAnswers, installerCommand);</span>
+
+            // then
+<span class="nc" id="L79">            install.assertSuccess();</span>
+<span class="nc" id="L80">            update.assertSuccess();</span>
+<span class="nc" id="L81">            assertThat(install.transcript())</span>
+<span class="nc" id="L82">                    .containsSubsequence(</span>
+                            &quot;Symphony for Trello installer&quot;,
+                            &quot;Detected &quot;,
+                            &quot;Install plan&quot;,
+                            &quot;Source: Git checkout&quot;,
+                            &quot;Ref: main&quot;,
+<span class="nc" id="L88">                            &quot;Install: &quot; + symphonyHome.resolve(&quot;app&quot;),</span>
+                            &quot;Command: &quot; + installedCommand,
+                            &quot;[1/4] Checking prerequisites&quot;,
+                            &quot;OK  Git&quot;,
+                            &quot;OK  Java 25+ JDK&quot;,
+                            &quot;OK  Codex CLI&quot;,
+                            &quot;[2/4] Installing Symphony&quot;,
+                            &quot;OK  Source checked out&quot;,
+                            &quot;OK  App built with Maven wrapper&quot;,
+                            &quot;OK  Command installed&quot;,
+                            &quot;[3/4] Running setup&quot;,
+                            RUN_LINE + installedCommand + &quot; setup-local&quot;,
+                            &quot;OK  Setup complete&quot;,
+                            &quot;[4/4] Starting managed workers&quot;,
+                            &quot;OK  User systemd service enabled: symphony-trello.service&quot;,
+                            HANDOFF)
+<span class="nc" id="L104">                    .containsOnlyOnce(&quot;Detected &quot;)</span>
+<span class="nc" id="L105">                    .containsOnlyOnce(&quot;Install plan&quot;)</span>
+<span class="nc" id="L106">                    .containsOnlyOnce(symphonyHome.resolve(&quot;app&quot;).toString())</span>
+<span class="nc" id="L107">                    .containsOnlyOnce(&quot;Command: &quot;)</span>
+<span class="nc" id="L108">                    .containsOnlyOnce(RUN_LINE)</span>
+<span class="nc" id="L109">                    .containsOnlyOnce(HANDOFF)</span>
+<span class="nc" id="L110">                    .doesNotContain(&quot;Update plan&quot;, &quot;Installer stopped during&quot;);</span>
+<span class="nc" id="L111">            assertThat(update.transcript())</span>
+<span class="nc" id="L112">                    .containsSubsequence(</span>
+                            &quot;Update plan&quot;,
+                            &quot;[1/4] Checking prerequisites&quot;,
+                            &quot;[2/4] Updating Symphony&quot;,
+                            &quot;Stopped WORKFLOW.transcript-board.md&quot;,
+                            &quot;OK  Managed workers stopped for the update&quot;,
+                            &quot;OK  Command installed&quot;,
+                            &quot;[3/4] Running setup&quot;,
+                            &quot;OK  Setup complete&quot;,
+                            &quot;[4/4] Restarting managed workers&quot;,
+                            HANDOFF)
+<span class="nc" id="L123">                    .containsOnlyOnce(&quot;Update plan&quot;)</span>
+<span class="nc" id="L124">                    .containsOnlyOnce(RUN_LINE)</span>
+<span class="nc" id="L125">                    .containsOnlyOnce(HANDOFF)</span>
+<span class="nc" id="L126">                    .doesNotContain(&quot;Install plan&quot;);</span>
+<span class="nc" id="L127">            assertThat(update.transcript().stripTrailing())</span>
+<span class="nc" id="L128">                    .endsWith(&quot;symphony-trello logs --workflow '&quot; + workflow + &quot;'&quot;);</span>
+        } finally {
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (Files.isExecutable(installedCommand)) {</span>
+<span class="nc" id="L131">                run(environment, installedCommand.toString(), &quot;stop&quot;).assertSuccess();</span>
+            }
+        }
+<span class="nc" id="L134">    }</span>
+
+    @Test
+    void posixReleaseInstallAndUpdateWithoutOnboardingEndWithOneResultAndNextStep() throws Exception {
+        // given
+<span class="nc" id="L139">        assumeFalse(isWindows());</span>
+<span class="nc" id="L140">        assumeTrue(commandExists(&quot;bash&quot;));</span>
+<span class="nc" id="L141">        assumeTrue(commandExists(&quot;tar&quot;));</span>
+<span class="nc bnc" id="L142" title="All 4 branches missed.">        assumeTrue(commandExists(&quot;curl&quot;) || commandExists(&quot;wget&quot;));</span>
+<span class="nc" id="L143">        Path releaseAssets = createReleaseAssets(true);</span>
+<span class="nc" id="L144">        Map&lt;String, String&gt; environment = releaseEnvironment(releaseAssets);</span>
+<span class="nc" id="L145">        Path symphonyHome = Path.of(environment.get(&quot;SYMPHONY_HOME&quot;));</span>
+<span class="nc" id="L146">        Path binDirectory = temporaryDirectory.resolve(&quot;release-bin&quot;);</span>
+
+        // when
+<span class="nc" id="L149">        ProcessResult install = runReleaseInstaller(environment, binDirectory);</span>
+<span class="nc" id="L150">        Files.writeString(</span>
+<span class="nc" id="L151">                symphonyHome.resolve(&quot;config&quot;).resolve(ConnectedBoardManifest.FILE_NAME), &quot;{\&quot;boards\&quot;:[]}\n&quot;);</span>
+<span class="nc" id="L152">        ProcessResult update = runReleaseInstaller(environment, binDirectory);</span>
+
+        // then
+<span class="nc" id="L155">        install.assertSuccess();</span>
+<span class="nc" id="L156">        update.assertSuccess();</span>
+<span class="nc" id="L157">        assertThat(install.output())</span>
+<span class="nc" id="L158">                .containsSubsequence(</span>
+                        &quot;Install plan&quot;,
+                        &quot;Source: release archive&quot;,
+                        &quot;Version: &quot; + RELEASE_VERSION,
+<span class="nc" id="L162">                        &quot;Release assets: &quot; + releaseAssets.toUri(),</span>
+                        &quot;[1/2] Checking prerequisites&quot;,
+                        &quot;OK  Java 25+ JDK&quot;,
+                        &quot;[2/2] Installing Symphony&quot;,
+                        &quot;OK  Release verified and unpacked&quot;,
+                        &quot;OK  Command installed&quot;,
+                        &quot;Symphony for Trello installed.&quot;,
+                        &quot;Next step: connect a Trello board with: &quot;,
+                        &quot;symphony-trello' setup-local&quot;)
+<span class="nc" id="L171">                .containsOnlyOnce(symphonyHome.resolve(&quot;app&quot;).toString())</span>
+<span class="nc" id="L172">                .containsOnlyOnce(RELEASE_VERSION)</span>
+<span class="nc" id="L173">                .doesNotContain(RUN_LINE, ESCAPE, &quot;\r&quot;, &quot;[3/&quot;, &quot;Running setup&quot;, &quot;start --all&quot;, HANDOFF);</span>
+<span class="nc" id="L174">        assertThat(update.output())</span>
+<span class="nc" id="L175">                .containsSubsequence(</span>
+                        &quot;Update plan&quot;,
+                        &quot;[1/2] Checking prerequisites&quot;,
+                        &quot;[2/2] Updating Symphony&quot;,
+                        &quot;OK  Release verified and unpacked&quot;,
+                        &quot;Symphony for Trello updated.&quot;,
+                        &quot;Next step: start the connected boards with: &quot;,
+                        &quot;symphony-trello' start --all&quot;)
+<span class="nc" id="L183">                .doesNotContain(RUN_LINE, ESCAPE, &quot;\r&quot;, &quot;Symphony for Trello installed.&quot;, &quot;setup-local&quot;);</span>
+<span class="nc" id="L184">        assertThat(symphonyHome.resolve(&quot;app/target/quarkus-app/quarkus-run.jar&quot;))</span>
+<span class="nc" id="L185">                .isRegularFile();</span>
+<span class="nc" id="L186">    }</span>
+
+    @Test
+    void posixGuidedDryRunNamesEveryPhaseWithoutClaimingSuccess() throws Exception {
+        // given
+<span class="nc" id="L191">        assumeFalse(isWindows());</span>
+<span class="nc" id="L192">        assumeTrue(commandExists(&quot;bash&quot;));</span>
+<span class="nc" id="L193">        Path binDirectory = temporaryDirectory.resolve(&quot;guided-dry-run-bin&quot;);</span>
+<span class="nc" id="L194">        Map&lt;String, String&gt; environment = dryRunEnvironment();</span>
+
+        // when
+<span class="nc" id="L197">        ProcessResult result =</span>
+<span class="nc" id="L198">                run(environment, &quot;bash&quot;, &quot;install.sh&quot;, &quot;--dry-run&quot;, &quot;--bin-dir&quot;, binDirectory.toString());</span>
+
+        // then
+<span class="nc" id="L201">        result.assertSuccess();</span>
+<span class="nc" id="L202">        assertThat(result.output())</span>
+<span class="nc" id="L203">                .containsSubsequence(</span>
+                        &quot;Install plan&quot;,
+                        &quot;Dry run: no files changed.&quot;,
+                        &quot;[1/4] Checking prerequisites&quot;,
+                        &quot;[2/4] Installing Symphony&quot;,
+                        &quot;WOULD download release archive:&quot;,
+                        &quot;WOULD verify SHA3-256 checksum from:&quot;,
+                        &quot;WOULD unpack release archive into:&quot;,
+                        &quot;WOULD install command:&quot;,
+                        &quot;WOULD add &quot; + binDirectory + &quot; to PATH in&quot;,
+                        &quot;[3/4] Running setup&quot;,
+<span class="nc" id="L214">                        &quot;WOULD run guided setup: &quot; + binDirectory.resolve(&quot;symphony-trello&quot;) + &quot; setup-local&quot;,</span>
+                        &quot;[4/4] Starting managed workers&quot;,
+                        &quot;WOULD skip autostart and start managed workers with: &quot;,
+                        &quot;start --all&quot;)
+<span class="nc" id="L218">                .containsOnlyOnce(&quot;Dry run: no files changed.&quot;)</span>
+<span class="nc" id="L219">                .doesNotContain(DRY_RUN_FORBIDDEN_OUTPUT);</span>
+<span class="nc" id="L220">        assertThat(Path.of(environment.get(&quot;SYMPHONY_HOME&quot;))).doesNotExist();</span>
+<span class="nc" id="L221">        assertThat(binDirectory).doesNotExist();</span>
+<span class="nc" id="L222">    }</span>
+
+    @Test
+    void posixNoOnboardDryRunStopsAfterTheInstallPhaseWithoutClaimingSuccess() throws Exception {
+        // given
+<span class="nc" id="L227">        assumeFalse(isWindows());</span>
+<span class="nc" id="L228">        assumeTrue(commandExists(&quot;bash&quot;));</span>
+<span class="nc" id="L229">        Path binDirectory = temporaryDirectory.resolve(&quot;no-onboard-dry-run-bin&quot;);</span>
+<span class="nc" id="L230">        Map&lt;String, String&gt; environment = dryRunEnvironment();</span>
+
+        // when
+<span class="nc" id="L233">        ProcessResult result = run(</span>
+<span class="nc" id="L234">                environment, &quot;bash&quot;, &quot;install.sh&quot;, &quot;--dry-run&quot;, &quot;--no-onboard&quot;, &quot;--bin-dir&quot;, binDirectory.toString());</span>
+
+        // then
+<span class="nc" id="L237">        result.assertSuccess();</span>
+<span class="nc" id="L238">        assertThat(result.output())</span>
+<span class="nc" id="L239">                .containsSubsequence(</span>
+                        &quot;Install plan&quot;,
+                        &quot;Dry run: no files changed.&quot;,
+                        &quot;[1/2] Checking prerequisites&quot;,
+                        &quot;[2/2] Installing Symphony&quot;,
+                        &quot;WOULD download release archive:&quot;,
+                        &quot;WOULD install command:&quot;,
+                        &quot;WOULD add &quot; + binDirectory + &quot; to PATH in&quot;)
+<span class="nc" id="L247">                .containsOnlyOnce(&quot;Dry run: no files changed.&quot;)</span>
+<span class="nc" id="L248">                .doesNotContain(DRY_RUN_FORBIDDEN_OUTPUT)</span>
+<span class="nc" id="L249">                .doesNotContain(&quot;[3/&quot;, &quot;Running setup&quot;, &quot;managed workers&quot;);</span>
+<span class="nc" id="L250">        assertThat(Path.of(environment.get(&quot;SYMPHONY_HOME&quot;))).doesNotExist();</span>
+<span class="nc" id="L251">        assertThat(binDirectory).doesNotExist();</span>
+<span class="nc" id="L252">    }</span>
+
+    @Test
+    void posixFailedPhaseIsNamedWithARecoveryStepAndNoCompletionResult() throws Exception {
+        // given
+<span class="nc" id="L257">        assumeFalse(isWindows());</span>
+<span class="nc" id="L258">        assumeTrue(commandExists(&quot;bash&quot;));</span>
+<span class="nc" id="L259">        assumeTrue(commandExists(&quot;tar&quot;));</span>
+<span class="nc bnc" id="L260" title="All 4 branches missed.">        assumeTrue(commandExists(&quot;curl&quot;) || commandExists(&quot;wget&quot;));</span>
+<span class="nc" id="L261">        Path releaseAssets = createReleaseAssets(false);</span>
+<span class="nc" id="L262">        Map&lt;String, String&gt; environment = releaseEnvironment(releaseAssets);</span>
+
+        // when
+<span class="nc" id="L265">        ProcessResult result = runReleaseInstaller(environment, temporaryDirectory.resolve(&quot;failed-bin&quot;));</span>
+
+        // then
+<span class="nc" id="L268">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
+<span class="nc" id="L269">        assertThat(result.output())</span>
+<span class="nc" id="L270">                .containsSubsequence(</span>
+                        &quot;[2/2] Installing Symphony&quot;,
+                        &quot;Release archive checksum verification failed for symphony-trello-&quot; + RELEASE_VERSION
+                                + &quot;.tar.gz.&quot;,
+                        &quot;Installer stopped during [2/2] Installing Symphony.&quot;,
+                        &quot;Fix the problem above, then rerun the installer.&quot;)
+<span class="nc" id="L276">                .containsOnlyOnce(&quot;Installer stopped during&quot;)</span>
+<span class="nc" id="L277">                .doesNotContain(&quot;verified and unpacked&quot;, &quot;OK  Command installed&quot;, &quot;Symphony for Trello installed.&quot;);</span>
+<span class="nc" id="L278">    }</span>
+
+    @Test
+    void powershellDryRunNamesTheSamePhasesAsPosixWhenAvailable() throws Exception {
+        // given
+<span class="nc" id="L283">        List&lt;String&gt; pwsh = powershellCommand();</span>
+<span class="nc" id="L284">        assumeFalse(pwsh.isEmpty());</span>
+
+        // when
+<span class="nc" id="L287">        ProcessResult guided = run(</span>
+<span class="nc" id="L288">                nonWindowsPowerShellEnvironment(),</span>
+<span class="nc" id="L289">                command(pwsh, &quot;-NoProfile&quot;, &quot;-File&quot;, &quot;./install.ps1&quot;, &quot;--dry-run&quot;)</span>
+<span class="nc" id="L290">                        .toArray(String[]::new));</span>
+<span class="nc" id="L291">        ProcessResult noOnboard = run(</span>
+<span class="nc" id="L292">                nonWindowsPowerShellEnvironment(),</span>
+<span class="nc" id="L293">                command(pwsh, &quot;-NoProfile&quot;, &quot;-File&quot;, &quot;./install.ps1&quot;, &quot;--dry-run&quot;, &quot;--no-onboard&quot;)</span>
+<span class="nc" id="L294">                        .toArray(String[]::new));</span>
+
+        // then
+<span class="nc" id="L297">        guided.assertSuccess();</span>
+<span class="nc" id="L298">        noOnboard.assertSuccess();</span>
+<span class="nc" id="L299">        assertThat(guided.output())</span>
+<span class="nc" id="L300">                .containsSubsequence(</span>
+                        &quot;Symphony for Trello installer&quot;,
+                        &quot;Detected &quot;,
+                        &quot;Install plan&quot;,
+                        &quot;Source: release archive&quot;,
+                        &quot;Command: &quot;,
+                        &quot;Dry run: no files changed.&quot;,
+                        &quot;[1/4] Checking prerequisites&quot;,
+                        &quot;[2/4] Installing Symphony&quot;,
+                        &quot;WOULD download release archive:&quot;,
+                        &quot;WOULD install command:&quot;,
+                        &quot;[3/4] Running setup&quot;,
+                        &quot;WOULD run guided setup:&quot;,
+                        &quot;[4/4] Starting managed workers&quot;,
+                        &quot;WOULD create Windows Scheduled Task:&quot;)
+<span class="nc" id="L315">                .containsOnlyOnce(&quot;Install plan&quot;)</span>
+<span class="nc" id="L316">                .doesNotContain(RUN_LINE, ESCAPE, &quot;Installer stopped during&quot;, HANDOFF);</span>
+<span class="nc" id="L317">        assertThat(noOnboard.output())</span>
+<span class="nc" id="L318">                .containsSubsequence(&quot;[1/2] Checking prerequisites&quot;, &quot;[2/2] Installing Symphony&quot;)</span>
+<span class="nc" id="L319">                .doesNotContain(RUN_LINE, &quot;[3/&quot;, &quot;Running setup&quot;, &quot;managed workers&quot;, &quot;Symphony for Trello installed.&quot;);</span>
+<span class="nc" id="L320">    }</span>
+
+    @Test
+    void powershellSourceInstallAndUpdateWithoutOnboardingEndWithOneResultWhenAvailable() throws Exception {
+        // given
+<span class="nc" id="L325">        List&lt;String&gt; pwsh = powershellCommand();</span>
+<span class="nc" id="L326">        assumeFalse(pwsh.isEmpty());</span>
+<span class="nc" id="L327">        assumeTrue(commandExists(&quot;git&quot;));</span>
+<span class="nc" id="L328">        Path sourceRepository = createPowerShellSourceRepository(temporaryDirectory);</span>
+<span class="nc" id="L329">        Path fakeBin = createPowerShellFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L330">        Path symphonyHome = temporaryDirectory.resolve(&quot;ps-source-home&quot;);</span>
+<span class="nc" id="L331">        Path binDirectory = temporaryDirectory.resolve(&quot;ps-source-bin&quot;);</span>
+<span class="nc" id="L332">        Map&lt;String, String&gt; environment = new LinkedHashMap&lt;&gt;(nonWindowsPowerShellEnvironment());</span>
+<span class="nc" id="L333">        environment.put(&quot;PATH&quot;, fakeBin + File.pathSeparator + System.getenv(&quot;PATH&quot;));</span>
+<span class="nc" id="L334">        environment.put(&quot;SYMPHONY_HOME&quot;, symphonyHome.toString());</span>
+<span class="nc" id="L335">        environment.put(&quot;SYMPHONY_FAKE_JAVA&quot;, fakeBin.resolve(&quot;fake-java.ps1&quot;).toString());</span>
+<span class="nc" id="L336">        environment.put(</span>
+<span class="nc" id="L337">                &quot;SYMPHONY_FAKE_LOG&quot;, temporaryDirectory.resolve(&quot;ps-source.log&quot;).toString());</span>
+<span class="nc" id="L338">        String[] installerCommand = command(</span>
+                        pwsh,
+                        &quot;-NoProfile&quot;,
+                        &quot;-File&quot;,
+                        &quot;./install.ps1&quot;,
+                        &quot;--no-onboard&quot;,
+                        &quot;--from-source&quot;,
+                        &quot;--repo&quot;,
+<span class="nc" id="L346">                        sourceRepository.toUri().toString(),</span>
+                        &quot;--ref&quot;,
+                        &quot;main&quot;,
+                        &quot;--bin-dir&quot;,
+<span class="nc" id="L350">                        binDirectory.toString())</span>
+<span class="nc" id="L351">                .toArray(String[]::new);</span>
+
+        // when
+<span class="nc" id="L354">        ProcessResult install = run(environment, installerCommand);</span>
+<span class="nc" id="L355">        Files.writeString(</span>
+<span class="nc" id="L356">                symphonyHome.resolve(&quot;config&quot;).resolve(ConnectedBoardManifest.FILE_NAME), &quot;{\&quot;boards\&quot;:[]}\n&quot;);</span>
+<span class="nc" id="L357">        ProcessResult update = run(environment, installerCommand);</span>
+
+        // then
+<span class="nc" id="L360">        install.assertSuccess();</span>
+<span class="nc" id="L361">        update.assertSuccess();</span>
+<span class="nc" id="L362">        assertThat(install.output())</span>
+<span class="nc" id="L363">                .containsSubsequence(</span>
+                        &quot;Install plan&quot;,
+                        &quot;Source: Git checkout&quot;,
+                        &quot;Ref: main&quot;,
+                        &quot;[1/2] Checking prerequisites&quot;,
+                        &quot;OK  Git&quot;,
+                        &quot;OK  Java 25+ JDK&quot;,
+                        &quot;[2/2] Installing Symphony&quot;,
+                        &quot;OK  Source checked out&quot;,
+                        &quot;OK  App built with Maven wrapper&quot;,
+                        &quot;OK  Command installed&quot;,
+                        &quot;Symphony for Trello installed.&quot;,
+                        &quot;Next step: connect a Trello board with: &quot;,
+                        &quot;setup-local&quot;)
+<span class="nc" id="L377">                .containsOnlyOnce(&quot;Install plan&quot;)</span>
+<span class="nc" id="L378">                .doesNotContain(RUN_LINE, ESCAPE, &quot;[3/&quot;, &quot;Running setup&quot;, HANDOFF);</span>
+<span class="nc" id="L379">        assertThat(update.output())</span>
+<span class="nc" id="L380">                .containsSubsequence(</span>
+                        &quot;Update plan&quot;,
+                        &quot;[2/2] Updating Symphony&quot;,
+                        &quot;OK  Source checked out&quot;,
+                        &quot;Symphony for Trello updated.&quot;,
+                        &quot;Next step: start the connected boards with: &quot;,
+                        &quot;start --all&quot;)
+<span class="nc" id="L387">                .doesNotContain(RUN_LINE, &quot;Symphony for Trello installed.&quot;, &quot;setup-local&quot;);</span>
+<span class="nc" id="L388">    }</span>
+
+    @Test
+    void powershellDownloadExceptionNamesTheFailedStepAndKeepsItsDiagnosticWhenAvailable() throws Exception {
+        // given
+<span class="nc" id="L393">        List&lt;String&gt; pwsh = powershellCommand();</span>
+<span class="nc" id="L394">        assumeFalse(pwsh.isEmpty());</span>
+<span class="nc" id="L395">        Path fakeBin = createPowerShellFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L396">        Map&lt;String, String&gt; environment = new LinkedHashMap&lt;&gt;(nonWindowsPowerShellEnvironment());</span>
+<span class="nc" id="L397">        environment.put(&quot;PATH&quot;, fakeBin + File.pathSeparator + System.getenv(&quot;PATH&quot;));</span>
+<span class="nc" id="L398">        environment.put(</span>
+<span class="nc" id="L399">                &quot;SYMPHONY_HOME&quot;, temporaryDirectory.resolve(&quot;ps-download-home&quot;).toString());</span>
+<span class="nc" id="L400">        environment.put(&quot;SYMPHONY_FAKE_JAVA&quot;, fakeBin.resolve(&quot;fake-java.ps1&quot;).toString());</span>
+<span class="nc" id="L401">        environment.put(</span>
+                &quot;SYMPHONY_FAKE_LOG&quot;,
+<span class="nc" id="L403">                temporaryDirectory.resolve(&quot;ps-download.log&quot;).toString());</span>
+<span class="nc" id="L404">        environment.put(&quot;SYMPHONY_TRELLO_RELEASE_BASE_URL&quot;, &quot;https://example.com/releases&quot;);</span>
+<span class="nc" id="L405">        environment.put(&quot;SYMPHONY_TRELLO_INSTALL_SOURCE&quot;, &quot;release-archive&quot;);</span>
+<span class="nc" id="L406">        Path driver = temporaryDirectory.resolve(&quot;failed-download.ps1&quot;);</span>
+<span class="nc" id="L407">        Files.writeString(</span>
+                driver,
+                &quot;&quot;&quot;
+                param([string]$Installer, [string]$BinDirectory)
+                function Invoke-WebRequest {
+                  param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
+                  throw &quot;Synthetic download failure.&quot;
+                }
+                &amp; $Installer -NoOnboard -Version 9.9.9 -BinDir $BinDirectory
+                exit $LASTEXITCODE
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L420">        ProcessResult result = run(</span>
+                environment,
+<span class="nc" id="L422">                command(</span>
+                                pwsh,
+                                &quot;-NoProfile&quot;,
+                                &quot;-File&quot;,
+<span class="nc" id="L426">                                driver.toString(),</span>
+<span class="nc" id="L427">                                Path.of(&quot;install.ps1&quot;).toAbsolutePath().toString(),</span>
+<span class="nc" id="L428">                                temporaryDirectory.resolve(&quot;ps-download-bin&quot;).toString())</span>
+<span class="nc" id="L429">                        .toArray(String[]::new));</span>
+
+        // then
+<span class="nc" id="L432">        assertThat(result.exitCode()).as(result.output()).isOne();</span>
+<span class="nc" id="L433">        assertThat(result.output())</span>
+<span class="nc" id="L434">                .contains(</span>
+                        &quot;Command failed: download https://example.com/releases/&quot;,
+                        &quot;Synthetic download failure.&quot;,
+                        &quot;Installer stopped during [2/2] Installing Symphony.&quot;)
+<span class="nc" id="L438">                .doesNotContain(&quot;Symphony for Trello installed.&quot;);</span>
+<span class="nc" id="L439">    }</span>
+
+    @Test
+    void powershellFailedPhaseIsNamedWithARecoveryStepWhenAvailable() throws Exception {
+        // given
+<span class="nc" id="L444">        List&lt;String&gt; pwsh = powershellCommand();</span>
+<span class="nc" id="L445">        assumeFalse(pwsh.isEmpty());</span>
+<span class="nc" id="L446">        Map&lt;String, String&gt; environment = new LinkedHashMap&lt;&gt;(nonWindowsPowerShellEnvironment());</span>
+<span class="nc" id="L447">        environment.put(&quot;PATH&quot;, String.join(File.pathSeparator, &quot;/usr/bin&quot;, &quot;/bin&quot;));</span>
+
+        // when
+<span class="nc" id="L450">        ProcessResult result = run(</span>
+                environment,
+<span class="nc" id="L452">                command(pwsh, &quot;-NoProfile&quot;, &quot;-File&quot;, &quot;./install.ps1&quot;, &quot;--no-onboard&quot;)</span>
+<span class="nc" id="L453">                        .toArray(String[]::new));</span>
+
+        // then
+<span class="nc" id="L456">        assertThat(result.exitCode()).as(result.output()).isOne();</span>
+<span class="nc" id="L457">        assertThat(result.output())</span>
+<span class="nc" id="L458">                .containsSubsequence(</span>
+                        &quot;[1/2] Checking prerequisites&quot;,
+                        &quot;NEEDED  Java 25+ JDK&quot;,
+                        &quot;Java 25+ JDK is required.&quot;,
+                        &quot;Installer stopped during [1/2] Checking prerequisites.&quot;,
+                        &quot;Follow the prerequisite steps above, then rerun the installer.&quot;)
+<span class="nc" id="L464">                .containsOnlyOnce(&quot;Installer stopped during&quot;)</span>
+<span class="nc" id="L465">                .doesNotContain(&quot;[2/2]&quot;, &quot;Symphony for Trello installed.&quot;);</span>
+<span class="nc" id="L466">    }</span>
+
+    private Path createReleaseAssets(boolean validChecksum) throws Exception {
+<span class="nc bnc" id="L469" title="All 2 branches missed.">        Path assets = temporaryDirectory.resolve(validChecksum ? &quot;release-assets&quot; : &quot;release-assets-bad-checksum&quot;);</span>
+<span class="nc" id="L470">        String rootName = &quot;symphony-trello-&quot; + RELEASE_VERSION;</span>
+<span class="nc" id="L471">        Path quarkusApp = assets.resolve(&quot;staging&quot;).resolve(rootName).resolve(&quot;target/quarkus-app&quot;);</span>
+<span class="nc" id="L472">        Files.createDirectories(quarkusApp);</span>
+<span class="nc" id="L473">        Files.writeString(quarkusApp.resolve(&quot;quarkus-run.jar&quot;), &quot;fake release jar\n&quot;);</span>
+<span class="nc" id="L474">        Path archive = assets.resolve(rootName + &quot;.tar.gz&quot;);</span>
+<span class="nc" id="L475">        run(</span>
+<span class="nc" id="L476">                        Map.of(),</span>
+                        &quot;tar&quot;,
+                        &quot;-czf&quot;,
+<span class="nc" id="L479">                        archive.toString(),</span>
+                        &quot;-C&quot;,
+<span class="nc" id="L481">                        assets.resolve(&quot;staging&quot;).toString(),</span>
+                        rootName)
+<span class="nc" id="L483">                .assertSuccess();</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">        String checksum = validChecksum</span>
+<span class="nc" id="L485">                ? HexFormat.of().formatHex(MessageDigest.getInstance(&quot;SHA3-256&quot;).digest(Files.readAllBytes(archive)))</span>
+<span class="nc" id="L486">                : &quot;0&quot;.repeat(SHA3_256_HEX_LENGTH);</span>
+<span class="nc" id="L487">        Files.writeString(assets.resolve(&quot;checksums.txt&quot;), checksum + &quot;  &quot; + archive.getFileName() + &quot;\n&quot;);</span>
+<span class="nc" id="L488">        return assets;</span>
+    }
+
+    private Map&lt;String, String&gt; dryRunEnvironment() throws Exception {
+<span class="nc" id="L492">        Path fakeBin = createFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L493">        return Map.of(</span>
+                &quot;PATH&quot;,
+<span class="nc" id="L495">                fakeBin + File.pathSeparator + System.getenv(&quot;PATH&quot;),</span>
+                &quot;SYMPHONY_HOME&quot;,
+<span class="nc" id="L497">                temporaryDirectory.resolve(&quot;dry-run-home&quot;).toString(),</span>
+                &quot;SYMPHONY_FAKE_SYSTEMD_UNAVAILABLE&quot;,
+                &quot;1&quot;,
+                &quot;SYMPHONY_FAKE_LOG&quot;,
+<span class="nc" id="L501">                temporaryDirectory.resolve(&quot;dry-run.log&quot;).toString());</span>
+    }
+
+    private Map&lt;String, String&gt; releaseEnvironment(Path releaseAssets) throws Exception {
+<span class="nc" id="L505">        Path fakeBin = createFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L506">        Path checksumBin = temporaryDirectory.resolve(&quot;checksum-java-bin&quot;);</span>
+<span class="nc" id="L507">        Files.createDirectories(checksumBin);</span>
+        // The shared fake java only records calls; the installer's SHA3 helper needs a real source launch.
+<span class="nc" id="L509">        writeExecutable(</span>
+<span class="nc" id="L510">                checksumBin.resolve(&quot;java&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                if [[ &quot;${1:-}&quot; == *.java ]]; then
+                  exec %s &quot;$@&quot;
+                fi
+                exec %s &quot;$@&quot;
+                &quot;&quot;&quot;
+<span class="nc" id="L518">                        .formatted(</span>
+<span class="nc" id="L519">                                shellQuote(Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, &quot;java&quot;)</span>
+<span class="nc" id="L520">                                        .toString()),</span>
+<span class="nc" id="L521">                                shellQuote(fakeBin.resolve(&quot;java&quot;).toString())));</span>
+<span class="nc" id="L522">        Path home = temporaryDirectory.resolve(releaseAssets.getFileName() + &quot;-user-home&quot;);</span>
+<span class="nc" id="L523">        Files.createDirectories(home);</span>
+<span class="nc" id="L524">        return Map.of(</span>
+                &quot;PATH&quot;,
+<span class="nc" id="L526">                checksumBin + File.pathSeparator + fakeBin + File.pathSeparator + System.getenv(&quot;PATH&quot;),</span>
+                &quot;HOME&quot;,
+<span class="nc" id="L528">                home.toString(),</span>
+                &quot;SYMPHONY_HOME&quot;,
+                temporaryDirectory
+<span class="nc" id="L531">                        .resolve(releaseAssets.getFileName() + &quot;-symphony-home&quot;)</span>
+<span class="nc" id="L532">                        .toString(),</span>
+                &quot;SYMPHONY_TRELLO_RELEASE_BASE_URL&quot;,
+<span class="nc" id="L534">                releaseAssets.toUri().toString(),</span>
+                &quot;SYMPHONY_FAKE_LOG&quot;,
+<span class="nc" id="L536">                temporaryDirectory.resolve(&quot;release.log&quot;).toString());</span>
+    }
+
+    private static ProcessResult runReleaseInstaller(Map&lt;String, String&gt; environment, Path binDirectory)
+            throws Exception {
+<span class="nc" id="L541">        return run(</span>
+                environment,
+                &quot;bash&quot;,
+                &quot;install.sh&quot;,
+                &quot;--no-onboard&quot;,
+                &quot;--version&quot;,
+                RELEASE_VERSION,
+                &quot;--bin-dir&quot;,
+<span class="nc" id="L549">                binDirectory.toString());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

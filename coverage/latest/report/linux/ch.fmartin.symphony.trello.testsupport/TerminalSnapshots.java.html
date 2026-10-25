@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TerminalSnapshots.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.testsupport</a> &gt; <span class="el_source">TerminalSnapshots.java</span></div><h1>TerminalSnapshots.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.testsupport;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.regex.Pattern;
+import org.approvaltests.Approvals;
+import org.approvaltests.core.ApprovalFailureReporter;
+import org.approvaltests.core.Options;
+import org.approvaltests.namer.ApprovalNamer;
+import org.approvaltests.reporters.AutoApproveReporter;
+import org.jspecify.annotations.Nullable;
+
+/// Verifies terminal transcripts against reviewed baselines under `src/test/snapshots`.
+///
+/// ApprovalTests stores, compares, and approves the files; ADR 0092 records why.
+/// Each scenario has its own baseline file, so reviewing or updating one command never rewrites
+/// another command's baseline. A normal run only reads baselines. A missing or different baseline
+/// fails with a line-level diff, and the candidate transcript is written under
+/// `target/snapshot-candidates`. Baselines change only when a developer passes
+/// `-Dsymphony.snapshots.update=true`, which CI refuses.
+public final class TerminalSnapshots {
+    public static final String UPDATE_PROPERTY = &quot;symphony.snapshots.update&quot;;
+    public static final String UPDATE_COMMAND = &quot;./mvnw test -Dtest='*SnapshotTest' -D&quot; + UPDATE_PROPERTY + &quot;=true&quot;;
+<span class="nc" id="L30">    private static final Path BASELINE_ROOT = Path.of(&quot;src&quot;, &quot;test&quot;, &quot;snapshots&quot;);</span>
+<span class="nc" id="L31">    private static final Path CANDIDATE_ROOT = Path.of(&quot;target&quot;, &quot;snapshot-candidates&quot;);</span>
+<span class="nc" id="L32">    private static final Pattern SCENARIO_NAME =</span>
+<span class="nc" id="L33">            Pattern.compile(&quot;[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)+&quot;);</span>
+    // ApprovalTests records every verified baseline path in a static, unsynchronized set to reject
+    // duplicate verifications. Snapshot tests run concurrently, so each comparison holds this lock;
+    // command execution and output capture stay parallel.
+<span class="nc" id="L37">    private static final Object APPROVAL_TRACKER_LOCK = new Object();</span>
+
+    private final Path baselineRoot;
+    private final Path candidateRoot;
+    private final boolean updateBaselines;
+
+<span class="nc" id="L43">    TerminalSnapshots(Path baselineRoot, Path candidateRoot, boolean updateBaselines) {</span>
+<span class="nc" id="L44">        this.baselineRoot = baselineRoot.toAbsolutePath().normalize();</span>
+<span class="nc" id="L45">        this.candidateRoot = candidateRoot.toAbsolutePath().normalize();</span>
+<span class="nc" id="L46">        this.updateBaselines = updateBaselines;</span>
+<span class="nc" id="L47">    }</span>
+
+    /// Returns the repository's committed baselines in the mode selected for this test run.
+    public static TerminalSnapshots repository() {
+<span class="nc" id="L51">        return new TerminalSnapshots(</span>
+                BASELINE_ROOT,
+                CANDIDATE_ROOT,
+<span class="nc" id="L54">                updateRequested(System.getProperty(UPDATE_PROPERTY), System.getenv(&quot;CI&quot;)));</span>
+    }
+
+    static boolean updateRequested(@Nullable String updateProperty, @Nullable String continuousIntegration) {
+<span class="nc" id="L58">        boolean requested = Boolean.parseBoolean(updateProperty);</span>
+<span class="nc bnc" id="L59" title="All 6 branches missed.">        if (requested &amp;&amp; continuousIntegration != null &amp;&amp; !&quot;false&quot;.equalsIgnoreCase(continuousIntegration)) {</span>
+<span class="nc" id="L60">            throw new IllegalStateException(&quot;Snapshot baselines must not be updated in CI. Remove -D&quot; + UPDATE_PROPERTY</span>
+                    + &quot;=true and review the candidate under &quot; + CANDIDATE_ROOT + &quot; instead.&quot;);
+        }
+<span class="nc" id="L63">        return requested;</span>
+    }
+
+    /// Verifies a command whose stdout and stderr were captured separately.
+    void verifyStreams(String scenario, int exitCode, String stdout, String stderr, TranscriptNormalizer normalizer) {
+<span class="nc" id="L68">        CredentialSentinels.assertAbsent(scenario, &quot;stdout&quot;, stdout);</span>
+<span class="nc" id="L69">        CredentialSentinels.assertAbsent(scenario, &quot;stderr&quot;, stderr);</span>
+<span class="nc" id="L70">        verifyRendered(scenario, TerminalTranscript.ofStreams(exitCode, stdout, stderr), normalizer);</span>
+<span class="nc" id="L71">    }</span>
+
+    public void verify(String scenario, CapturedStreams result, TranscriptNormalizer normalizer) {
+<span class="nc" id="L74">        verifyStreams(scenario, result.exitCode(), result.stdout(), result.stderr(), normalizer);</span>
+<span class="nc" id="L75">    }</span>
+
+    /// Verifies a pseudo-terminal session, whose transcript intentionally merges both streams.
+    public void verifyTerminal(String scenario, int exitCode, String transcript, TranscriptNormalizer normalizer) {
+<span class="nc" id="L79">        CredentialSentinels.assertAbsent(scenario, &quot;the terminal&quot;, transcript);</span>
+<span class="nc" id="L80">        verifyRendered(scenario, TerminalTranscript.ofTerminal(exitCode, transcript), normalizer);</span>
+<span class="nc" id="L81">    }</span>
+
+    private void verifyRendered(String scenario, String rendered, TranscriptNormalizer normalizer) {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (!SCENARIO_NAME.matcher(scenario).matches()) {</span>
+<span class="nc" id="L85">            throw new IllegalArgumentException(</span>
+                    &quot;Snapshot scenario names are lower-case kebab-case segments below a suite directory,&quot;
+                            + &quot; such as cli/root-help: &quot; + scenario);
+        }
+<span class="nc" id="L89">        String normalized = normalizer.normalize(rendered);</span>
+<span class="nc" id="L90">        normalizer.assertNoUnnormalizedValues(scenario, normalized);</span>
+<span class="nc" id="L91">        Options options = new Options()</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                .withReporter(updateBaselines ? new AutoApproveReporter() : new VerificationReporter(scenario))</span>
+<span class="nc" id="L93">                .forFile()</span>
+<span class="nc" id="L94">                .withNamer(new ScenarioNamer(scenario, baselineRoot, candidateRoot));</span>
+<span class="nc" id="L95">        synchronized (APPROVAL_TRACKER_LOCK) {</span>
+<span class="nc" id="L96">            Approvals.verify(normalized, options);</span>
+<span class="nc" id="L97">        }</span>
+<span class="nc" id="L98">    }</span>
+
+<span class="nc" id="L100">    private record VerificationReporter(String scenario) implements ApprovalFailureReporter {</span>
+        @Override
+        public boolean report(String received, String approved) {
+<span class="nc" id="L103">            Path candidate = Path.of(received);</span>
+<span class="nc" id="L104">            Path baseline = Path.of(approved);</span>
+<span class="nc" id="L105">            String review = &quot;Review %s and, if the change is intended, run: %s&quot;.formatted(candidate, UPDATE_COMMAND);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (Files.notExists(baseline)) {</span>
+<span class="nc" id="L107">                throw new AssertionError(</span>
+<span class="nc" id="L108">                        &quot;Snapshot %s has no committed baseline at %s. %s&quot;.formatted(scenario, baseline, review));</span>
+            }
+<span class="nc" id="L110">            String description = &quot;Snapshot %s differs from %s. %s&quot;.formatted(scenario, baseline, review);</span>
+<span class="nc" id="L111">            assertThat(candidate)</span>
+<span class="nc" id="L112">                    .as(description)</span>
+<span class="nc" id="L113">                    .usingCharset(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L114">                    .hasSameTextualContentAs(baseline, StandardCharsets.UTF_8);</span>
+            // The line comparison above ignores a missing final newline; the exact comparison does not.
+<span class="nc" id="L116">            assertThat(read(candidate)).as(description).isEqualTo(read(baseline));</span>
+<span class="nc" id="L117">            return true;</span>
+        }
+
+        private static String read(Path file) {
+            try {
+<span class="nc" id="L122">                return Files.readString(file);</span>
+<span class="nc" id="L123">            } catch (IOException exception) {</span>
+<span class="nc" id="L124">                throw new UncheckedIOException(exception);</span>
+            }
+        }
+    }
+
+<span class="nc" id="L129">    private record ScenarioNamer(String scenario, Path baselineRoot, Path candidateRoot) implements ApprovalNamer {</span>
+        @Override
+        public File getApprovedFile(String extensionWithDot) {
+<span class="nc" id="L132">            return baselineRoot</span>
+<span class="nc" id="L133">                    .resolve(scenario + &quot;.approved&quot; + extensionWithDot)</span>
+<span class="nc" id="L134">                    .toFile();</span>
+        }
+
+        @Override
+        public File getReceivedFile(String extensionWithDot) {
+<span class="nc" id="L139">            return candidateRoot</span>
+<span class="nc" id="L140">                    .resolve(scenario + &quot;.received&quot; + extensionWithDot)</span>
+<span class="nc" id="L141">                    .toFile();</span>
+        }
+
+        @Override
+        public String getApprovalName() {
+<span class="nc" id="L146">            return scenario;</span>
+        }
+
+        @Override
+        public String getSourceFilePath() {
+<span class="nc" id="L151">            return baselineRoot + File.separator;</span>
+        }
+
+        @Override
+        public ApprovalNamer addAdditionalInformation(String info) {
+<span class="nc" id="L156">            throw new UnsupportedOperationException(&quot;Snapshot scenarios carry their full name: &quot; + scenario);</span>
+        }
+
+        @Override
+        public String getAdditionalInformation() {
+<span class="nc" id="L161">            return &quot;&quot;;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

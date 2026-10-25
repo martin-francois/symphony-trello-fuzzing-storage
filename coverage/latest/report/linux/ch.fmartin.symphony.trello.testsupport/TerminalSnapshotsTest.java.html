@@ -1,0 +1,339 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TerminalSnapshotsTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.testsupport</a> &gt; <span class="el_source">TerminalSnapshotsTest.java</span></div><h1>TerminalSnapshotsTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.testsupport;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+import org.approvaltests.SafetyCheckBeforeVerify;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L23">final class TerminalSnapshotsTest {</span>
+    private static final int COMPARISON_TIMEOUT_SECONDS = 10;
+    private static final int OVERLAP_OBSERVATION_MILLIS = 200;
+    private static final String SCENARIO = &quot;suite/scenario&quot;;
+    private static final char BELL = '\u0007';
+    private static final char ESCAPE = TerminalTranscript.ESCAPE;
+    private static final String BASELINE_STDOUT =
+            &quot;&quot;&quot;
+            Checking prerequisites...
+              OK      Git
+              OK      Java 25+ JDK
+            Done.
+            &quot;&quot;&quot;;
+
+    @TempDir
+    Path tempDir;
+
+    @MethodSource(&quot;unapprovedChanges&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void unapprovedChangeFailsWithLineDiffAndLeavesBaselineUntouched(
+            String change, String changedStdout, String expectedDiff) throws IOException {
+        // given
+<span class="nc" id="L45">        Path baseline = writeBaseline(TerminalTranscript.ofStreams(0, BASELINE_STDOUT, &quot;&quot;));</span>
+<span class="nc" id="L46">        TerminalSnapshots snapshots = verifyingSnapshots();</span>
+
+        // when
+<span class="nc" id="L49">        Throwable failure = catchThrowable(</span>
+<span class="nc" id="L50">                () -&gt; snapshots.verifyStreams(SCENARIO, 0, changedStdout, &quot;&quot;, TranscriptNormalizer.none()));</span>
+
+        // then
+<span class="nc" id="L53">        assertThat(failure)</span>
+<span class="nc" id="L54">                .as(change)</span>
+<span class="nc" id="L55">                .isInstanceOf(AssertionError.class)</span>
+<span class="nc" id="L56">                .hasMessageContaining(&quot;Snapshot suite/scenario differs from %s&quot;, baseline)</span>
+<span class="nc" id="L57">                .hasMessageContaining(expectedDiff)</span>
+<span class="nc" id="L58">                .hasMessageContaining(TerminalSnapshots.UPDATE_COMMAND);</span>
+<span class="nc" id="L59">        assertThat(baseline)</span>
+<span class="nc" id="L60">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L61">                .isEqualTo(TerminalTranscript.ofStreams(0, BASELINE_STDOUT, &quot;&quot;));</span>
+<span class="nc" id="L62">        assertThat(candidate())</span>
+<span class="nc" id="L63">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L64">                .isEqualTo(TerminalTranscript.ofStreams(0, changedStdout, &quot;&quot;));</span>
+<span class="nc" id="L65">    }</span>
+
+    static Stream&lt;Arguments&gt; unapprovedChanges() {
+<span class="nc" id="L68">        return Stream.of(</span>
+<span class="nc" id="L69">                Arguments.of(</span>
+                        &quot;unexpected line&quot;,
+<span class="nc" id="L71">                        BASELINE_STDOUT.replace(&quot;Done.&quot;, &quot;  WARN    Unexpected line\nDone.&quot;),</span>
+                        &quot;&quot;&quot;
+                        Extra content at line 6:
+                          [&quot;  WARN    Unexpected line&quot;]&quot;&quot;&quot;),
+<span class="nc" id="L75">                Arguments.of(</span>
+                        &quot;ordering change&quot;,
+<span class="nc" id="L77">                        BASELINE_STDOUT.replace(</span>
+                                &quot;  OK      Git\n  OK      Java 25+ JDK\n&quot;, &quot;  OK      Java 25+ JDK\n  OK      Git\n&quot;),
+                        &quot;&quot;&quot;
+                        Missing content at line 4:
+                          [&quot;  OK      Git&quot;]
+
+                        Extra content at line 6:
+                          [&quot;  OK      Git&quot;]&quot;&quot;&quot;),
+<span class="nc" id="L85">                Arguments.of(</span>
+                        &quot;meaningful whitespace change&quot;,
+<span class="nc" id="L87">                        BASELINE_STDOUT.replace(&quot;  OK      Git&quot;, &quot;  OK     Git&quot;),</span>
+                        &quot;&quot;&quot;
+                        Changed content at line 4:
+                        expecting:
+                          [&quot;  OK      Git&quot;]
+                        but was:
+                          [&quot;  OK     Git&quot;]&quot;&quot;&quot;));
+    }
+
+    @Test
+    void streamPlacementChangeFails() throws IOException {
+        // given
+<span class="nc" id="L99">        writeBaseline(TerminalTranscript.ofStreams(0, BASELINE_STDOUT, &quot;&quot;));</span>
+<span class="nc" id="L100">        TerminalSnapshots snapshots = verifyingSnapshots();</span>
+
+        // when
+<span class="nc" id="L103">        Throwable failure = catchThrowable(</span>
+<span class="nc" id="L104">                () -&gt; snapshots.verifyStreams(SCENARIO, 0, &quot;&quot;, BASELINE_STDOUT, TranscriptNormalizer.none()));</span>
+
+        // then
+<span class="nc" id="L107">        assertThat(failure).isInstanceOf(AssertionError.class).hasMessageContaining(&quot;--- stderr ---&quot;);</span>
+<span class="nc" id="L108">    }</span>
+
+    @Test
+    void missingBaselineFailsWithoutCreatingIt() {
+        // given
+<span class="nc" id="L113">        TerminalSnapshots snapshots = verifyingSnapshots();</span>
+
+        // when
+<span class="nc" id="L116">        Throwable failure = catchThrowable(</span>
+<span class="nc" id="L117">                () -&gt; snapshots.verifyStreams(SCENARIO, 0, BASELINE_STDOUT, &quot;&quot;, TranscriptNormalizer.none()));</span>
+
+        // then
+<span class="nc" id="L120">        assertThat(failure)</span>
+<span class="nc" id="L121">                .isInstanceOf(AssertionError.class)</span>
+<span class="nc" id="L122">                .hasMessageContaining(&quot;Snapshot suite/scenario has no committed baseline at %s&quot;, baselinePath());</span>
+<span class="nc" id="L123">        assertThat(baselinePath()).doesNotExist();</span>
+<span class="nc" id="L124">        assertThat(candidate()).exists();</span>
+<span class="nc" id="L125">    }</span>
+
+    @Test
+    void matchingTranscriptPassesAndRemovesTheCandidate() throws IOException {
+        // given
+<span class="nc" id="L130">        writeBaseline(TerminalTranscript.ofStreams(0, BASELINE_STDOUT, &quot;&quot;));</span>
+
+        // when
+<span class="nc" id="L133">        verifyingSnapshots().verifyStreams(SCENARIO, 0, BASELINE_STDOUT, &quot;&quot;, TranscriptNormalizer.none());</span>
+
+        // then
+<span class="nc" id="L136">        assertThat(candidate()).doesNotExist();</span>
+<span class="nc" id="L137">    }</span>
+
+    @Test
+    void explicitUpdateModeWritesTheBaseline() {
+        // given
+<span class="nc" id="L142">        var snapshots = new TerminalSnapshots(baselineRoot(), candidateRoot(), true);</span>
+
+        // when
+<span class="nc" id="L145">        snapshots.verifyStreams(SCENARIO, 3, &quot;&quot;, &quot;failed\n&quot;, TranscriptNormalizer.none());</span>
+
+        // then
+<span class="nc" id="L148">        assertThat(baselinePath())</span>
+<span class="nc" id="L149">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L150">                .isEqualTo(&quot;exitCode: 3\n--- stdout ---\n--- stderr ---\nfailed\n&quot;);</span>
+<span class="nc" id="L151">    }</span>
+
+    @Test
+    void ciRefusesSnapshotUpdates() {
+        // given
+<span class="nc" id="L156">        String updateProperty = &quot;true&quot;;</span>
+
+        // when
+<span class="nc" id="L159">        Throwable failure = catchThrowable(() -&gt; TerminalSnapshots.updateRequested(updateProperty, &quot;true&quot;));</span>
+
+        // then
+<span class="nc" id="L162">        assertThat(failure).isInstanceOf(IllegalStateException.class).hasMessageContaining(&quot;must not be updated in CI&quot;);</span>
+<span class="nc" id="L163">    }</span>
+
+    @Test
+    void updatesRequireTheExplicitProperty() {
+        // given
+<span class="nc" id="L168">        String unsetProperty = null;</span>
+
+        // when
+<span class="nc" id="L171">        boolean localDefault = TerminalSnapshots.updateRequested(unsetProperty, null);</span>
+<span class="nc" id="L172">        boolean ciDefault = TerminalSnapshots.updateRequested(unsetProperty, &quot;true&quot;);</span>
+<span class="nc" id="L173">        boolean explicitLocalUpdate = TerminalSnapshots.updateRequested(&quot;true&quot;, null);</span>
+
+        // then
+<span class="nc" id="L176">        assertThat(localDefault)</span>
+<span class="nc" id="L177">                .as(&quot;local runs verify unless the update property is set&quot;)</span>
+<span class="nc" id="L178">                .isFalse();</span>
+<span class="nc" id="L179">        assertThat(ciDefault).as(&quot;CI runs verify&quot;).isFalse();</span>
+<span class="nc" id="L180">        assertThat(explicitLocalUpdate)</span>
+<span class="nc" id="L181">                .as(&quot;a developer can request an update locally&quot;)</span>
+<span class="nc" id="L182">                .isTrue();</span>
+<span class="nc" id="L183">    }</span>
+
+    @Test
+    void credentialSentinelFailsBeforeComparison() {
+        // given
+<span class="nc" id="L188">        TerminalSnapshots snapshots = verifyingSnapshots();</span>
+<span class="nc" id="L189">        String leakingStderr = &quot;token=&quot; + CredentialSentinels.TRELLO_API_TOKEN + &quot;\n&quot;;</span>
+
+        // when
+<span class="nc" id="L192">        Throwable failure = catchThrowable(</span>
+<span class="nc" id="L193">                () -&gt; snapshots.verifyStreams(SCENARIO, 0, &quot;&quot;, leakingStderr, TranscriptNormalizer.none()));</span>
+
+        // then
+<span class="nc" id="L196">        assertThat(failure)</span>
+<span class="nc" id="L197">                .isInstanceOf(AssertionError.class)</span>
+<span class="nc" id="L198">                .hasMessageContaining(&quot;must not print a credential sentinel on stderr&quot;);</span>
+<span class="nc" id="L199">        assertThat(candidate()).doesNotExist();</span>
+<span class="nc" id="L200">    }</span>
+
+    @Test
+    void normalizationReplacesOnlyRegisteredValues() {
+        // given
+<span class="nc" id="L205">        Path root = tempDir.resolve(&quot;junit-random-name&quot;);</span>
+<span class="nc" id="L206">        TranscriptNormalizer normalizer = TranscriptNormalizer.builder()</span>
+<span class="nc" id="L207">                .temporaryRoot(root, &quot;&lt;TEMP&gt;&quot;)</span>
+<span class="nc" id="L208">                .literal(&quot;127.0.0.1:41234&quot;, &quot;127.0.0.1:&lt;PORT&gt;&quot;)</span>
+<span class="nc" id="L209">                .build();</span>
+
+        // when
+<span class="nc" id="L212">        String normalized = normalizer.normalize(&quot;Wrote &quot; + root + &quot;/WORKFLOW.md on 127.0.0.1:41234 at 41234\n&quot;);</span>
+
+        // then
+<span class="nc" id="L215">        assertThat(normalized).isEqualTo(&quot;Wrote &lt;TEMP&gt;/WORKFLOW.md on 127.0.0.1:&lt;PORT&gt; at 41234\n&quot;);</span>
+<span class="nc" id="L216">    }</span>
+
+    @Test
+    void wrappedTemporaryPathFailsInsteadOfBeingPartlyNormalized() {
+        // given
+<span class="nc" id="L221">        Path root = tempDir.resolve(&quot;junit-random-name&quot;);</span>
+        TranscriptNormalizer normalizer =
+<span class="nc" id="L223">                TranscriptNormalizer.builder().temporaryRoot(root, &quot;&lt;TEMP&gt;&quot;).build();</span>
+<span class="nc" id="L224">        String wrappedPath = &quot;Wrote &quot; + root.getParent() + &quot;/junit-random-\nname/WORKFLOW.md\n&quot;;</span>
+
+        // when
+<span class="nc" id="L227">        Throwable failure = catchThrowable(</span>
+<span class="nc" id="L228">                () -&gt; normalizer.assertNoUnnormalizedValues(SCENARIO, normalizer.normalize(wrappedPath)));</span>
+
+        // then
+<span class="nc" id="L231">        assertThat(failure)</span>
+<span class="nc" id="L232">                .isInstanceOf(AssertionError.class)</span>
+<span class="nc" id="L233">                .hasMessageContaining(&quot;still contains part of a temporary path&quot;);</span>
+<span class="nc" id="L234">    }</span>
+
+    @Test
+    void transcriptsShowControlCharactersAndMissingFinalNewlines() {
+        // given
+<span class="nc" id="L239">        String stdout = ESCAPE + &quot;[1mbold&quot; + ESCAPE + &quot;[0m\r\nprogress 50%\rprogress 100%\n&quot;;</span>
+<span class="nc" id="L240">        String stderr = &quot;bell&quot; + BELL;</span>
+
+        // when
+<span class="nc" id="L243">        String rendered = TerminalTranscript.ofStreams(1, stdout, stderr);</span>
+<span class="nc" id="L244">        String terminal = TerminalTranscript.ofTerminal(0, &quot;prompt: answer\r\n&quot;);</span>
+
+        // then
+<span class="nc" id="L247">        assertThat(rendered)</span>
+<span class="nc" id="L248">                .isEqualTo(</span>
+                        &quot;&quot;&quot;
+                        exitCode: 1
+                        --- stdout ---
+                        &lt;ESC&gt;[1mbold&lt;ESC&gt;[0m
+                        progress 50%&lt;CR&gt;progress 100%
+                        --- stderr ---
+                        bell&lt;U+0007&gt;&lt;no newline at end of stream&gt;
+                        &quot;&quot;&quot;);
+<span class="nc" id="L257">        assertThat(terminal).isEqualTo(&quot;exitCode: 0\n--- terminal ---\nprompt: answer&lt;CR&gt;\n&quot;);</span>
+<span class="nc" id="L258">    }</span>
+
+    @Test
+    void comparisonsRunOneAtATimeBecauseApprovalTestsTracksBaselinesUnsynchronized() throws Exception {
+        // given
+<span class="nc" id="L263">        var snapshots = new TerminalSnapshots(baselineRoot(), candidateRoot(), true);</span>
+<span class="nc" id="L264">        var firstEntered = new CountDownLatch(1);</span>
+<span class="nc" id="L265">        var releaseFirst = new CountDownLatch(1);</span>
+<span class="nc" id="L266">        var secondEntered = new CountDownLatch(1);</span>
+        // Closing waits for both comparisons; the first one stops waiting after the latch timeout.
+<span class="nc" id="L268">        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {</span>
+<span class="nc" id="L269">            Future&lt;?&gt; first = executor.submit(() -&gt; verifyHoldingComparison(snapshots, &quot;concurrent/first&quot;, () -&gt; {</span>
+<span class="nc" id="L270">                firstEntered.countDown();</span>
+<span class="nc" id="L271">                awaitLatch(releaseFirst);</span>
+<span class="nc" id="L272">            }));</span>
+<span class="nc" id="L273">            awaitLatch(firstEntered);</span>
+
+            // when
+<span class="nc" id="L276">            Future&lt;?&gt; second = executor.submit(</span>
+<span class="nc" id="L277">                    () -&gt; verifyHoldingComparison(snapshots, &quot;concurrent/second&quot;, secondEntered::countDown));</span>
+<span class="nc" id="L278">            boolean secondOverlappedFirst = secondEntered.await(OVERLAP_OBSERVATION_MILLIS, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L279">            releaseFirst.countDown();</span>
+<span class="nc" id="L280">            first.get(COMPARISON_TIMEOUT_SECONDS, TimeUnit.SECONDS);</span>
+<span class="nc" id="L281">            second.get(COMPARISON_TIMEOUT_SECONDS, TimeUnit.SECONDS);</span>
+
+            // then
+<span class="nc" id="L284">            assertThat(secondOverlappedFirst)</span>
+<span class="nc" id="L285">                    .as(&quot;a second comparison must wait while another thread is inside ApprovalTests&quot;)</span>
+<span class="nc" id="L286">                    .isFalse();</span>
+<span class="nc" id="L287">            assertThat(secondEntered.getCount())</span>
+<span class="nc" id="L288">                    .as(&quot;the waiting comparison runs once the first one finishes&quot;)</span>
+<span class="nc" id="L289">                    .isZero();</span>
+        }
+<span class="nc" id="L291">    }</span>
+
+    /// Runs `insideComparison` on the calling thread from within ApprovalTests' verification, where
+    /// its unsynchronized baseline tracker is updated.
+    private static void verifyHoldingComparison(
+            TerminalSnapshots snapshots, String scenario, Runnable insideComparison) {
+<span class="nc" id="L297">        SafetyCheckBeforeVerify.add((approver, options) -&gt; insideComparison.run());</span>
+<span class="nc" id="L298">        snapshots.verifyStreams(scenario, 0, &quot;&quot;, &quot;&quot;, TranscriptNormalizer.none());</span>
+<span class="nc" id="L299">    }</span>
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">            if (!latch.await(COMPARISON_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L304">                throw new IllegalStateException(&quot;timed out waiting for the other comparison&quot;);</span>
+            }
+<span class="nc" id="L306">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L307">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L308">            throw new IllegalStateException(exception);</span>
+<span class="nc" id="L309">        }</span>
+<span class="nc" id="L310">    }</span>
+
+    private TerminalSnapshots verifyingSnapshots() {
+<span class="nc" id="L313">        return new TerminalSnapshots(baselineRoot(), candidateRoot(), false);</span>
+    }
+
+    private Path writeBaseline(String content) throws IOException {
+<span class="nc" id="L317">        Path baseline = baselinePath();</span>
+<span class="nc" id="L318">        Files.createDirectories(baseline.getParent());</span>
+<span class="nc" id="L319">        Files.writeString(baseline, content);</span>
+<span class="nc" id="L320">        return baseline;</span>
+    }
+
+    private Path baselineRoot() {
+<span class="nc" id="L324">        return tempDir.resolve(&quot;baselines&quot;);</span>
+    }
+
+    private Path candidateRoot() {
+<span class="nc" id="L328">        return tempDir.resolve(&quot;candidates&quot;);</span>
+    }
+
+    private Path baselinePath() {
+<span class="nc" id="L332">        return baselineRoot().resolve(SCENARIO + &quot;.approved.txt&quot;);</span>
+    }
+
+    private Path candidate() {
+<span class="nc" id="L336">        return candidateRoot().resolve(SCENARIO + &quot;.received.txt&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,824 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowBodyMigrationTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">WorkflowBodyMigrationTest.java</span></div><h1>WorkflowBodyMigrationTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.CliExitCodes.SETUP_FAILURE;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.GITHUB_INPUTS;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.NEWER_VERSION;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.NON_GITHUB_INPUTS;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.OLDER_VERSION;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.RUNNING_VERSION;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.backupOf;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.otherVersionBody;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.targetBody;
+import static ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.workflowFile;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.abort;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.GeneratedWorkflow;
+import ch.fmartin.symphony.trello.setup.WorkflowMigrationFixture.MigrationRun;
+import java.io.IOException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L42">final class WorkflowBodyMigrationTest {</span>
+    private static final String PREFIX = &quot;Team rule: write Trello comments in German.\n\n&quot;;
+    private static final String SUFFIX = &quot;\n## Local Additions\n\nRun the smoke tests before handoff.\n&quot;;
+    private static final String GENERATED_TITLE = &quot;# Trello Card\n\n&quot;;
+    private static final String HAND_WRITTEN_BODY = &quot;Hand-written prompt.\n&quot;;
+
+    @TempDir
+    Path configDir;
+
+    private WorkflowMigrationFixture fixture;
+
+    @BeforeEach
+    void createFixture() {
+<span class="nc" id="L55">        fixture = new WorkflowMigrationFixture(configDir);</span>
+<span class="nc" id="L56">    }</span>
+
+    @EnumSource(Direction.class)
+    @ParameterizedTest
+    void migratesAnUnchangedGeneratedBodyAfterConfirmationAndKeepsMetadata(Direction direction) throws Exception {
+        // given
+<span class="nc" id="L62">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L63">                fixture.generatedBy(direction.sourceVersion, &quot;Board A&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+
+        // when
+<span class="nc" id="L66">        MigrationRun run = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L69">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L70">        assertThat(run.output())</span>
+<span class="nc" id="L71">                .contains(</span>
+<span class="nc" id="L72">                        &quot;MIGRATE   \&quot;Board A\&quot; (&quot; + workflow.path() + &quot;): unchanged generated body from Symphony &quot;</span>
+                                + direction.sourceVersion,
+                        direction.explanation,
+                        &quot;Only the text after the closing --- line changes.&quot;,
+<span class="nc" id="L76">                        &quot;OK  Migrated &quot; + workflow.path(),</span>
+<span class="nc" id="L77">                        &quot;Backup: &quot; + backupOf(workflow.path()),</span>
+                        &quot;also reinstall Symphony &quot; + direction.sourceVersion)
+<span class="nc" id="L79">                .doesNotContain(&quot;Warning: your kept text&quot;);</span>
+<span class="nc" id="L80">        assertThat(workflow.path()).hasContent(workflowFile(GITHUB_INPUTS, targetBody(GITHUB_INPUTS)));</span>
+<span class="nc" id="L81">        assertThat(metadataOf(Files.readString(workflow.path()))).isEqualTo(metadataOf(workflow.content()));</span>
+<span class="nc" id="L82">        assertThat(backupOf(workflow.path())).hasContent(workflow.content());</span>
+<span class="nc" id="L83">        assertThat(fixture.recorded(workflow.path()))</span>
+<span class="nc" id="L84">                .get()</span>
+<span class="nc" id="L85">                .extracting(GeneratedWorkflowRecord::symphonyVersion, GeneratedWorkflowRecord::body)</span>
+<span class="nc" id="L86">                .containsExactly(RUNNING_VERSION, targetBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L87">    }</span>
+
+    @MethodSource(&quot;additionsInBothDirections&quot;)
+    @ParameterizedTest(name = &quot;{0} on {1}&quot;)
+    void keepsUserPrefixAndSuffixByteForByteAndWarnsBeforeConfirming(Additions additions, Direction direction)
+            throws Exception {
+        // given
+<span class="nc" id="L94">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L95">                fixture.generatedBy(direction.sourceVersion, &quot;Board B&quot;, NON_GITHUB_INPUTS, additions::around);</span>
+
+        // when
+<span class="nc" id="L98">        MigrationRun run = fixture.run(fixture.request(), &quot;yes&quot;);</span>
+
+        // then
+<span class="nc" id="L101">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L102">        assertThat(run.output())</span>
+<span class="nc" id="L103">                .containsSubsequence(</span>
+                        &quot;with your own text before or after it&quot;,
+                        direction.explanation,
+                        &quot;the generated body stays exactly as it is.&quot;,
+                        &quot;Warning: your kept text can conflict with the new generated body&quot;,
+                        &quot;Replace the generated body in \&quot;Board B\&quot;&quot;,
+<span class="nc" id="L109">                        &quot;OK  Migrated &quot; + workflow.path());</span>
+<span class="nc" id="L110">        assertThat(workflow.path())</span>
+<span class="nc" id="L111">                .hasContent(workflowFile(NON_GITHUB_INPUTS, additions.around(targetBody(NON_GITHUB_INPUTS))));</span>
+<span class="nc" id="L112">        assertThat(metadataOf(Files.readString(workflow.path()))).isEqualTo(metadataOf(workflow.content()));</span>
+<span class="nc" id="L113">    }</span>
+
+    static List&lt;Arguments&gt; additionsInBothDirections() {
+<span class="nc" id="L116">        List&lt;Arguments&gt; cases = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        for (Additions additions : Additions.values()) {</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            for (Direction direction : Direction.values()) {</span>
+<span class="nc" id="L119">                cases.add(Arguments.of(additions, direction));</span>
+            }
+        }
+<span class="nc" id="L122">        return cases;</span>
+    }
+
+    @EnumSource(Direction.class)
+    @ParameterizedTest
+    void leavesDeclinedWorkflowsUnchangedWithADirectionSpecificWarning(Direction direction) throws Exception {
+        // given
+<span class="nc" id="L129">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L130">                fixture.generatedBy(direction.sourceVersion, &quot;Board C&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+
+        // when
+<span class="nc" id="L133">        MigrationRun run = fixture.run(fixture.request(), &quot;n&quot;);</span>
+
+        // then
+<span class="nc" id="L136">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L137">        assertThat(run.output())</span>
+<span class="nc" id="L138">                .contains(</span>
+<span class="nc" id="L139">                        &quot;SKIPPED  This workflow keeps its current body: &quot; + workflow.path(), direction.declineWarning);</span>
+<span class="nc" id="L140">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L141">        assertThat(backupOf(workflow.path())).doesNotExist();</span>
+<span class="nc" id="L142">        assertThat(fixture.recorded(workflow.path()))</span>
+<span class="nc" id="L143">                .get()</span>
+<span class="nc" id="L144">                .extracting(GeneratedWorkflowRecord::symphonyVersion)</span>
+<span class="nc" id="L145">                .isEqualTo(direction.sourceVersion);</span>
+<span class="nc" id="L146">    }</span>
+
+    @MethodSource(&quot;customizationsInBothDirections&quot;)
+    @ParameterizedTest(name = &quot;{0} on {1}&quot;)
+    void requiresManualMigrationForCustomizedBodiesAndWritesTheTargetBodyPreview(
+            Customization customization, Direction direction) throws Exception {
+        // given
+<span class="nc" id="L153">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L154">                fixture.generatedBy(direction.sourceVersion, &quot;Board D&quot;, GITHUB_INPUTS, customization.edit);</span>
+<span class="nc" id="L155">        Path preview = fixture.targetBodyPath(workflow.path());</span>
+
+        // when
+<span class="nc" id="L158">        MigrationRun run = fixture.run(fixture.request());</span>
+
+        // then
+<span class="nc" id="L161">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L162">        assertThat(run.output())</span>
+<span class="nc" id="L163">                .contains(</span>
+<span class="nc" id="L164">                        &quot;MANUAL    \&quot;Board D\&quot; (&quot; + workflow.path() + &quot;)&quot;,</span>
+                        customization.description,
+                        &quot;Manual workflow migration needed&quot;,
+                        &quot;Symphony &quot; + RUNNING_VERSION + &quot; generated body:\n      &quot; + preview,
+                        &quot;Keep the workflow metadata unchanged&quot;,
+                        &quot;symphony-trello migrate-workflows --config-dir '&quot; + configDir + &quot;' --workflow '&quot;
+<span class="nc" id="L170">                                + workflow.path() + &quot;' --mark-migrated&quot;,</span>
+                        &quot;Guide: https://github.com/martin-francois/symphony-trello/blob/v&quot; + RUNNING_VERSION
+                                + &quot;/README.md#migrate-generated-workflows&quot;,
+                        direction.manualNote)
+<span class="nc" id="L174">                .doesNotContain(&quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L175">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L176">        assertThat(preview).hasContent(targetBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L177">    }</span>
+
+    static List&lt;Arguments&gt; customizationsInBothDirections() {
+<span class="nc" id="L180">        List&lt;Arguments&gt; cases = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">        for (Customization customization : Customization.values()) {</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">            for (Direction direction : Direction.values()) {</span>
+<span class="nc" id="L183">                cases.add(Arguments.of(customization, direction));</span>
+            }
+        }
+<span class="nc" id="L186">        return cases;</span>
+    }
+
+    @EnumSource(Direction.class)
+    @ParameterizedTest
+    void treatsMalformedFrontMatterAsManualWithoutReplacingTheWorkflow(Direction direction) throws Exception {
+        // given
+<span class="nc" id="L193">        String original = &quot;# Notes without front matter\n&quot; + otherVersionBody(GITHUB_INPUTS);</span>
+<span class="nc" id="L194">        Path workflow = fixture.connectedWorkflow(&quot;Board E&quot;, GITHUB_INPUTS, original);</span>
+<span class="nc" id="L195">        fixture.record(workflow, direction.sourceVersion, GITHUB_INPUTS, otherVersionBody(GITHUB_INPUTS));</span>
+
+        // when
+<span class="nc" id="L198">        MigrationRun run = fixture.run(fixture.request());</span>
+
+        // then
+<span class="nc" id="L201">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L202">        assertThat(run.output())</span>
+<span class="nc" id="L203">                .contains(&quot;MANUAL    \&quot;Board E\&quot;&quot;, &quot;the front matter is missing or unclosed&quot;, &quot;Fix the workflow file&quot;);</span>
+<span class="nc" id="L204">        assertThat(workflow).hasContent(original);</span>
+<span class="nc" id="L205">        assertThat(fixture.targetBodyPath(workflow)).hasContent(targetBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L206">    }</span>
+
+    @Test
+    void usesCurrentListSettingsOnlyToRecognizeOrPreviewUnversionedWorkflows() throws Exception {
+        // given
+<span class="nc" id="L211">        Path current = fixture.connectedWorkflow(</span>
+<span class="nc" id="L212">                &quot;Current Board&quot;, GITHUB_INPUTS, workflowFile(GITHUB_INPUTS, targetBody(GITHUB_INPUTS)));</span>
+<span class="nc" id="L213">        String unknownContent = workflowFile(NON_GITHUB_INPUTS, otherVersionBody(NON_GITHUB_INPUTS));</span>
+<span class="nc" id="L214">        Path unknown = fixture.connectedWorkflow(&quot;Unknown Board&quot;, NON_GITHUB_INPUTS, unknownContent);</span>
+
+        // when
+<span class="nc" id="L217">        MigrationRun run = fixture.run(fixture.request());</span>
+
+        // then
+<span class="nc" id="L220">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L221">        assertThat(run.output())</span>
+<span class="nc" id="L222">                .contains(</span>
+                        &quot;CURRENT   \&quot;Current Board\&quot;&quot;,
+                        &quot;MANUAL    \&quot;Unknown Board\&quot;&quot;,
+                        &quot;Symphony has no record of the generated body this workflow started from&quot;,
+                        &quot;Symphony rendered this body from the workflow's current list settings.&quot;)
+<span class="nc" id="L227">                .doesNotContain(&quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L228">        assertThat(unknown).hasContent(unknownContent);</span>
+<span class="nc" id="L229">        assertThat(fixture.targetBodyPath(unknown)).hasContent(targetBody(NON_GITHUB_INPUTS));</span>
+<span class="nc" id="L230">        assertThat(fixture.recorded(current))</span>
+<span class="nc" id="L231">                .get()</span>
+<span class="nc" id="L232">                .extracting(GeneratedWorkflowRecord::inputs, GeneratedWorkflowRecord::body)</span>
+<span class="nc" id="L233">                .containsExactly(GITHUB_INPUTS, targetBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L234">        assertThat(fixture.recorded(unknown)).isEmpty();</span>
+<span class="nc" id="L235">    }</span>
+
+    @Test
+    void skipsWorkflowsWhoseGeneratedBodyDidNotChange() throws Exception {
+        // given
+<span class="nc" id="L240">        String customized = workflowFile(GITHUB_INPUTS, HAND_WRITTEN_BODY);</span>
+<span class="nc" id="L241">        Path workflow = fixture.connectedWorkflow(&quot;Board F&quot;, GITHUB_INPUTS, customized);</span>
+<span class="nc" id="L242">        fixture.record(workflow, OLDER_VERSION, GITHUB_INPUTS, targetBody(GITHUB_INPUTS));</span>
+
+        // when
+<span class="nc" id="L245">        MigrationRun run = fixture.run(fixture.request());</span>
+
+        // then
+<span class="nc" id="L248">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L249">        assertThat(run.output())</span>
+<span class="nc" id="L250">                .contains(&quot;OK        \&quot;Board F\&quot;&quot;, &quot;the generated workflow body did not change&quot;)</span>
+<span class="nc" id="L251">                .doesNotContain(&quot;Manual workflow migration needed&quot;, &quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L252">        assertThat(workflow).hasContent(customized);</span>
+<span class="nc" id="L253">    }</span>
+
+    @Test
+    void appliesABatchConfirmationOnlyToReplaceableWorkflowsInAMixedSet() throws Exception {
+        // given
+<span class="nc" id="L258">        GeneratedWorkflow exact =</span>
+<span class="nc" id="L259">                fixture.generatedBy(OLDER_VERSION, &quot;Exact Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L260">        GeneratedWorkflow additions =</span>
+<span class="nc" id="L261">                fixture.generatedBy(OLDER_VERSION, &quot;Additions Board&quot;, NON_GITHUB_INPUTS, Additions.PREFIX_ONLY::around);</span>
+<span class="nc" id="L262">        GeneratedWorkflow customized =</span>
+<span class="nc" id="L263">                fixture.generatedBy(OLDER_VERSION, &quot;Customized Board&quot;, GITHUB_INPUTS, body -&gt; HAND_WRITTEN_BODY);</span>
+
+        // when
+<span class="nc" id="L266">        MigrationRun run = fixture.run(fixture.request(), &quot;all&quot;);</span>
+
+        // then
+<span class="nc" id="L269">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L270">        assertThat(run.output())</span>
+<span class="nc" id="L271">                .containsSubsequence(</span>
+                        &quot;MIGRATE   \&quot;Exact Board\&quot;&quot;,
+                        &quot;MIGRATE   \&quot;Additions Board\&quot;&quot;,
+                        &quot;MANUAL    \&quot;Customized Board\&quot;&quot;,
+                        &quot;Replace the generated body in all 2 workflows above?&quot;,
+<span class="nc" id="L276">                        &quot;OK  Migrated &quot; + exact.path(),</span>
+<span class="nc" id="L277">                        &quot;OK  Migrated &quot; + additions.path())</span>
+<span class="nc" id="L278">                .doesNotContain(&quot;Replace the generated body in \&quot;&quot;);</span>
+<span class="nc" id="L279">        assertThat(exact.path()).hasContent(workflowFile(GITHUB_INPUTS, targetBody(GITHUB_INPUTS)));</span>
+<span class="nc" id="L280">        assertThat(additions.path())</span>
+<span class="nc" id="L281">                .hasContent(</span>
+<span class="nc" id="L282">                        workflowFile(NON_GITHUB_INPUTS, Additions.PREFIX_ONLY.around(targetBody(NON_GITHUB_INPUTS))));</span>
+<span class="nc" id="L283">        assertThat(customized.path()).hasContent(customized.content());</span>
+<span class="nc" id="L284">    }</span>
+
+    @Test
+    void asksForEachWorkflowWhenTheBatchAnswerIsEach() throws Exception {
+        // given
+<span class="nc" id="L289">        GeneratedWorkflow first =</span>
+<span class="nc" id="L290">                fixture.generatedBy(OLDER_VERSION, &quot;First Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L291">        GeneratedWorkflow second =</span>
+<span class="nc" id="L292">                fixture.generatedBy(OLDER_VERSION, &quot;Second Board&quot;, NON_GITHUB_INPUTS, UnaryOperator.identity());</span>
+
+        // when
+<span class="nc" id="L295">        MigrationRun run = fixture.run(fixture.request(), &quot;&quot;, &quot;n&quot;, &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L298">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L299">        assertThat(run.output())</span>
+<span class="nc" id="L300">                .containsSubsequence(</span>
+                        &quot;Enter all, each, or none [each]&quot;,
+                        &quot;Replace the generated body in \&quot;First Board\&quot;&quot;,
+<span class="nc" id="L303">                        &quot;SKIPPED  This workflow keeps its current body: &quot; + first.path(),</span>
+                        &quot;Replace the generated body in \&quot;Second Board\&quot;&quot;,
+<span class="nc" id="L305">                        &quot;OK  Migrated &quot; + second.path());</span>
+<span class="nc" id="L306">        assertThat(first.path()).hasContent(first.content());</span>
+<span class="nc" id="L307">        assertThat(second.path()).hasContent(workflowFile(NON_GITHUB_INPUTS, targetBody(NON_GITHUB_INPUTS)));</span>
+<span class="nc" id="L308">    }</span>
+
+    @Test
+    void dryRunShowsTheSamePlanWithoutWritingAnything() throws Exception {
+        // given
+<span class="nc" id="L313">        GeneratedWorkflow exact =</span>
+<span class="nc" id="L314">                fixture.generatedBy(OLDER_VERSION, &quot;Exact Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L315">        GeneratedWorkflow manual =</span>
+<span class="nc" id="L316">                fixture.generatedBy(OLDER_VERSION, &quot;Manual Board&quot;, GITHUB_INPUTS, body -&gt; HAND_WRITTEN_BODY);</span>
+<span class="nc" id="L317">        Path current = fixture.connectedWorkflow(</span>
+<span class="nc" id="L318">                &quot;Current Board&quot;, GITHUB_INPUTS, workflowFile(GITHUB_INPUTS, targetBody(GITHUB_INPUTS)));</span>
+<span class="nc" id="L319">        String storeBefore = Files.readString(configDir.resolve(GeneratedWorkflowStore.FILE_NAME));</span>
+
+        // when
+<span class="nc" id="L322">        MigrationRun run = fixture.run(fixture.dryRun());</span>
+
+        // then
+<span class="nc" id="L325">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L326">        assertThat(run.output())</span>
+<span class="nc" id="L327">                .contains(</span>
+                        &quot;MIGRATE   \&quot;Exact Board\&quot;&quot;,
+                        &quot;MANUAL    \&quot;Manual Board\&quot;&quot;,
+                        &quot;CURRENT   \&quot;Current Board\&quot;&quot;,
+                        &quot;WOULD write the Symphony &quot; + RUNNING_VERSION + &quot; generated body to:\n      &quot;
+<span class="nc" id="L332">                                + fixture.targetBodyPath(manual.path()),</span>
+<span class="nc" id="L333">                        &quot;WOULD back up and replace the generated body in:\n    &quot; + exact.path())</span>
+<span class="nc" id="L334">                .doesNotContain(&quot;Replace the generated body in&quot;);</span>
+<span class="nc" id="L335">        assertThat(exact.path()).hasContent(exact.content());</span>
+<span class="nc" id="L336">        assertThat(manual.path()).hasContent(manual.content());</span>
+<span class="nc" id="L337">        assertThat(backupOf(exact.path())).doesNotExist();</span>
+<span class="nc" id="L338">        assertThat(fixture.targetBodyPath(manual.path())).doesNotExist();</span>
+<span class="nc" id="L339">        assertThat(configDir.resolve(GeneratedWorkflowStore.FILE_NAME)).hasContent(storeBefore);</span>
+<span class="nc" id="L340">        assertThat(fixture.recorded(current)).isEmpty();</span>
+<span class="nc" id="L341">    }</span>
+
+    @EnumSource(Direction.class)
+    @ParameterizedTest
+    void nonInteractiveRunsReportWithoutAskingOrWritingFiles(Direction direction) throws Exception {
+        // given
+<span class="nc" id="L347">        GeneratedWorkflow replaceable =</span>
+<span class="nc" id="L348">                fixture.generatedBy(direction.sourceVersion, &quot;Board G&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L349">        GeneratedWorkflow manual =</span>
+<span class="nc" id="L350">                fixture.generatedBy(direction.sourceVersion, &quot;Board H&quot;, GITHUB_INPUTS, body -&gt; HAND_WRITTEN_BODY);</span>
+
+        // when
+<span class="nc" id="L353">        MigrationRun run = fixture.run(fixture.nonInteractive(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L356">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L357">        assertThat(run.output())</span>
+<span class="nc" id="L358">                .contains(</span>
+                        &quot;No workflow was changed. Run symphony-trello migrate-workflows --config-dir '&quot; + configDir
+                                + &quot;' in a terminal&quot;,
+                        &quot;in a terminal to write the Symphony &quot; + RUNNING_VERSION + &quot; generated body next to this&quot;,
+                        direction.nonInteractiveNote)
+<span class="nc" id="L363">                .doesNotContain(&quot;Replace the generated body in&quot;);</span>
+<span class="nc" id="L364">        assertThat(replaceable.path()).hasContent(replaceable.content());</span>
+<span class="nc" id="L365">        assertThat(manual.path()).hasContent(manual.content());</span>
+<span class="nc" id="L366">        assertThat(fixture.targetBodyPath(manual.path())).doesNotExist();</span>
+<span class="nc" id="L367">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;\n&quot;, &quot;\r\n&quot;})
+    void treatsLfAndCrlfBodiesAlikeAndKeepsTheirStyle(String lineBreak) throws Exception {
+        // given
+<span class="nc" id="L373">        String original = workflowFile(</span>
+<span class="nc" id="L374">                        GITHUB_INPUTS, Additions.PREFIX_AND_SUFFIX.around(otherVersionBody(GITHUB_INPUTS)))</span>
+<span class="nc" id="L375">                .replace(&quot;\n&quot;, lineBreak);</span>
+<span class="nc" id="L376">        Path workflow = fixture.connectedWorkflow(&quot;Board H&quot;, GITHUB_INPUTS, original);</span>
+<span class="nc" id="L377">        fixture.record(workflow, OLDER_VERSION, GITHUB_INPUTS, otherVersionBody(GITHUB_INPUTS));</span>
+
+        // when
+<span class="nc" id="L380">        MigrationRun run = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L383">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L384">        assertThat(run.output()).contains(&quot;MIGRATE   \&quot;Board H\&quot;&quot;);</span>
+<span class="nc" id="L385">        assertThat(workflow)</span>
+<span class="nc" id="L386">                .hasContent(workflowFile(GITHUB_INPUTS, Additions.PREFIX_AND_SUFFIX.around(targetBody(GITHUB_INPUTS)))</span>
+<span class="nc" id="L387">                        .replace(&quot;\n&quot;, lineBreak));</span>
+<span class="nc" id="L388">    }</span>
+
+    @Test
+    void preservesPosixPermissionsOfTheMigratedWorkflowAndItsBackup() throws Exception {
+        // given
+<span class="nc" id="L393">        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains(&quot;posix&quot;));</span>
+<span class="nc" id="L394">        Set&lt;PosixFilePermission&gt; permissions = PosixFilePermissions.fromString(&quot;rw-r-----&quot;);</span>
+<span class="nc" id="L395">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L396">                fixture.generatedBy(OLDER_VERSION, &quot;Board I&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L397">        Files.setPosixFilePermissions(workflow.path(), permissions);</span>
+
+        // when
+<span class="nc" id="L400">        MigrationRun run = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L403">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L404">        assertThat(Files.getPosixFilePermissions(workflow.path())).isEqualTo(permissions);</span>
+<span class="nc" id="L405">        assertThat(Files.getPosixFilePermissions(backupOf(workflow.path()))).isEqualTo(permissions);</span>
+<span class="nc" id="L406">    }</span>
+
+    @Test
+    void reportsAFailedReplacementAsAnUnexpectedFailureAndLeavesTheOriginalInPlace() throws Exception {
+        // given
+<span class="nc" id="L411">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L412">                fixture.generatedBy(OLDER_VERSION, &quot;Board J&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L413">        var writer = new WorkflowBodyWriter(</span>
+<span class="nc" id="L414">                WorkflowMigrationFixture.clock(),</span>
+                (source, target) -&gt; {
+<span class="nc" id="L416">                    throw new IOException(&quot;simulated disk full&quot;);</span>
+                },
+<span class="nc" id="L418">                ignored -&gt; {});</span>
+
+        // when
+<span class="nc" id="L421">        MigrationRun run = WorkflowMigrationFixture.run(fixture.migration(writer), fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L424">        assertThat(run.exitCode()).isEqualTo(SETUP_FAILURE);</span>
+<span class="nc" id="L425">        assertThat(run.failureCode()).hasValue(&quot;setup_workflow_migration_failed&quot;);</span>
+<span class="nc" id="L426">        assertThat(SetupDiagnosticReporter.shouldReport(</span>
+                        new TrelloBoardSetupException(&quot;setup_workflow_migration_failed&quot;, &quot;failed&quot;)))
+<span class="nc" id="L428">                .as(&quot;a failed workflow write must produce a troubleshooting report&quot;)</span>
+<span class="nc" id="L429">                .isTrue();</span>
+<span class="nc" id="L430">        assertThat(run.output())</span>
+<span class="nc" id="L431">                .contains(</span>
+                        &quot;FAILED  Could not migrate this workflow (the workflow was not changed (simulated disk full)):\n&quot;
+<span class="nc" id="L433">                                + &quot;          &quot; + workflow.path(),</span>
+<span class="nc" id="L434">                        &quot;The backup of the original workflow is: &quot; + backupOf(workflow.path()));</span>
+<span class="nc" id="L435">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L436">        assertThat(fixture.recorded(workflow.path()))</span>
+<span class="nc" id="L437">                .get()</span>
+<span class="nc" id="L438">                .extracting(GeneratedWorkflowRecord::symphonyVersion)</span>
+<span class="nc" id="L439">                .isEqualTo(OLDER_VERSION);</span>
+<span class="nc" id="L440">    }</span>
+
+    @Test
+    void restoresTheBackupWhenTheMigratedWorkflowFailsValidation() throws Exception {
+        // given
+<span class="nc" id="L445">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L446">                fixture.generatedBy(OLDER_VERSION, &quot;Board K&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L447">        var checks = new AtomicInteger();</span>
+<span class="nc" id="L448">        var writer = new WorkflowBodyWriter(</span>
+<span class="nc" id="L449">                WorkflowMigrationFixture.clock(),</span>
+<span class="nc" id="L450">                (source, target) -&gt; Files.move(source, target, StandardCopyOption.REPLACE_EXISTING),</span>
+                checked -&gt; {
+<span class="nc bnc" id="L452" title="All 4 branches missed.">                    if (checked.equals(workflow.path()) &amp;&amp; checks.incrementAndGet() == 1) {</span>
+<span class="nc" id="L453">                        throw new IOException(&quot;simulated validation failure&quot;);</span>
+                    }
+<span class="nc" id="L455">                });</span>
+
+        // when
+<span class="nc" id="L458">        MigrationRun run = WorkflowMigrationFixture.run(fixture.migration(writer), fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L461">        assertThat(run.exitCode()).isEqualTo(SETUP_FAILURE);</span>
+<span class="nc" id="L462">        assertThat(run.failureCode()).hasValue(&quot;setup_workflow_migration_failed&quot;);</span>
+<span class="nc" id="L463">        assertThat(run.output())</span>
+<span class="nc" id="L464">                .contains(</span>
+                        &quot;the migrated workflow did not pass validation (simulated validation failure)&quot;,
+<span class="nc" id="L466">                        &quot;Symphony restored the original workflow from the backup: &quot; + backupOf(workflow.path()));</span>
+<span class="nc" id="L467">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L468">    }</span>
+
+    @Test
+    void doesNotFollowASymbolicLinkInTheConnectedWorkflowSet() throws Exception {
+        // given
+<span class="nc" id="L473">        Path outside = Files.createDirectories(configDir.resolve(&quot;outside&quot;)).resolve(&quot;real.md&quot;);</span>
+<span class="nc" id="L474">        String original = workflowFile(GITHUB_INPUTS, otherVersionBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L475">        Files.writeString(outside, original);</span>
+<span class="nc" id="L476">        Path workflow = fixture.connectedWorkflow(&quot;Linked Board&quot;, GITHUB_INPUTS, &quot;placeholder&quot;);</span>
+<span class="nc" id="L477">        Files.delete(workflow);</span>
+        try {
+<span class="nc" id="L479">            Files.createSymbolicLink(workflow, outside);</span>
+<span class="nc" id="L480">        } catch (UnsupportedOperationException | IOException e) {</span>
+<span class="nc" id="L481">            abort(&quot;symbolic links are unavailable: &quot; + e.getMessage());</span>
+<span class="nc" id="L482">        }</span>
+<span class="nc" id="L483">        fixture.record(workflow, OLDER_VERSION, GITHUB_INPUTS, otherVersionBody(GITHUB_INPUTS));</span>
+
+        // when
+<span class="nc" id="L486">        MigrationRun run = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L489">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L490">        assertThat(run.output())</span>
+<span class="nc" id="L491">                .contains(&quot;MANUAL    \&quot;Linked Board\&quot;&quot;, &quot;the workflow path is a symbolic link&quot;)</span>
+<span class="nc" id="L492">                .doesNotContain(&quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L493">        assertThat(outside).hasContent(original);</span>
+<span class="nc" id="L494">        assertThat(configDir.resolve(&quot;outside&quot;)).isDirectoryNotContaining(&quot;glob:**/real.md.*&quot;);</span>
+<span class="nc" id="L495">    }</span>
+
+    @Test
+    void checksOnlyConnectedOrExplicitlySelectedWorkflows() throws Exception {
+        // given
+<span class="nc" id="L500">        String unrelatedContent = workflowFile(GITHUB_INPUTS, otherVersionBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L501">        Path unrelated = configDir.resolve(&quot;WORKFLOW.unrelated.md&quot;);</span>
+<span class="nc" id="L502">        Files.writeString(unrelated, unrelatedContent);</span>
+<span class="nc" id="L503">        fixture.record(unrelated, OLDER_VERSION, GITHUB_INPUTS, otherVersionBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L504">        Path explicitDirectory = Files.createDirectories(configDir.resolve(&quot;repository&quot;));</span>
+<span class="nc" id="L505">        Path explicit = explicitDirectory.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L506">        Files.writeString(explicit, workflowFile(NON_GITHUB_INPUTS, otherVersionBody(NON_GITHUB_INPUTS)));</span>
+<span class="nc" id="L507">        fixture.record(explicit, OLDER_VERSION, NON_GITHUB_INPUTS, otherVersionBody(NON_GITHUB_INPUTS));</span>
+
+        // when
+<span class="nc" id="L510">        MigrationRun all = fixture.run(fixture.request());</span>
+<span class="nc" id="L511">        MigrationRun selected = fixture.run(fixture.explicitWorkflow(explicit, false), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L514">        assertThat(all.output()).contains(&quot;No connected workflows to check.&quot;).doesNotContain(unrelated.toString());</span>
+<span class="nc" id="L515">        assertThat(selected.output())</span>
+<span class="nc" id="L516">                .contains(&quot;MIGRATE   \&quot;WORKFLOW.md\&quot; (&quot; + explicit + &quot;)&quot;, &quot;OK  Migrated &quot; + explicit);</span>
+<span class="nc" id="L517">        assertThat(explicit).hasContent(workflowFile(NON_GITHUB_INPUTS, targetBody(NON_GITHUB_INPUTS)));</span>
+<span class="nc" id="L518">        assertThat(unrelated).hasContent(unrelatedContent);</span>
+<span class="nc" id="L519">    }</span>
+
+    @Test
+    void checksOnlyTheBoardSelectedByName() throws Exception {
+        // given
+<span class="nc" id="L524">        GeneratedWorkflow other =</span>
+<span class="nc" id="L525">                fixture.generatedBy(OLDER_VERSION, &quot;Other Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L526">        GeneratedWorkflow selected =</span>
+<span class="nc" id="L527">                fixture.generatedBy(OLDER_VERSION, &quot;Selected Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+
+        // when
+<span class="nc" id="L530">        MigrationRun run = fixture.run(fixture.board(&quot;Selected Board&quot;), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L533">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L534">        assertThat(run.output()).contains(&quot;OK  Migrated &quot; + selected.path()).doesNotContain(&quot;Other Board&quot;);</span>
+<span class="nc" id="L535">        assertThat(other.path()).hasContent(other.content());</span>
+<span class="nc" id="L536">    }</span>
+
+    @Test
+    void rejectsAMajorVersionDowngradeBeforeCheckingWorkflows() throws Exception {
+        // given
+<span class="nc" id="L541">        GeneratedWorkflow workflow = fixture.generatedBy(&quot;2.0.0&quot;, &quot;Board L&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+
+        // when
+<span class="nc" id="L544">        MigrationRun fromNewerMajor = fixture.run(fixture.fromVersion(&quot;2.1.0&quot;), &quot;y&quot;);</span>
+<span class="nc" id="L545">        MigrationRun recordFromNewerMajor = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L548">        assertThat(fromNewerMajor.exitCode()).isEqualTo(SETUP_FAILURE);</span>
+<span class="nc" id="L549">        assertThat(fromNewerMajor.output())</span>
+<span class="nc" id="L550">                .contains(</span>
+                        &quot;REJECTED  Symphony 2.1.0 was replaced by Symphony &quot; + RUNNING_VERSION,
+                        &quot;Reinstall a Symphony 2.x release&quot;)
+<span class="nc" id="L553">                .doesNotContain(&quot;Board L&quot;);</span>
+<span class="nc" id="L554">        assertThat(recordFromNewerMajor.exitCode()).isEqualTo(SETUP_FAILURE);</span>
+<span class="nc" id="L555">        assertThat(recordFromNewerMajor.output())</span>
+<span class="nc" id="L556">                .contains(&quot;REJECTED  \&quot;Board L\&quot;&quot;, &quot;downgrading to another major version is not supported&quot;)</span>
+<span class="nc" id="L557">                .doesNotContain(&quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L558">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L559">    }</span>
+
+    @CsvSource({&quot;false, 2.0.0&quot;, &quot;true, 2.0.0&quot;, &quot;false, 2.0.0+build.1&quot;, &quot;true, 2.0.0+build.1&quot;})
+    @ParameterizedTest
+    void aNewerMajorRecordStopsTheWholeBatchBeforeAnyWrite(boolean missingNewerWorkflow, String newerVersion)
+            throws Exception {
+        // given
+<span class="nc" id="L566">        GeneratedWorkflow older =</span>
+<span class="nc" id="L567">                fixture.generatedBy(OLDER_VERSION, &quot;Older Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L568">        GeneratedWorkflow newer =</span>
+<span class="nc" id="L569">                fixture.generatedBy(newerVersion, &quot;Newer Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc bnc" id="L570" title="All 2 branches missed.">        if (missingNewerWorkflow) {</span>
+<span class="nc" id="L571">            Files.delete(newer.path());</span>
+        }
+<span class="nc" id="L573">        Path store = configDir.resolve(GeneratedWorkflowStore.FILE_NAME);</span>
+<span class="nc" id="L574">        String provenance = Files.readString(store);</span>
+
+        // when
+<span class="nc" id="L577">        MigrationRun run = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L580">        assertThat(run.exitCode()).as(run.output()).isEqualTo(SETUP_FAILURE);</span>
+<span class="nc" id="L581">        assertThat(run.output()).contains(&quot;REJECTED&quot;).doesNotContain(&quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L582">        assertThat(older.path()).hasContent(older.content());</span>
+<span class="nc" id="L583">        assertThat(backupOf(older.path())).doesNotExist();</span>
+<span class="nc" id="L584">        assertThat(store).hasContent(provenance);</span>
+<span class="nc" id="L585">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void markingAReplaceableBodyOnlyRecordsAcknowledgement(boolean nonInteractive) throws Exception {
+        // given
+<span class="nc" id="L591">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L592">                fixture.generatedBy(OLDER_VERSION, &quot;Acknowledged Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L593">        var request = new WorkflowMigrationRequest(</span>
+                configDir,
+<span class="nc" id="L595">                Optional.empty(),</span>
+<span class="nc" id="L596">                Optional.of(workflow.path()),</span>
+                false,
+                nonInteractive,
+<span class="nc" id="L599">                Optional.empty(),</span>
+                true);
+
+        // when
+<span class="nc" id="L603">        MigrationRun run = fixture.run(request, &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L606">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L607">        assertThat(run.output()).doesNotContain(&quot;Replace the generated body&quot;);</span>
+<span class="nc" id="L608">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L609">        assertThat(backupOf(workflow.path())).doesNotExist();</span>
+<span class="nc" id="L610">        assertThat(fixture.recorded(workflow.path()))</span>
+<span class="nc" id="L611">                .get()</span>
+<span class="nc" id="L612">                .extracting(GeneratedWorkflowRecord::symphonyVersion)</span>
+<span class="nc" id="L613">                .isEqualTo(RUNNING_VERSION);</span>
+<span class="nc" id="L614">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;missing front matter&quot;, &quot;---\ntracker: [\n---\ninvalid metadata&quot;})
+    void malformedRecordedWorkflowsKeepTheirInputsAndDowngradeWarning(String content) throws Exception {
+        // given
+<span class="nc" id="L620">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L621">                fixture.generatedBy(NEWER_VERSION, &quot;Malformed Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L622">        Files.writeString(workflow.path(), content);</span>
+
+        // when
+<span class="nc" id="L625">        MigrationRun run = fixture.run(fixture.request());</span>
+
+        // then
+<span class="nc" id="L628">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L629">        assertThat(run.output()).contains(&quot;MANUAL&quot;, &quot;Warning: this workflow was created for Symphony &quot; + NEWER_VERSION);</span>
+<span class="nc" id="L630">        assertThat(workflow.path()).hasContent(content);</span>
+<span class="nc" id="L631">        assertThat(fixture.targetBodyPath(workflow.path())).hasContent(targetBody(GITHUB_INPUTS));</span>
+<span class="nc" id="L632">    }</span>
+
+    @Test
+    void recoveryCommandsKeepTheSelectedConfigDirectory() throws Exception {
+        // given
+<span class="nc" id="L637">        Path selectedConfig = Files.createDirectory(configDir.resolve(&quot;selected config&quot;));</span>
+<span class="nc" id="L638">        var selected = new WorkflowMigrationFixture(selectedConfig);</span>
+<span class="nc" id="L639">        selected.generatedBy(OLDER_VERSION, &quot;Manual Board&quot;, GITHUB_INPUTS, body -&gt; HAND_WRITTEN_BODY);</span>
+
+        // when
+<span class="nc" id="L642">        MigrationRun run = selected.run(selected.request());</span>
+
+        // then
+<span class="nc" id="L645">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L646">        assertThat(run.output()).contains(&quot;migrate-workflows --config-dir '&quot; + selectedConfig + &quot;' --workflow&quot;);</span>
+<span class="nc" id="L647">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recoveryCommandsRetainAnExplicitWorkflowOutsideTheManifest(boolean replaceable) throws Exception {
+        // given
+<span class="nc" id="L653">        GeneratedWorkflow workflow = fixture.generatedBy(</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">                OLDER_VERSION, &quot;Outside Board&quot;, GITHUB_INPUTS, body -&gt; replaceable ? body : HAND_WRITTEN_BODY);</span>
+<span class="nc" id="L655">        new ConnectedBoardRepository(configDir.resolve(ConnectedBoardManifest.FILE_NAME))</span>
+<span class="nc" id="L656">                .save(new ConnectedBoardManifest(List.of()));</span>
+<span class="nc" id="L657">        var request = new WorkflowMigrationRequest(</span>
+<span class="nc" id="L658">                configDir, Optional.empty(), Optional.of(workflow.path()), false, true, Optional.empty(), false);</span>
+
+        // when
+<span class="nc" id="L661">        MigrationRun run = fixture.run(request);</span>
+
+        // then
+<span class="nc" id="L664">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L665">        assertThat(run.output())</span>
+<span class="nc" id="L666">                .contains(&quot;migrate-workflows --config-dir '&quot; + configDir + &quot;' --workflow '&quot; + workflow.path()</span>
+                        + &quot;' in a terminal&quot;);
+<span class="nc" id="L668">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L669">    }</span>
+
+    @Test
+    void failedRollbackNamesTheUnrestoredWorkflowAndBackup() throws Exception {
+        // given
+<span class="nc" id="L674">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L675">                fixture.generatedBy(OLDER_VERSION, &quot;Rollback Board&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L676">        var writer = new WorkflowBodyWriter(</span>
+<span class="nc" id="L677">                WorkflowMigrationFixture.clock(),</span>
+<span class="nc" id="L678">                (source, target) -&gt; Files.move(source, target, StandardCopyOption.REPLACE_EXISTING),</span>
+                checked -&gt; {
+<span class="nc bnc" id="L680" title="All 2 branches missed.">                    if (checked.equals(workflow.path())) {</span>
+<span class="nc" id="L681">                        Files.delete(checked);</span>
+<span class="nc" id="L682">                        Files.createDirectory(checked);</span>
+<span class="nc" id="L683">                        Files.writeString(checked.resolve(&quot;keep.txt&quot;), &quot;concurrent content&quot;);</span>
+<span class="nc" id="L684">                        throw new IOException(&quot;simulated validation failure&quot;);</span>
+                    }
+<span class="nc" id="L686">                });</span>
+
+        // when
+<span class="nc" id="L689">        MigrationRun run = WorkflowMigrationFixture.run(fixture.migration(writer), fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L692">        assertThat(run.exitCode()).isEqualTo(SETUP_FAILURE);</span>
+<span class="nc" id="L693">        assertThat(run.output())</span>
+<span class="nc" id="L694">                .contains(</span>
+                        &quot;cannot restore the original workflow&quot;,
+                        &quot;restore the backup before restarting&quot;,
+<span class="nc" id="L697">                        backupOf(workflow.path()).toString());</span>
+<span class="nc" id="L698">        assertThat(backupOf(workflow.path())).hasContent(workflow.content());</span>
+<span class="nc" id="L699">        assertThat(workflow.path().resolve(&quot;keep.txt&quot;)).hasContent(&quot;concurrent content&quot;);</span>
+<span class="nc" id="L700">    }</span>
+
+    @Test
+    void marksAManualMigrationSoLaterChecksCompareAgainstTheCurrentBody() throws Exception {
+        // given
+<span class="nc" id="L705">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L706">                fixture.generatedBy(OLDER_VERSION, &quot;Board M&quot;, GITHUB_INPUTS, body -&gt; HAND_WRITTEN_BODY);</span>
+
+        // when
+<span class="nc" id="L709">        MigrationRun mark = fixture.run(fixture.explicitWorkflow(workflow.path(), true));</span>
+<span class="nc" id="L710">        MigrationRun later = fixture.run(fixture.request());</span>
+
+        // then
+<span class="nc" id="L713">        assertThat(mark.output())</span>
+<span class="nc" id="L714">                .contains(&quot;OK  Recorded &quot; + workflow.path() + &quot; as migrated to the Symphony &quot; + RUNNING_VERSION);</span>
+<span class="nc" id="L715">        assertThat(later.output()).contains(&quot;OK        \&quot;Board M\&quot;&quot;).doesNotContain(&quot;MANUAL&quot;);</span>
+<span class="nc" id="L716">        assertThat(workflow.path()).hasContent(workflow.content());</span>
+<span class="nc" id="L717">        assertThat(fixture.recorded(workflow.path()))</span>
+<span class="nc" id="L718">                .get()</span>
+<span class="nc" id="L719">                .extracting(GeneratedWorkflowRecord::symphonyVersion)</span>
+<span class="nc" id="L720">                .isEqualTo(RUNNING_VERSION);</span>
+<span class="nc" id="L721">    }</span>
+
+    @Test
+    void ignoresUnknownFieldsWrittenByANewerVersionOfTheStore() throws Exception {
+        // given
+<span class="nc" id="L726">        GeneratedWorkflow workflow =</span>
+<span class="nc" id="L727">                fixture.generatedBy(NEWER_VERSION, &quot;Board N&quot;, GITHUB_INPUTS, UnaryOperator.identity());</span>
+<span class="nc" id="L728">        Path store = configDir.resolve(GeneratedWorkflowStore.FILE_NAME);</span>
+<span class="nc" id="L729">        Files.writeString(</span>
+                store,
+<span class="nc" id="L731">                Files.readString(store)</span>
+<span class="nc" id="L732">                        .replace(&quot;\&quot;githubEnabled\&quot;&quot;, &quot;\&quot;newerInput\&quot; : \&quot;x\&quot;, \&quot;githubEnabled\&quot;&quot;)</span>
+<span class="nc" id="L733">                        .replace(&quot;\&quot;formatVersion\&quot;&quot;, &quot;\&quot;newerField\&quot; : 7, \&quot;formatVersion\&quot;&quot;));</span>
+
+        // when
+<span class="nc" id="L736">        MigrationRun run = fixture.run(fixture.request(), &quot;y&quot;);</span>
+
+        // then
+<span class="nc" id="L739">        assertThat(run.exitCode()).as(run.output()).isZero();</span>
+<span class="nc" id="L740">        assertThat(run.output()).contains(&quot;OK  Migrated &quot; + workflow.path());</span>
+<span class="nc" id="L741">        assertThat(workflow.path()).hasContent(workflowFile(GITHUB_INPUTS, targetBody(GITHUB_INPUTS)));</span>
+<span class="nc" id="L742">    }</span>
+
+    private static String metadataOf(String content) {
+<span class="nc" id="L745">        return WorkflowFileText.parse(content).map(WorkflowFileText::metadata).orElseThrow();</span>
+    }
+
+    /// Update and supported downgrade share one flow; only the wording around the decision differs.
+<span class="nc" id="L749">    enum Direction {</span>
+<span class="nc" id="L750">        UPDATE(</span>
+                OLDER_VERSION,
+                &quot;The generated workflow changed since Symphony &quot; + OLDER_VERSION,
+                &quot;It does not get the Symphony &quot; + RUNNING_VERSION + &quot; workflow fixes and features.&quot;,
+                &quot;in a terminal to review and apply these migrations.&quot;,
+                &quot;Keep the workflow metadata unchanged&quot;),
+<span class="nc" id="L756">        DOWNGRADE(</span>
+                NEWER_VERSION,
+                &quot;This workflow was created for a newer Symphony version (Symphony &quot; + NEWER_VERSION + &quot;)&quot;,
+                Direction.NEWER_FEATURES_WARNING,
+                Direction.NEWER_FEATURES_WARNING,
+                Direction.NEWER_FEATURES_WARNING);
+
+        private static final String NEWER_FEATURES_WARNING =
+                &quot;It may mention features that Symphony &quot; + RUNNING_VERSION + &quot; does not support&quot;;
+
+        private final String sourceVersion;
+        private final String explanation;
+        private final String declineWarning;
+        private final String nonInteractiveNote;
+        private final String manualNote;
+
+        Direction(
+                String sourceVersion,
+                String explanation,
+                String declineWarning,
+                String nonInteractiveNote,
+<span class="nc" id="L777">                String manualNote) {</span>
+<span class="nc" id="L778">            this.sourceVersion = sourceVersion;</span>
+<span class="nc" id="L779">            this.explanation = explanation;</span>
+<span class="nc" id="L780">            this.declineWarning = declineWarning;</span>
+<span class="nc" id="L781">            this.nonInteractiveNote = nonInteractiveNote;</span>
+<span class="nc" id="L782">            this.manualNote = manualNote;</span>
+<span class="nc" id="L783">        }</span>
+    }
+
+    /// User text kept around the generated body.
+<span class="nc" id="L787">    enum Additions {</span>
+<span class="nc" id="L788">        PREFIX_ONLY(PREFIX, &quot;&quot;),</span>
+<span class="nc" id="L789">        SUFFIX_ONLY(&quot;&quot;, SUFFIX),</span>
+<span class="nc" id="L790">        PREFIX_AND_SUFFIX(PREFIX, SUFFIX);</span>
+
+        private final String prefix;
+        private final String suffix;
+
+<span class="nc" id="L795">        Additions(String prefix, String suffix) {</span>
+<span class="nc" id="L796">            this.prefix = prefix;</span>
+<span class="nc" id="L797">            this.suffix = suffix;</span>
+<span class="nc" id="L798">        }</span>
+
+        String around(String body) {
+<span class="nc" id="L801">            return prefix + body + suffix;</span>
+        }
+    }
+
+    /// Edits that make the recorded generated body unusable for an automatic migration.
+<span class="nc" id="L806">    enum Customization {</span>
+<span class="nc" id="L807">        INTERNAL_EDIT(</span>
+<span class="nc" id="L808">                body -&gt; body.replace(&quot;## Trello Comments&quot;, &quot;## Trello Comments (read twice)&quot;), Customization.EDITED),</span>
+<span class="nc" id="L809">        REORDERED_TEXT(body -&gt; body.substring(GENERATED_TITLE.length()) + GENERATED_TITLE, Customization.EDITED),</span>
+<span class="nc" id="L810">        DELETED_TEXT(body -&gt; body.replace(&quot;## Trello Comments&quot;, &quot;&quot;), Customization.EDITED),</span>
+<span class="nc" id="L811">        DUPLICATE_GENERATED_BODY(body -&gt; body + &quot;\n&quot; + body, &quot;appears more than once&quot;);</span>
+
+        private static final String EDITED = &quot;was edited, reordered, or partly removed&quot;;
+
+        private final UnaryOperator&lt;String&gt; edit;
+        private final String description;
+
+<span class="nc" id="L818">        Customization(UnaryOperator&lt;String&gt; edit, String description) {</span>
+<span class="nc" id="L819">            this.edit = edit;</span>
+<span class="nc" id="L820">            this.description = description;</span>
+<span class="nc" id="L821">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

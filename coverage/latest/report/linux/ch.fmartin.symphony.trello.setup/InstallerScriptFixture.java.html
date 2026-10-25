@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstallerScriptFixture.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">InstallerScriptFixture.java</span></div><h1>InstallerScriptFixture.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.fmartin.symphony.trello.testsupport.CapturedStreams;
+import com.google.common.base.Splitter;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -13,396 +16,702 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 final class InstallerScriptFixture {
+    static final String TRELLO_KEY_PROMPT = &quot;Trello API key: &quot;;
+    static final String TRELLO_TOKEN_PROMPT = &quot;Trello API token: &quot;;
+    static final String TRELLO_BOARD_PROMPT = &quot;Trello board name: &quot;;
     private static final int PROCESS_DESCENDANT_DISCOVERY_MILLIS = 1_000;
     private static final int PROCESS_TERMINATION_SECONDS = 5;
+    private static final int PROCESS_STOP_SECONDS = 5;
+    private static final int PROCESS_STOP_POLL_MILLIS = 10;
+<span class="nc" id="L39">    private static final Splitter PS_LINES =</span>
+<span class="nc" id="L40">            Splitter.onPattern(&quot;\\R&quot;).trimResults().omitEmptyStrings();</span>
+    private static final int PROCESS_TIMEOUT_SECONDS = 60;
     private static final int TEMP_FILE_DELETION_SECONDS = 5;
+    static final String FAKE_SLOW_TERM_DELAYED = &quot;true&quot;;
+    static final String FAKE_SLOW_TERM_UNTIL_KILLED = &quot;until-killed&quot;;
+    // The real start returns once the worker is healthy; the fake start waits this long for jar-start.
+    static final int FAKE_WORKER_READY_SECONDS = 30;
+<span class="nc" id="L47">    private static final String FAKE_WORKER_TERM_HANDLER = singleQuoteFree(</span>
+            &quot;&quot;&quot;
+            fake_worker_on_term() {
+              echo &quot;jar-term-received pid=$$&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+              if [[ &quot;${SYMPHONY_FAKE_SLOW_TERM:-}&quot; == &quot;%s&quot; ]]; then sleep 2; fi
+              if [[ -d &quot;$app_home&quot; ]]; then
+                echo &quot;app-present-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+              else
+                echo &quot;app-missing-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+              fi
+              if [[ &quot;${SYMPHONY_FAKE_SLOW_TERM:-}&quot; == &quot;%s&quot; ]]; then
+                while true; do sleep 1; done
+              fi
+              echo &quot;jar-stopped&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+              exit 0
+            }
+            trap fake_worker_on_term TERM
+            &quot;&quot;&quot;
+<span class="nc" id="L65">                    .formatted(FAKE_SLOW_TERM_DELAYED, FAKE_SLOW_TERM_UNTIL_KILLED));</span>
     private static final String REPOSITORY_ENVIRONMENT_PREFIX = &quot;SYMPHONY_&quot;;
-<span class="nc" id="L30">    private static final Pattern POSIX_INSTALLER_DEFAULT_VERSION =</span>
-<span class="nc" id="L31">            Pattern.compile(&quot;(?m)^DEFAULT_VERSION=\&quot;([^\&quot;]+)\&quot; # x-release-please-version$&quot;);</span>
+    /// The installers decide whether to color their output from these variables. Tests start without
+    /// the developer's or CI runner's values so a transcript does not depend on the host terminal.
+<span class="nc" id="L69">    static final List&lt;String&gt; OUTPUT_COLOR_CONTROLS = List.of(&quot;NO_COLOR&quot;, &quot;CLICOLOR&quot;, &quot;CLICOLOR_FORCE&quot;, &quot;TERM&quot;);</span>
+<span class="nc" id="L70">    private static final Pattern POSIX_INSTALLER_DEFAULT_VERSION =</span>
+<span class="nc" id="L71">            Pattern.compile(&quot;(?m)^DEFAULT_VERSION=\&quot;([^\&quot;]+)\&quot; # x-release-please-version$&quot;);</span>
 
     private InstallerScriptFixture() {}
 
     static void writeExecutable(Path path, String content) throws IOException {
-<span class="nc" id="L36">        Files.writeString(path, content);</span>
-<span class="nc" id="L37">        path.toFile().setExecutable(true);</span>
-<span class="nc" id="L38">    }</span>
+<span class="nc" id="L76">        Files.writeString(path, content);</span>
+<span class="nc" id="L77">        path.toFile().setExecutable(true);</span>
+<span class="nc" id="L78">    }</span>
 
     static void writeCommandProxy(Path directory, String name, String target) throws IOException {
-<span class="nc" id="L41">        writeExecutable(</span>
-<span class="nc" id="L42">                directory.resolve(name),</span>
+<span class="nc" id="L81">        writeExecutable(</span>
+<span class="nc" id="L82">                directory.resolve(name),</span>
                 &quot;&quot;&quot;
                 #!/bin/sh
                 exec %s &quot;$@&quot;
-<span class="nc" id="L46">                &quot;&quot;&quot;.formatted(target));</span>
-<span class="nc" id="L47">    }</span>
+<span class="nc" id="L86">                &quot;&quot;&quot;.formatted(target));</span>
+<span class="nc" id="L87">    }</span>
 
-    static ProcessResult runWithPseudoTerminal(Map&lt;String, String&gt; environment, String input, String command)
+    static PseudoTerminalResult runWithPseudoTerminal(Map&lt;String, String&gt; environment, String input, String command)
             throws IOException, InterruptedException {
-<span class="nc" id="L51">        var processBuilder = new ProcessBuilder(&quot;script&quot;, &quot;-q&quot;, &quot;-e&quot;, &quot;-c&quot;, command, &quot;/dev/null&quot;);</span>
-<span class="nc" id="L52">        return runWithTestEnvironment(environment, processBuilder, input);</span>
+<span class="nc" id="L91">        ProcessResult session = runWithTestEnvironment(environment, pseudoTerminalProcess(command), input);</span>
+<span class="nc" id="L92">        return PseudoTerminalResult.from(session);</span>
+    }
+
+    /// Runs `command` in a pseudo-terminal and types each response only after its prompt appeared,
+    /// the way a person answers prompts. Unlike [#runWithPseudoTerminal], which writes all input
+    /// before the command starts, the terminal echo of each answer then follows its prompt, so the
+    /// transcript order does not depend on scheduling.
+    static PseudoTerminalResult runPseudoTerminalDialog(
+            HostEnvironment hostEnvironment,
+            Map&lt;String, String&gt; environment,
+            Path workingDirectory,
+            String command,
+            List&lt;TerminalAnswer&gt; answers)
+            throws IOException, InterruptedException {
+<span class="nc" id="L106">        ProcessBuilder processBuilder = pseudoTerminalProcess(command);</span>
+<span class="nc" id="L107">        processBuilder.directory(workingDirectory.toFile());</span>
+<span class="nc" id="L108">        hostEnvironment.applyTo(processBuilder);</span>
+<span class="nc" id="L109">        try (AppliedTestEnvironment ignored = applyTestEnvironment(processBuilder, environment)) {</span>
+<span class="nc" id="L110">            return PseudoTerminalResult.from(runDialog(processBuilder, answers, PROCESS_TIMEOUT_SECONDS));</span>
+        }
+    }
+
+    private static ProcessBuilder pseudoTerminalProcess(String command) {
+<span class="nc" id="L115">        return new ProcessBuilder(&quot;script&quot;, &quot;-q&quot;, &quot;-e&quot;, &quot;-c&quot;, command, &quot;/dev/null&quot;);</span>
     }
 
     static ProcessResult run(Map&lt;String, String&gt; environment, String... command)
             throws IOException, InterruptedException {
-<span class="nc" id="L57">        return run(environment, new ProcessBuilder(command));</span>
+<span class="nc" id="L120">        return run(environment, new ProcessBuilder(command));</span>
     }
 
     static ProcessResult run(Map&lt;String, String&gt; environment, Path workingDirectory, String... command)
             throws IOException, InterruptedException {
-<span class="nc" id="L62">        var processBuilder = new ProcessBuilder(command);</span>
-<span class="nc" id="L63">        processBuilder.directory(workingDirectory.toFile());</span>
-<span class="nc" id="L64">        return run(environment, processBuilder);</span>
+<span class="nc" id="L125">        var processBuilder = new ProcessBuilder(command);</span>
+<span class="nc" id="L126">        processBuilder.directory(workingDirectory.toFile());</span>
+<span class="nc" id="L127">        return run(environment, processBuilder);</span>
     }
 
     static ProcessResult run(Map&lt;String, String&gt; environment, ProcessBuilder processBuilder)
             throws IOException, InterruptedException {
-<span class="nc" id="L69">        return runWithTestEnvironment(environment, processBuilder, &quot;&quot;);</span>
+<span class="nc" id="L132">        return runWithTestEnvironment(environment, processBuilder, &quot;&quot;);</span>
+    }
+
+    static ProcessResult run(
+            HostEnvironment hostEnvironment, Map&lt;String, String&gt; environment, Path workingDirectory, String... command)
+            throws IOException, InterruptedException {
+<span class="nc" id="L138">        var processBuilder = new ProcessBuilder(command);</span>
+<span class="nc" id="L139">        processBuilder.directory(workingDirectory.toFile());</span>
+<span class="nc" id="L140">        hostEnvironment.applyTo(processBuilder);</span>
+<span class="nc" id="L141">        return run(environment, processBuilder);</span>
     }
 
     private static ProcessResult runWithTestEnvironment(
             Map&lt;String, String&gt; environment, ProcessBuilder processBuilder, String input)
             throws IOException, InterruptedException {
-<span class="nc" id="L75">        try (AppliedTestEnvironment ignored = applyTestEnvironment(processBuilder, environment)) {</span>
-<span class="nc" id="L76">            return run(processBuilder, input, 60);</span>
+<span class="nc" id="L147">        try (AppliedTestEnvironment ignored = applyTestEnvironment(processBuilder, environment)) {</span>
+<span class="nc" id="L148">            return run(processBuilder, input, PROCESS_TIMEOUT_SECONDS);</span>
         }
     }
 
     private static AppliedTestEnvironment applyTestEnvironment(
             ProcessBuilder processBuilder, Map&lt;String, String&gt; environment) throws IOException {
-<span class="nc" id="L82">        Map&lt;String, String&gt; processEnvironment = processBuilder.environment();</span>
-<span class="nc" id="L83">        processEnvironment.keySet().removeIf(InstallerScriptFixture::isRepositoryEnvironmentControl);</span>
-<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (!environment.containsKey(&quot;PATH&quot;)) {</span>
-<span class="nc" id="L85">            String inheritedPath = processEnvironment.getOrDefault(&quot;PATH&quot;, &quot;&quot;);</span>
-<span class="nc" id="L86">            String javaBin = Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;).toString();</span>
-<span class="nc" id="L87">            processEnvironment.put(</span>
-<span class="nc bnc" id="L88" title="All 2 branches missed.">                    &quot;PATH&quot;, inheritedPath.isEmpty() ? javaBin : javaBin + File.pathSeparator + inheritedPath);</span>
+<span class="nc" id="L154">        Map&lt;String, String&gt; processEnvironment = processBuilder.environment();</span>
+<span class="nc" id="L155">        processEnvironment.keySet().removeIf(InstallerScriptFixture::isRepositoryEnvironmentControl);</span>
+<span class="nc" id="L156">        processEnvironment.keySet().removeIf(InstallerScriptFixture::isOutputColorControl);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (!environment.containsKey(&quot;PATH&quot;)) {</span>
+<span class="nc" id="L158">            String inheritedPath = processEnvironment.getOrDefault(&quot;PATH&quot;, &quot;&quot;);</span>
+<span class="nc" id="L159">            String javaBin = Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;).toString();</span>
+<span class="nc" id="L160">            processEnvironment.put(</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">                    &quot;PATH&quot;, inheritedPath.isEmpty() ? javaBin : javaBin + File.pathSeparator + inheritedPath);</span>
         }
-<span class="nc bnc" id="L90" title="All 2 branches missed.">        for (String xdgHome : List.of(&quot;XDG_DATA_HOME&quot;, &quot;XDG_CONFIG_HOME&quot;, &quot;XDG_STATE_HOME&quot;, &quot;XDG_CACHE_HOME&quot;)) {</span>
-<span class="nc bnc" id="L91" title="All 2 branches missed.">            if (!environment.containsKey(xdgHome)) {</span>
-<span class="nc" id="L92">                processEnvironment.remove(xdgHome);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        for (String xdgHome : List.of(&quot;XDG_DATA_HOME&quot;, &quot;XDG_CONFIG_HOME&quot;, &quot;XDG_STATE_HOME&quot;, &quot;XDG_CACHE_HOME&quot;)) {</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">            if (!environment.containsKey(xdgHome)) {</span>
+<span class="nc" id="L165">                processEnvironment.remove(xdgHome);</span>
             }
-<span class="nc" id="L94">        }</span>
-<span class="nc" id="L95">        processEnvironment.putAll(environment);</span>
-<span class="nc bnc" id="L96" title="All 4 branches missed.">        if (!environment.containsKey(&quot;SYMPHONY_TRELLO_TEST_OS&quot;) &amp;&amp; isLinux()) {</span>
-<span class="nc" id="L97">            processEnvironment.put(&quot;SYMPHONY_TRELLO_TEST_OS&quot;, &quot;Linux&quot;);</span>
+<span class="nc" id="L167">        }</span>
+<span class="nc" id="L168">        processEnvironment.putAll(environment);</span>
+<span class="nc bnc" id="L169" title="All 4 branches missed.">        if (!environment.containsKey(&quot;SYMPHONY_TRELLO_TEST_OS&quot;) &amp;&amp; isLinux()) {</span>
+<span class="nc" id="L170">            processEnvironment.put(&quot;SYMPHONY_TRELLO_TEST_OS&quot;, &quot;Linux&quot;);</span>
         }
-<span class="nc" id="L99">        applyDeterministicLinuxDistro(processEnvironment);</span>
-<span class="nc" id="L100">        applyDeterministicLinuxFilesystem(processEnvironment);</span>
-<span class="nc" id="L101">        List&lt;Path&gt; cleanupRoots = List.of();</span>
-<span class="nc bnc" id="L102" title="All 4 branches missed.">        if (!environment.containsKey(&quot;HOME&quot;) &amp;&amp; !isWindows()) {</span>
-<span class="nc" id="L103">            String symphonyHome = environment.get(&quot;SYMPHONY_HOME&quot;);</span>
+<span class="nc" id="L172">        applyDeterministicLinuxDistro(processEnvironment);</span>
+<span class="nc" id="L173">        applyDeterministicLinuxFilesystem(processEnvironment);</span>
+<span class="nc" id="L174">        List&lt;Path&gt; cleanupRoots = List.of();</span>
+<span class="nc bnc" id="L175" title="All 4 branches missed.">        if (!environment.containsKey(&quot;HOME&quot;) &amp;&amp; !isWindows()) {</span>
+<span class="nc" id="L176">            String symphonyHome = environment.get(&quot;SYMPHONY_HOME&quot;);</span>
             Path home;
-<span class="nc bnc" id="L105" title="All 4 branches missed.">            Path symphonyHomePath = symphonyHome == null || symphonyHome.isBlank() ? null : Path.of(symphonyHome);</span>
-<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (symphonyHomePath != null</span>
-<span class="nc bnc" id="L107" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.isAbsolute()</span>
-<span class="nc bnc" id="L108" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.getParent() != null</span>
-<span class="nc bnc" id="L109" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.getFileName() != null) {</span>
-<span class="nc" id="L110">                Files.createDirectories(symphonyHomePath.getParent());</span>
-<span class="nc" id="L111">                home = symphonyHomePath.resolveSibling(symphonyHomePath.getFileName() + &quot;-user-home&quot;);</span>
+<span class="nc bnc" id="L178" title="All 4 branches missed.">            Path symphonyHomePath = symphonyHome == null || symphonyHome.isBlank() ? null : Path.of(symphonyHome);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            if (symphonyHomePath != null</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.isAbsolute()</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.getParent() != null</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">                    &amp;&amp; symphonyHomePath.getFileName() != null) {</span>
+<span class="nc" id="L183">                Files.createDirectories(symphonyHomePath.getParent());</span>
+<span class="nc" id="L184">                home = symphonyHomePath.resolveSibling(symphonyHomePath.getFileName() + &quot;-user-home&quot;);</span>
             } else {
-<span class="nc" id="L113">                home = Files.createTempDirectory(&quot;symphony-trello-installer-home-&quot;);</span>
-<span class="nc" id="L114">                cleanupRoots = List.of(home);</span>
+<span class="nc" id="L186">                home = Files.createTempDirectory(&quot;symphony-trello-installer-home-&quot;);</span>
+<span class="nc" id="L187">                cleanupRoots = List.of(home);</span>
             }
-<span class="nc" id="L116">            Files.createDirectories(home);</span>
-<span class="nc" id="L117">            processEnvironment.put(&quot;HOME&quot;, home.toString());</span>
+<span class="nc" id="L189">            Files.createDirectories(home);</span>
+<span class="nc" id="L190">            processEnvironment.put(&quot;HOME&quot;, home.toString());</span>
         }
-<span class="nc" id="L119">        return new AppliedTestEnvironment(cleanupRoots);</span>
+<span class="nc" id="L192">        return new AppliedTestEnvironment(cleanupRoots);</span>
     }
 
     static boolean isRepositoryEnvironmentControl(String name) {
-<span class="nc" id="L123">        return name.regionMatches(true, 0, REPOSITORY_ENVIRONMENT_PREFIX, 0, REPOSITORY_ENVIRONMENT_PREFIX.length());</span>
+<span class="nc" id="L196">        return name.regionMatches(true, 0, REPOSITORY_ENVIRONMENT_PREFIX, 0, REPOSITORY_ENVIRONMENT_PREFIX.length());</span>
+    }
+
+    private static boolean isOutputColorControl(String name) {
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        for (String control : OUTPUT_COLOR_CONTROLS) {</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (control.equalsIgnoreCase(name)) {</span>
+<span class="nc" id="L202">                return true;</span>
+            }
+<span class="nc" id="L204">        }</span>
+<span class="nc" id="L205">        return false;</span>
+    }
+
+    /// Returns `base` with `overrides` applied, for a run that differs from a shared environment only
+    /// in a few variables.
+    static Map&lt;String, String&gt; withEnvironment(Map&lt;String, String&gt; base, Map&lt;String, String&gt; overrides) {
+<span class="nc" id="L211">        Map&lt;String, String&gt; environment = new LinkedHashMap&lt;&gt;(base);</span>
+<span class="nc" id="L212">        environment.putAll(overrides);</span>
+<span class="nc" id="L213">        return environment;</span>
     }
 
     private static void applyDeterministicLinuxDistro(Map&lt;String, String&gt; processEnvironment) {
-<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (!&quot;Linux&quot;.equals(processEnvironment.get(&quot;SYMPHONY_TRELLO_TEST_OS&quot;))) {</span>
-<span class="nc" id="L128">            return;</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        if (!&quot;Linux&quot;.equals(processEnvironment.get(&quot;SYMPHONY_TRELLO_TEST_OS&quot;))) {</span>
+<span class="nc" id="L218">            return;</span>
         }
-<span class="nc" id="L130">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_ID&quot;, &quot;debian&quot;);</span>
-<span class="nc" id="L131">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_ID_LIKE&quot;, &quot;debian&quot;);</span>
-<span class="nc" id="L132">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_PRETTY_NAME&quot;, &quot;Debian GNU/Linux&quot;);</span>
-<span class="nc" id="L133">    }</span>
+<span class="nc" id="L220">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_ID&quot;, &quot;debian&quot;);</span>
+<span class="nc" id="L221">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_ID_LIKE&quot;, &quot;debian&quot;);</span>
+<span class="nc" id="L222">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_OS_PRETTY_NAME&quot;, &quot;Debian GNU/Linux&quot;);</span>
+<span class="nc" id="L223">    }</span>
 
     private static void applyDeterministicLinuxFilesystem(Map&lt;String, String&gt; processEnvironment) {
-<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (!&quot;Linux&quot;.equals(processEnvironment.get(&quot;SYMPHONY_TRELLO_TEST_OS&quot;))) {</span>
-<span class="nc" id="L137">            return;</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">        if (!&quot;Linux&quot;.equals(processEnvironment.get(&quot;SYMPHONY_TRELLO_TEST_OS&quot;))) {</span>
+<span class="nc" id="L227">            return;</span>
         }
-<span class="nc" id="L139">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_HOME_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
-<span class="nc" id="L140">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_ROOT_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
-<span class="nc" id="L141">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_VAR_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
-<span class="nc" id="L142">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_HOME_SIZE_KB&quot;, &quot;1048576&quot;);</span>
-<span class="nc" id="L143">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_VAR_SIZE_KB&quot;, &quot;1048576&quot;);</span>
-<span class="nc" id="L144">    }</span>
+<span class="nc" id="L229">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_HOME_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
+<span class="nc" id="L230">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_ROOT_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
+<span class="nc" id="L231">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_VAR_FS_SOURCE&quot;, &quot;fixture-root&quot;);</span>
+<span class="nc" id="L232">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_HOME_SIZE_KB&quot;, &quot;1048576&quot;);</span>
+<span class="nc" id="L233">        processEnvironment.putIfAbsent(&quot;SYMPHONY_TRELLO_TEST_VAR_SIZE_KB&quot;, &quot;1048576&quot;);</span>
+<span class="nc" id="L234">    }</span>
 
     private static boolean isLinux() {
-<span class="nc" id="L147">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).equalsIgnoreCase(&quot;Linux&quot;);</span>
+<span class="nc" id="L237">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).equalsIgnoreCase(&quot;Linux&quot;);</span>
     }
 
     private static void deleteRecursively(Path root) throws IOException {
-<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (!Files.exists(root)) {</span>
-<span class="nc" id="L152">            return;</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">        if (!Files.exists(root)) {</span>
+<span class="nc" id="L242">            return;</span>
         }
-<span class="nc" id="L154">        Files.walkFileTree(root, new SimpleFileVisitor&lt;&gt;() {</span>
+<span class="nc" id="L244">        Files.walkFileTree(root, new SimpleFileVisitor&lt;&gt;() {</span>
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
-<span class="nc" id="L157">                Files.delete(file);</span>
-<span class="nc" id="L158">                return FileVisitResult.CONTINUE;</span>
+<span class="nc" id="L247">                Files.delete(file);</span>
+<span class="nc" id="L248">                return FileVisitResult.CONTINUE;</span>
             }
 
             @Override
             public FileVisitResult postVisitDirectory(Path directory, IOException failure) throws IOException {
-<span class="nc bnc" id="L163" title="All 2 branches missed.">                if (failure != null) {</span>
-<span class="nc" id="L164">                    throw failure;</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">                if (failure != null) {</span>
+<span class="nc" id="L254">                    throw failure;</span>
                 }
-<span class="nc" id="L166">                Files.delete(directory);</span>
-<span class="nc" id="L167">                return FileVisitResult.CONTINUE;</span>
+<span class="nc" id="L256">                Files.delete(directory);</span>
+<span class="nc" id="L257">                return FileVisitResult.CONTINUE;</span>
             }
         });
-<span class="nc" id="L170">    }</span>
+<span class="nc" id="L260">    }</span>
 
     static ProcessResult run(ProcessBuilder processBuilder, String input, int timeoutSeconds)
             throws IOException, InterruptedException {
-<span class="nc" id="L174">        Path stdout = Files.createTempFile(&quot;symphony-trello-installer-stdout-&quot;, &quot;.log&quot;);</span>
-<span class="nc" id="L175">        Path stderr = null;</span>
-<span class="nc" id="L176">        Path stdin = null;</span>
-<span class="nc" id="L177">        Process process = null;</span>
+<span class="nc" id="L264">        Path stdin = Files.createTempFile(&quot;symphony-trello-installer-stdin-&quot;, &quot;.log&quot;);</span>
         try {
-<span class="nc" id="L179">            stderr = Files.createTempFile(&quot;symphony-trello-installer-stderr-&quot;, &quot;.log&quot;);</span>
-<span class="nc" id="L180">            stdin = Files.createTempFile(&quot;symphony-trello-installer-stdin-&quot;, &quot;.log&quot;);</span>
-<span class="nc" id="L181">            Files.writeString(stdin, input);</span>
-<span class="nc" id="L182">            processBuilder.redirectInput(stdin.toFile());</span>
-<span class="nc" id="L183">            processBuilder.redirectOutput(stdout.toFile());</span>
-<span class="nc" id="L184">            processBuilder.redirectError(stderr.toFile());</span>
-<span class="nc" id="L185">            process = processBuilder.start();</span>
-<span class="nc" id="L186">            boolean completed = process.waitFor(Duration.ofSeconds(timeoutSeconds));</span>
-<span class="nc bnc" id="L187" title="All 2 branches missed.">            if (!completed) {</span>
-<span class="nc" id="L188">                terminateProcessTree(process);</span>
-            }
-<span class="nc" id="L190">            String output = decodeCapturedOutput(stdout) + decodeCapturedOutput(stderr);</span>
-<span class="nc" id="L191">            assertThat(completed)</span>
-<span class="nc" id="L192">                    .as(&quot;process timed out: %s output:%n%s&quot;, processBuilder.command(), output)</span>
-<span class="nc" id="L193">                    .isTrue();</span>
-<span class="nc" id="L194">            return new ProcessResult(process.exitValue(), output);</span>
+<span class="nc" id="L266">            Files.writeString(stdin, input);</span>
+<span class="nc" id="L267">            processBuilder.redirectInput(stdin.toFile());</span>
+<span class="nc" id="L268">            return runCaptured(processBuilder, timeoutSeconds, (process, stdout, deadline) -&gt; {});</span>
         } finally {
-<span class="nc bnc" id="L196" title="All 4 branches missed.">            if (process != null &amp;&amp; process.isAlive()) {</span>
-<span class="nc" id="L197">                terminateProcessTreeImmediately(process);</span>
-            }
-<span class="nc" id="L199">            deleteTempFiles(stdout, stderr, stdin);</span>
+<span class="nc" id="L270">            deleteTempFiles(stdin);</span>
         }
+    }
+
+    private static ProcessResult runDialog(
+            ProcessBuilder processBuilder, List&lt;TerminalAnswer&gt; answers, int timeoutSeconds)
+            throws IOException, InterruptedException {
+<span class="nc" id="L277">        processBuilder.redirectInput(ProcessBuilder.Redirect.PIPE);</span>
+<span class="nc" id="L278">        return runCaptured(processBuilder, timeoutSeconds, (process, stdout, deadline) -&gt; {</span>
+<span class="nc" id="L279">            int answeredUpTo = 0;</span>
+<span class="nc" id="L280">            try (var terminalInput = process.getOutputStream()) {</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">                for (TerminalAnswer answer : answers) {</span>
+<span class="nc" id="L282">                    answeredUpTo = awaitPrompt(process, stdout, answer.prompt(), answeredUpTo, deadline);</span>
+<span class="nc" id="L283">                    terminalInput.write((answer.response() + &quot;\n&quot;).getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L284">                    terminalInput.flush();</span>
+<span class="nc" id="L285">                }</span>
+            }
+<span class="nc" id="L287">        });</span>
+    }
+
+    /// Starts the process with captured stdout and stderr, lets `input` interact with it until the
+    /// deadline, and waits for it to exit. Standard input must already be configured.
+    private static ProcessResult runCaptured(ProcessBuilder processBuilder, int timeoutSeconds, ProcessInput input)
+            throws IOException, InterruptedException {
+<span class="nc" id="L294">        Path stdout = Files.createTempFile(&quot;symphony-trello-installer-stdout-&quot;, &quot;.log&quot;);</span>
+<span class="nc" id="L295">        Path stderr = null;</span>
+<span class="nc" id="L296">        Process process = null;</span>
+        try {
+<span class="nc" id="L298">            stderr = Files.createTempFile(&quot;symphony-trello-installer-stderr-&quot;, &quot;.log&quot;);</span>
+<span class="nc" id="L299">            processBuilder.redirectOutput(stdout.toFile());</span>
+<span class="nc" id="L300">            processBuilder.redirectError(stderr.toFile());</span>
+<span class="nc" id="L301">            process = processBuilder.start();</span>
+<span class="nc" id="L302">            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);</span>
+<span class="nc" id="L303">            input.interact(process, stdout, deadline);</span>
+<span class="nc" id="L304">            boolean completed = process.waitFor(Duration.ofNanos(Math.max(0, deadline - System.nanoTime())));</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">            if (!completed) {</span>
+<span class="nc" id="L306">                terminateProcessTree(process);</span>
+            }
+<span class="nc" id="L308">            String capturedStdout = decodeCapturedOutput(stdout);</span>
+<span class="nc" id="L309">            String capturedStderr = decodeCapturedOutput(stderr);</span>
+<span class="nc" id="L310">            assertThat(completed)</span>
+<span class="nc" id="L311">                    .as(&quot;process timed out: %s output:%n%s%s&quot;, processBuilder.command(), capturedStdout, capturedStderr)</span>
+<span class="nc" id="L312">                    .isTrue();</span>
+<span class="nc" id="L313">            return new ProcessResult(process.exitValue(), capturedStdout, capturedStderr);</span>
+        } finally {
+<span class="nc bnc" id="L315" title="All 4 branches missed.">            if (process != null &amp;&amp; process.isAlive()) {</span>
+<span class="nc" id="L316">                terminateProcessTreeImmediately(process);</span>
+            }
+<span class="nc" id="L318">            deleteTempFiles(stdout, stderr);</span>
+        }
+    }
+
+    @FunctionalInterface
+    private interface ProcessInput {
+        void interact(Process process, Path stdout, long deadlineNanos) throws IOException, InterruptedException;
+    }
+
+    private static int awaitPrompt(Process process, Path transcript, String prompt, int searchFrom, long deadline)
+            throws IOException, InterruptedException {
+        while (true) {
+<span class="nc" id="L330">            String output = decodeCapturedOutput(transcript);</span>
+<span class="nc" id="L331">            int promptStart = output.indexOf(prompt, searchFrom);</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            if (promptStart &gt;= 0) {</span>
+<span class="nc" id="L333">                return promptStart + prompt.length();</span>
+            }
+<span class="nc bnc" id="L335" title="All 4 branches missed.">            if (!process.isAlive() || System.nanoTime() &gt;= deadline) {</span>
+<span class="nc" id="L336">                throw new AssertionError(&quot;terminal never showed the prompt %s; transcript so far:%n%s&quot;</span>
+<span class="nc" id="L337">                        .formatted(shellQuote(prompt), output));</span>
+            }
+<span class="nc" id="L339">            pollDelayForBoundedProcessWait();</span>
+<span class="nc" id="L340">        }</span>
     }
 
     private static void deleteTempFiles(Path... files) throws IOException, InterruptedException {
-<span class="nc" id="L204">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TEMP_FILE_DELETION_SECONDS);</span>
-<span class="nc" id="L205">        Map&lt;Path, IOException&gt; failures = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L344">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TEMP_FILE_DELETION_SECONDS);</span>
+<span class="nc" id="L345">        Map&lt;Path, IOException&gt; failures = new LinkedHashMap&lt;&gt;();</span>
         do {
-<span class="nc" id="L207">            failures.clear();</span>
-<span class="nc bnc" id="L208" title="All 2 branches missed.">            for (Path file : files) {</span>
-<span class="nc bnc" id="L209" title="All 2 branches missed.">                if (file == null) {</span>
-<span class="nc" id="L210">                    continue;</span>
+<span class="nc" id="L347">            failures.clear();</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">            for (Path file : files) {</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                if (file == null) {</span>
+<span class="nc" id="L350">                    continue;</span>
                 }
                 try {
-<span class="nc" id="L213">                    Files.deleteIfExists(file);</span>
-<span class="nc" id="L214">                } catch (IOException exception) {</span>
-<span class="nc" id="L215">                    failures.put(file, exception);</span>
-<span class="nc" id="L216">                }</span>
+<span class="nc" id="L353">                    Files.deleteIfExists(file);</span>
+<span class="nc" id="L354">                } catch (IOException exception) {</span>
+<span class="nc" id="L355">                    failures.put(file, exception);</span>
+<span class="nc" id="L356">                }</span>
             }
-<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (failures.isEmpty()) {</span>
-<span class="nc" id="L219">                return;</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">            if (failures.isEmpty()) {</span>
+<span class="nc" id="L359">                return;</span>
             }
-<span class="nc" id="L221">            pollDelayForBoundedProcessWait();</span>
-<span class="nc bnc" id="L222" title="All 2 branches missed.">        } while (System.nanoTime() &lt; deadline);</span>
+<span class="nc" id="L361">            pollDelayForBoundedProcessWait();</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        } while (System.nanoTime() &lt; deadline);</span>
 
-<span class="nc" id="L224">        var failure = new IOException(&quot;Temporary process files remain locked: &quot; + failures.keySet());</span>
-<span class="nc" id="L225">        failures.values().forEach(failure::addSuppressed);</span>
-<span class="nc" id="L226">        throw failure;</span>
+<span class="nc" id="L364">        var failure = new IOException(&quot;Temporary process files remain locked: &quot; + failures.keySet());</span>
+<span class="nc" id="L365">        failures.values().forEach(failure::addSuppressed);</span>
+<span class="nc" id="L366">        throw failure;</span>
     }
 
     private static String decodeCapturedOutput(Path output) throws IOException {
-<span class="nc" id="L230">        return StandardCharsets.UTF_8</span>
-<span class="nc" id="L231">                .newDecoder()</span>
-<span class="nc" id="L232">                .onMalformedInput(CodingErrorAction.REPLACE)</span>
-<span class="nc" id="L233">                .onUnmappableCharacter(CodingErrorAction.REPLACE)</span>
-<span class="nc" id="L234">                .decode(ByteBuffer.wrap(Files.readAllBytes(output)))</span>
-<span class="nc" id="L235">                .toString();</span>
+<span class="nc" id="L370">        return StandardCharsets.UTF_8</span>
+<span class="nc" id="L371">                .newDecoder()</span>
+<span class="nc" id="L372">                .onMalformedInput(CodingErrorAction.REPLACE)</span>
+<span class="nc" id="L373">                .onUnmappableCharacter(CodingErrorAction.REPLACE)</span>
+<span class="nc" id="L374">                .decode(ByteBuffer.wrap(Files.readAllBytes(output)))</span>
+<span class="nc" id="L375">                .toString();</span>
     }
 
-    private static void terminateProcessTree(Process process) throws InterruptedException {
-<span class="nc" id="L239">        Map&lt;Long, ProcessHandle&gt; observedDescendants = new LinkedHashMap&lt;&gt;();</span>
-<span class="nc" id="L240">        long discoveryDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PROCESS_DESCENDANT_DISCOVERY_MILLIS);</span>
+    private static void terminateProcessTree(Process process) throws IOException, InterruptedException {
+<span class="nc" id="L379">        Map&lt;Long, ProcessHandle&gt; observedDescendants = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (isWindows()) {</span>
+<span class="nc" id="L381">            terminateDescendantsUntilNoneAppear(process, observedDescendants);</span>
+        } else {
+<span class="nc" id="L383">            stopProcessTree(process);</span>
+        }
+<span class="nc" id="L385">        terminateCurrentDescendants(process, observedDescendants);</span>
+<span class="nc" id="L386">        process.destroyForcibly();</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">        for (ProcessHandle descendant : observedDescendants.values()) {</span>
+<span class="nc" id="L388">            descendant.destroyForcibly();</span>
+<span class="nc" id="L389">        }</span>
+<span class="nc" id="L390">        long terminationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(PROCESS_TERMINATION_SECONDS);</span>
+<span class="nc bnc" id="L391" title="All 4 branches missed.">        while ((process.isAlive() || observedDescendants.values().stream().anyMatch(ProcessHandle::isAlive))</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">                &amp;&amp; System.nanoTime() &lt; terminationDeadline) {</span>
+<span class="nc" id="L393">            pollDelayForBoundedProcessWait();</span>
+        }
+<span class="nc bnc" id="L395" title="All 4 branches missed.">        assertThat(process.isAlive() || observedDescendants.values().stream().anyMatch(ProcessHandle::isAlive))</span>
+<span class="nc" id="L396">                .as(&quot;timed-out process tree terminates: root pid %s&quot;, process.pid())</span>
+<span class="nc" id="L397">                .isFalse();</span>
+<span class="nc" id="L398">    }</span>
+
+    /// Sends SIGSTOP to the root and to every descendant before any of them is terminated, on Linux and
+    /// macOS. A running process can start a child between a descendant scan and its own termination,
+    /// for example from a `CHLD` trap that replaces a terminated child, and once that process dies the
+    /// kernel moves the new child out of the tree where no later scan finds it. A stopped process starts
+    /// no child and runs no trap. The fixture waits until `ps` reports each signalled process as stopped
+    /// before it scans again, because a process can still finish a fork after `kill` returns. The scan
+    /// after the last stop therefore sees every process the tree contains. See ADR 0129.
+    static void stopProcessTree(Process process) throws IOException, InterruptedException {
+<span class="nc" id="L408">        Set&lt;Long&gt; stoppedPids = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L409">        List&lt;ProcessHandle&gt; unstopped = List.of(process.toHandle());</span>
+<span class="nc" id="L410">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(PROCESS_STOP_SECONDS);</span>
+<span class="nc bnc" id="L411" title="All 4 branches missed.">        while (!unstopped.isEmpty() &amp;&amp; System.nanoTime() &lt; deadline) {</span>
+<span class="nc" id="L412">            runProcessHelper(command(List.of(&quot;kill&quot;, &quot;-s&quot;, &quot;STOP&quot;), pidArguments(unstopped)));</span>
+<span class="nc" id="L413">            awaitStopped(unstopped, deadline);</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">            for (ProcessHandle stopped : unstopped) {</span>
+<span class="nc" id="L415">                stoppedPids.add(stopped.pid());</span>
+<span class="nc" id="L416">            }</span>
+<span class="nc" id="L417">            unstopped = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L418" title="All 2 branches missed.">            for (ProcessHandle descendant : process.descendants().toList()) {</span>
+<span class="nc bnc" id="L419" title="All 2 branches missed.">                if (!stoppedPids.contains(descendant.pid())) {</span>
+<span class="nc" id="L420">                    unstopped.add(descendant);</span>
+                }
+<span class="nc" id="L422">            }</span>
+        }
+<span class="nc" id="L424">    }</span>
+
+    private static void awaitStopped(List&lt;ProcessHandle&gt; processes, long deadline)
+            throws IOException, InterruptedException {
+<span class="nc" id="L428">        String pids = String.join(&quot;,&quot;, pidArguments(processes));</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        while (!allListedProcessesStopped(runProcessHelper(List.of(&quot;ps&quot;, &quot;-o&quot;, &quot;stat=&quot;, &quot;-p&quot;, pids)))</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                &amp;&amp; System.nanoTime() &lt; deadline) {</span>
+<span class="nc" id="L431">            Thread.sleep(PROCESS_STOP_POLL_MILLIS);</span>
+        }
+<span class="nc" id="L433">    }</span>
+
+    /// `ps` prints no line for a process that exited and was reaped. `T` is a stopped process, `Z` one
+    /// that exited while its stopped parent cannot reap it; neither can start a child.
+    private static boolean allListedProcessesStopped(String psStates) {
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        for (String state : PS_LINES.split(psStates)) {</span>
+<span class="nc bnc" id="L439" title="All 4 branches missed.">            if (!state.startsWith(&quot;T&quot;) &amp;&amp; !state.startsWith(&quot;Z&quot;)) {</span>
+<span class="nc" id="L440">                return false;</span>
+            }
+<span class="nc" id="L442">        }</span>
+<span class="nc" id="L443">        return true;</span>
+    }
+
+    private static String[] pidArguments(List&lt;ProcessHandle&gt; processes) {
+<span class="nc" id="L447">        String[] pids = new String[processes.size()];</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">        for (int index = 0; index &lt; pids.length; index++) {</span>
+<span class="nc" id="L449">            pids[index] = Long.toString(processes.get(index).pid());</span>
+        }
+<span class="nc" id="L451">        return pids;</span>
+    }
+
+    /// Runs `kill` or `ps` and returns its standard output. Both exit non-zero when a listed process
+    /// already exited, and still handle the others, so the exit code is ignored.
+    private static String runProcessHelper(List&lt;String&gt; command) throws IOException, InterruptedException {
+<span class="nc" id="L457">        Path output = Files.createTempFile(&quot;symphony-trello-process-helper-&quot;, &quot;.log&quot;);</span>
+        try {
+<span class="nc" id="L459">            Process helper = new ProcessBuilder(command)</span>
+<span class="nc" id="L460">                    .redirectOutput(output.toFile())</span>
+<span class="nc" id="L461">                    .redirectError(ProcessBuilder.Redirect.DISCARD)</span>
+<span class="nc" id="L462">                    .start();</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">            if (!helper.waitFor(Duration.ofSeconds(PROCESS_STOP_SECONDS))) {</span>
+<span class="nc" id="L464">                helper.destroyForcibly();</span>
+            }
+<span class="nc" id="L466">            return Files.readString(output);</span>
+        } finally {
+<span class="nc" id="L468">            Files.deleteIfExists(output);</span>
+        }
+    }
+
+    /// Windows offers no stop signal, so this best-effort loop terminates descendants until a scan finds
+    /// none or the discovery window closes. A process that starts a child after the last scan can still
+    /// leave that child running.
+    private static void terminateDescendantsUntilNoneAppear(
+            Process process, Map&lt;Long, ProcessHandle&gt; observedDescendants) throws InterruptedException {
+<span class="nc" id="L477">        long discoveryDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PROCESS_DESCENDANT_DISCOVERY_MILLIS);</span>
         List&lt;ProcessHandle&gt; currentDescendants;
         do {
-<span class="nc" id="L243">            currentDescendants = terminateCurrentDescendants(process, observedDescendants);</span>
-<span class="nc bnc" id="L244" title="All 2 branches missed.">            if (currentDescendants.isEmpty()) {</span>
-<span class="nc" id="L245">                break;</span>
+<span class="nc" id="L480">            currentDescendants = terminateCurrentDescendants(process, observedDescendants);</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">            if (currentDescendants.isEmpty()) {</span>
+<span class="nc" id="L482">                break;</span>
             }
-<span class="nc" id="L247">            pollDelayForBoundedProcessWait();</span>
-<span class="nc bnc" id="L248" title="All 4 branches missed.">        } while (process.isAlive() &amp;&amp; System.nanoTime() &lt; discoveryDeadline);</span>
-<span class="nc" id="L249">        terminateCurrentDescendants(process, observedDescendants);</span>
-<span class="nc" id="L250">        process.destroyForcibly();</span>
-<span class="nc bnc" id="L251" title="All 2 branches missed.">        for (ProcessHandle descendant : observedDescendants.values()) {</span>
-<span class="nc" id="L252">            descendant.destroyForcibly();</span>
-<span class="nc" id="L253">        }</span>
-<span class="nc" id="L254">        long terminationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(PROCESS_TERMINATION_SECONDS);</span>
-<span class="nc bnc" id="L255" title="All 4 branches missed.">        while ((process.isAlive() || observedDescendants.values().stream().anyMatch(ProcessHandle::isAlive))</span>
-<span class="nc bnc" id="L256" title="All 2 branches missed.">                &amp;&amp; System.nanoTime() &lt; terminationDeadline) {</span>
-<span class="nc" id="L257">            pollDelayForBoundedProcessWait();</span>
-        }
-<span class="nc bnc" id="L259" title="All 4 branches missed.">        assertThat(process.isAlive() || observedDescendants.values().stream().anyMatch(ProcessHandle::isAlive))</span>
-<span class="nc" id="L260">                .as(&quot;timed-out process tree terminates: root pid %s&quot;, process.pid())</span>
-<span class="nc" id="L261">                .isFalse();</span>
-<span class="nc" id="L262">    }</span>
+<span class="nc" id="L484">            pollDelayForBoundedProcessWait();</span>
+<span class="nc bnc" id="L485" title="All 4 branches missed.">        } while (process.isAlive() &amp;&amp; System.nanoTime() &lt; discoveryDeadline);</span>
+<span class="nc" id="L486">    }</span>
 
     private static List&lt;ProcessHandle&gt; terminateCurrentDescendants(
             Process process, Map&lt;Long, ProcessHandle&gt; observedDescendants) {
-<span class="nc" id="L266">        List&lt;ProcessHandle&gt; currentDescendants = process.descendants().toList();</span>
-<span class="nc bnc" id="L267" title="All 2 branches missed.">        for (ProcessHandle descendant : currentDescendants.reversed()) {</span>
-<span class="nc" id="L268">            observedDescendants.put(descendant.pid(), descendant);</span>
-<span class="nc" id="L269">            descendant.destroyForcibly();</span>
-<span class="nc" id="L270">        }</span>
-<span class="nc" id="L271">        return currentDescendants;</span>
+<span class="nc" id="L490">        List&lt;ProcessHandle&gt; currentDescendants = process.descendants().toList();</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">        for (ProcessHandle descendant : currentDescendants.reversed()) {</span>
+<span class="nc" id="L492">            observedDescendants.put(descendant.pid(), descendant);</span>
+<span class="nc" id="L493">            descendant.destroyForcibly();</span>
+<span class="nc" id="L494">        }</span>
+<span class="nc" id="L495">        return currentDescendants;</span>
     }
 
-    private static void terminateProcessTreeImmediately(Process process) {
-<span class="nc" id="L275">        List&lt;ProcessHandle&gt; descendants = process.descendants().toList();</span>
-<span class="nc" id="L276">        descendants.reversed().forEach(ProcessHandle::destroyForcibly);</span>
-<span class="nc" id="L277">        process.destroyForcibly();</span>
-<span class="nc" id="L278">    }</span>
+    static void terminateProcessTreeImmediately(Process process) {
+<span class="nc" id="L499">        List&lt;ProcessHandle&gt; descendants = process.descendants().toList();</span>
+<span class="nc" id="L500">        descendants.reversed().forEach(ProcessHandle::destroyForcibly);</span>
+<span class="nc" id="L501">        process.destroyForcibly();</span>
+<span class="nc" id="L502">    }</span>
 
     static Path singleFile(Path directory, String suffix) throws IOException {
-<span class="nc" id="L281">        try (Stream&lt;Path&gt; files = Files.list(directory)) {</span>
-<span class="nc" id="L282">            return files.filter(path -&gt; path.getFileName().toString().endsWith(suffix))</span>
-<span class="nc" id="L283">                    .reduce((first, second) -&gt; {</span>
-<span class="nc" id="L284">                        throw new IllegalStateException(&quot;Expected one &quot; + suffix + &quot; file, found at least two&quot;);</span>
+<span class="nc" id="L505">        try (Stream&lt;Path&gt; files = Files.list(directory)) {</span>
+<span class="nc" id="L506">            return files.filter(path -&gt; path.getFileName().toString().endsWith(suffix))</span>
+<span class="nc" id="L507">                    .reduce((first, second) -&gt; {</span>
+<span class="nc" id="L508">                        throw new IllegalStateException(&quot;Expected one &quot; + suffix + &quot; file, found at least two&quot;);</span>
                     })
-<span class="nc" id="L286">                    .orElseThrow(() -&gt; new IllegalStateException(&quot;Expected one &quot; + suffix + &quot; file in &quot; + directory));</span>
+<span class="nc" id="L510">                    .orElseThrow(() -&gt; new IllegalStateException(&quot;Expected one &quot; + suffix + &quot; file in &quot; + directory));</span>
         }
     }
 
     static List&lt;Path&gt; regularFilesUnder(Path directory) throws IOException {
-<span class="nc bnc" id="L291" title="All 2 branches missed.">        if (!Files.exists(directory)) {</span>
-<span class="nc" id="L292">            return List.of();</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">        if (!Files.exists(directory)) {</span>
+<span class="nc" id="L516">            return List.of();</span>
         }
-<span class="nc" id="L294">        try (Stream&lt;Path&gt; files = Files.walk(directory)) {</span>
-<span class="nc" id="L295">            return files.filter(Files::isRegularFile).toList();</span>
+<span class="nc" id="L518">        try (Stream&lt;Path&gt; files = Files.walk(directory)) {</span>
+<span class="nc" id="L519">            return files.filter(Files::isRegularFile).toList();</span>
         }
     }
 
     static boolean processIsRunning(long pid) throws IOException, InterruptedException {
-<span class="nc bnc" id="L300" title="All 2 branches missed.">        return run(Map.of(), &quot;bash&quot;, &quot;-c&quot;, &quot;kill -0 &quot; + pid).exitCode() == 0;</span>
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        return run(Map.of(), &quot;bash&quot;, &quot;-c&quot;, &quot;kill -0 &quot; + pid).exitCode() == 0;</span>
     }
 
     static boolean processStopsWithin(long pid, int timeoutSeconds) throws IOException, InterruptedException {
-<span class="nc" id="L304">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);</span>
-<span class="nc bnc" id="L305" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
-<span class="nc bnc" id="L306" title="All 2 branches missed.">            if (!processIsRunning(pid)) {</span>
-<span class="nc" id="L307">                return true;</span>
+<span class="nc bnc" id="L528" title="All 2 branches missed.">        return holdsWithin(timeoutSeconds, () -&gt; !processIsRunning(pid));</span>
+    }
+
+    static boolean fileContainsWithin(Path file, String text, int timeoutSeconds)
+            throws IOException, InterruptedException {
+<span class="nc" id="L533">        return holdsWithin(</span>
+                timeoutSeconds,
+<span class="nc bnc" id="L535" title="All 4 branches missed.">                () -&gt; Files.exists(file) &amp;&amp; Files.readString(file).contains(text));</span>
+    }
+
+    private static boolean holdsWithin(int timeoutSeconds, PolledCondition condition)
+            throws IOException, InterruptedException {
+<span class="nc" id="L540">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
+<span class="nc bnc" id="L542" title="All 2 branches missed.">            if (condition.holds()) {</span>
+<span class="nc" id="L543">                return true;</span>
             }
-<span class="nc" id="L309">            pollDelayForBoundedProcessWait();</span>
+<span class="nc" id="L545">            pollDelayForBoundedProcessWait();</span>
         }
-<span class="nc bnc" id="L311" title="All 2 branches missed.">        return !processIsRunning(pid);</span>
+<span class="nc" id="L547">        return condition.holds();</span>
+    }
+
+    @FunctionalInterface
+    private interface PolledCondition {
+        boolean holds() throws IOException, InterruptedException;
+    }
+
+    /// The uninstaller's stop contract: it signals the worker, the worker is gone by the time the
+    /// service is disabled, and the worker never sees its app directory removed while stopping. The
+    /// uninstaller disables the service before it removes any installer-managed file, and it prints
+    /// its own STOP line before it sends TERM. The worker's trap only runs once its current sleep
+    /// ends, so a trap log line would not prove the signal on a stalled host. The contract holds
+    /// whether the worker exits on TERM or the uninstaller has to KILL it after its grace.
+    static void assertUninstallStoppedWorkerBeforeDisablingService(
+            ProcessResult uninstall, String uninstallLog, String workerLabel, long workerPid) {
+<span class="nc" id="L563">        assertThat(uninstall.output())</span>
+<span class="nc" id="L564">                .containsSubsequence(</span>
+                        &quot;STOP  &quot; + workerLabel + &quot; pid=&quot; + workerPid + &quot;\n&quot;,
+                        &quot;STOP  user systemd service: symphony-trello.service\n&quot;);
+<span class="nc" id="L567">        assertThat(uninstallLog)</span>
+<span class="nc" id="L568">                .as(&quot;fake tool log during uninstall; uninstall output:%n%s&quot;, uninstall.output())</span>
+<span class="nc" id="L569">                .containsSubsequence(</span>
+                        &quot;systemctl --user disable --now symphony-trello.service\n&quot;,
+                        &quot;systemctl-disable worker pid=&quot; + workerPid + &quot; stopped\n&quot;)
+<span class="nc" id="L572">                .doesNotContain(&quot;systemctl-disable worker pid=&quot; + workerPid + &quot; alive&quot;, &quot;app-missing-before-exit&quot;);</span>
+<span class="nc" id="L573">    }</span>
+
+    // The managed start path embeds the fake worker's TERM handler in a bash -c '...' script.
+    private static String singleQuoteFree(String script) {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">        checkArgument(!script.contains(&quot;'&quot;), &quot;script must not contain a single quote: %s&quot;, script);</span>
+<span class="nc" id="L578">        return script;</span>
+    }
+
+    private static String withPlaceholders(String script, Map&lt;String, String&gt; values) {
+<span class="nc" id="L582">        String filled = script;</span>
+<span class="nc bnc" id="L583" title="All 2 branches missed.">        for (Map.Entry&lt;String, String&gt; value : values.entrySet()) {</span>
+<span class="nc" id="L584">            checkArgument(filled.contains(value.getKey()), &quot;script has no placeholder %s&quot;, value.getKey());</span>
+<span class="nc" id="L585">            filled = filled.replace(value.getKey(), value.getValue());</span>
+<span class="nc" id="L586">        }</span>
+<span class="nc" id="L587">        return filled;</span>
     }
 
     private static void pollDelayForBoundedProcessWait() throws InterruptedException {
-<span class="nc" id="L315">        Thread.sleep(100);</span>
-<span class="nc" id="L316">    }</span>
+<span class="nc" id="L591">        Thread.sleep(100);</span>
+<span class="nc" id="L592">    }</span>
 
     static String shellQuote(String value) {
-<span class="nc" id="L319">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;'\&quot;'\&quot;'&quot;) + &quot;'&quot;;</span>
+<span class="nc" id="L595">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;'\&quot;'\&quot;'&quot;) + &quot;'&quot;;</span>
+    }
+
+    /// Creates a directory that exposes only the named host commands, for a PATH whose output must
+    /// not change with optional tools a host or CI runner happens to have, such as `curl`, `node`,
+    /// or `npm`. A missing command fails the test instead of skipping it, so a runner without it
+    /// cannot silently drop required coverage.
+    static Path hostCommandDirectory(Path directory, List&lt;String&gt; commands) throws IOException {
+<span class="nc" id="L603">        Files.createDirectories(directory);</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">        for (String command : commands) {</span>
+<span class="nc" id="L605">            writeCommandProxy(</span>
+<span class="nc" id="L606">                    directory, command, shellQuote(hostExecutable(command).toString()));</span>
+<span class="nc" id="L607">        }</span>
+<span class="nc" id="L608">        return directory;</span>
+    }
+
+    private static Path hostExecutable(String command) {
+<span class="nc bnc" id="L612" title="All 2 branches missed.">        for (String directory : searchPathEntries(System.getenv().getOrDefault(&quot;PATH&quot;, &quot;&quot;))) {</span>
+<span class="nc" id="L613">            Path candidate = Path.of(directory, command);</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">            if (Files.isExecutable(candidate)) {</span>
+<span class="nc" id="L615">                return candidate;</span>
+            }
+<span class="nc" id="L617">        }</span>
+<span class="nc" id="L618">        throw new IllegalStateException(command + &quot; is required on PATH for this test&quot;);</span>
+    }
+
+    /// Splits a PATH-style search path, ignoring empty entries.
+    static Iterable&lt;String&gt; searchPathEntries(String searchPath) {
+<span class="nc" id="L623">        return Splitter.on(File.pathSeparatorChar).omitEmptyStrings().split(searchPath);</span>
     }
 
     static boolean commandExists(String name) {
         try {
-<span class="nc" id="L324">            Process process = new ProcessBuilder(name, &quot;--version&quot;).start();</span>
-<span class="nc bnc" id="L325" title="All 4 branches missed.">            return process.waitFor(Duration.ofSeconds(10)) &amp;&amp; process.exitValue() == 0;</span>
-<span class="nc" id="L326">        } catch (IOException e) {</span>
-<span class="nc" id="L327">            return false;</span>
-<span class="nc" id="L328">        } catch (InterruptedException e) {</span>
-<span class="nc" id="L329">            Thread.currentThread().interrupt();</span>
-<span class="nc" id="L330">            return false;</span>
+<span class="nc" id="L628">            Process process = new ProcessBuilder(name, &quot;--version&quot;).start();</span>
+<span class="nc bnc" id="L629" title="All 4 branches missed.">            return process.waitFor(Duration.ofSeconds(10)) &amp;&amp; process.exitValue() == 0;</span>
+<span class="nc" id="L630">        } catch (IOException e) {</span>
+<span class="nc" id="L631">            return false;</span>
+<span class="nc" id="L632">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L633">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L634">            return false;</span>
         }
     }
 
     static boolean dockerDaemonIsUsable() {
         try {
-<span class="nc" id="L336">            Process process = new ProcessBuilder(&quot;docker&quot;, &quot;info&quot;, &quot;--format&quot;, &quot;{{.ServerVersion}}&quot;)</span>
-<span class="nc" id="L337">                    .redirectErrorStream(true)</span>
-<span class="nc" id="L338">                    .start();</span>
-<span class="nc" id="L339">            boolean completed = process.waitFor(Duration.ofSeconds(10));</span>
-<span class="nc" id="L340">            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();</span>
-<span class="nc bnc" id="L341" title="All 2 branches missed.">            return completed</span>
-<span class="nc bnc" id="L342" title="All 2 branches missed.">                    &amp;&amp; process.exitValue() == 0</span>
-<span class="nc bnc" id="L343" title="All 2 branches missed.">                    &amp;&amp; !output.isBlank()</span>
-<span class="nc bnc" id="L344" title="All 2 branches missed.">                    &amp;&amp; !output.toLowerCase(Locale.ROOT).contains(&quot;permission denied&quot;);</span>
-<span class="nc" id="L345">        } catch (IOException e) {</span>
-<span class="nc" id="L346">            return false;</span>
-<span class="nc" id="L347">        } catch (InterruptedException e) {</span>
-<span class="nc" id="L348">            Thread.currentThread().interrupt();</span>
-<span class="nc" id="L349">            return false;</span>
+<span class="nc" id="L640">            Process process = new ProcessBuilder(&quot;docker&quot;, &quot;info&quot;, &quot;--format&quot;, &quot;{{.ServerVersion}}&quot;)</span>
+<span class="nc" id="L641">                    .redirectErrorStream(true)</span>
+<span class="nc" id="L642">                    .start();</span>
+<span class="nc" id="L643">            boolean completed = process.waitFor(Duration.ofSeconds(10));</span>
+<span class="nc" id="L644">            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();</span>
+<span class="nc bnc" id="L645" title="All 2 branches missed.">            return completed</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">                    &amp;&amp; process.exitValue() == 0</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">                    &amp;&amp; !output.isBlank()</span>
+<span class="nc bnc" id="L648" title="All 2 branches missed.">                    &amp;&amp; !output.toLowerCase(Locale.ROOT).contains(&quot;permission denied&quot;);</span>
+<span class="nc" id="L649">        } catch (IOException e) {</span>
+<span class="nc" id="L650">            return false;</span>
+<span class="nc" id="L651">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L652">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L653">            return false;</span>
         }
     }
 
     static boolean isWindows() {
-<span class="nc" id="L354">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;);</span>
+<span class="nc" id="L658">        return System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;);</span>
     }
 
     static List&lt;String&gt; powershellCommand() {
-<span class="nc" id="L358">        String configured = System.getenv(&quot;SYMPHONY_TRELLO_TEST_PWSH&quot;);</span>
-<span class="nc bnc" id="L359" title="All 4 branches missed.">        if (configured != null &amp;&amp; !configured.isBlank()) {</span>
-<span class="nc" id="L360">            Path command = Path.of(configured);</span>
-<span class="nc bnc" id="L361" title="All 2 branches missed.">            if (Files.isExecutable(command)) {</span>
-<span class="nc" id="L362">                return List.of(command.toString());</span>
+<span class="nc" id="L662">        String configured = System.getenv(&quot;SYMPHONY_TRELLO_TEST_PWSH&quot;);</span>
+<span class="nc bnc" id="L663" title="All 4 branches missed.">        if (configured != null &amp;&amp; !configured.isBlank()) {</span>
+<span class="nc" id="L664">            Path command = Path.of(configured);</span>
+<span class="nc bnc" id="L665" title="All 2 branches missed.">            if (Files.isExecutable(command)) {</span>
+<span class="nc" id="L666">                return List.of(command.toString());</span>
             }
         }
-<span class="nc bnc" id="L365" title="All 2 branches missed.">        if (!isWindows()) {</span>
-<span class="nc" id="L366">            return List.of();</span>
+<span class="nc bnc" id="L669" title="All 2 branches missed.">        if (!isWindows()) {</span>
+<span class="nc" id="L670">            return List.of();</span>
         }
-<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (commandExists(&quot;pwsh&quot;)) {</span>
-<span class="nc" id="L369">            return List.of(&quot;pwsh&quot;);</span>
+<span class="nc bnc" id="L672" title="All 2 branches missed.">        if (commandExists(&quot;pwsh&quot;)) {</span>
+<span class="nc" id="L673">            return List.of(&quot;pwsh&quot;);</span>
         }
-<span class="nc" id="L371">        return List.of();</span>
+<span class="nc" id="L675">        return List.of();</span>
     }
 
     static List&lt;String&gt; command(List&lt;String&gt; executable, String... arguments) {
-<span class="nc" id="L375">        return Stream.concat(executable.stream(), Stream.of(arguments)).toList();</span>
+<span class="nc" id="L679">        return Stream.concat(executable.stream(), Stream.of(arguments)).toList();</span>
     }
 
     static Map&lt;String, String&gt; nonWindowsPowerShellEnvironment() {
-<span class="nc bnc" id="L379" title="All 2 branches missed.">        if (System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;)) {</span>
-<span class="nc" id="L380">            return Map.of();</span>
+<span class="nc bnc" id="L683" title="All 2 branches missed.">        if (System.getProperty(&quot;os.name&quot;, &quot;&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;)) {</span>
+<span class="nc" id="L684">            return Map.of();</span>
         }
-<span class="nc" id="L382">        return Map.of(&quot;SYMPHONY_TRELLO_ALLOW_NON_WINDOWS_PWSH_FOR_TEST&quot;, &quot;1&quot;);</span>
+<span class="nc" id="L686">        return Map.of(&quot;SYMPHONY_TRELLO_ALLOW_NON_WINDOWS_PWSH_FOR_TEST&quot;, &quot;1&quot;);</span>
     }
 
     static String powerShellLiteral(String value) {
-<span class="nc" id="L386">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;''&quot;) + &quot;'&quot;;</span>
+<span class="nc" id="L690">        return &quot;'&quot; + value.replace(&quot;'&quot;, &quot;''&quot;) + &quot;'&quot;;</span>
     }
 
     static String installerDefaultRef() throws IOException {
-<span class="nc" id="L390">        String installScript = Files.readString(Path.of(&quot;install.sh&quot;));</span>
-<span class="nc" id="L391">        return POSIX_INSTALLER_DEFAULT_VERSION</span>
-<span class="nc" id="L392">                .matcher(installScript)</span>
-<span class="nc" id="L393">                .results()</span>
-<span class="nc" id="L394">                .findAny()</span>
-<span class="nc" id="L395">                .map(match -&gt; &quot;v&quot; + match.group(1))</span>
-<span class="nc" id="L396">                .orElseThrow(() -&gt; new IllegalStateException(&quot;install.sh is missing the Release Please default ref&quot;));</span>
+<span class="nc" id="L694">        return &quot;v&quot; + installerDefaultVersion();</span>
+    }
+
+    /// The release version `install.sh` installs by default; Release Please bumps it every release.
+    static String installerDefaultVersion() throws IOException {
+<span class="nc" id="L699">        String installScript = Files.readString(Path.of(&quot;install.sh&quot;));</span>
+<span class="nc" id="L700">        return POSIX_INSTALLER_DEFAULT_VERSION</span>
+<span class="nc" id="L701">                .matcher(installScript)</span>
+<span class="nc" id="L702">                .results()</span>
+<span class="nc" id="L703">                .findAny()</span>
+<span class="nc" id="L704">                .map(match -&gt; match.group(1))</span>
+<span class="nc" id="L705">                .orElseThrow(() -&gt; new IllegalStateException(&quot;install.sh is missing the Release Please default ref&quot;));</span>
     }
 
     static Path createSourceRepository(Path temporaryDirectory) throws Exception {
-<span class="nc" id="L400">        Path repository = temporaryDirectory.resolve(&quot;source&quot;);</span>
-<span class="nc" id="L401">        Files.createDirectories(repository);</span>
-<span class="nc" id="L402">        Files.writeString(repository.resolve(&quot;pom.xml&quot;), &quot;&lt;project /&gt;\n&quot;);</span>
-<span class="nc" id="L403">        Files.writeString(repository.resolve(&quot;WORKFLOW.example.md&quot;), &quot;# Example workflow\n&quot;);</span>
-<span class="nc" id="L404">        Files.writeString(</span>
-<span class="nc" id="L405">                repository.resolve(&quot;mvnw&quot;),</span>
+<span class="nc" id="L709">        Path repository = temporaryDirectory.resolve(&quot;source&quot;);</span>
+<span class="nc" id="L710">        Files.createDirectories(repository);</span>
+<span class="nc" id="L711">        Files.writeString(repository.resolve(&quot;pom.xml&quot;), &quot;&lt;project /&gt;\n&quot;);</span>
+<span class="nc" id="L712">        Files.writeString(repository.resolve(&quot;WORKFLOW.example.md&quot;), &quot;# Example workflow\n&quot;);</span>
+<span class="nc" id="L713">        Files.writeString(</span>
+<span class="nc" id="L714">                repository.resolve(&quot;mvnw&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 set -euo pipefail
@@ -411,18 +720,18 @@ final class InstallerScriptFixture {
                 mkdir -p &quot;$app_home/target/quarkus-app/app&quot; &quot;$app_home/target/quarkus-app/lib/main&quot; &quot;$app_home/target/quarkus-app/quarkus&quot;
                 : &gt; &quot;$app_home/target/quarkus-app/quarkus-run.jar&quot;
                 &quot;&quot;&quot;);
-<span class="nc" id="L414">        repository.resolve(&quot;mvnw&quot;).toFile().setExecutable(true);</span>
-<span class="nc" id="L415">        initializeSourceRepository(repository);</span>
-<span class="nc" id="L416">        return repository;</span>
+<span class="nc" id="L723">        repository.resolve(&quot;mvnw&quot;).toFile().setExecutable(true);</span>
+<span class="nc" id="L724">        initializeSourceRepository(repository);</span>
+<span class="nc" id="L725">        return repository;</span>
     }
 
     static Path createWindowsSourceRepository(Path temporaryDirectory) throws Exception {
-<span class="nc" id="L420">        Path repository = temporaryDirectory.resolve(&quot;windows source&quot;);</span>
-<span class="nc" id="L421">        Files.createDirectories(repository);</span>
-<span class="nc" id="L422">        Files.writeString(repository.resolve(&quot;pom.xml&quot;), &quot;&lt;project /&gt;\n&quot;);</span>
-<span class="nc" id="L423">        Files.writeString(repository.resolve(&quot;WORKFLOW.example.md&quot;), &quot;# Example workflow\n&quot;);</span>
-<span class="nc" id="L424">        Files.writeString(</span>
-<span class="nc" id="L425">                repository.resolve(&quot;mvnw.cmd&quot;),</span>
+<span class="nc" id="L729">        Path repository = temporaryDirectory.resolve(&quot;windows source&quot;);</span>
+<span class="nc" id="L730">        Files.createDirectories(repository);</span>
+<span class="nc" id="L731">        Files.writeString(repository.resolve(&quot;pom.xml&quot;), &quot;&lt;project /&gt;\n&quot;);</span>
+<span class="nc" id="L732">        Files.writeString(repository.resolve(&quot;WORKFLOW.example.md&quot;), &quot;# Example workflow\n&quot;);</span>
+<span class="nc" id="L733">        Files.writeString(</span>
+<span class="nc" id="L734">                repository.resolve(&quot;mvnw.cmd&quot;),</span>
                 &quot;&quot;&quot;
                 @echo off
                 echo mvnw.cmd %* &gt;&gt; &quot;%SYMPHONY_FAKE_LOG%&quot;
@@ -431,51 +740,51 @@ final class InstallerScriptFixture {
                 mkdir target\\quarkus-app\\quarkus 2&gt;nul
                 type nul &gt; target\\quarkus-app\\quarkus-run.jar
                 &quot;&quot;&quot;);
-<span class="nc" id="L434">        initializeSourceRepository(repository);</span>
-<span class="nc" id="L435">        return repository;</span>
+<span class="nc" id="L743">        initializeSourceRepository(repository);</span>
+<span class="nc" id="L744">        return repository;</span>
     }
 
     private static void initializeSourceRepository(Path repository) throws Exception {
-<span class="nc" id="L439">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;init&quot;, &quot;-b&quot;, &quot;main&quot;).assertSuccess();</span>
-<span class="nc" id="L440">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;config&quot;, &quot;user.name&quot;, &quot;Test User&quot;)</span>
-<span class="nc" id="L441">                .assertSuccess();</span>
-<span class="nc" id="L442">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;config&quot;, &quot;user.email&quot;, &quot;test@example.invalid&quot;)</span>
-<span class="nc" id="L443">                .assertSuccess();</span>
-<span class="nc" id="L444">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, &quot;.&quot;).assertSuccess();</span>
-<span class="nc" id="L445">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Initial test source&quot;)</span>
-<span class="nc" id="L446">                .assertSuccess();</span>
-<span class="nc" id="L447">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;tag&quot;, installerDefaultRef())</span>
-<span class="nc" id="L448">                .assertSuccess();</span>
-<span class="nc" id="L449">    }</span>
+<span class="nc" id="L748">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;init&quot;, &quot;-b&quot;, &quot;main&quot;).assertSuccess();</span>
+<span class="nc" id="L749">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;config&quot;, &quot;user.name&quot;, &quot;Test User&quot;)</span>
+<span class="nc" id="L750">                .assertSuccess();</span>
+<span class="nc" id="L751">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;config&quot;, &quot;user.email&quot;, &quot;test@example.invalid&quot;)</span>
+<span class="nc" id="L752">                .assertSuccess();</span>
+<span class="nc" id="L753">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, &quot;.&quot;).assertSuccess();</span>
+<span class="nc" id="L754">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Initial test source&quot;)</span>
+<span class="nc" id="L755">                .assertSuccess();</span>
+<span class="nc" id="L756">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;tag&quot;, installerDefaultRef())</span>
+<span class="nc" id="L757">                .assertSuccess();</span>
+<span class="nc" id="L758">    }</span>
 
     static void addSourceRepositoryCommit(Path repository, String relativePath, String content) throws Exception {
-<span class="nc" id="L452">        Files.writeString(repository.resolve(relativePath), content);</span>
-<span class="nc" id="L453">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, relativePath).assertSuccess();</span>
-<span class="nc" id="L454">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Update test source&quot;)</span>
-<span class="nc" id="L455">                .assertSuccess();</span>
-<span class="nc" id="L456">    }</span>
+<span class="nc" id="L761">        Files.writeString(repository.resolve(relativePath), content);</span>
+<span class="nc" id="L762">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, relativePath).assertSuccess();</span>
+<span class="nc" id="L763">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Update test source&quot;)</span>
+<span class="nc" id="L764">                .assertSuccess();</span>
+<span class="nc" id="L765">    }</span>
 
     static String pinnedRef(Path repository, String refType) throws Exception {
-<span class="nc bnc" id="L459" title="All 3 branches missed.">        return switch (refType) {</span>
+<span class="nc bnc" id="L768" title="All 3 branches missed.">        return switch (refType) {</span>
             case &quot;tag&quot; -&gt; {
-<span class="nc" id="L461">                run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;tag&quot;, &quot;v-test-install&quot;)</span>
-<span class="nc" id="L462">                        .assertSuccess();</span>
-<span class="nc" id="L463">                yield &quot;v-test-install&quot;;</span>
+<span class="nc" id="L770">                run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;tag&quot;, &quot;v-test-install&quot;)</span>
+<span class="nc" id="L771">                        .assertSuccess();</span>
+<span class="nc" id="L772">                yield &quot;v-test-install&quot;;</span>
             }
             case &quot;sha&quot; -&gt; {
-<span class="nc" id="L466">                ProcessResult result = run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;rev-parse&quot;, &quot;HEAD&quot;);</span>
-<span class="nc" id="L467">                result.assertSuccess();</span>
-<span class="nc" id="L468">                yield result.output().trim();</span>
+<span class="nc" id="L775">                ProcessResult result = run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;rev-parse&quot;, &quot;HEAD&quot;);</span>
+<span class="nc" id="L776">                result.assertSuccess();</span>
+<span class="nc" id="L777">                yield result.output().trim();</span>
             }
-<span class="nc" id="L470">            default -&gt; throw new IllegalArgumentException(&quot;Unknown ref type: &quot; + refType);</span>
+<span class="nc" id="L779">            default -&gt; throw new IllegalArgumentException(&quot;Unknown ref type: &quot; + refType);</span>
         };
     }
 
     static Path createFakeToolchain(Path temporaryDirectory) throws IOException {
-<span class="nc" id="L475">        Path fakeBin = temporaryDirectory.resolve(&quot;fake-bin&quot;);</span>
-<span class="nc" id="L476">        Files.createDirectories(fakeBin);</span>
-<span class="nc" id="L477">        writeExecutable(</span>
-<span class="nc" id="L478">                fakeBin.resolve(&quot;codex&quot;),</span>
+<span class="nc" id="L784">        Path fakeBin = temporaryDirectory.resolve(&quot;fake-bin&quot;);</span>
+<span class="nc" id="L785">        Files.createDirectories(fakeBin);</span>
+<span class="nc" id="L786">        writeExecutable(</span>
+<span class="nc" id="L787">                fakeBin.resolve(&quot;codex&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 set -euo pipefail
@@ -490,8 +799,8 @@ final class InstallerScriptFixture {
                 fi
                 exit 0
                 &quot;&quot;&quot;);
-<span class="nc" id="L493">        writeExecutable(</span>
-<span class="nc" id="L494">                fakeBin.resolve(&quot;systemctl&quot;),</span>
+<span class="nc" id="L802">        writeExecutable(</span>
+<span class="nc" id="L803">                fakeBin.resolve(&quot;systemctl&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 set -euo pipefail
@@ -510,13 +819,22 @@ final class InstallerScriptFixture {
                 fi
                 if [[ &quot;$*&quot; == &quot;--user restart symphony-trello.service&quot; &amp;&amp; -n &quot;$command_path&quot; ]]; then
                   &quot;$command_path&quot; start --all
-                elif [[ &quot;$*&quot; == &quot;--user disable --now symphony-trello.service&quot; &amp;&amp; -n &quot;$command_path&quot; ]]; then
-                  &quot;$command_path&quot; stop
+                elif [[ &quot;$*&quot; == &quot;--user disable --now symphony-trello.service&quot; ]]; then
+                  while read -r worker_pid; do
+                    if kill -0 &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1; then
+                      echo &quot;systemctl-disable worker pid=$worker_pid alive&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                    else
+                      echo &quot;systemctl-disable worker pid=$worker_pid stopped&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                    fi
+                  done &lt; &lt;(sed -n 's/^jar-start pid=\\([0-9][0-9]*\\) .*/\\1/p' &quot;${SYMPHONY_FAKE_LOG:?}&quot;)
+                  if [[ -n &quot;$command_path&quot; ]]; then
+                    &quot;$command_path&quot; stop
+                  fi
                 fi
                 exit 0
                 &quot;&quot;&quot;);
-<span class="nc" id="L518">        writeExecutable(</span>
-<span class="nc" id="L519">                fakeBin.resolve(&quot;loginctl&quot;),</span>
+<span class="nc" id="L836">        writeExecutable(</span>
+<span class="nc" id="L837">                fakeBin.resolve(&quot;loginctl&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 set -euo pipefail
@@ -526,8 +844,8 @@ final class InstallerScriptFixture {
                 fi
                 exit 0
                 &quot;&quot;&quot;);
-<span class="nc" id="L529">        writeExecutable(</span>
-<span class="nc" id="L530">                fakeBin.resolve(&quot;java&quot;),</span>
+<span class="nc" id="L847">        writeExecutable(</span>
+<span class="nc" id="L848">                fakeBin.resolve(&quot;java&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 set -euo pipefail
@@ -772,11 +1090,22 @@ final class InstallerScriptFixture {
                         app_home=&quot;$1&quot;
                         workflow=&quot;$2&quot;
                         env_file=&quot;$3&quot;
-                        echo &quot;jar-start cwd=$PWD args=-jar quarkus-run.jar $workflow dotenv=$env_file&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
-                        trap '&quot;'&quot;'if [[ -n &quot;${SYMPHONY_FAKE_SLOW_TERM:-}&quot; ]]; then sleep 2; fi; if [[ -d &quot;$app_home&quot; ]]; then echo &quot;app-present-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; else echo &quot;app-missing-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; fi; echo &quot;jar-stopped&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; exit 0'&quot;'&quot;' TERM
+                        @FAKE_WORKER_TERM_HANDLER@
+                        echo &quot;jar-start pid=$$ cwd=$PWD args=-jar quarkus-run.jar $workflow dotenv=$env_file&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
                         while true; do sleep 1; done
                       ' symphony-worker &quot;$app_home&quot; &quot;$workflow&quot; &quot;$env_file&quot; &quot;-Dsymphony.trello.managed.app_home=$app_home&quot; &quot;$app_home/target/quarkus-app/quarkus-run.jar&quot; &gt;&quot;$log_file&quot; 2&gt;&quot;$log_file.err&quot; &amp;
-	                      echo &quot;$!&quot; &gt; &quot;$pid_file&quot;
+	                      worker_pid=&quot;$!&quot;
+	                      # The real start returns only after the worker passes its health check. Waiting for
+	                      # jar-start means a stop that follows can never reach the worker before its TERM trap.
+	                      ready_deadline=$((SECONDS + @FAKE_WORKER_READY_SECONDS@))
+	                      until grep -q &quot;^jar-start pid=$worker_pid &quot; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; do
+	                        if ! kill -0 &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 || ((SECONDS &gt;= ready_deadline)); then
+	                          echo &quot;Fake worker pid=$worker_pid did not report jar-start&quot; &gt;&amp;2
+	                          exit 1
+	                        fi
+	                        sleep 0.1
+	                      done
+	                      echo &quot;$worker_pid&quot; &gt; &quot;$pid_file&quot;
 	                      echo &quot;Started Symphony for Trello: $workflow&quot;
 	                      echo &quot;Log: $log_file&quot;
 	                      exit 0
@@ -794,11 +1123,23 @@ final class InstallerScriptFixture {
 	                    stop)
 	                      if [[ -f &quot;$pid_file&quot; ]]; then
 	                        worker_pid=&quot;$(cat &quot;$pid_file&quot;)&quot;
+	                        # Same TERM grace and KILL fallback as LocalWorkerManager, so &quot;Stopped&quot; always
+	                        # means the worker is gone and no late TERM-handler output can land after it.
+	                        worker_exits_within() {
+	                          local deadline=$((SECONDS + $1))
+	                          while kill -0 &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 &amp;&amp; ((SECONDS &lt; deadline)); do
+	                            sleep 0.1
+	                          done
+	                          ! kill -0 &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1
+	                        }
 	                        kill &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 || true
-	                        for _ in {1..50}; do
-	                          kill -0 &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 || break
-	                          sleep 0.1
-	                        done
+	                        if ! worker_exits_within @WORKER_STOP_GRACE_SECONDS@; then
+	                          kill -KILL &quot;$worker_pid&quot; &gt;/dev/null 2&gt;&amp;1 || true
+	                          if ! worker_exits_within @WORKER_KILL_WAIT_SECONDS@; then
+	                            echo &quot;Fake worker pid=$worker_pid did not stop&quot; &gt;&amp;2
+	                            exit 1
+	                          fi
+	                        fi
 	                        rm -f &quot;$pid_file&quot;
 	                      fi
 	                      echo &quot;Stopped $display_name&quot;
@@ -842,9 +1183,26 @@ final class InstallerScriptFixture {
                     exit 0
                   fi
                   mkdir -p &quot;$config_dir&quot;
-                  read -r key
-                  read -r token
-                  read -r board
+                  if [[ -t 0 ]] &amp;&amp; command -v stty &gt;/dev/null 2&gt;&amp;1; then
+                    # Like Java's Console.readPassword, hide the echo before showing a secret prompt.
+                    # set -e exits on a failed read; the trap still restores the echo.
+                    trap 'stty echo' EXIT
+                    stty -echo
+                    printf '@TRELLO_KEY_PROMPT@'
+                    IFS= read -r key
+                    printf '\\n'
+                    printf '@TRELLO_TOKEN_PROMPT@'
+                    IFS= read -r token
+                    stty echo
+                    trap - EXIT
+                    printf '\\n'
+                    printf '@TRELLO_BOARD_PROMPT@'
+                    IFS= read -r board
+                  else
+                    read -r key
+                    read -r token
+                    read -r board
+                  fi
                   slug=&quot;$(printf '%s' &quot;$board&quot; | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//')&quot;
                   workflow=&quot;$config_dir/WORKFLOW.${slug:-trello-board}.md&quot;
                   printf 'TRELLO_API_KEY=%s\\nTRELLO_API_TOKEN=%s\\n' &quot;$key&quot; &quot;$token&quot; &gt; &quot;$config_dir/.env&quot;
@@ -859,48 +1217,93 @@ final class InstallerScriptFixture {
                 fi
                 if [[ &quot;$*&quot; == *&quot;-jar &quot;* ]]; then
                   app_home=&quot;$PWD&quot;
-                  echo &quot;jar-start cwd=$PWD args=$* dotenv=${SYMPHONY_TRELLO_DOTENV:-}&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
-                  trap 'if [[ -n &quot;${SYMPHONY_FAKE_SLOW_TERM:-}&quot; ]]; then sleep 2; fi; if [[ -d &quot;$app_home&quot; ]]; then echo &quot;app-present-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; else echo &quot;app-missing-before-exit&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; fi; echo &quot;jar-stopped&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;; exit 0' TERM
+                  @FAKE_WORKER_TERM_HANDLER@
+                  echo &quot;jar-start pid=$$ cwd=$PWD args=$* dotenv=${SYMPHONY_TRELLO_DOTENV:-}&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
                   while true; do sleep 1; done
                 fi
                 echo &quot;java $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
                 exit 0
-                &quot;&quot;&quot;);
-<span class="nc" id="L869">        writeExecutable(</span>
-<span class="nc" id="L870">                fakeBin.resolve(&quot;javac&quot;),</span>
+                &quot;&quot;&quot;
+<span class="nc" id="L1227">                        .transform(script -&gt; withPlaceholders(</span>
+                                script,
+<span class="nc" id="L1229">                                Map.of(</span>
+                                        &quot;@TRELLO_KEY_PROMPT@&quot;,
+                                        TRELLO_KEY_PROMPT,
+                                        &quot;@TRELLO_TOKEN_PROMPT@&quot;,
+                                        TRELLO_TOKEN_PROMPT,
+                                        &quot;@TRELLO_BOARD_PROMPT@&quot;,
+                                        TRELLO_BOARD_PROMPT,
+                                        &quot;@FAKE_WORKER_TERM_HANDLER@&quot;,
+                                        FAKE_WORKER_TERM_HANDLER,
+                                        &quot;@FAKE_WORKER_READY_SECONDS@&quot;,
+<span class="nc" id="L1239">                                        Integer.toString(FAKE_WORKER_READY_SECONDS),</span>
+                                        &quot;@WORKER_STOP_GRACE_SECONDS@&quot;,
+<span class="nc" id="L1241">                                        Long.toString(LocalWorkerManager.WORKER_STOP_GRACE.toSeconds()),</span>
+                                        &quot;@WORKER_KILL_WAIT_SECONDS@&quot;,
+<span class="nc" id="L1243">                                        Long.toString(LocalWorkerManager.WORKER_KILL_WAIT.toSeconds())))));</span>
+<span class="nc" id="L1244">        writeExecutable(</span>
+<span class="nc" id="L1245">                fakeBin.resolve(&quot;javac&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 set -euo pipefail
                 echo 'javac 25.0.1'
                 &quot;&quot;&quot;);
-<span class="nc" id="L876">        return fakeBin;</span>
+<span class="nc" id="L1251">        return fakeBin;</span>
+    }
+
+    static Path createPowerShellSourceRepository(Path temporaryDirectory) throws Exception {
+<span class="nc bnc" id="L1255" title="All 2 branches missed.">        if (isWindows()) {</span>
+<span class="nc" id="L1256">            return createWindowsSourceRepository(temporaryDirectory);</span>
+        }
+<span class="nc" id="L1258">        Path repository = createSourceRepository(temporaryDirectory);</span>
+<span class="nc" id="L1259">        writeExecutable(</span>
+<span class="nc" id="L1260">                repository.resolve(&quot;mvnw.cmd&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                echo &quot;mvnw.cmd $*&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                app_home=&quot;$(cd &quot;$(dirname &quot;$0&quot;)&quot; &amp;&amp; pwd -P)&quot;
+                mkdir -p &quot;$app_home/target/quarkus-app/app&quot; &quot;$app_home/target/quarkus-app/lib/main&quot; &quot;$app_home/target/quarkus-app/quarkus&quot;
+                : &gt; &quot;$app_home/target/quarkus-app/quarkus-run.jar&quot;
+                &quot;&quot;&quot;);
+<span class="nc" id="L1269">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;add&quot;, &quot;mvnw.cmd&quot;).assertSuccess();</span>
+<span class="nc" id="L1270">        run(Map.of(), &quot;git&quot;, &quot;-C&quot;, repository.toString(), &quot;commit&quot;, &quot;-m&quot;, &quot;Add PowerShell test wrapper&quot;)</span>
+<span class="nc" id="L1271">                .assertSuccess();</span>
+<span class="nc" id="L1272">        return repository;</span>
+    }
+
+    static Path createPowerShellFakeToolchain(Path temporaryDirectory) throws IOException {
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">        if (isWindows()) {</span>
+<span class="nc" id="L1277">            return createFakeWindowsToolchain(temporaryDirectory);</span>
+        }
+<span class="nc" id="L1279">        return createFakeToolchain(temporaryDirectory);</span>
     }
 
     static Path createFakeWindowsToolchain(Path temporaryDirectory) throws IOException {
-<span class="nc" id="L880">        Path fakeBin = temporaryDirectory.resolve(&quot;fake-windows-bin&quot;);</span>
-<span class="nc" id="L881">        Files.createDirectories(fakeBin);</span>
-<span class="nc" id="L882">        Files.writeString(</span>
-<span class="nc" id="L883">                fakeBin.resolve(&quot;java.cmd&quot;),</span>
+<span class="nc" id="L1283">        Path fakeBin = temporaryDirectory.resolve(&quot;fake-windows-bin&quot;);</span>
+<span class="nc" id="L1284">        Files.createDirectories(fakeBin);</span>
+<span class="nc" id="L1285">        Files.writeString(</span>
+<span class="nc" id="L1286">                fakeBin.resolve(&quot;java.cmd&quot;),</span>
                 &quot;&quot;&quot;
                 @echo off
                 pwsh -NoProfile -File &quot;%SYMPHONY_FAKE_JAVA%&quot; %*
                 &quot;&quot;&quot;);
-<span class="nc" id="L888">        Files.writeString(</span>
-<span class="nc" id="L889">                fakeBin.resolve(&quot;javac.cmd&quot;),</span>
+<span class="nc" id="L1291">        Files.writeString(</span>
+<span class="nc" id="L1292">                fakeBin.resolve(&quot;javac.cmd&quot;),</span>
                 &quot;&quot;&quot;
                 @echo off
                 echo javac 25.0.1
                 &quot;&quot;&quot;);
-<span class="nc" id="L894">        Files.writeString(</span>
-<span class="nc" id="L895">                fakeBin.resolve(&quot;codex.cmd&quot;),</span>
+<span class="nc" id="L1297">        Files.writeString(</span>
+<span class="nc" id="L1298">                fakeBin.resolve(&quot;codex.cmd&quot;),</span>
                 &quot;&quot;&quot;
                 @echo off
                 if &quot;%1&quot;==&quot;login&quot; if &quot;%2&quot;==&quot;status&quot; exit /b 0
                 echo codex %* &gt;&gt; &quot;%SYMPHONY_FAKE_LOG%&quot;
                 exit /b 0
                 &quot;&quot;&quot;);
-<span class="nc" id="L902">        Files.writeString(</span>
-<span class="nc" id="L903">                fakeBin.resolve(&quot;fake-java.ps1&quot;),</span>
+<span class="nc" id="L1305">        Files.writeString(</span>
+<span class="nc" id="L1306">                fakeBin.resolve(&quot;fake-java.ps1&quot;),</span>
                 &quot;&quot;&quot;
                 if ($args.Count -gt 0 -and $args[0] -eq &quot;-version&quot;) {
                   [Console]::Error.WriteLine('openjdk version &quot;25.0.1&quot; 2026-04-21')
@@ -994,11 +1397,11 @@ final class InstallerScriptFixture {
                 &quot;java $($args -join ' ')&quot; | Add-Content -Path $env:SYMPHONY_FAKE_LOG
                 exit 0
                 &quot;&quot;&quot;);
-<span class="nc" id="L997">        return fakeBin;</span>
+<span class="nc" id="L1400">        return fakeBin;</span>
     }
 
     static List&lt;String[]&gt; installedPicocliHelpCommands() {
-<span class="nc" id="L1001">        return List.of(</span>
+<span class="nc" id="L1404">        return List.of(</span>
                 new String[] {&quot;--help&quot;},
                 new String[] {&quot;--version&quot;},
                 new String[] {&quot;setup-local&quot;, &quot;--help&quot;},
@@ -1016,46 +1419,84 @@ final class InstallerScriptFixture {
     }
 
     static String[] commandWithPrefix(String executable, String[] arguments) {
-<span class="nc" id="L1019">        String[] command = new String[arguments.length + 1];</span>
-<span class="nc" id="L1020">        command[0] = executable;</span>
-<span class="nc" id="L1021">        System.arraycopy(arguments, 0, command, 1, arguments.length);</span>
-<span class="nc" id="L1022">        return command;</span>
+<span class="nc" id="L1422">        String[] command = new String[arguments.length + 1];</span>
+<span class="nc" id="L1423">        command[0] = executable;</span>
+<span class="nc" id="L1424">        System.arraycopy(arguments, 0, command, 1, arguments.length);</span>
+<span class="nc" id="L1425">        return command;</span>
     }
 
     static String[] powerShellFileCommand(String script, String[] arguments) {
-<span class="nc" id="L1026">        String[] command = new String[arguments.length + 4];</span>
-<span class="nc" id="L1027">        command[0] = &quot;pwsh&quot;;</span>
-<span class="nc" id="L1028">        command[1] = &quot;-NoProfile&quot;;</span>
-<span class="nc" id="L1029">        command[2] = &quot;-File&quot;;</span>
-<span class="nc" id="L1030">        command[3] = script;</span>
-<span class="nc" id="L1031">        System.arraycopy(arguments, 0, command, 4, arguments.length);</span>
-<span class="nc" id="L1032">        return command;</span>
+<span class="nc" id="L1429">        String[] command = new String[arguments.length + 4];</span>
+<span class="nc" id="L1430">        command[0] = &quot;pwsh&quot;;</span>
+<span class="nc" id="L1431">        command[1] = &quot;-NoProfile&quot;;</span>
+<span class="nc" id="L1432">        command[2] = &quot;-File&quot;;</span>
+<span class="nc" id="L1433">        command[3] = script;</span>
+<span class="nc" id="L1434">        System.arraycopy(arguments, 0, command, 4, arguments.length);</span>
+<span class="nc" id="L1435">        return command;</span>
     }
 
     static String[] commandPromptCommand(String executable, String[] arguments) {
-<span class="nc" id="L1036">        String commandLine = Stream.concat(Stream.of(executable), Stream.of(arguments))</span>
-<span class="nc" id="L1037">                .map(InstallerScriptFixture::commandPromptLiteral)</span>
-<span class="nc" id="L1038">                .collect(Collectors.joining(&quot; &quot;));</span>
-<span class="nc" id="L1039">        return new String[] {&quot;cmd.exe&quot;, &quot;/d&quot;, &quot;/s&quot;, &quot;/c&quot;, &quot;\&quot;&quot; + commandLine + &quot;\&quot;&quot;};</span>
+<span class="nc" id="L1439">        String commandLine = Stream.concat(Stream.of(executable), Stream.of(arguments))</span>
+<span class="nc" id="L1440">                .map(InstallerScriptFixture::commandPromptLiteral)</span>
+<span class="nc" id="L1441">                .collect(Collectors.joining(&quot; &quot;));</span>
+<span class="nc" id="L1442">        return new String[] {&quot;cmd.exe&quot;, &quot;/d&quot;, &quot;/s&quot;, &quot;/c&quot;, &quot;\&quot;&quot; + commandLine + &quot;\&quot;&quot;};</span>
     }
 
     private static String commandPromptLiteral(String value) {
-<span class="nc" id="L1043">        return &quot;\&quot;&quot; + value.replace(&quot;\&quot;&quot;, &quot;\&quot;\&quot;&quot;) + &quot;\&quot;&quot;;</span>
+<span class="nc" id="L1446">        return &quot;\&quot;&quot; + value.replace(&quot;\&quot;&quot;, &quot;\&quot;\&quot;&quot;) + &quot;\&quot;&quot;;</span>
     }
 
-<span class="nc" id="L1046">    record ProcessResult(int exitCode, String output) {</span>
+    /// A child process whose standard output and standard error were captured separately.
+<span class="nc" id="L1450">    record ProcessResult(int exitCode, String stdout, String stderr) implements CapturedStreams {</span>
+        /// Standard output followed by standard error, for fragment assertions that do not depend
+        /// on stream placement. Use [#stdout()] and [#stderr()] when the stream matters.
+        String output() {
+<span class="nc" id="L1454">            return stdout + stderr;</span>
+        }
+
         void assertSuccess() {
-<span class="nc" id="L1048">            assertThat(exitCode).as(output).isZero();</span>
-<span class="nc" id="L1049">        }</span>
+<span class="nc" id="L1458">            assertThat(exitCode).as(output()).isZero();</span>
+<span class="nc" id="L1459">        }</span>
     }
 
-<span class="nc" id="L1052">    private record AppliedTestEnvironment(List&lt;Path&gt; cleanupRoots) implements AutoCloseable {</span>
+    /// A pseudo-terminal session. The terminal merges standard output, standard error, and the
+    /// echo of typed input into one transcript, so this result has no stream split.
+<span class="nc" id="L1464">    record PseudoTerminalResult(int exitCode, String transcript) {</span>
+        private static PseudoTerminalResult from(ProcessResult session) {
+            // `script` writes the terminal session to its own stdout; its stderr only carries
+            // diagnostics from `script` itself, kept so a harness failure stays visible.
+<span class="nc" id="L1468">            return new PseudoTerminalResult(session.exitCode(), session.stdout() + session.stderr());</span>
+        }
+
+        void assertSuccess() {
+<span class="nc" id="L1472">            assertThat(exitCode).as(transcript).isZero();</span>
+<span class="nc" id="L1473">        }</span>
+    }
+
+    /// One answer typed into a pseudo-terminal after `prompt` appeared.
+<span class="nc" id="L1477">    record TerminalAnswer(String prompt, String response) {}</span>
+
+    /// Whether a child process starts from the test JVM's environment or from an empty one. Use
+    /// [#CLEARED] when output must not depend on the developer's or runner's variables, such as
+    /// locale, terminal type, color settings, shell, or credentials.
+<span class="nc" id="L1482">    enum HostEnvironment {</span>
+<span class="nc" id="L1483">        INHERITED,</span>
+<span class="nc" id="L1484">        CLEARED;</span>
+
+        void applyTo(ProcessBuilder processBuilder) {
+<span class="nc bnc" id="L1487" title="All 2 branches missed.">            if (this == CLEARED) {</span>
+<span class="nc" id="L1488">                processBuilder.environment().clear();</span>
+            }
+<span class="nc" id="L1490">        }</span>
+    }
+
+<span class="nc" id="L1493">    private record AppliedTestEnvironment(List&lt;Path&gt; cleanupRoots) implements AutoCloseable {</span>
         @Override
         public void close() throws IOException {
-<span class="nc bnc" id="L1055" title="All 2 branches missed.">            for (Path cleanupRoot : cleanupRoots) {</span>
-<span class="nc" id="L1056">                deleteRecursively(cleanupRoot);</span>
-<span class="nc" id="L1057">            }</span>
-<span class="nc" id="L1058">        }</span>
+<span class="nc bnc" id="L1496" title="All 2 branches missed.">            for (Path cleanupRoot : cleanupRoots) {</span>
+<span class="nc" id="L1497">                deleteRecursively(cleanupRoot);</span>
+<span class="nc" id="L1498">            }</span>
+<span class="nc" id="L1499">        }</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

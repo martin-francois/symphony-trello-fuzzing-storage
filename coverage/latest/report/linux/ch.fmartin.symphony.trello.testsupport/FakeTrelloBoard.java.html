@@ -1,0 +1,502 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FakeTrelloBoard.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.testsupport</a> &gt; <span class="el_source">FakeTrelloBoard.java</span></div><h1>FakeTrelloBoard.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.testsupport;
+
+import static ch.fmartin.symphony.trello.TestHttpExchange.query;
+
+import ch.fmartin.symphony.trello.TestHttpExchange;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+/// Stateful in-memory Trello board for one fake API server. It keeps lists, cards, labels,
+/// attachments, checklists, and comments, so a test can check the board state that a sequence
+/// of Trello writes leaves behind instead of only the individual requests.
+///
+/// Register it with `server.on(&quot;/1/&quot;, board)`. Requests outside the supported routes answer 404.
+public final class FakeTrelloBoard implements HttpHandler {
+<span class="nc" id="L25">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+
+    private final String boardId;
+<span class="nc" id="L28">    private final List&lt;BoardList&gt; lists = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L29">    private final List&lt;FakeCard&gt; cards = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L30">    private final List&lt;Label&gt; labels = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L31">    private final List&lt;String&gt; requests = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L32">    private final Map&lt;String, Integer&gt; failures = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L33">    private int idCounter = 1;</span>
+
+<span class="nc" id="L35">    public FakeTrelloBoard(String boardId) {</span>
+<span class="nc" id="L36">        this.boardId = boardId;</span>
+<span class="nc" id="L37">    }</span>
+
+    public synchronized FakeTrelloBoard list(String id, String name) {
+<span class="nc" id="L40">        lists.add(new BoardList(id, name, false));</span>
+<span class="nc" id="L41">        return this;</span>
+    }
+
+    public synchronized FakeTrelloBoard label(String id, String name) {
+<span class="nc" id="L45">        labels.add(new Label(id, name, &quot;green&quot;));</span>
+<span class="nc" id="L46">        return this;</span>
+    }
+
+    public synchronized FakeCard card(String id, String shortLink, String name, String listId) {
+<span class="nc" id="L50">        var card = new FakeCard(id, shortLink, name, listId, boardId);</span>
+<span class="nc" id="L51">        cards.add(card);</span>
+<span class="nc" id="L52">        return card;</span>
+    }
+
+    /// Makes the next `count` requests whose `METHOD /path` starts with `requestPrefix` fail with
+    /// HTTP 500 before any state changes.
+    public synchronized FakeTrelloBoard failNext(String requestPrefix, int count) {
+<span class="nc" id="L58">        failures.put(requestPrefix, count);</span>
+<span class="nc" id="L59">        return this;</span>
+    }
+
+    public Optional&lt;FakeCard&gt; cardByName(String name) {
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        for (FakeCard card : cards) {</span>
+<span class="nc bnc" id="L64" title="All 2 branches missed.">            if (card.name.equals(name)) {</span>
+<span class="nc" id="L65">                return Optional.of(card);</span>
+            }
+<span class="nc" id="L67">        }</span>
+<span class="nc" id="L68">        return Optional.empty();</span>
+    }
+
+    /// Cards created through the API, in creation order. Cards a test seeded are not included.
+    public List&lt;FakeCard&gt; createdCards() {
+<span class="nc" id="L73">        List&lt;FakeCard&gt; created = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        for (FakeCard card : cards) {</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">            if (card.createdThroughApi) {</span>
+<span class="nc" id="L76">                created.add(card);</span>
+            }
+<span class="nc" id="L78">        }</span>
+<span class="nc" id="L79">        return created;</span>
+    }
+
+    public List&lt;Label&gt; labels() {
+<span class="nc" id="L83">        return List.copyOf(labels);</span>
+    }
+
+    /// Every request as `METHOD /path`, in arrival order.
+    public List&lt;String&gt; requests() {
+<span class="nc" id="L88">        return List.copyOf(requests);</span>
+    }
+
+    public List&lt;String&gt; writeRequests() {
+<span class="nc" id="L92">        List&lt;String&gt; writes = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        for (String request : requests) {</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            if (!request.startsWith(&quot;GET &quot;)) {</span>
+<span class="nc" id="L95">                writes.add(request);</span>
+            }
+<span class="nc" id="L97">        }</span>
+<span class="nc" id="L98">        return writes;</span>
+    }
+
+    @Override
+    public synchronized void handle(HttpExchange exchange) throws IOException {
+<span class="nc" id="L103">        String method = exchange.getRequestMethod();</span>
+<span class="nc" id="L104">        String path = exchange.getRequestURI().getPath().substring(&quot;/1/&quot;.length());</span>
+<span class="nc" id="L105">        String request = method + &quot; /&quot; + path;</span>
+<span class="nc" id="L106">        requests.add(request);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        for (Map.Entry&lt;String, Integer&gt; failure : failures.entrySet()) {</span>
+<span class="nc bnc" id="L108" title="All 4 branches missed.">            if (request.startsWith(failure.getKey()) &amp;&amp; failure.getValue() &gt; 0) {</span>
+<span class="nc" id="L109">                failure.setValue(failure.getValue() - 1);</span>
+<span class="nc" id="L110">                TestHttpExchange.respond(exchange, 500, &quot;{\&quot;message\&quot;:\&quot;injected failure\&quot;}&quot;);</span>
+<span class="nc" id="L111">                return;</span>
+            }
+<span class="nc" id="L113">        }</span>
+<span class="nc" id="L114">        Map&lt;String, String&gt; query = query(exchange);</span>
+<span class="nc" id="L115">        List&lt;String&gt; segments = Arrays.asList(path.split(&quot;/&quot;));</span>
+<span class="nc" id="L116">        Object response = route(method, segments, query);</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (response == null) {</span>
+<span class="nc" id="L118">            TestHttpExchange.respond(exchange, 404, &quot;{\&quot;message\&quot;:\&quot;not found\&quot;}&quot;);</span>
+<span class="nc" id="L119">            return;</span>
+        }
+<span class="nc" id="L121">        TestHttpExchange.respond(exchange, json(response));</span>
+<span class="nc" id="L122">    }</span>
+
+    private Object route(String method, List&lt;String&gt; segments, Map&lt;String, String&gt; query) {
+<span class="nc" id="L125">        String head = segments.getFirst();</span>
+<span class="nc bnc" id="L126" title="All 6 branches missed.">        return switch (head) {</span>
+<span class="nc" id="L127">            case &quot;boards&quot; -&gt; boardRoute(method, segments);</span>
+<span class="nc bnc" id="L128" title="All 4 branches missed.">            case &quot;labels&quot; -&gt; &quot;POST&quot;.equals(method) &amp;&amp; segments.size() == 1 ? createLabel(query) : null;</span>
+<span class="nc" id="L129">            case &quot;cards&quot; -&gt; cardRoute(method, segments, query);</span>
+<span class="nc" id="L130">            case &quot;checklists&quot; -&gt; checklistRoute(method, segments, query);</span>
+<span class="nc" id="L131">            case &quot;actions&quot; -&gt; actionRoute(method, segments, query);</span>
+<span class="nc" id="L132">            default -&gt; null;</span>
+        };
+    }
+
+    private Object actionRoute(String method, List&lt;String&gt; segments, Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L137" title="All 6 branches missed.">        if (!&quot;PUT&quot;.equals(method) || segments.size() != 3 || !&quot;text&quot;.equals(segments.get(2))) {</span>
+<span class="nc" id="L138">            return null;</span>
+        }
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        for (FakeCard card : cards) {</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            for (int index = 0; index &lt; card.comments.size(); index++) {</span>
+<span class="nc" id="L142">                Comment comment = card.comments.get(index);</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">                if (comment.id().equals(segments.get(1))) {</span>
+<span class="nc" id="L144">                    card.comments.set(index, new Comment(comment.id(), query.get(&quot;value&quot;)));</span>
+<span class="nc" id="L145">                    return Map.of(&quot;id&quot;, comment.id());</span>
+                }
+            }
+<span class="nc" id="L148">        }</span>
+<span class="nc" id="L149">        return null;</span>
+    }
+
+    private Object boardRoute(String method, List&lt;String&gt; segments) {
+<span class="nc bnc" id="L153" title="All 6 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; segments.size() == 2 &amp;&amp; boardId.equals(segments.get(1))) {</span>
+<span class="nc" id="L154">            return Map.of(&quot;id&quot;, boardId, &quot;name&quot;, &quot;Synthetic board&quot;, &quot;closed&quot;, false);</span>
+        }
+<span class="nc bnc" id="L156" title="All 6 branches missed.">        if (!&quot;GET&quot;.equals(method) || segments.size() &lt; 3 || !boardId.equals(segments.get(1))) {</span>
+<span class="nc" id="L157">            return null;</span>
+        }
+<span class="nc" id="L159">        String tail = String.join(&quot;/&quot;, segments.subList(2, segments.size()));</span>
+<span class="nc" id="L160">        List&lt;Object&gt; payload = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L161" title="All 4 branches missed.">        switch (tail) {</span>
+            case &quot;lists&quot; -&gt; {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">                for (BoardList list : lists) {</span>
+<span class="nc" id="L164">                    payload.add(list.json());</span>
+<span class="nc" id="L165">                }</span>
+<span class="nc" id="L166">            }</span>
+            case &quot;labels&quot; -&gt; {
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                for (Label label : labels) {</span>
+<span class="nc" id="L169">                    payload.add(label.json());</span>
+<span class="nc" id="L170">                }</span>
+<span class="nc" id="L171">            }</span>
+            case &quot;cards/open&quot; -&gt; {
+<span class="nc bnc" id="L173" title="All 2 branches missed.">                for (FakeCard card : cards) {</span>
+<span class="nc" id="L174">                    payload.add(card.json());</span>
+<span class="nc" id="L175">                }</span>
+<span class="nc" id="L176">            }</span>
+            default -&gt; {
+<span class="nc" id="L178">                return null;</span>
+            }
+        }
+<span class="nc" id="L181">        return payload;</span>
+    }
+
+    private Object createLabel(Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (!boardId.equals(query.get(&quot;idBoard&quot;))) {</span>
+<span class="nc" id="L186">            return null;</span>
+        }
+<span class="nc" id="L188">        var label = new Label(&quot;label-&quot; + nextId(), query.get(&quot;name&quot;), query.get(&quot;color&quot;));</span>
+<span class="nc" id="L189">        labels.add(label);</span>
+<span class="nc" id="L190">        return label.json();</span>
+    }
+
+    private Object cardRoute(String method, List&lt;String&gt; segments, Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L194" title="All 2 branches missed.">        if (segments.size() == 1) {</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">            return &quot;POST&quot;.equals(method) ? createCard(query) : null;</span>
+        }
+<span class="nc" id="L197">        FakeCard card = null;</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        for (FakeCard candidate : cards) {</span>
+<span class="nc bnc" id="L199" title="All 4 branches missed.">            if (candidate.id.equals(segments.get(1)) || candidate.shortLink.equals(segments.get(1))) {</span>
+<span class="nc" id="L200">                card = candidate;</span>
+            }
+<span class="nc" id="L202">        }</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (card == null) {</span>
+<span class="nc" id="L204">            return null;</span>
+        }
+<span class="nc" id="L206">        String tail = String.join(&quot;/&quot;, segments.subList(2, segments.size()));</span>
+<span class="nc bnc" id="L207" title="All 9 branches missed.">        return switch (method + &quot; &quot; + tail) {</span>
+<span class="nc" id="L208">            case &quot;GET &quot; -&gt; card.json();</span>
+            case &quot;GET attachments&quot; -&gt; {
+<span class="nc" id="L210">                List&lt;Object&gt; payload = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                for (Attachment attachment : card.attachments) {</span>
+<span class="nc" id="L212">                    payload.add(attachment.json());</span>
+<span class="nc" id="L213">                }</span>
+<span class="nc" id="L214">                yield payload;</span>
+            }
+            case &quot;POST attachments&quot; -&gt; {
+<span class="nc" id="L217">                var attachment = new Attachment(&quot;attachment-&quot; + nextId(), query.get(&quot;name&quot;), query.get(&quot;url&quot;));</span>
+<span class="nc" id="L218">                card.attachments.add(attachment);</span>
+<span class="nc" id="L219">                yield List.of(attachment.json());</span>
+            }
+            case &quot;GET checklists&quot; -&gt; {
+<span class="nc" id="L222">                List&lt;Object&gt; payload = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                for (Checklist checklist : card.checklists) {</span>
+<span class="nc" id="L224">                    payload.add(checklist.json());</span>
+<span class="nc" id="L225">                }</span>
+<span class="nc" id="L226">                yield payload;</span>
+            }
+            case &quot;POST checklists&quot; -&gt; {
+<span class="nc" id="L229">                var checklist = new Checklist(&quot;checklist-&quot; + nextId(), query.get(&quot;name&quot;));</span>
+<span class="nc" id="L230">                card.checklists.add(checklist);</span>
+<span class="nc" id="L231">                yield checklist.json();</span>
+            }
+            case &quot;POST idLabels&quot; -&gt; {
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                if (!hasLabel(query.get(&quot;value&quot;))) {</span>
+<span class="nc" id="L235">                    yield null;</span>
+                }
+<span class="nc" id="L237">                card.labelIds.add(query.get(&quot;value&quot;));</span>
+<span class="nc" id="L238">                yield card.labelIds;</span>
+            }
+            case &quot;PUT idList&quot; -&gt; {
+<span class="nc bnc" id="L241" title="All 2 branches missed.">                if (openList(query.get(&quot;value&quot;)) == null) {</span>
+<span class="nc" id="L242">                    yield null;</span>
+                }
+<span class="nc" id="L244">                card.listId = query.get(&quot;value&quot;);</span>
+<span class="nc" id="L245">                yield card.json();</span>
+            }
+            case &quot;POST actions/comments&quot; -&gt; {
+<span class="nc" id="L248">                String actionId = &quot;action-&quot; + nextId();</span>
+<span class="nc" id="L249">                card.comments.addFirst(new Comment(actionId, query.get(&quot;text&quot;)));</span>
+<span class="nc" id="L250">                yield Map.of(&quot;id&quot;, actionId);</span>
+            }
+<span class="nc" id="L252">            default -&gt; null;</span>
+        };
+    }
+
+    private Object createCard(Map&lt;String, String&gt; query) {
+<span class="nc" id="L257">        String listId = query.get(&quot;idList&quot;);</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        if (openList(listId) == null) {</span>
+<span class="nc" id="L259">            return null;</span>
+        }
+<span class="nc" id="L261">        int number = nextId();</span>
+<span class="nc" id="L262">        var card = new FakeCard(&quot;card-&quot; + number, &quot;Fu%06d&quot;.formatted(number), query.get(&quot;name&quot;), listId, boardId);</span>
+<span class="nc" id="L263">        card.description = query.getOrDefault(&quot;desc&quot;, &quot;&quot;);</span>
+<span class="nc" id="L264">        card.createdThroughApi = true;</span>
+<span class="nc" id="L265">        String labelIds = query.get(&quot;idLabels&quot;);</span>
+<span class="nc bnc" id="L266" title="All 4 branches missed.">        if (labelIds != null &amp;&amp; !labelIds.isBlank()) {</span>
+<span class="nc" id="L267">            card.labelIds.addAll(Arrays.asList(labelIds.split(&quot;,&quot;)));</span>
+        }
+<span class="nc" id="L269">        cards.add(card);</span>
+<span class="nc" id="L270">        return card.json();</span>
+    }
+
+    private Object checklistRoute(String method, List&lt;String&gt; segments, Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L274" title="All 6 branches missed.">        if (!&quot;POST&quot;.equals(method) || segments.size() != 3 || !&quot;checkItems&quot;.equals(segments.get(2))) {</span>
+<span class="nc" id="L275">            return null;</span>
+        }
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        for (FakeCard card : cards) {</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            for (Checklist checklist : card.checklists) {</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">                if (checklist.id.equals(segments.get(1))) {</span>
+<span class="nc" id="L280">                    var item = new ChecklistItem(</span>
+<span class="nc" id="L281">                            &quot;item-&quot; + nextId(), query.get(&quot;name&quot;), Boolean.parseBoolean(query.get(&quot;checked&quot;)));</span>
+<span class="nc" id="L282">                    checklist.items.add(item);</span>
+<span class="nc" id="L283">                    return Map.of(&quot;id&quot;, item.id());</span>
+                }
+<span class="nc" id="L285">            }</span>
+<span class="nc" id="L286">        }</span>
+<span class="nc" id="L287">        return null;</span>
+    }
+
+    private boolean hasLabel(String labelId) {
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        for (Label label : labels) {</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">            if (label.id().equals(labelId)) {</span>
+<span class="nc" id="L293">                return true;</span>
+            }
+<span class="nc" id="L295">        }</span>
+<span class="nc" id="L296">        return false;</span>
+    }
+
+    private BoardList openList(String listId) {
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        for (BoardList list : lists) {</span>
+<span class="nc bnc" id="L301" title="All 4 branches missed.">            if (list.id().equals(listId) &amp;&amp; !list.closed()) {</span>
+<span class="nc" id="L302">                return list;</span>
+            }
+<span class="nc" id="L304">        }</span>
+<span class="nc" id="L305">        return null;</span>
+    }
+
+    private int nextId() {
+<span class="nc" id="L309">        int id = idCounter;</span>
+<span class="nc" id="L310">        idCounter = id + 1;</span>
+<span class="nc" id="L311">        return id;</span>
+    }
+
+    private static String json(Object value) {
+        try {
+<span class="nc" id="L316">            return JSON.writeValueAsString(value);</span>
+<span class="nc" id="L317">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L318">            throw new IllegalStateException(e);</span>
+        }
+    }
+
+    public static final class FakeCard {
+        private final String id;
+        private final String shortLink;
+        private final String name;
+<span class="nc" id="L326">        private final List&lt;String&gt; labelIds = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L327">        private final List&lt;Attachment&gt; attachments = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L328">        private final List&lt;Checklist&gt; checklists = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L329">        private final List&lt;Comment&gt; comments = new CopyOnWriteArrayList&lt;&gt;();</span>
+        private final String boardId;
+        private volatile String listId;
+<span class="nc" id="L332">        private volatile String description = &quot;&quot;;</span>
+        private volatile boolean createdThroughApi;
+
+<span class="nc" id="L335">        private FakeCard(String id, String shortLink, String name, String listId, String boardId) {</span>
+<span class="nc" id="L336">            this.boardId = boardId;</span>
+<span class="nc" id="L337">            this.id = id;</span>
+<span class="nc" id="L338">            this.shortLink = shortLink;</span>
+<span class="nc" id="L339">            this.name = name;</span>
+<span class="nc" id="L340">            this.listId = listId;</span>
+<span class="nc" id="L341">        }</span>
+
+        public FakeCard description(String text) {
+<span class="nc" id="L344">            description = text;</span>
+<span class="nc" id="L345">            return this;</span>
+        }
+
+        /// Moves the card the way a person would in the Trello UI.
+        public FakeCard moveTo(String targetListId) {
+<span class="nc" id="L350">            listId = targetListId;</span>
+<span class="nc" id="L351">            return this;</span>
+        }
+
+        public FakeCard attachment(String name, String url) {
+<span class="nc" id="L355">            attachments.add(new Attachment(&quot;attachment-&quot; + id + &quot;-&quot; + attachments.size(), name, url));</span>
+<span class="nc" id="L356">            return this;</span>
+        }
+
+        public FakeCard checklist(String name, String... items) {
+<span class="nc" id="L360">            var checklist = new Checklist(&quot;checklist-&quot; + id + &quot;-&quot; + checklists.size(), name);</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            for (String item : items) {</span>
+<span class="nc" id="L362">                checklist.items.add(new ChecklistItem(&quot;item-&quot; + id + &quot;-&quot; + checklist.items.size(), item, false));</span>
+            }
+<span class="nc" id="L364">            checklists.add(checklist);</span>
+<span class="nc" id="L365">            return this;</span>
+        }
+
+        public String id() {
+<span class="nc" id="L369">            return id;</span>
+        }
+
+        public String shortLink() {
+<span class="nc" id="L373">            return shortLink;</span>
+        }
+
+        public String url() {
+<span class="nc" id="L377">            return &quot;https://trello.com/c/&quot; + shortLink;</span>
+        }
+
+        public String name() {
+<span class="nc" id="L381">            return name;</span>
+        }
+
+        public String description() {
+<span class="nc" id="L385">            return description;</span>
+        }
+
+        public String listId() {
+<span class="nc" id="L389">            return listId;</span>
+        }
+
+        public List&lt;String&gt; labelIds() {
+<span class="nc" id="L393">            return List.copyOf(labelIds);</span>
+        }
+
+        public List&lt;Attachment&gt; attachments() {
+<span class="nc" id="L397">            return List.copyOf(attachments);</span>
+        }
+
+        public List&lt;Checklist&gt; checklists() {
+<span class="nc" id="L401">            return List.copyOf(checklists);</span>
+        }
+
+        public FakeCard comment(String text) {
+<span class="nc" id="L405">            comments.addFirst(new Comment(&quot;comment-&quot; + id + &quot;-&quot; + comments.size(), text));</span>
+<span class="nc" id="L406">            return this;</span>
+        }
+
+        public List&lt;String&gt; comments() {
+<span class="nc" id="L410">            List&lt;String&gt; texts = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">            for (Comment comment : comments) {</span>
+<span class="nc" id="L412">                texts.add(comment.text());</span>
+<span class="nc" id="L413">            }</span>
+<span class="nc" id="L414">            return List.copyOf(texts);</span>
+        }
+
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L418">            Map&lt;String, Object&gt; json = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L419">            json.put(&quot;id&quot;, id);</span>
+<span class="nc" id="L420">            json.put(&quot;shortLink&quot;, shortLink);</span>
+<span class="nc" id="L421">            json.put(&quot;name&quot;, name);</span>
+<span class="nc" id="L422">            json.put(&quot;desc&quot;, description);</span>
+<span class="nc" id="L423">            json.put(&quot;idBoard&quot;, boardId);</span>
+<span class="nc" id="L424">            List&lt;Object&gt; actions = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">            for (Comment comment : comments) {</span>
+<span class="nc" id="L426">                actions.add(Map.of(</span>
+                        &quot;id&quot;,
+<span class="nc" id="L428">                        comment.id(),</span>
+                        &quot;type&quot;,
+                        &quot;commentCard&quot;,
+                        &quot;date&quot;,
+                        &quot;2026-01-01T00:00:00Z&quot;,
+                        &quot;data&quot;,
+<span class="nc" id="L434">                        Map.of(&quot;text&quot;, comment.text())));</span>
+<span class="nc" id="L435">            }</span>
+<span class="nc" id="L436">            json.put(&quot;actions&quot;, actions);</span>
+<span class="nc" id="L437">            json.put(&quot;idList&quot;, listId);</span>
+<span class="nc" id="L438">            json.put(&quot;idLabels&quot;, List.copyOf(labelIds));</span>
+<span class="nc" id="L439">            json.put(&quot;closed&quot;, false);</span>
+<span class="nc" id="L440">            json.put(&quot;url&quot;, url() + &quot;/1-slug&quot;);</span>
+<span class="nc" id="L441">            return json;</span>
+        }
+    }
+
+<span class="nc" id="L445">    private record Comment(String id, String text) {}</span>
+
+<span class="nc" id="L447">    public record BoardList(String id, String name, boolean closed) {</span>
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L449">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, name, &quot;closed&quot;, closed, &quot;pos&quot;, 1);</span>
+        }
+    }
+
+<span class="nc" id="L453">    public record Label(String id, String name, String color) {</span>
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L455">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, name, &quot;color&quot;, color);</span>
+        }
+    }
+
+<span class="nc" id="L459">    public record Attachment(String id, String name, String url) {</span>
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L461">            Map&lt;String, Object&gt; json = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L462">            json.put(&quot;id&quot;, id);</span>
+<span class="nc bnc" id="L463" title="All 2 branches missed.">            json.put(&quot;name&quot;, name == null ? &quot;&quot; : name);</span>
+<span class="nc" id="L464">            json.put(&quot;url&quot;, url);</span>
+<span class="nc" id="L465">            return json;</span>
+        }
+    }
+
+    public static final class Checklist {
+        private final String id;
+        private final String name;
+<span class="nc" id="L472">        private final List&lt;ChecklistItem&gt; items = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L474">        private Checklist(String id, String name) {</span>
+<span class="nc" id="L475">            this.id = id;</span>
+<span class="nc" id="L476">            this.name = name;</span>
+<span class="nc" id="L477">        }</span>
+
+        public String name() {
+<span class="nc" id="L480">            return name;</span>
+        }
+
+        public List&lt;ChecklistItem&gt; items() {
+<span class="nc" id="L484">            return List.copyOf(items);</span>
+        }
+
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L488">            List&lt;Object&gt; checkItems = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L489" title="All 2 branches missed.">            for (ChecklistItem item : items) {</span>
+<span class="nc" id="L490">                checkItems.add(item.json());</span>
+<span class="nc" id="L491">            }</span>
+<span class="nc" id="L492">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, name, &quot;checkItems&quot;, checkItems);</span>
+        }
+    }
+
+<span class="nc" id="L496">    public record ChecklistItem(String id, String name, boolean complete) {</span>
+        private Map&lt;String, Object&gt; json() {
+<span class="nc bnc" id="L498" title="All 2 branches missed.">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, name, &quot;state&quot;, complete ? &quot;complete&quot; : &quot;incomplete&quot;);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

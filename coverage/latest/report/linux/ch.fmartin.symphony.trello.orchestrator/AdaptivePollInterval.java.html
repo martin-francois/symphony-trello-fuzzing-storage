@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AdaptivePollInterval.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">AdaptivePollInterval.java</span></div><h1>AdaptivePollInterval.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import ch.fmartin.symphony.trello.orchestrator.RuntimeSnapshot.SlowdownReason;
+import ch.fmartin.symphony.trello.tracker.RateLimitPressure;
+import com.google.common.collect.Comparators;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Optional;
+import java.util.random.RandomGenerator;
+import org.jboss.logging.Logger;
+
+/// Chooses the delay before the next poll tick from the configured `polling.interval_ms` and the
+/// Trello `429` responses seen since the previous tick. See
+/// docs/adr/0098-adaptive-trello-polling-interval.md.
+///
+/// Not thread-safe: the orchestrator calls it only while holding its instance monitor.
+final class AdaptivePollInterval {
+    /// How long the worker must see no `429` before each recovery step.
+<span class="nc" id="L20">    static final Duration QUIET_PERIOD = Duration.ofSeconds(60);</span>
+    /// Each tick with a `429` multiplies the effective interval by this; each quiet period divides it.
+    static final int SLOWDOWN_FACTOR = 2;
+    /// Jitter adds up to this share of the delay, so workers sharing a Trello token drift apart.
+    static final int MAX_JITTER_PERCENT = 10;
+
+<span class="nc" id="L26">    private static final Logger LOG = Logger.getLogger(AdaptivePollInterval.class);</span>
+    private static final int PERCENT = 100;
+
+    private final Clock clock;
+    private final RandomGenerator random;
+    /// Zero while not slowed down; otherwise the slowed interval, at most [RateLimitPressure#MAX_WAIT].
+<span class="nc" id="L32">    private Duration slowedInterval = Duration.ZERO;</span>
+    /// When the slowed interval last grew or shrank; recovery waits a quiet period from here.
+<span class="nc" id="L34">    private Instant slowedIntervalChangedAt = Instant.MIN;</span>
+
+<span class="nc" id="L36">    private Optional&lt;Instant&gt; lastRateLimitedAt = Optional.empty();</span>
+
+<span class="nc" id="L38">    AdaptivePollInterval(Clock clock, RandomGenerator random) {</span>
+<span class="nc" id="L39">        this.clock = clock;</span>
+<span class="nc" id="L40">        this.random = random;</span>
+<span class="nc" id="L41">    }</span>
+
+    /// Updates the effective interval for the pressure one tick saw and returns how long to wait
+    /// before the next tick. A `Retry-After` wait that a request already sat out has ended by now,
+    /// so only the part still ahead extends the delay.
+    Duration nextDelay(Duration configured, RateLimitPressure pressure) {
+<span class="nc" id="L47">        Instant now = clock.instant();</span>
+<span class="nc" id="L48">        Duration previous = effectiveInterval(configured);</span>
+<span class="nc bnc" id="L49" title="All 2 branches missed.">        if (pressure.rateLimited()) {</span>
+<span class="nc" id="L50">            slowedInterval = Comparators.min(previous.multipliedBy(SLOWDOWN_FACTOR), RateLimitPressure.MAX_WAIT);</span>
+<span class="nc" id="L51">            slowedIntervalChangedAt = now;</span>
+<span class="nc" id="L52">            lastRateLimitedAt = pressure.lastRateLimitedAt().or(() -&gt; lastRateLimitedAt);</span>
+<span class="nc bnc" id="L53" title="All 4 branches missed.">        } else if (isSlowedDown(configured) &amp;&amp; !now.isBefore(slowedIntervalChangedAt.plus(QUIET_PERIOD))) {</span>
+<span class="nc" id="L54">            slowedInterval = slowedInterval.dividedBy(SLOWDOWN_FACTOR);</span>
+<span class="nc" id="L55">            slowedIntervalChangedAt = now;</span>
+        }
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        if (!isSlowedDown(configured)) {</span>
+<span class="nc" id="L58">            slowedInterval = Duration.ZERO;</span>
+        }
+<span class="nc" id="L60">        Duration effective = effectiveInterval(configured);</span>
+<span class="nc" id="L61">        logChange(configured, previous, effective);</span>
+<span class="nc" id="L62">        Duration retryAfterLeft = pressure.retryNotBefore()</span>
+<span class="nc" id="L63">                .map(notBefore -&gt; Duration.between(now, notBefore))</span>
+<span class="nc" id="L64">                .filter(Duration::isPositive)</span>
+<span class="nc" id="L65">                .orElse(Duration.ZERO);</span>
+<span class="nc" id="L66">        return withJitter(Comparators.max(effective, retryAfterLeft));</span>
+    }
+
+    RuntimeSnapshot.Polling status(Duration configured) {
+<span class="nc" id="L70">        return new RuntimeSnapshot.Polling(</span>
+                configured,
+<span class="nc" id="L72">                effectiveInterval(configured),</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">                isSlowedDown(configured) ? Optional.of(SlowdownReason.TRELLO_RATE_LIMITED) : Optional.empty(),</span>
+                lastRateLimitedAt);
+    }
+
+    private Duration effectiveInterval(Duration configured) {
+<span class="nc" id="L78">        return Comparators.max(configured, slowedInterval);</span>
+    }
+
+    private boolean isSlowedDown(Duration configured) {
+<span class="nc bnc" id="L82" title="All 2 branches missed.">        return slowedInterval.compareTo(configured) &gt; 0;</span>
+    }
+
+    /// Jitter only lengthens the delay, so the configured interval and any `Retry-After` stay
+    /// minimums.
+    private Duration withJitter(Duration delay) {
+<span class="nc" id="L88">        long maxJitterMillis = delay.toMillis() * MAX_JITTER_PERCENT / PERCENT;</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        return maxJitterMillis &gt; 0 ? delay.plusMillis(random.nextLong(maxJitterMillis)) : delay;</span>
+    }
+
+    private static void logChange(Duration configured, Duration previous, Duration effective) {
+<span class="nc" id="L93">        int change = effective.compareTo(previous);</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (change &gt; 0) {</span>
+<span class="nc" id="L95">            LOG.warnf(</span>
+                    &quot;polling outcome=slowed_down reason=%s configured_interval_ms=%d effective_interval_ms=%d&quot;,
+<span class="nc" id="L97">                    SlowdownReason.TRELLO_RATE_LIMITED.code(), configured.toMillis(), effective.toMillis());</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        } else if (change &lt; 0) {</span>
+<span class="nc" id="L99">            LOG.infof(</span>
+                    &quot;polling outcome=recovering configured_interval_ms=%d effective_interval_ms=%d&quot;,
+<span class="nc" id="L101">                    configured.toMillis(), effective.toMillis());</span>
+        }
+<span class="nc" id="L103">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AdaptivePollIntervalTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">AdaptivePollIntervalTest.java</span></div><h1>AdaptivePollIntervalTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.MAX_JITTER;
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.NO_JITTER;
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.withLargestJitter;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.MutableClock;
+import ch.fmartin.symphony.trello.tracker.RateLimitPressure;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.random.RandomGenerator;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L22">final class AdaptivePollIntervalTest {</span>
+<span class="nc" id="L23">    private static final Instant START = Instant.parse(&quot;2026-10-04T10:00:00Z&quot;);</span>
+<span class="nc" id="L24">    private static final Duration CONFIGURED = Duration.ofSeconds(5);</span>
+    private static final int RATE_LIMITED_TICKS_TO_REACH_CAP = 3;
+    private static final int QUIET_PERIODS_TO_RECOVER = 3;
+
+<span class="nc" id="L28">    private final MutableClock clock = new MutableClock(START);</span>
+
+    @MethodSource(&quot;jitterDraws&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void jitterOnlyLengthensTheDelayAndStaysBelowItsShare(
+            String scenario, RandomGenerator random, Duration expectedDelay) {
+        // given
+<span class="nc" id="L35">        var interval = new AdaptivePollInterval(clock, random);</span>
+
+        // when
+<span class="nc" id="L38">        Duration delay = interval.nextDelay(CONFIGURED, RateLimitPressure.NONE);</span>
+
+        // then
+<span class="nc" id="L41">        assertThat(delay).as(scenario).isEqualTo(expectedDelay);</span>
+<span class="nc" id="L42">    }</span>
+
+    private static Stream&lt;Arguments&gt; jitterDraws() {
+<span class="nc" id="L45">        return Stream.of(</span>
+<span class="nc" id="L46">                Arguments.of(&quot;smallest draw keeps the configured interval&quot;, NO_JITTER, CONFIGURED),</span>
+<span class="nc" id="L47">                Arguments.of(</span>
+<span class="nc" id="L48">                        &quot;largest draw stays below the jitter share on top&quot;, MAX_JITTER, withLargestJitter(CONFIGURED)));</span>
+    }
+
+    @Test
+    void eachRateLimitedTickDoublesTheEffectiveIntervalUntilTheCap() {
+        // given
+<span class="nc" id="L54">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc" id="L55">        List&lt;Duration&gt; delays = new ArrayList&lt;&gt;();</span>
+
+        // when
+<span class="nc bnc" id="L58" title="All 2 branches missed.">        for (int tick = 0; tick &lt; RATE_LIMITED_TICKS_TO_REACH_CAP + 1; tick++) {</span>
+<span class="nc" id="L59">            delays.add(interval.nextDelay(CONFIGURED, rateLimited(Optional.empty())));</span>
+        }
+
+        // then
+<span class="nc" id="L63">        assertThat(delays)</span>
+<span class="nc" id="L64">                .containsExactly(</span>
+<span class="nc" id="L65">                        Duration.ofSeconds(10),</span>
+<span class="nc" id="L66">                        Duration.ofSeconds(20),</span>
+                        RateLimitPressure.MAX_WAIT,
+                        RateLimitPressure.MAX_WAIT);
+<span class="nc" id="L69">        assertThat(interval.status(CONFIGURED))</span>
+<span class="nc" id="L70">                .isEqualTo(new RuntimeSnapshot.Polling(</span>
+                        CONFIGURED,
+                        RateLimitPressure.MAX_WAIT,
+<span class="nc" id="L73">                        Optional.of(RuntimeSnapshot.SlowdownReason.TRELLO_RATE_LIMITED),</span>
+<span class="nc" id="L74">                        Optional.of(START)));</span>
+<span class="nc" id="L75">    }</span>
+
+    @Test
+    void jitterAtTheCapComesOnTopSoWorkersAtTheCapDoNotPollInStep() {
+        // given
+<span class="nc" id="L80">        var interval = new AdaptivePollInterval(clock, MAX_JITTER);</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        for (int tick = 0; tick &lt; RATE_LIMITED_TICKS_TO_REACH_CAP - 1; tick++) {</span>
+<span class="nc" id="L82">            interval.nextDelay(CONFIGURED, rateLimited(Optional.empty()));</span>
+        }
+
+        // when
+<span class="nc" id="L86">        Duration delay = interval.nextDelay(CONFIGURED, rateLimited(Optional.empty()));</span>
+
+        // then
+<span class="nc" id="L89">        assertThat(delay)</span>
+<span class="nc" id="L90">                .as(&quot;the cap bounds the effective interval; jitter is added after it&quot;)</span>
+<span class="nc" id="L91">                .isEqualTo(withLargestJitter(RateLimitPressure.MAX_WAIT));</span>
+<span class="nc" id="L92">        assertThat(interval.status(CONFIGURED).effectiveInterval()).isEqualTo(RateLimitPressure.MAX_WAIT);</span>
+<span class="nc" id="L93">    }</span>
+
+    @Test
+    void retryAfterStillAheadDelaysTheNextTickBeyondTheEffectiveInterval() {
+        // given
+<span class="nc" id="L98">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc" id="L99">        Duration retryAfter = Duration.ofSeconds(25);</span>
+
+        // when
+<span class="nc" id="L102">        Duration delay = interval.nextDelay(CONFIGURED, rateLimited(Optional.of(START.plus(retryAfter))));</span>
+
+        // then
+<span class="nc" id="L105">        assertThat(delay).isEqualTo(retryAfter);</span>
+<span class="nc" id="L106">        assertThat(interval.status(CONFIGURED).effectiveInterval()).isEqualTo(Duration.ofSeconds(10));</span>
+<span class="nc" id="L107">    }</span>
+
+    @Test
+    void retryAfterARequestAlreadyWaitedOutIsNotWaitedAgain() {
+        // given
+<span class="nc" id="L112">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc" id="L113">        Instant retryNotBefore = START.plusSeconds(25);</span>
+<span class="nc" id="L114">        clock.advance(Duration.ofSeconds(26));</span>
+
+        // when
+<span class="nc" id="L117">        Duration delay = interval.nextDelay(CONFIGURED, rateLimited(Optional.of(retryNotBefore)));</span>
+
+        // then
+<span class="nc" id="L120">        assertThat(delay)</span>
+<span class="nc" id="L121">                .as(&quot;the read already slept until %s, so only the slowed interval remains&quot;, retryNotBefore)</span>
+<span class="nc" id="L122">                .isEqualTo(Duration.ofSeconds(10));</span>
+<span class="nc" id="L123">    }</span>
+
+    @Test
+    void retryAfterGetsJitterOnTopSoWorkersDoNotRetryInStep() {
+        // given
+<span class="nc" id="L128">        var interval = new AdaptivePollInterval(clock, MAX_JITTER);</span>
+<span class="nc" id="L129">        Duration retryAfter = Duration.ofSeconds(20);</span>
+
+        // when
+<span class="nc" id="L132">        Duration delay = interval.nextDelay(CONFIGURED, rateLimited(Optional.of(START.plus(retryAfter))));</span>
+
+        // then
+<span class="nc" id="L135">        assertThat(delay).isEqualTo(withLargestJitter(retryAfter));</span>
+<span class="nc" id="L136">    }</span>
+
+    @Test
+    void quietPeriodsHalveTheIntervalStepByStepBackToTheConfiguredInterval() {
+        // given
+<span class="nc" id="L141">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        for (int tick = 0; tick &lt; RATE_LIMITED_TICKS_TO_REACH_CAP; tick++) {</span>
+<span class="nc" id="L143">            interval.nextDelay(CONFIGURED, rateLimited(Optional.empty()));</span>
+        }
+<span class="nc" id="L145">        List&lt;Duration&gt; effective = new ArrayList&lt;&gt;();</span>
+
+        // when
+<span class="nc" id="L148">        clock.advance(AdaptivePollInterval.QUIET_PERIOD.minusMillis(1));</span>
+<span class="nc" id="L149">        effective.add(interval.nextDelay(CONFIGURED, RateLimitPressure.NONE));</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        for (int quietPeriod = 0; quietPeriod &lt; QUIET_PERIODS_TO_RECOVER; quietPeriod++) {</span>
+<span class="nc" id="L151">            clock.advance(AdaptivePollInterval.QUIET_PERIOD);</span>
+<span class="nc" id="L152">            effective.add(interval.nextDelay(CONFIGURED, RateLimitPressure.NONE));</span>
+        }
+
+        // then
+<span class="nc" id="L156">        assertThat(effective)</span>
+<span class="nc" id="L157">                .containsExactly(</span>
+<span class="nc" id="L158">                        RateLimitPressure.MAX_WAIT, Duration.ofSeconds(15), Duration.ofMillis(7_500), CONFIGURED);</span>
+<span class="nc" id="L159">        assertThat(interval.status(CONFIGURED))</span>
+<span class="nc" id="L160">                .isEqualTo(new RuntimeSnapshot.Polling(CONFIGURED, CONFIGURED, Optional.empty(), Optional.of(START)));</span>
+<span class="nc" id="L161">    }</span>
+
+    @Test
+    void rateLimitDuringRecoveryRestartsTheQuietPeriod() {
+        // given
+<span class="nc" id="L166">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc" id="L167">        interval.nextDelay(CONFIGURED, rateLimited(Optional.empty()));</span>
+<span class="nc" id="L168">        clock.advance(AdaptivePollInterval.QUIET_PERIOD.dividedBy(2));</span>
+<span class="nc" id="L169">        interval.nextDelay(CONFIGURED, rateLimited(Optional.empty()));</span>
+
+        // when
+<span class="nc" id="L172">        clock.advance(AdaptivePollInterval.QUIET_PERIOD.dividedBy(2));</span>
+<span class="nc" id="L173">        Duration delay = interval.nextDelay(CONFIGURED, RateLimitPressure.NONE);</span>
+
+        // then
+<span class="nc" id="L176">        assertThat(delay).isEqualTo(Duration.ofSeconds(20));</span>
+<span class="nc" id="L177">    }</span>
+
+    @Test
+    void configuredIntervalAtTheCapIsNotSlowedDown() {
+        // given
+<span class="nc" id="L182">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc" id="L183">        Duration configured = RateLimitPressure.MAX_WAIT;</span>
+
+        // when
+<span class="nc" id="L186">        Duration delay = interval.nextDelay(configured, rateLimited(Optional.empty()));</span>
+
+        // then
+<span class="nc" id="L189">        assertThat(delay).isEqualTo(configured);</span>
+<span class="nc" id="L190">        assertThat(interval.status(configured))</span>
+<span class="nc" id="L191">                .isEqualTo(new RuntimeSnapshot.Polling(configured, configured, Optional.empty(), Optional.of(START)));</span>
+<span class="nc" id="L192">    }</span>
+
+    @Test
+    void reloadedIntervalAboveTheSlowedIntervalReplacesTheSlowdown() {
+        // given
+<span class="nc" id="L197">        var interval = new AdaptivePollInterval(clock, NO_JITTER);</span>
+<span class="nc" id="L198">        interval.nextDelay(CONFIGURED, rateLimited(Optional.empty()));</span>
+<span class="nc" id="L199">        Duration reloaded = Duration.ofSeconds(20);</span>
+
+        // when
+<span class="nc" id="L202">        Duration delay = interval.nextDelay(reloaded, RateLimitPressure.NONE);</span>
+
+        // then
+<span class="nc" id="L205">        assertThat(delay).isEqualTo(reloaded);</span>
+<span class="nc" id="L206">        assertThat(interval.status(reloaded).slowdownReason()).isEmpty();</span>
+<span class="nc" id="L207">    }</span>
+
+    private static RateLimitPressure rateLimited(Optional&lt;Instant&gt; retryNotBefore) {
+<span class="nc" id="L210">        return new RateLimitPressure(1, Optional.of(START), retryNotBefore);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

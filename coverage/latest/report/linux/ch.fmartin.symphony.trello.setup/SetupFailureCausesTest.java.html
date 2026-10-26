@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SetupFailureCausesTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">SetupFailureCausesTest.java</span></div><h1>SetupFailureCausesTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.testsupport.TestFileContents.INVALID_UTF_8_READ_FAILURE;
+import static ch.fmartin.symphony.trello.testsupport.TestFileContents.INVALID_YAML_QUOTING_PRIVATE_VALUE;
+import static ch.fmartin.symphony.trello.testsupport.TestFileContents.PRIVATE_YAML_VALUE;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import java.io.IOException;
+import java.net.ConnectException;
+import java.nio.channels.UnresolvedAddressException;
+import java.nio.charset.MalformedInputException;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.NoSuchFileException;
+import java.util.Map;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L24">final class SetupFailureCausesTest {</span>
+    private static final String PRIVATE_PATH = &quot;/home/private-user/.config/symphony-trello/connected-boards.json&quot;;
+
+    @MethodSource(&quot;causes&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void summaryNamesTheCauseTypeAndItsPathFreeDetail(String scenario, Throwable cause, String expected) {
+        // given
+
+        // when
+<span class="nc" id="L33">        String summary = SetupFailureCauses.summary(cause);</span>
+
+        // then
+<span class="nc" id="L36">        assertThat(summary).as(scenario).isEqualTo(expected).doesNotContain(PRIVATE_PATH);</span>
+<span class="nc" id="L37">    }</span>
+
+    private static Stream&lt;Arguments&gt; causes() {
+<span class="nc" id="L40">        return Stream.of(</span>
+<span class="nc" id="L41">                Arguments.of(</span>
+                        &quot;hand-written IOException message&quot;,
+                        new IOException(&quot;Selected dotenv parent is not a directory.&quot;),
+                        &quot;IOException: Selected dotenv parent is not a directory.&quot;),
+<span class="nc" id="L45">                Arguments.of(&quot;IOException without message&quot;, new IOException(), &quot;IOException&quot;),</span>
+<span class="nc" id="L46">                Arguments.of(&quot;IOException with blank message&quot;, new IOException(&quot; &quot;), &quot;IOException&quot;),</span>
+<span class="nc" id="L47">                Arguments.of(&quot;JDK detail without a path&quot;, new MalformedInputException(1), INVALID_UTF_8_READ_FAILURE),</span>
+<span class="nc" id="L48">                Arguments.of(</span>
+                        &quot;file-system failure with a reason&quot;,
+                        new AccessDeniedException(PRIVATE_PATH, null, &quot;Permission denied&quot;),
+                        &quot;AccessDeniedException: Permission denied&quot;),
+<span class="nc" id="L52">                Arguments.of(</span>
+                        &quot;file-system failure without a reason&quot;,
+                        new NoSuchFileException(PRIVATE_PATH),
+                        &quot;NoSuchFileException&quot;),
+<span class="nc" id="L56">                Arguments.of(</span>
+                        &quot;file-system failure naming two paths&quot;,
+                        new FileAlreadyExistsException(PRIVATE_PATH, PRIVATE_PATH + &quot;.tmp&quot;, null),
+                        &quot;FileAlreadyExistsException&quot;),
+<span class="nc" id="L60">                Arguments.of(</span>
+                        &quot;network failure whose detail is only in the root cause&quot;,
+                        new ConnectException()
+<span class="nc" id="L63">                                .initCause(new ConnectException().initCause(new UnresolvedAddressException())),</span>
+                        &quot;ConnectException, caused by UnresolvedAddressException&quot;),
+<span class="nc" id="L65">                Arguments.of(</span>
+                        &quot;root cause on a file-system failure&quot;,
+                        new IOException(&quot;Could not rotate worker log&quot;, new AccessDeniedException(PRIVATE_PATH)),
+                        &quot;IOException: Could not rotate worker log, caused by AccessDeniedException&quot;));
+    }
+
+    @Test
+    void summaryOmitsParserMessagesBecauseTheyQuoteTheParsedContent() {
+        // given
+<span class="nc" id="L74">        IOException parserFailure = yamlParserFailure(INVALID_YAML_QUOTING_PRIVATE_VALUE);</span>
+
+        // when
+<span class="nc" id="L77">        String summary = SetupFailureCauses.summary(parserFailure);</span>
+
+        // then
+<span class="nc" id="L80">        assertThat(parserFailure).hasMessageContaining(PRIVATE_YAML_VALUE);</span>
+<span class="nc" id="L81">        assertThat(summary).isEqualTo(parserFailure.getClass().getSimpleName()).doesNotContain(PRIVATE_YAML_VALUE);</span>
+<span class="nc" id="L82">    }</span>
+
+    @Test
+    void summaryStopsAtAWrappedParserFailureBecauseItsCausesQuoteTheSameContent() {
+        // given
+<span class="nc" id="L87">        IOException parserFailure = yamlParserFailure(INVALID_YAML_QUOTING_PRIVATE_VALUE);</span>
+<span class="nc" id="L88">        var wrappedFailure = new IOException(&quot;Could not load workflow front matter&quot;, parserFailure);</span>
+
+        // when
+<span class="nc" id="L91">        String summary = SetupFailureCauses.summary(wrappedFailure);</span>
+
+        // then
+<span class="nc" id="L94">        assertThat(summary)</span>
+<span class="nc" id="L95">                .isEqualTo(</span>
+                        &quot;IOException: Could not load workflow front matter, caused by %s&quot;,
+<span class="nc" id="L97">                        parserFailure.getClass().getSimpleName())</span>
+<span class="nc" id="L98">                .doesNotContain(PRIVATE_YAML_VALUE);</span>
+<span class="nc" id="L99">    }</span>
+
+    @Test
+    void withCauseAppendsTheSummaryInParentheses() {
+        // given
+<span class="nc" id="L104">        String message = &quot;Could not update the connected-board manifest. Check the config directory permissions.&quot;;</span>
+
+        // when
+<span class="nc" id="L107">        String rendered = SetupFailureCauses.withCause(message, new AccessDeniedException(PRIVATE_PATH));</span>
+
+        // then
+<span class="nc" id="L110">        assertThat(rendered)</span>
+<span class="nc" id="L111">                .isEqualTo(&quot;Could not update the connected-board manifest. Check the config directory permissions.&quot;</span>
+                        + &quot; (AccessDeniedException)&quot;);
+<span class="nc" id="L113">    }</span>
+
+    @Test
+    void withSetupFailureKeepsTheWrappedMessageWholeInParentheses() {
+        // given
+<span class="nc" id="L118">        TrelloBoardSetupException wrapped = SetupFailureCauses.setupFailure(</span>
+                &quot;setup_workflow_read_failed&quot;,
+                &quot;Workflow file cannot be read before worker start.&quot;,
+                new AccessDeniedException(PRIVATE_PATH));
+
+        // when
+<span class="nc" id="L124">        String rendered = SetupFailureCauses.withSetupFailure(&quot;Could not restart the worker&quot;, wrapped);</span>
+
+        // then
+<span class="nc" id="L127">        assertThat(rendered)</span>
+<span class="nc" id="L128">                .isEqualTo(&quot;Could not restart the worker&quot;</span>
+                        + &quot; (Workflow file cannot be read before worker start. (AccessDeniedException))&quot;);
+<span class="nc" id="L130">    }</span>
+
+    @Test
+    void setupFailureChainsTheCauseItNames() {
+        // given
+<span class="nc" id="L135">        var cause = new AccessDeniedException(PRIVATE_PATH);</span>
+
+        // when
+<span class="nc" id="L138">        TrelloBoardSetupException failure =</span>
+<span class="nc" id="L139">                SetupFailureCauses.setupFailure(&quot;setup_manifest_write_failed&quot;, &quot;Could not update the manifest.&quot;, cause);</span>
+
+        // then
+<span class="nc" id="L142">        assertThat(failure.code()).isEqualTo(&quot;setup_manifest_write_failed&quot;);</span>
+<span class="nc" id="L143">        assertThat(failure)</span>
+<span class="nc" id="L144">                .hasMessage(&quot;Could not update the manifest. (AccessDeniedException)&quot;)</span>
+<span class="nc" id="L145">                .hasCause(cause);</span>
+<span class="nc" id="L146">    }</span>
+
+    @MethodSource(&quot;commandBoundaryFailures&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void commandBoundaryMessageSummarizesOnlyUnwrappedIoFailures(String scenario, Exception failure, String expected) {
+        // given
+
+        // when
+<span class="nc" id="L154">        String message = SetupFailureCauses.commandBoundaryMessage(failure);</span>
+
+        // then
+<span class="nc" id="L157">        assertThat(message).as(scenario).isEqualTo(expected);</span>
+<span class="nc" id="L158">    }</span>
+
+    private static Stream&lt;Arguments&gt; commandBoundaryFailures() {
+<span class="nc" id="L161">        return Stream.of(</span>
+<span class="nc" id="L162">                Arguments.of(</span>
+                        &quot;unwrapped I/O failure&quot;,
+                        new AccessDeniedException(PRIVATE_PATH, null, &quot;Permission denied&quot;),
+                        &quot;AccessDeniedException: Permission denied&quot;),
+<span class="nc" id="L166">                Arguments.of(</span>
+                        &quot;setup failure keeps its actionable message&quot;,
+                        new TrelloBoardSetupException(&quot;setup_invalid_path&quot;, &quot;Invalid Trello API path&quot;),
+                        &quot;Invalid Trello API path&quot;),
+<span class="nc" id="L170">                Arguments.of(</span>
+                        &quot;input validation keeps its actionable message&quot;,
+                        new IllegalArgumentException(&quot;--board must not be empty.&quot;),
+                        &quot;--board must not be empty.&quot;));
+    }
+
+    private static IOException yamlParserFailure(String yaml) {
+        try {
+<span class="nc" id="L178">            new ObjectMapper(new YAMLFactory()).readValue(yaml, Map.class);</span>
+<span class="nc" id="L179">        } catch (IOException e) {</span>
+<span class="nc" id="L180">            return e;</span>
+<span class="nc" id="L181">        }</span>
+<span class="nc" id="L182">        throw new AssertionError(&quot;The YAML fixture must fail to parse.&quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

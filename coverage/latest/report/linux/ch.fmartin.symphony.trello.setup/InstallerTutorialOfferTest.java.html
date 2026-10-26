@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstallerTutorialOfferTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">InstallerTutorialOfferTest.java</span></div><h1>InstallerTutorialOfferTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.HostEnvironment.CLEARED;
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.createFakeToolchain;
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.createSourceRepository;
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.run;
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.runPseudoTerminalDialog;
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.shellQuote;
+import static ch.fmartin.symphony.trello.setup.InstallerScriptFixture.writeExecutable;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.setup.InstallerScriptFixture.TerminalAnswer;
+import ch.fmartin.symphony.trello.testsupport.StatefulFakeTrello;
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.StringJoiner;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L31">final class InstallerTutorialOfferTest {</span>
+    private static final String BOARD_NAME = &quot;Installed queue&quot;;
+    private static final String HANDOFF = &quot;You're good to go - your Trello board is now a queue for Codex work.&quot;;
+
+    @TempDir
+    Path temporaryDirectory;
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;n&quot;, &quot;&quot;, &quot;\u0004&quot;})
+    void posixInstallerOffersOnlyAfterAutostartAndCompletedHandoff(String answer) throws Exception {
+        // given
+<span class="nc" id="L42">        assumeTrue(System.getProperty(&quot;os.name&quot;).equalsIgnoreCase(&quot;Linux&quot;), &quot;the fixture uses a POSIX terminal&quot;);</span>
+<span class="nc" id="L43">        try (var trello = new StatefulFakeTrello().start();</span>
+<span class="nc" id="L44">                var fixture = fixture(trello)) {</span>
+
+            // when
+<span class="nc" id="L47">            var result = runPseudoTerminalDialog(</span>
+                    CLEARED,
+<span class="nc" id="L49">                    fixture.environment(),</span>
+                    temporaryDirectory,
+<span class="nc" id="L51">                    fixture.installerCommand(),</span>
+<span class="nc" id="L52">                    List.of(</span>
+                            new TerminalAnswer(InstallerScriptFixture.TRELLO_KEY_PROMPT, &quot;synthetic-key&quot;),
+                            new TerminalAnswer(InstallerScriptFixture.TRELLO_TOKEN_PROMPT, &quot;synthetic-token&quot;),
+                            new TerminalAnswer(InstallerScriptFixture.TRELLO_BOARD_PROMPT, BOARD_NAME),
+<span class="nc bnc" id="L56" title="All 2 branches missed.">                            new TerminalAnswer(GuidedTutorial.OFFER_PROMPT, answer, !answer.equals(&quot;\u0004&quot;))));</span>
+
+            // then
+<span class="nc" id="L59">            result.assertSuccess();</span>
+<span class="nc" id="L60">            assertThat(result.transcript())</span>
+<span class="nc" id="L61">                    .containsSubsequence(&quot;User systemd service enabled:&quot;, HANDOFF, GuidedTutorial.OFFER_PROMPT)</span>
+<span class="nc" id="L62">                    .doesNotContain(&quot;Installer stopped during&quot;);</span>
+<span class="nc" id="L63">            assertThat(fixture.log())</span>
+<span class="nc" id="L64">                    .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L65">                    .containsSubsequence(&quot;systemctl --user enable&quot;, &quot;completion_mode=print&quot;, &quot;tutorial-offer&quot;);</span>
+<span class="nc" id="L66">            assertInstallationAndWorkerPreserved(fixture);</span>
+<span class="nc" id="L67">            assertThat(trello.boardNames()).isEmpty();</span>
+        }
+<span class="nc" id="L69">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void posixAcceptedTutorialPreservesInstalledWorkerWhenFinishedOrInterrupted(boolean interrupt) throws Exception {
+        // given
+<span class="nc" id="L75">        assumeTrue(System.getProperty(&quot;os.name&quot;).equalsIgnoreCase(&quot;Linux&quot;), &quot;the fixture uses a POSIX terminal&quot;);</span>
+<span class="nc" id="L76">        try (var trello = new StatefulFakeTrello().start();</span>
+<span class="nc" id="L77">                var fixture = fixture(trello)) {</span>
+<span class="nc" id="L78">            String existingBoard = trello.givenBoard(&quot;Existing queue&quot;);</span>
+<span class="nc" id="L79">            List&lt;TerminalAnswer&gt; answers = new ArrayList&lt;&gt;(List.of(</span>
+                    new TerminalAnswer(InstallerScriptFixture.TRELLO_KEY_PROMPT, &quot;synthetic-key&quot;),
+                    new TerminalAnswer(InstallerScriptFixture.TRELLO_TOKEN_PROMPT, &quot;synthetic-token&quot;),
+                    new TerminalAnswer(InstallerScriptFixture.TRELLO_BOARD_PROMPT, BOARD_NAME),
+                    new TerminalAnswer(GuidedTutorial.OFFER_PROMPT, &quot;y&quot;),
+<span class="nc bnc" id="L84" title="All 4 branches missed.">                    new TerminalAnswer(GuidedTutorial.CHECK_PROMPT, interrupt ? &quot;\u0003&quot; : &quot;q&quot;, !interrupt)));</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (!interrupt) {</span>
+<span class="nc" id="L86">                answers.add(new TerminalAnswer(GuidedTutorial.CLEANUP_PROMPT, &quot;&quot;));</span>
+            }
+
+            // when
+<span class="nc" id="L90">            var result = runPseudoTerminalDialog(</span>
+<span class="nc" id="L91">                    CLEARED, fixture.environment(), temporaryDirectory, fixture.installerCommand(), answers);</span>
+
+            // then
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            if (interrupt) {</span>
+<span class="nc" id="L95">                assertThat(result.exitCode()).as(result.transcript()).isIn(0, 130);</span>
+            } else {
+<span class="nc" id="L97">                result.assertSuccess();</span>
+            }
+<span class="nc" id="L99">            assertThat(result.transcript())</span>
+<span class="nc" id="L100">                    .containsSubsequence(HANDOFF, GuidedTutorial.OFFER_PROMPT, &quot;Board created:&quot;)</span>
+<span class="nc" id="L101">                    .doesNotContain(&quot;Installer stopped during&quot;);</span>
+<span class="nc" id="L102">            assertInstallationAndWorkerPreserved(fixture);</span>
+<span class="nc" id="L103">            assertThat(trello.archived(trello.boardIdNamed(GuidedTutorial.BOARD_NAME)))</span>
+<span class="nc" id="L104">                    .as(&quot;tutorial completion or console interruption archives the temporary board&quot;)</span>
+<span class="nc" id="L105">                    .isTrue();</span>
+<span class="nc" id="L106">            assertThat(trello.archived(existingBoard))</span>
+<span class="nc" id="L107">                    .as(&quot;the existing queue remains active&quot;)</span>
+<span class="nc" id="L108">                    .isFalse();</span>
+        }
+<span class="nc" id="L110">    }</span>
+
+    @Test
+    void posixTutorialFailurePreservesTheCompletedInstallation() throws Exception {
+        // given
+<span class="nc" id="L115">        assumeTrue(System.getProperty(&quot;os.name&quot;).equalsIgnoreCase(&quot;Linux&quot;), &quot;the fixture uses a POSIX terminal&quot;);</span>
+<span class="nc" id="L116">        try (var trello = new StatefulFakeTrello().start();</span>
+<span class="nc" id="L117">                var fixture = fixture(trello)) {</span>
+<span class="nc" id="L118">            trello.failNext(&quot;POST&quot;, &quot;lists&quot;, 500);</span>
+
+            // when
+<span class="nc" id="L121">            var result = runPseudoTerminalDialog(</span>
+                    CLEARED,
+<span class="nc" id="L123">                    fixture.environment(),</span>
+                    temporaryDirectory,
+<span class="nc" id="L125">                    fixture.installerCommand(),</span>
+<span class="nc" id="L126">                    List.of(</span>
+                            new TerminalAnswer(InstallerScriptFixture.TRELLO_KEY_PROMPT, &quot;synthetic-key&quot;),
+                            new TerminalAnswer(InstallerScriptFixture.TRELLO_TOKEN_PROMPT, &quot;synthetic-token&quot;),
+                            new TerminalAnswer(InstallerScriptFixture.TRELLO_BOARD_PROMPT, BOARD_NAME),
+                            new TerminalAnswer(GuidedTutorial.OFFER_PROMPT, &quot;y&quot;)));
+
+            // then
+<span class="nc" id="L133">            result.assertSuccess();</span>
+<span class="nc" id="L134">            assertThat(result.transcript())</span>
+<span class="nc" id="L135">                    .containsSubsequence(HANDOFF, &quot;The guided tutorial stopped: Trello write outcome is unknown.&quot;)</span>
+<span class="nc" id="L136">                    .doesNotContain(&quot;Installer stopped during&quot;);</span>
+<span class="nc" id="L137">            assertInstallationAndWorkerPreserved(fixture);</span>
+<span class="nc" id="L138">            assertThat(trello.archived(trello.boardIdNamed(GuidedTutorial.BOARD_NAME)))</span>
+<span class="nc" id="L139">                    .as(&quot;a failed tutorial archives its own temporary board&quot;)</span>
+<span class="nc" id="L140">                    .isTrue();</span>
+        }
+<span class="nc" id="L142">    }</span>
+
+    @EnumSource(PowerShellOffer.class)
+    @ParameterizedTest
+    void powershellInstallerPreservesCompletedInstallationAfterTheOffer(PowerShellOffer scenario) throws Exception {
+        // given
+<span class="nc" id="L148">        assumeTrue(System.getProperty(&quot;os.name&quot;).equalsIgnoreCase(&quot;Linux&quot;), &quot;the fixture uses a POSIX terminal&quot;);</span>
+<span class="nc" id="L149">        List&lt;String&gt; powershell = InstallerScriptFixture.powershellCommand();</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        assumeTrue(!powershell.isEmpty(), &quot;the pinned PowerShell runtime is required&quot;);</span>
+<span class="nc" id="L151">        Path source = InstallerScriptFixture.createPowerShellSourceRepository(temporaryDirectory);</span>
+<span class="nc" id="L152">        Path tools = createFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L153">        Path fakeJava = tools.resolve(&quot;java-fixture&quot;);</span>
+<span class="nc" id="L154">        Files.move(tools.resolve(&quot;java&quot;), fakeJava);</span>
+<span class="nc" id="L155">        Files.writeString(</span>
+                fakeJava,
+<span class="nc" id="L157">                Files.readString(fakeJava)</span>
+<span class="nc" id="L158">                        .replace(</span>
+                                &quot;env -u SYMPHONY_TRELLO_INSTALLER_COMPLETION \&quot;${SYMPHONY_TRELLO_COMMAND:?}\&quot; start&quot;,
+                                &quot;env -u SYMPHONY_TRELLO_INSTALLER_COMPLETION pwsh -NoProfile -File \&quot;${SYMPHONY_TRELLO_COMMAND:?}\&quot; start&quot;));
+<span class="nc" id="L161">        writeExecutable(</span>
+<span class="nc" id="L162">                tools.resolve(&quot;java&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                if [[ &quot;$*&quot; == *&quot;TrelloBoardSetupMain tutorial --offer&quot;* ]]; then
+                  echo tutorial-offer &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                  printf '%s'
+                  IFS= read -r answer || true
+                  echo &quot;tutorial-answer=${answer:-}&quot; &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                  case &quot;${SYMPHONY_FAKE_TUTORIAL_MODE:?}&quot; in
+                    FAILURE) exit 23 ;;
+                    INTERRUPT)
+                      echo 'Tutorial child is ready'
+                      IFS= read -r next
+                      exit 99
+                      ;;
+                  esac
+                  echo &quot;You can start it later with: symphony-trello tutorial&quot;
+                  exit 0
+                fi
+                exec %s &quot;$@&quot;
+                &quot;&quot;&quot;
+<span class="nc" id="L184">                        .formatted(GuidedTutorial.OFFER_PROMPT, shellQuote(fakeJava.toString())));</span>
+<span class="nc" id="L185">        Path home = Files.createDirectories(temporaryDirectory.resolve(&quot;home&quot;));</span>
+<span class="nc" id="L186">        Path installHome = temporaryDirectory.resolve(&quot;installed&quot;);</span>
+<span class="nc" id="L187">        Path bin = temporaryDirectory.resolve(&quot;bin&quot;);</span>
+<span class="nc" id="L188">        Path log = temporaryDirectory.resolve(&quot;tools.log&quot;);</span>
+<span class="nc" id="L189">        Files.createFile(temporaryDirectory.resolve(&quot;codex-authenticated&quot;));</span>
+<span class="nc" id="L190">        Map&lt;String, String&gt; environment = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L191">        environment.put(&quot;PATH&quot;, tools + File.pathSeparator + System.getenv(&quot;PATH&quot;));</span>
+<span class="nc" id="L192">        environment.put(&quot;HOME&quot;, home.toString());</span>
+<span class="nc" id="L193">        environment.put(&quot;USERPROFILE&quot;, home.toString());</span>
+<span class="nc" id="L194">        environment.put(&quot;TERM&quot;, &quot;xterm-256color&quot;);</span>
+<span class="nc" id="L195">        environment.put(&quot;SYMPHONY_TRELLO_REPO_URL&quot;, source.toUri().toString());</span>
+<span class="nc" id="L196">        environment.put(&quot;SYMPHONY_TRELLO_REF&quot;, &quot;main&quot;);</span>
+<span class="nc" id="L197">        environment.put(&quot;SYMPHONY_HOME&quot;, installHome.toString());</span>
+<span class="nc" id="L198">        environment.put(&quot;SYMPHONY_FAKE_LOG&quot;, log.toString());</span>
+<span class="nc" id="L199">        environment.put(&quot;SYMPHONY_FAKE_TUTORIAL_MODE&quot;, scenario.name());</span>
+<span class="nc" id="L200">        var command = new StringJoiner(&quot; &quot;);</span>
+        // Windows ACL APIs are the only installer boundary unavailable in the pinned Linux image.
+<span class="nc" id="L202">        String installer = Files.readString(Path.of(&quot;install.ps1&quot;));</span>
+<span class="nc" id="L203">        int protectionStart = installer.indexOf(&quot;function Protect-PrivateFile(&quot;);</span>
+<span class="nc" id="L204">        int protectionEnd = installer.indexOf(&quot;function Write-AutostartLauncher&quot;, protectionStart);</span>
+<span class="nc" id="L205">        assertThat(protectionStart).isNotNegative();</span>
+<span class="nc" id="L206">        assertThat(protectionEnd).isGreaterThan(protectionStart);</span>
+<span class="nc" id="L207">        Path testInstaller = temporaryDirectory.resolve(&quot;install-fixture.ps1&quot;);</span>
+<span class="nc" id="L208">        Files.writeString(</span>
+                testInstaller,
+<span class="nc" id="L210">                installer.substring(0, protectionStart)</span>
+                        + &quot;function Protect-PrivateFile([string]$Path) { &amp; chmod 600 $Path }\n\n&quot;
+<span class="nc" id="L212">                        + installer.substring(protectionEnd));</span>
+<span class="nc" id="L213">        String launch = &quot;$env:USERPROFILE = &quot; + InstallerScriptFixture.powerShellLiteral(home.toString())</span>
+<span class="nc" id="L214">                + &quot;; &amp; &quot; + InstallerScriptFixture.powerShellLiteral(testInstaller.toString())</span>
+<span class="nc" id="L215">                + &quot; -NoUpdatePath -BinDir &quot; + InstallerScriptFixture.powerShellLiteral(bin.toString());</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        for (String argument : InstallerScriptFixture.command(powershell, &quot;-NoProfile&quot;, &quot;-Command&quot;, launch)) {</span>
+<span class="nc" id="L217">            command.add(shellQuote(argument));</span>
+<span class="nc" id="L218">        }</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        List&lt;TerminalAnswer&gt; answers = new ArrayList&lt;&gt;(List.of(</span>
+                new TerminalAnswer(InstallerScriptFixture.TRELLO_KEY_PROMPT, &quot;synthetic-key&quot;),
+                new TerminalAnswer(InstallerScriptFixture.TRELLO_TOKEN_PROMPT, &quot;synthetic-token&quot;),
+                new TerminalAnswer(InstallerScriptFixture.TRELLO_BOARD_PROMPT, BOARD_NAME),
+                new TerminalAnswer(GuidedTutorial.OFFER_PROMPT, scenario.answer, scenario != PowerShellOffer.EOF)));
+<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (scenario == PowerShellOffer.INTERRUPT) {</span>
+<span class="nc" id="L225">            answers.add(new TerminalAnswer(&quot;Tutorial child is ready&quot;, &quot;\u0003&quot;, false));</span>
+        }
+        try {
+
+            // when
+<span class="nc" id="L230">            var result = runPseudoTerminalDialog(</span>
+                    CLEARED,
+                    environment,
+                    temporaryDirectory,
+<span class="nc" id="L234">                    InstallerScriptFixture.withTerminalSize(command.toString()),</span>
+                    answers);
+
+            // then
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (scenario != PowerShellOffer.INTERRUPT) {</span>
+<span class="nc" id="L239">                result.assertSuccess();</span>
+            }
+<span class="nc" id="L241">            assertThat(result.transcript())</span>
+<span class="nc" id="L242">                    .containsSubsequence(&quot;Managed workers started&quot;, HANDOFF, GuidedTutorial.OFFER_PROMPT)</span>
+<span class="nc" id="L243">                    .doesNotContain(&quot;Installer stopped during&quot;);</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">            if (scenario == PowerShellOffer.FAILURE) {</span>
+<span class="nc" id="L245">                assertThat(result.transcript()).contains(&quot;Installation is complete. Start the tutorial again with:&quot;);</span>
+            }
+<span class="nc" id="L247">            assertThat(log)</span>
+<span class="nc" id="L248">                    .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L249">                    .containsSubsequence(&quot;completion_mode=print&quot;, &quot;tutorial-offer&quot;);</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (scenario == PowerShellOffer.ACCEPT) {</span>
+<span class="nc" id="L251">                assertThat(Files.readAllLines(log)).contains(&quot;tutorial-answer=y&quot;);</span>
+            }
+<span class="nc" id="L253">            assertThat(bin.resolve(&quot;symphony-trello.ps1&quot;)).isRegularFile();</span>
+<span class="nc" id="L254">            assertThat(bin.resolve(&quot;symphony-trello-autostart.ps1&quot;)).isRegularFile();</span>
+<span class="nc" id="L255">            assertThat(installHome.resolve(&quot;config/connected-boards.json&quot;)).isRegularFile();</span>
+        } finally {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">            if (Files.isRegularFile(bin.resolve(&quot;symphony-trello.ps1&quot;))) {</span>
+<span class="nc" id="L258">                run(</span>
+                                environment,
+                                temporaryDirectory,
+<span class="nc" id="L261">                                InstallerScriptFixture.command(</span>
+                                                powershell,
+                                                &quot;-NoProfile&quot;,
+                                                &quot;-File&quot;,
+<span class="nc" id="L265">                                                bin.resolve(&quot;symphony-trello.ps1&quot;)</span>
+<span class="nc" id="L266">                                                        .toString(),</span>
+                                                &quot;stop&quot;,
+                                                &quot;--all&quot;)
+<span class="nc" id="L269">                                        .toArray(String[]::new))</span>
+<span class="nc" id="L270">                        .assertSuccess();</span>
+            }
+        }
+<span class="nc" id="L273">    }</span>
+
+    private Fixture fixture(StatefulFakeTrello trello) throws Exception {
+<span class="nc" id="L276">        Path source = createSourceRepository(temporaryDirectory);</span>
+<span class="nc" id="L277">        Path tools = createFakeToolchain(temporaryDirectory);</span>
+<span class="nc" id="L278">        Path fakeJava = tools.resolve(&quot;java-fixture&quot;);</span>
+<span class="nc" id="L279">        Files.move(tools.resolve(&quot;java&quot;), fakeJava);</span>
+<span class="nc" id="L280">        var detachedWorker = new StringJoiner(&quot; &quot;);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">        for (String argument : new PosixManagedProcessPlatform().launchCommand(List.of(&quot;bash&quot;))) {</span>
+<span class="nc" id="L282">            detachedWorker.add(shellQuote(argument));</span>
+<span class="nc" id="L283">        }</span>
+        // Match the real worker's session detachment, so closing the installer's PTY does not
+        // kill the fake worker before the survivor assertion observes it.
+<span class="nc" id="L286">        Files.writeString(fakeJava, Files.readString(fakeJava).replace(&quot;bash -c '&quot;, detachedWorker + &quot; -c '&quot;));</span>
+<span class="nc" id="L287">        writeExecutable(</span>
+<span class="nc" id="L288">                tools.resolve(&quot;java&quot;),</span>
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -euo pipefail
+                if [[ &quot;$*&quot; == *&quot;TrelloBoardSetupMain tutorial --offer&quot;* ]]; then
+                  echo tutorial-offer &gt;&gt; &quot;${SYMPHONY_FAKE_LOG:?}&quot;
+                  exec %s -cp %s ch.fmartin.symphony.trello.setup.TrelloBoardSetupMain tutorial --offer \
+                    --endpoint %s --key synthetic-key --token synthetic-token --no-github
+                fi
+                exec %s &quot;$@&quot;
+                &quot;&quot;&quot;
+<span class="nc" id="L299">                        .formatted(</span>
+<span class="nc" id="L300">                                shellQuote(Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, &quot;java&quot;)</span>
+<span class="nc" id="L301">                                        .toString()),</span>
+<span class="nc" id="L302">                                shellQuote(System.getProperty(&quot;java.class.path&quot;)),</span>
+<span class="nc" id="L303">                                shellQuote(trello.endpoint().toString()),</span>
+<span class="nc" id="L304">                                shellQuote(fakeJava.toString())));</span>
+<span class="nc" id="L305">        Path home = Files.createDirectories(temporaryDirectory.resolve(&quot;home&quot;));</span>
+<span class="nc" id="L306">        Path installHome = temporaryDirectory.resolve(&quot;installed&quot;);</span>
+<span class="nc" id="L307">        Path bin = temporaryDirectory.resolve(&quot;bin&quot;);</span>
+<span class="nc" id="L308">        Path log = temporaryDirectory.resolve(&quot;tools.log&quot;);</span>
+<span class="nc" id="L309">        Files.createFile(temporaryDirectory.resolve(&quot;codex-authenticated&quot;));</span>
+<span class="nc" id="L310">        Map&lt;String, String&gt; environment = Map.of(</span>
+                &quot;PATH&quot;,
+<span class="nc" id="L312">                tools + File.pathSeparator + System.getenv(&quot;PATH&quot;),</span>
+                &quot;HOME&quot;,
+<span class="nc" id="L314">                home.toString(),</span>
+                &quot;USER&quot;,
+                &quot;symphony-test&quot;,
+                &quot;TERM&quot;,
+                &quot;xterm-256color&quot;,
+                &quot;SYMPHONY_TRELLO_REPO_URL&quot;,
+<span class="nc" id="L320">                source.toUri().toString(),</span>
+                &quot;SYMPHONY_TRELLO_REF&quot;,
+                &quot;main&quot;,
+                &quot;SYMPHONY_HOME&quot;,
+<span class="nc" id="L324">                installHome.toString(),</span>
+                &quot;SYMPHONY_FAKE_LOG&quot;,
+<span class="nc" id="L326">                log.toString());</span>
+<span class="nc" id="L327">        String installerCommand = InstallerScriptFixture.withTerminalSize(&quot;bash &quot;</span>
+<span class="nc" id="L328">                + shellQuote(Path.of(&quot;install.sh&quot;).toAbsolutePath().toString()) + &quot; --no-update-path --bin-dir &quot;</span>
+<span class="nc" id="L329">                + shellQuote(bin.toString()));</span>
+<span class="nc" id="L330">        return new Fixture(environment, home, installHome, bin.resolve(&quot;symphony-trello&quot;), log, installerCommand);</span>
+    }
+
+<span class="nc" id="L333">    enum PowerShellOffer {</span>
+<span class="nc" id="L334">        NO(&quot;n&quot;),</span>
+<span class="nc" id="L335">        DEFAULT_NO(&quot;&quot;),</span>
+<span class="nc" id="L336">        EOF(&quot;\u0004&quot;),</span>
+<span class="nc" id="L337">        ACCEPT(&quot;y&quot;),</span>
+<span class="nc" id="L338">        FAILURE(&quot;y&quot;),</span>
+<span class="nc" id="L339">        INTERRUPT(&quot;y&quot;);</span>
+
+        private final String answer;
+
+<span class="nc" id="L343">        PowerShellOffer(String answer) {</span>
+<span class="nc" id="L344">            this.answer = answer;</span>
+<span class="nc" id="L345">        }</span>
+    }
+
+    private static void assertInstallationAndWorkerPreserved(Fixture fixture) throws IOException {
+<span class="nc" id="L349">        assertThat(fixture.command()).isExecutable();</span>
+<span class="nc" id="L350">        assertThat(fixture.home().resolve(&quot;.config/systemd/user/symphony-trello.service&quot;))</span>
+<span class="nc" id="L351">                .isRegularFile();</span>
+<span class="nc" id="L352">        assertThat(fixture.installHome().resolve(&quot;config/connected-boards.json&quot;))</span>
+<span class="nc" id="L353">                .isRegularFile();</span>
+<span class="nc" id="L354">        Path workerPid = fixture.installHome().resolve(&quot;state/WORKFLOW.installed-queue.md.abcdef123456.pid&quot;);</span>
+<span class="nc" id="L355">        assertThat(ProcessHandle.of(Long.parseLong(Files.readString(workerPid).trim())))</span>
+<span class="nc" id="L356">                .hasValueSatisfying(worker -&gt; assertThat(worker.isAlive())</span>
+<span class="nc" id="L357">                        .as(&quot;optional tutorial work leaves the started managed worker alive&quot;)</span>
+<span class="nc" id="L358">                        .isTrue());</span>
+<span class="nc" id="L359">    }</span>
+
+<span class="nc" id="L361">    private record Fixture(</span>
+            Map&lt;String, String&gt; environment,
+            Path home,
+            Path installHome,
+            Path command,
+            Path log,
+            String installerCommand)
+            implements AutoCloseable {
+        @Override
+        public void close() throws Exception {
+<span class="nc bnc" id="L371" title="All 2 branches missed.">            if (Files.isExecutable(command)) {</span>
+<span class="nc" id="L372">                run(environment, command.toString(), &quot;stop&quot;, &quot;--all&quot;).assertSuccess();</span>
+            }
+<span class="nc" id="L374">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

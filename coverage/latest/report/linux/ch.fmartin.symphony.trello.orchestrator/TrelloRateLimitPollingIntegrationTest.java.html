@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloRateLimitPollingIntegrationTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">TrelloRateLimitPollingIntegrationTest.java</span></div><h1>TrelloRateLimitPollingIntegrationTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.waitUntil;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.boardJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.respond;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.InstanceOfAssertFactories.DURATION;
+import static org.mockito.Mockito.mock;
+
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import ch.fmartin.symphony.trello.workspace.HookRunner;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/// Runs the real Trello client against a fake Trello server that answers `429`, so the path from
+/// the HTTP response to the next tick's schedule is covered without stubbing the pressure.
+<span class="nc" id="L29">final class TrelloRateLimitPollingIntegrationTest {</span>
+<span class="nc" id="L30">    private static final Duration CONFIGURED = Duration.ofSeconds(1);</span>
+<span class="nc" id="L31">    private static final Duration RETRY_AFTER = Duration.ofSeconds(7);</span>
+    /// Time the test itself may spend between the 429 and reading the schedule.
+<span class="nc" id="L33">    private static final Duration TEST_SLACK = Duration.ofSeconds(2);</span>
+
+    private FakeTrelloServer trello;
+
+    @TempDir
+    Path tempDir;
+
+    @BeforeEach
+    void startServer() throws Exception {
+<span class="nc" id="L42">        trello = new FakeTrelloServer()</span>
+<span class="nc" id="L43">                .on(&quot;/1/boards/board-1&quot;, exchange -&gt; respond(exchange, boardJson(&quot;board-1&quot;, &quot;Board&quot;, false)))</span>
+<span class="nc" id="L44">                .on(&quot;/1/boards/board-1/lists&quot;, exchange -&gt; {</span>
+<span class="nc" id="L45">                    exchange.getResponseHeaders().add(&quot;Retry-After&quot;, String.valueOf(RETRY_AFTER.toSeconds()));</span>
+<span class="nc" id="L46">                    respond(exchange, 429, &quot;{}&quot;);</span>
+<span class="nc" id="L47">                })</span>
+<span class="nc" id="L48">                .startEmpty();</span>
+<span class="nc" id="L49">    }</span>
+
+    @AfterEach
+    void stopServer() {
+<span class="nc" id="L53">        trello.stop();</span>
+<span class="nc" id="L54">    }</span>
+
+    @Test
+    void trelloRateLimitSlowsTheWorkerAndTheNextTickWaitsForRetryAfter() throws Exception {
+        // given
+<span class="nc" id="L59">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L60">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  endpoint: %s
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [Todo]
+                  max_api_retries: 0
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: %d
+                codex:
+                  command: fake
+                ---
+                {{ card.title }}
+                &quot;&quot;&quot;
+<span class="nc" id="L81">                        .formatted(trello.endpoint(), CONFIGURED.toMillis()));</span>
+<span class="nc" id="L82">        var workspaces = new WorkspaceManager(new HookRunner());</span>
+<span class="nc" id="L83">        var orchestrator = new SymphonyOrchestrator(</span>
+                new WorkflowLoader(),
+                new ConfigResolver(),
+                new TrelloClient(new ObjectMapper()),
+<span class="nc" id="L87">                mock(),</span>
+                new PromptRenderer(),
+                workspaces);
+<span class="nc" id="L90">        orchestrator.workflowPath = workflow;</span>
+
+        // when
+<span class="nc" id="L93">        orchestrator.start();</span>
+<span class="nc" id="L94">        waitUntil(() -&gt; orchestrator.snapshot().polling().slowdownReason().isPresent());</span>
+<span class="nc" id="L95">        RuntimeSnapshot.Polling polling = orchestrator.snapshot().polling();</span>
+<span class="nc" id="L96">        Optional&lt;Duration&gt; nextTickDelay = orchestrator.scheduledTickDelayForTests();</span>
+<span class="nc" id="L97">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L100">        assertThat(polling.configuredInterval()).isEqualTo(CONFIGURED);</span>
+<span class="nc" id="L101">        assertThat(polling.effectiveInterval())</span>
+<span class="nc" id="L102">                .isEqualTo(CONFIGURED.multipliedBy(AdaptivePollInterval.SLOWDOWN_FACTOR));</span>
+<span class="nc" id="L103">        assertThat(polling.lastRateLimitedAt()).isPresent();</span>
+<span class="nc" id="L104">        assertThat(nextTickDelay)</span>
+<span class="nc" id="L105">                .as(&quot;with no retries left, the next tick itself waits out Trello's Retry-After of %s&quot;, RETRY_AFTER)</span>
+<span class="nc" id="L106">                .get(DURATION)</span>
+<span class="nc" id="L107">                .isGreaterThan(RETRY_AFTER.minus(TEST_SLACK));</span>
+<span class="nc" id="L108">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

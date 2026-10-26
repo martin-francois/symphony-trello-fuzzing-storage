@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MavenCentralPublicationTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello</a> &gt; <span class="el_source">MavenCentralPublicationTest.java</span></div><h1>MavenCentralPublicationTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello;
+
+import static org.assertj.core.api.Assertions.as;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
+import static org.assertj.core.api.InstanceOfAssertFactories.map;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.xpath.XPathConstants;
+import javax.xml.xpath.XPathExpressionException;
+import javax.xml.xpath.XPathFactory;
+import org.junit.jupiter.api.Test;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.SAXException;
+
+<span class="nc" id="L29">final class MavenCentralPublicationTest {</span>
+<span class="nc" id="L30">    private static final ObjectMapper YAML = new ObjectMapper(new YAMLFactory());</span>
+<span class="nc" id="L31">    private static final TypeReference&lt;Map&lt;String, String&gt;&gt; STRING_MAP = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L32">    private static final Path RELEASE_WORKFLOW = Path.of(&quot;.github/workflows/release-please.yml&quot;);</span>
+<span class="nc" id="L33">    private static final Path POM = Path.of(&quot;pom.xml&quot;);</span>
+    private static final String RELEASE_JOB = &quot;release-please&quot;;
+    private static final String PUBLICATION_JOB = &quot;maven-central&quot;;
+    private static final String PUBLICATION_ENVIRONMENT = &quot;maven-central&quot;;
+    private static final String CHECKOUT_STEP = &quot;Checkout release tag&quot;;
+    private static final String STAGE_STEP = &quot;Stage Maven Central artifacts&quot;;
+    private static final String DEPLOY_STEP = &quot;Deploy to Maven Central&quot;;
+    private static final String REPOSITORY_URL = &quot;https://github.com/martin-francois/symphony-trello&quot;;
+    private static final String BUILD_PLUGINS = &quot;/project/build/plugins/plugin&quot;;
+    private static final String PUBLICATION_PROFILE = &quot;/project/profiles/profile[id='maven-central']&quot;;
+    private static final String JRELEASER_CONFIGURATION =
+            PUBLICATION_PROFILE + &quot;/build/plugins/plugin[artifactId='jreleaser-maven-plugin']/configuration/jreleaser&quot;;
+
+    @Test
+    void publicationRunsAfterThePublishedGitHubReleaseOnlyWhenTheOwnerEnablesIt() throws IOException {
+        // given
+<span class="nc" id="L49">        JsonNode jobs = releaseWorkflowJobs();</span>
+
+        // when
+<span class="nc" id="L52">        JsonNode releaseJob = jobs.get(RELEASE_JOB);</span>
+<span class="nc" id="L53">        JsonNode publicationJob = jobs.get(PUBLICATION_JOB);</span>
+
+        // then
+<span class="nc" id="L56">        assertThat(strings(releaseJob.get(&quot;outputs&quot;)))</span>
+<span class="nc" id="L57">                .contains(</span>
+<span class="nc" id="L58">                        entry(&quot;upload_assets&quot;, &quot;${{ steps.release-assets.outputs.upload_assets }}&quot;),</span>
+<span class="nc" id="L59">                        entry(&quot;checkout_ref&quot;, &quot;${{ steps.release-assets.outputs.checkout_ref }}&quot;));</span>
+<span class="nc" id="L60">        assertThat(releaseJob.get(&quot;steps&quot;))</span>
+<span class="nc" id="L61">                .as(&quot;the GitHub Release job never runs the Maven Central steps&quot;)</span>
+<span class="nc" id="L62">                .extracting(MavenCentralPublicationTest::stepName)</span>
+<span class="nc" id="L63">                .doesNotContain(STAGE_STEP, DEPLOY_STEP);</span>
+<span class="nc" id="L64">        assertThat(publicationJob.get(&quot;needs&quot;).asText()).isEqualTo(RELEASE_JOB);</span>
+<span class="nc" id="L65">        assertThat(publicationJob.get(&quot;if&quot;).asText())</span>
+<span class="nc" id="L66">                .isEqualTo(&quot;${{ needs.&quot; + RELEASE_JOB + &quot;.outputs.upload_assets == 'true'&quot;</span>
+                        + &quot; &amp;&amp; vars.MAVEN_CENTRAL_STAGE != '' }}&quot;);
+<span class="nc" id="L68">        assertThat(publicationJob.get(&quot;environment&quot;).asText()).isEqualTo(PUBLICATION_ENVIRONMENT);</span>
+<span class="nc" id="L69">        assertThat(strings(publicationJob.get(&quot;permissions&quot;))).containsOnly(entry(&quot;contents&quot;, &quot;read&quot;));</span>
+<span class="nc" id="L70">        assertThat(publicationJob.get(&quot;steps&quot;))</span>
+<span class="nc" id="L71">                .extracting(MavenCentralPublicationTest::stepName)</span>
+<span class="nc" id="L72">                .containsSubsequence(CHECKOUT_STEP, STAGE_STEP, DEPLOY_STEP);</span>
+<span class="nc" id="L73">        assertThat(publicationJob.get(&quot;steps&quot;))</span>
+<span class="nc" id="L74">                .first()</span>
+<span class="nc" id="L75">                .extracting(step -&gt; strings(step.get(&quot;with&quot;)), as(map(String.class, String.class)))</span>
+<span class="nc" id="L76">                .containsOnly(</span>
+<span class="nc" id="L77">                        entry(&quot;ref&quot;, &quot;${{ needs.&quot; + RELEASE_JOB + &quot;.outputs.checkout_ref }}&quot;),</span>
+<span class="nc" id="L78">                        entry(&quot;persist-credentials&quot;, &quot;false&quot;));</span>
+<span class="nc" id="L79">    }</span>
+
+    @Test
+    void onlyTheDeployStepReceivesPublicationSecrets() throws IOException {
+        // given
+<span class="nc" id="L84">        JsonNode jobs = releaseWorkflowJobs();</span>
+
+        // when
+<span class="nc" id="L87">        JsonNode steps = jobs.get(PUBLICATION_JOB).get(&quot;steps&quot;);</span>
+
+        // then
+<span class="nc" id="L90">        assertThat(steps)</span>
+<span class="nc" id="L91">                .filteredOn(step -&gt; step.toString().contains(&quot;secrets.&quot;))</span>
+<span class="nc" id="L92">                .extracting(MavenCentralPublicationTest::stepName)</span>
+<span class="nc" id="L93">                .containsExactly(DEPLOY_STEP);</span>
+<span class="nc" id="L94">        assertThat(steps)</span>
+<span class="nc" id="L95">                .last()</span>
+<span class="nc" id="L96">                .extracting(step -&gt; strings(step.get(&quot;env&quot;)), as(map(String.class, String.class)))</span>
+<span class="nc" id="L97">                .containsOnly(</span>
+<span class="nc" id="L98">                        entry(&quot;JRELEASER_MAVENCENTRAL_STAGE&quot;, &quot;${{ vars.MAVEN_CENTRAL_STAGE }}&quot;),</span>
+<span class="nc" id="L99">                        entry(&quot;JRELEASER_MAVENCENTRAL_USERNAME&quot;, &quot;${{ secrets.JRELEASER_MAVENCENTRAL_USERNAME }}&quot;),</span>
+<span class="nc" id="L100">                        entry(&quot;JRELEASER_MAVENCENTRAL_PASSWORD&quot;, &quot;${{ secrets.JRELEASER_MAVENCENTRAL_PASSWORD }}&quot;),</span>
+<span class="nc" id="L101">                        entry(&quot;JRELEASER_GPG_PUBLIC_KEY&quot;, &quot;${{ secrets.JRELEASER_GPG_PUBLIC_KEY }}&quot;),</span>
+<span class="nc" id="L102">                        entry(&quot;JRELEASER_GPG_SECRET_KEY&quot;, &quot;${{ secrets.JRELEASER_GPG_SECRET_KEY }}&quot;),</span>
+<span class="nc" id="L103">                        entry(&quot;JRELEASER_GPG_PASSPHRASE&quot;, &quot;${{ secrets.JRELEASER_GPG_PASSPHRASE }}&quot;));</span>
+<span class="nc" id="L104">    }</span>
+
+    @Test
+    void jreleaserOnlyDeploysMavenArtifactsWithUploadAsThePomStage() throws Exception {
+        // given
+<span class="nc" id="L109">        Document pom = pom();</span>
+
+        // when
+<span class="nc" id="L112">        Element jreleaser = element(pom, JRELEASER_CONFIGURATION);</span>
+
+        // then
+<span class="nc" id="L115">        assertThat(childTexts(jreleaser).keySet())</span>
+<span class="nc" id="L116">                .as(&quot;GitHub Release assets, checksums.txt, and their attestation belong to the release job&quot;)</span>
+<span class="nc" id="L117">                .containsExactlyInAnyOrder(&quot;signing&quot;, &quot;release&quot;, &quot;deploy&quot;);</span>
+<span class="nc" id="L118">        assertThat(childTexts(element(jreleaser, &quot;release/github&quot;)))</span>
+<span class="nc" id="L119">                .containsOnly(entry(&quot;skipTag&quot;, &quot;true&quot;), entry(&quot;skipRelease&quot;, &quot;true&quot;));</span>
+<span class="nc" id="L120">        assertThat(childTexts(element(jreleaser, &quot;deploy/maven/mavenCentral/sonatype&quot;)))</span>
+<span class="nc" id="L121">                .containsOnly(</span>
+<span class="nc" id="L122">                        entry(&quot;active&quot;, &quot;RELEASE&quot;),</span>
+<span class="nc" id="L123">                        entry(&quot;url&quot;, &quot;https://central.sonatype.com/api/v1/publisher&quot;),</span>
+<span class="nc" id="L124">                        entry(&quot;stage&quot;, &quot;UPLOAD&quot;),</span>
+<span class="nc" id="L125">                        entry(&quot;stagingRepositories&quot;, &quot;${maven-central.staging-directory}&quot;));</span>
+<span class="nc" id="L126">    }</span>
+
+    /// Pull request CI never runs JReleaser's POM checks, so this test keeps the required metadata
+    /// and the attached jars from disappearing between releases.
+    @Test
+    void pomCarriesMavenCentralMetadataAndAttachesSourcesAndJavadoc() throws Exception {
+        // given
+<span class="nc" id="L133">        Document pom = pom();</span>
+
+        // when
+<span class="nc" id="L136">        Element project = pom.getDocumentElement();</span>
+
+        // then
+<span class="nc" id="L139">        assertThat(childTexts(project)).containsEntry(&quot;url&quot;, REPOSITORY_URL);</span>
+<span class="nc" id="L140">        assertThat(childTexts(element(project, &quot;licenses/license&quot;))).containsEntry(&quot;name&quot;, &quot;Apache-2.0&quot;);</span>
+<span class="nc" id="L141">        assertThat(childTexts(element(project, &quot;developers/developer&quot;))).containsKeys(&quot;id&quot;, &quot;name&quot;, &quot;url&quot;);</span>
+<span class="nc" id="L142">        assertThat(childTexts(element(project, &quot;scm&quot;)))</span>
+<span class="nc" id="L143">                .containsOnly(</span>
+<span class="nc" id="L144">                        entry(&quot;connection&quot;, &quot;scm:git:&quot; + REPOSITORY_URL + &quot;.git&quot;),</span>
+<span class="nc" id="L145">                        entry(&quot;developerConnection&quot;, &quot;scm:git:&quot; + REPOSITORY_URL + &quot;.git&quot;),</span>
+<span class="nc" id="L146">                        entry(&quot;url&quot;, REPOSITORY_URL));</span>
+<span class="nc" id="L147">        assertThat(childTexts(element(project, &quot;issueManagement&quot;))).containsEntry(&quot;url&quot;, REPOSITORY_URL + &quot;/issues&quot;);</span>
+<span class="nc" id="L148">        assertThat(childTexts(</span>
+<span class="nc" id="L149">                        element(pom, BUILD_PLUGINS + &quot;[artifactId='maven-source-plugin']/executions/execution/goals&quot;)))</span>
+<span class="nc" id="L150">                .containsOnly(entry(&quot;goal&quot;, &quot;jar-no-fork&quot;));</span>
+<span class="nc" id="L151">        assertThat(childTexts(</span>
+<span class="nc" id="L152">                        element(pom, BUILD_PLUGINS + &quot;[artifactId='maven-javadoc-plugin']/executions/execution/goals&quot;)))</span>
+<span class="nc" id="L153">                .containsOnly(entry(&quot;goal&quot;, &quot;jar&quot;));</span>
+<span class="nc" id="L154">        assertThat(childTexts(</span>
+<span class="nc" id="L155">                        element(pom, PUBLICATION_PROFILE + &quot;/build/plugins/plugin[artifactId='maven-deploy-plugin']&quot;)))</span>
+<span class="nc" id="L156">                .as(&quot;a pinned deploy plugin lets Renovate track the version that fills the staging directory&quot;)</span>
+<span class="nc" id="L157">                .containsEntry(&quot;version&quot;, &quot;${maven-deploy-plugin.version}&quot;);</span>
+<span class="nc" id="L158">        assertThat(childTexts(element(pom, PUBLICATION_PROFILE + &quot;/properties&quot;)))</span>
+<span class="nc" id="L159">                .containsOnly(entry(&quot;altDeploymentRepository&quot;, &quot;local::file:${maven-central.staging-directory}&quot;));</span>
+<span class="nc" id="L160">    }</span>
+
+    private static JsonNode releaseWorkflowJobs() throws IOException {
+<span class="nc" id="L163">        return YAML.readTree(RELEASE_WORKFLOW.toFile()).get(&quot;jobs&quot;);</span>
+    }
+
+    private static String stepName(JsonNode step) {
+<span class="nc" id="L167">        return step.path(&quot;name&quot;).asText();</span>
+    }
+
+    private static Map&lt;String, String&gt; strings(JsonNode mapping) {
+<span class="nc" id="L171">        return YAML.convertValue(mapping, STRING_MAP);</span>
+    }
+
+    private static Document pom() throws ParserConfigurationException, SAXException, IOException {
+<span class="nc" id="L175">        DocumentBuilderFactory factory = DocumentBuilderFactory.newDefaultInstance();</span>
+<span class="nc" id="L176">        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);</span>
+<span class="nc" id="L177">        factory.setFeature(&quot;http://apache.org/xml/features/disallow-doctype-decl&quot;, true);</span>
+<span class="nc" id="L178">        return factory.newDocumentBuilder().parse(POM.toFile());</span>
+    }
+
+    private static Element element(Node context, String path) throws XPathExpressionException {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (XPathFactory.newDefaultInstance().newXPath().evaluate(path, context, XPathConstants.NODE)</span>
+<span class="nc" id="L183">                instanceof Element element) {</span>
+<span class="nc" id="L184">            return element;</span>
+        }
+<span class="nc" id="L186">        throw new AssertionError(&quot;pom.xml has no element &quot; + path);</span>
+    }
+
+    /// Maps each child element name to its text; callers pass elements whose child names are unique.
+    private static Map&lt;String, String&gt; childTexts(Element parent) {
+<span class="nc" id="L191">        Map&lt;String, String&gt; texts = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L192">        NodeList children = parent.getChildNodes();</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        for (int index = 0; index &lt; children.getLength(); index++) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            if (children.item(index) instanceof Element child) {</span>
+<span class="nc" id="L195">                texts.put(child.getTagName(), child.getTextContent().strip());</span>
+            }
+        }
+<span class="nc" id="L198">        return Map.copyOf(texts);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

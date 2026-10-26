@@ -11,6 +11,7 @@ import ch.fmartin.symphony.trello.config.ConfigResolver;
 import ch.fmartin.symphony.trello.config.EffectiveConfig;
 import ch.fmartin.symphony.trello.domain.Card;
 import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.testsupport.BoundedWait;
 import ch.fmartin.symphony.trello.tracker.CardLookupResult;
 import ch.fmartin.symphony.trello.tracker.TrackerClient;
 import ch.fmartin.symphony.trello.tracker.TrelloClient;
@@ -20,19 +21,20 @@ import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-<span class="nc" id="L33">final class UsageLimitPauseIntegrationTest {</span>
+<span class="nc" id="L34">final class UsageLimitPauseIntegrationTest {</span>
     private static final String FIRST_CARD = &quot;TRELLO-first&quot;;
     private static final String SECOND_CARD = &quot;TRELLO-second&quot;;
+<span class="nc" id="L37">    private static final Duration RETRY_SCHEDULING_TIMEOUT = Duration.ofSeconds(10);</span>
 
     @TempDir
     Path tempDir;
@@ -40,9 +42,9 @@ import org.junit.jupiter.api.io.TempDir;
     @Test
     void typedUsageLimitStopsTheNextPriorityCardFromChurningThroughInProgress() throws Exception {
         // given
-<span class="nc" id="L43">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
-<span class="nc" id="L44">        Path fakeAppServer = writeUsageLimitAppServer();</span>
-<span class="nc" id="L45">        Files.writeString(</span>
+<span class="nc" id="L45">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L46">        Path fakeAppServer = writeUsageLimitAppServer();</span>
+<span class="nc" id="L47">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -69,49 +71,52 @@ import org.junit.jupiter.api.io.TempDir;
                 ---
                 {{ card.identifier }}
                 &quot;&quot;&quot;
-<span class="nc" id="L72">                        .formatted(fakeAppServer));</span>
-<span class="nc" id="L73">        Card first = TestCards.cardWithLabels(&quot;card-1&quot;, FIRST_CARD, &quot;Ready for Codex&quot;, List.of(&quot;p1&quot;));</span>
-<span class="nc" id="L74">        Card second = TestCards.cardWithLabels(&quot;card-2&quot;, SECOND_CARD, &quot;Ready for Codex&quot;, List.of(&quot;p2&quot;));</span>
-<span class="nc" id="L75">        var tracker = new LocalTracker(List.of(first, second));</span>
-<span class="nc" id="L76">        tracker.setPreparedCard(inProgress(first));</span>
-<span class="nc" id="L77">        var json = new ObjectMapper();</span>
-<span class="nc" id="L78">        var workspaces = new WorkspaceManager(new HookRunner());</span>
-<span class="nc" id="L79">        var codex = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
-<span class="nc" id="L80">        var runner = new LocalAgentRunner(workspaces, new HookRunner(), codex, tracker, new PromptRenderer());</span>
-<span class="nc" id="L81">        var orchestrator = new SymphonyOrchestrator(</span>
+<span class="nc" id="L74">                        .formatted(fakeAppServer));</span>
+<span class="nc" id="L75">        Card first = TestCards.cardWithLabels(&quot;card-1&quot;, FIRST_CARD, &quot;Ready for Codex&quot;, List.of(&quot;p1&quot;));</span>
+<span class="nc" id="L76">        Card second = TestCards.cardWithLabels(&quot;card-2&quot;, SECOND_CARD, &quot;Ready for Codex&quot;, List.of(&quot;p2&quot;));</span>
+<span class="nc" id="L77">        var tracker = new LocalTracker(List.of(first, second));</span>
+<span class="nc" id="L78">        tracker.setPreparedCard(inProgress(first));</span>
+<span class="nc" id="L79">        var json = new ObjectMapper();</span>
+<span class="nc" id="L80">        var workspaces = new WorkspaceManager(new HookRunner());</span>
+<span class="nc" id="L81">        var codex = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L82">        var runner = new LocalAgentRunner(workspaces, new HookRunner(), codex, tracker, new PromptRenderer());</span>
+<span class="nc" id="L83">        var orchestrator = new SymphonyOrchestrator(</span>
                 new WorkflowLoader(), new ConfigResolver(), tracker, runner, new PromptRenderer(), workspaces);
-<span class="nc" id="L83">        orchestrator.workflowPath = workflow;</span>
+<span class="nc" id="L85">        orchestrator.workflowPath = workflow;</span>
 
         // when
-<span class="nc" id="L86">        orchestrator.start();</span>
-<span class="nc bnc" id="L87" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
-<span class="nc" id="L88">        int candidateFetchesBeforeRefresh = tracker.candidateFetches.get();</span>
-<span class="nc" id="L89">        orchestrator.tickNowForTests();</span>
-<span class="nc" id="L90">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
-<span class="nc" id="L91">        orchestrator.stop();</span>
+<span class="nc" id="L88">        orchestrator.start();</span>
+<span class="nc" id="L89">        BoundedWait.until(</span>
+                RETRY_SCHEDULING_TIMEOUT,
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                () -&gt; orchestrator.snapshot().counts().retrying() == 1,</span>
+                &quot;the usage-limited card retry&quot;);
+<span class="nc" id="L93">        int candidateFetchesBeforeRefresh = tracker.candidateFetches.get();</span>
+<span class="nc" id="L94">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L95">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L96">        orchestrator.stop();</span>
 
         // then
-<span class="nc" id="L94">        assertThat(snapshot.retrying()).singleElement().satisfies(retry -&gt; {</span>
-<span class="nc" id="L95">            assertThat(retry.cardIdentifier()).isEqualTo(FIRST_CARD);</span>
-<span class="nc" id="L96">            assertThat(retry.error()).contains(&quot;Synthetic Codex usage limit&quot;);</span>
-<span class="nc" id="L97">        });</span>
-<span class="nc" id="L98">        assertThat(tracker.preparedIdentifiers)</span>
-<span class="nc" id="L99">                .as(&quot;the workflow-wide usage pause must stop the second card before its pickup move&quot;)</span>
-<span class="nc" id="L100">                .containsExactly(FIRST_CARD);</span>
-<span class="nc" id="L101">        assertThat(tracker.candidateFetches)</span>
-<span class="nc" id="L102">                .as(&quot;manual refresh must stop before Trello candidate I/O while usage is paused&quot;)</span>
-<span class="nc" id="L103">                .hasValue(candidateFetchesBeforeRefresh);</span>
-<span class="nc" id="L104">        assertThat(tracker.releasedIdentifiers).containsExactly(FIRST_CARD);</span>
-<span class="nc" id="L105">        assertThat(tracker.cardState(&quot;card-2&quot;).state()).isEqualTo(&quot;Ready for Codex&quot;);</span>
-<span class="nc" id="L106">    }</span>
+<span class="nc" id="L99">        assertThat(snapshot.retrying()).singleElement().satisfies(retry -&gt; {</span>
+<span class="nc" id="L100">            assertThat(retry.cardIdentifier()).isEqualTo(FIRST_CARD);</span>
+<span class="nc" id="L101">            assertThat(retry.error()).contains(&quot;Synthetic Codex usage limit&quot;);</span>
+<span class="nc" id="L102">        });</span>
+<span class="nc" id="L103">        assertThat(tracker.preparedIdentifiers)</span>
+<span class="nc" id="L104">                .as(&quot;the workflow-wide usage pause must stop the second card before its pickup move&quot;)</span>
+<span class="nc" id="L105">                .containsExactly(FIRST_CARD);</span>
+<span class="nc" id="L106">        assertThat(tracker.candidateFetches)</span>
+<span class="nc" id="L107">                .as(&quot;manual refresh must stop before Trello candidate I/O while usage is paused&quot;)</span>
+<span class="nc" id="L108">                .hasValue(candidateFetchesBeforeRefresh);</span>
+<span class="nc" id="L109">        assertThat(tracker.releasedIdentifiers).containsExactly(FIRST_CARD);</span>
+<span class="nc" id="L110">        assertThat(tracker.cardState(&quot;card-2&quot;).state()).isEqualTo(&quot;Ready for Codex&quot;);</span>
+<span class="nc" id="L111">    }</span>
 
     private static Card inProgress(Card card) {
-<span class="nc" id="L109">        return TestCards.cardWithLabels(card.id(), card.identifier(), &quot;In Progress&quot;, card.labels());</span>
+<span class="nc" id="L114">        return TestCards.cardWithLabels(card.id(), card.identifier(), &quot;In Progress&quot;, card.labels());</span>
     }
 
     private Path writeUsageLimitAppServer() throws Exception {
-<span class="nc" id="L113">        Path script = tempDir.resolve(&quot;usage-limit-app-server.sh&quot;);</span>
-<span class="nc" id="L114">        Files.writeString(</span>
+<span class="nc" id="L118">        Path script = tempDir.resolve(&quot;usage-limit-app-server.sh&quot;);</span>
+<span class="nc" id="L119">        Files.writeString(</span>
                 script,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -127,89 +132,73 @@ import org.junit.jupiter.api.io.TempDir;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L130">        script.toFile().setExecutable(true);</span>
-<span class="nc" id="L131">        return script;</span>
-    }
-
-    private static void waitUntil(Condition condition) throws Exception {
-<span class="nc" id="L135">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);</span>
-<span class="nc bnc" id="L136" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
-<span class="nc bnc" id="L137" title="All 2 branches missed.">            if (condition.matches()) {</span>
-<span class="nc" id="L138">                return;</span>
-            }
-<span class="nc" id="L140">            Thread.sleep(25);</span>
-        }
-<span class="nc" id="L142">        throw new AssertionError(&quot;Condition was not met before timeout&quot;);</span>
-    }
-
-    @FunctionalInterface
-    private interface Condition {
-        boolean matches();
+<span class="nc" id="L135">        script.toFile().setExecutable(true);</span>
+<span class="nc" id="L136">        return script;</span>
     }
 
     private static final class LocalTracker implements TrackerClient {
         private final List&lt;Card&gt; candidates;
         private volatile Map&lt;String, CardLookupResult&gt; cardStates;
-<span class="nc" id="L153">        private final AtomicInteger candidateFetches = new AtomicInteger();</span>
-<span class="nc" id="L154">        private final List&lt;String&gt; preparedIdentifiers = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L155">        private final List&lt;String&gt; releasedIdentifiers = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L156">        private final Map&lt;String, Card&gt; preparedCards = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L142">        private final AtomicInteger candidateFetches = new AtomicInteger();</span>
+<span class="nc" id="L143">        private final List&lt;String&gt; preparedIdentifiers = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L144">        private final List&lt;String&gt; releasedIdentifiers = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L145">        private final Map&lt;String, Card&gt; preparedCards = new LinkedHashMap&lt;&gt;();</span>
 
-<span class="nc" id="L158">        private LocalTracker(List&lt;Card&gt; candidates) {</span>
-<span class="nc" id="L159">            this.candidates = List.copyOf(candidates);</span>
-<span class="nc" id="L160">            cardStates = candidates.stream().collect(toImmutableMap(Card::id, CardLookupResult.Found::new));</span>
-<span class="nc" id="L161">        }</span>
+<span class="nc" id="L147">        private LocalTracker(List&lt;Card&gt; candidates) {</span>
+<span class="nc" id="L148">            this.candidates = List.copyOf(candidates);</span>
+<span class="nc" id="L149">            cardStates = candidates.stream().collect(toImmutableMap(Card::id, CardLookupResult.Found::new));</span>
+<span class="nc" id="L150">        }</span>
 
         private void setPreparedCard(Card card) {
-<span class="nc" id="L164">            preparedCards.put(card.id(), card);</span>
-<span class="nc" id="L165">        }</span>
+<span class="nc" id="L153">            preparedCards.put(card.id(), card);</span>
+<span class="nc" id="L154">        }</span>
 
         private Card cardState(String cardId) {
-<span class="nc" id="L168">            return ((CardLookupResult.Found) cardStates.get(cardId)).card();</span>
+<span class="nc" id="L157">            return ((CardLookupResult.Found) cardStates.get(cardId)).card();</span>
         }
 
         private void setCardState(Card card) {
-<span class="nc" id="L172">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(cardStates);</span>
-<span class="nc" id="L173">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L174">            cardStates = Map.copyOf(updated);</span>
-<span class="nc" id="L175">        }</span>
+<span class="nc" id="L161">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(cardStates);</span>
+<span class="nc" id="L162">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L163">            cardStates = Map.copyOf(updated);</span>
+<span class="nc" id="L164">        }</span>
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L179">            return &quot;board-1&quot;;</span>
+<span class="nc" id="L168">            return &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L184">            candidateFetches.incrementAndGet();</span>
-<span class="nc" id="L185">            return new ArrayList&lt;&gt;(candidates);</span>
+<span class="nc" id="L173">            candidateFetches.incrementAndGet();</span>
+<span class="nc" id="L174">            return new ArrayList&lt;&gt;(candidates);</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L190">            return List.of();</span>
+<span class="nc" id="L179">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L195">            return cardStates.entrySet().stream()</span>
-<span class="nc" id="L196">                    .filter(entry -&gt; cardIds.contains(entry.getKey()))</span>
-<span class="nc" id="L197">                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));</span>
+<span class="nc" id="L184">            return cardStates.entrySet().stream()</span>
+<span class="nc" id="L185">                    .filter(entry -&gt; cardIds.contains(entry.getKey()))</span>
+<span class="nc" id="L186">                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));</span>
         }
 
         @Override
         public Card prepareForDispatch(EffectiveConfig config, Card card) {
-<span class="nc" id="L202">            preparedIdentifiers.add(card.identifier());</span>
-<span class="nc" id="L203">            Card prepared = preparedCards.getOrDefault(card.id(), inProgress(card));</span>
-<span class="nc" id="L204">            setCardState(prepared);</span>
-<span class="nc" id="L205">            return prepared;</span>
+<span class="nc" id="L191">            preparedIdentifiers.add(card.identifier());</span>
+<span class="nc" id="L192">            Card prepared = preparedCards.getOrDefault(card.id(), inProgress(card));</span>
+<span class="nc" id="L193">            setCardState(prepared);</span>
+<span class="nc" id="L194">            return prepared;</span>
         }
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card, Card dispatchSource) {
-<span class="nc" id="L210">            releasedIdentifiers.add(card.identifier());</span>
-<span class="nc" id="L211">            setCardState(TestCards.cardWithLabels(card.id(), card.identifier(), dispatchSource.state(), card.labels()));</span>
-<span class="nc" id="L212">        }</span>
+<span class="nc" id="L199">            releasedIdentifiers.add(card.identifier());</span>
+<span class="nc" id="L200">            setCardState(TestCards.cardWithLabels(card.id(), card.identifier(), dispatchSource.state(), card.labels()));</span>
+<span class="nc" id="L201">        }</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

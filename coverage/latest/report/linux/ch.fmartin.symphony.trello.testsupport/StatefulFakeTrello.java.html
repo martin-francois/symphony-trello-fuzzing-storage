@@ -1,0 +1,442 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StatefulFakeTrello.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.testsupport</a> &gt; <span class="el_source">StatefulFakeTrello.java</span></div><h1>StatefulFakeTrello.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.testsupport;
+
+import static ch.fmartin.symphony.trello.TestHttpExchange.query;
+
+import ch.fmartin.symphony.trello.TestHttpExchange;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Consumer;
+
+/// Stateful stand-in for the Trello REST calls that board setup and the guided tutorial make.
+///
+/// Unlike [FakeTrelloServer], which answers canned payloads, this fake keeps boards, lists, cards,
+/// and comments, so a test can act as the person moving cards in the Trello UI while the code under
+/// test polls the board. Routes it does not model answer HTTP 404.
+<span class="nc" id="L26">public final class StatefulFakeTrello implements AutoCloseable {</span>
+<span class="nc" id="L27">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+    private static final String MEMBER_ID = &quot;000000000000000000000099&quot;;
+
+    // Trello lists boards, lists, and comments in creation order, so the fake keeps insertion order.
+<span class="nc" id="L31">    private final Map&lt;String, Board&gt; boards = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L32">    private final Map&lt;String, TrelloList&gt; lists = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L33">    private final Map&lt;String, Card&gt; cards = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L34">    private final Map&lt;String, Comment&gt; comments = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L35">    private final List&lt;Workspace&gt; workspaces = new ArrayList&lt;&gt;(List.of(new Workspace(&quot;workspace-1&quot;, &quot;Engineering&quot;)));</span>
+<span class="nc" id="L36">    private final List&lt;String&gt; requests = new ArrayList&lt;&gt;();</span>
+    // Injected failures fire in the order the test registered them.
+<span class="nc" id="L38">    private final Map&lt;String, Integer&gt; failures = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L39">    private Consumer&lt;String&gt; beforeCardRead = cardId -&gt; {};</span>
+<span class="nc" id="L40">    private int nextId = 1;</span>
+    private HttpServer server;
+
+    public StatefulFakeTrello start() throws IOException {
+<span class="nc" id="L44">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L45">        server.createContext(&quot;/1/&quot;, this::handle);</span>
+<span class="nc" id="L46">        server.start();</span>
+<span class="nc" id="L47">        return this;</span>
+    }
+
+    @Override
+    public void close() {
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        if (server != null) {</span>
+<span class="nc" id="L53">            server.stop(0);</span>
+        }
+<span class="nc" id="L55">    }</span>
+
+    public URI endpoint() {
+<span class="nc" id="L58">        return URI.create(&quot;http://127.0.0.1:&quot; + server.getAddress().getPort() + &quot;/1&quot;);</span>
+    }
+
+    public synchronized StatefulFakeTrello givenWorkspaces(String... displayNames) {
+<span class="nc" id="L62">        workspaces.clear();</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        for (int i = 0; i &lt; displayNames.length; i++) {</span>
+<span class="nc" id="L64">            workspaces.add(new Workspace(&quot;workspace-&quot; + (i + 1), displayNames[i]));</span>
+        }
+<span class="nc" id="L66">        return this;</span>
+    }
+
+    /// Creates a board the way a person would, for example a board that setup connected earlier.
+    public synchronized String givenBoard(String name) {
+<span class="nc" id="L71">        return createBoard(name, workspaces.getFirst().id()).id;</span>
+    }
+
+    /// Runs before the fake answers a card read, so a test can change the card between two polls.
+    public synchronized void beforeCardRead(Consumer&lt;String&gt; action) {
+<span class="nc" id="L76">        beforeCardRead = action;</span>
+<span class="nc" id="L77">    }</span>
+
+    /// Answers the next request whose method and path start match with the given HTTP status.
+    public synchronized void failNext(String method, String pathPrefix, int statusCode) {
+<span class="nc" id="L81">        failures.put(method + &quot; &quot; + pathPrefix, statusCode);</span>
+<span class="nc" id="L82">    }</span>
+
+    public synchronized List&lt;String&gt; boardNames() {
+<span class="nc" id="L85">        List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        for (Board board : boards.values()) {</span>
+<span class="nc" id="L87">            names.add(board.name);</span>
+<span class="nc" id="L88">        }</span>
+<span class="nc" id="L89">        return names;</span>
+    }
+
+    public synchronized String boardIdNamed(String name) {
+<span class="nc" id="L93">        List&lt;String&gt; ids = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        for (Board board : boards.values()) {</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">            if (board.name.equals(name)) {</span>
+<span class="nc" id="L96">                ids.add(board.id);</span>
+            }
+<span class="nc" id="L98">        }</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (ids.size() != 1) {</span>
+<span class="nc" id="L100">            throw new IllegalStateException(&quot;Expected one board named &quot; + name + &quot; but found &quot; + ids.size());</span>
+        }
+<span class="nc" id="L102">        return ids.getFirst();</span>
+    }
+
+    public synchronized boolean archived(String boardId) {
+<span class="nc" id="L106">        return board(boardId).closed;</span>
+    }
+
+    public synchronized String workspaceOf(String boardId) {
+<span class="nc" id="L110">        return board(boardId).workspaceId;</span>
+    }
+
+    public synchronized List&lt;String&gt; listNames(String boardId) {
+<span class="nc" id="L114">        List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        for (TrelloList list : lists.values()) {</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">            if (list.boardId.equals(boardId)) {</span>
+<span class="nc" id="L117">                names.add(list.name);</span>
+            }
+<span class="nc" id="L119">        }</span>
+<span class="nc" id="L120">        return names;</span>
+    }
+
+    public synchronized String onlyCardId(String boardId) {
+<span class="nc" id="L124">        List&lt;String&gt; ids = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">        for (Card card : cards.values()) {</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (card.boardId.equals(boardId)) {</span>
+<span class="nc" id="L127">                ids.add(card.id);</span>
+            }
+<span class="nc" id="L129">        }</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        if (ids.size() != 1) {</span>
+<span class="nc" id="L131">            throw new IllegalStateException(&quot;Expected one card on &quot; + boardId + &quot; but found &quot; + ids);</span>
+        }
+<span class="nc" id="L133">        return ids.getFirst();</span>
+    }
+
+    public synchronized String cardName(String cardId) {
+<span class="nc" id="L137">        return card(cardId).name;</span>
+    }
+
+    public synchronized String listOf(String cardId) {
+<span class="nc" id="L141">        return lists.get(card(cardId).listId).name;</span>
+    }
+
+    /// Comment texts on the card, oldest first.
+    public synchronized List&lt;String&gt; commentTexts(String cardId) {
+<span class="nc" id="L146">        List&lt;String&gt; texts = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        for (Comment comment : comments.values()) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (comment.cardId.equals(cardId)) {</span>
+<span class="nc" id="L149">                texts.add(comment.text);</span>
+            }
+<span class="nc" id="L151">        }</span>
+<span class="nc" id="L152">        return texts;</span>
+    }
+
+    public synchronized void moveCard(String cardId, String listName) {
+<span class="nc" id="L156">        Card card = card(cardId);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        for (TrelloList list : lists.values()) {</span>
+<span class="nc bnc" id="L158" title="All 4 branches missed.">            if (list.boardId.equals(card.boardId) &amp;&amp; list.name.equals(listName)) {</span>
+<span class="nc" id="L159">                card.listId = list.id;</span>
+<span class="nc" id="L160">                return;</span>
+            }
+<span class="nc" id="L162">        }</span>
+<span class="nc" id="L163">        throw new IllegalStateException(&quot;No list named &quot; + listName);</span>
+    }
+
+    public synchronized void addComment(String cardId, String text) {
+<span class="nc" id="L167">        card(cardId);</span>
+<span class="nc" id="L168">        String id = nextId();</span>
+<span class="nc" id="L169">        comments.put(id, new Comment(id, cardId, text));</span>
+<span class="nc" id="L170">    }</span>
+
+    public synchronized void deleteCard(String cardId) {
+<span class="nc" id="L173">        cards.remove(cardId);</span>
+<span class="nc" id="L174">    }</span>
+
+    public synchronized boolean receivedRequestStartingWith(String prefix) {
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        for (String request : requests) {</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">            if (request.startsWith(prefix)) {</span>
+<span class="nc" id="L179">                return true;</span>
+            }
+<span class="nc" id="L181">        }</span>
+<span class="nc" id="L182">        return false;</span>
+    }
+
+    /// Requests in arrival order, as `METHOD /path`.
+    public synchronized List&lt;String&gt; requests() {
+<span class="nc" id="L187">        return List.copyOf(requests);</span>
+    }
+
+    private void handle(HttpExchange exchange) throws IOException {
+        Reply reply;
+        Consumer&lt;String&gt; cardReadAction;
+<span class="nc" id="L193">        String method = exchange.getRequestMethod();</span>
+<span class="nc" id="L194">        String path = exchange.getRequestURI().getPath().substring(&quot;/1/&quot;.length());</span>
+<span class="nc" id="L195">        synchronized (this) {</span>
+<span class="nc" id="L196">            requests.add(method + &quot; /&quot; + path);</span>
+<span class="nc" id="L197">            cardReadAction = beforeCardRead;</span>
+<span class="nc" id="L198">        }</span>
+<span class="nc" id="L199">        List&lt;String&gt; segments = List.of(path.split(&quot;/&quot;));</span>
+<span class="nc bnc" id="L200" title="All 6 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; segments.size() == 2 &amp;&amp; &quot;cards&quot;.equals(segments.getFirst())) {</span>
+<span class="nc" id="L201">            cardReadAction.accept(segments.get(1));</span>
+        }
+<span class="nc" id="L203">        synchronized (this) {</span>
+<span class="nc" id="L204">            reply = injectedFailure(method, path).orElseGet(() -&gt; route(method, segments, query(exchange)));</span>
+<span class="nc" id="L205">        }</span>
+<span class="nc" id="L206">        TestHttpExchange.respond(exchange, reply.status(), reply.body());</span>
+<span class="nc" id="L207">    }</span>
+
+    private Optional&lt;Reply&gt; injectedFailure(String method, String path) {
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        for (Map.Entry&lt;String, Integer&gt; failure : List.copyOf(failures.entrySet())) {</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">            if ((method + &quot; &quot; + path).startsWith(failure.getKey())) {</span>
+<span class="nc" id="L212">                failures.remove(failure.getKey());</span>
+<span class="nc" id="L213">                return Optional.of(new Reply(failure.getValue(), &quot;injected failure&quot;));</span>
+            }
+<span class="nc" id="L215">        }</span>
+<span class="nc" id="L216">        return Optional.empty();</span>
+    }
+
+    private Reply route(String method, List&lt;String&gt; path, Map&lt;String, String&gt; query) {
+<span class="nc" id="L220">        String resource = path.getFirst();</span>
+<span class="nc bnc" id="L221" title="All 12 branches missed.">        return switch (method + &quot; &quot; + resource + &quot;/&quot; + (path.size() - 1)) {</span>
+<span class="nc" id="L222">            case &quot;GET members/1&quot; -&gt; ok(Map.of(&quot;id&quot;, MEMBER_ID, &quot;username&quot;, &quot;alex&quot;, &quot;fullName&quot;, &quot;Alex Example&quot;));</span>
+            case &quot;GET members/2&quot; -&gt; {
+<span class="nc" id="L224">                List&lt;Map&lt;String, Object&gt;&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                for (Workspace workspace : workspaces) {</span>
+<span class="nc" id="L226">                    values.add(workspace.json());</span>
+<span class="nc" id="L227">                }</span>
+<span class="nc" id="L228">                yield ok(values);</span>
+            }
+            case &quot;POST boards/0&quot;, &quot;POST boards/1&quot; -&gt;
+<span class="nc" id="L231">                ok(createBoard(query.get(&quot;name&quot;), query.get(&quot;idOrganization&quot;)).json());</span>
+<span class="nc" id="L232">            case &quot;GET boards/1&quot;, &quot;PUT boards/1&quot; -&gt; boardRoute(method, path.get(1), query);</span>
+<span class="nc" id="L233">            case &quot;GET boards/2&quot; -&gt; boardLists(path.get(1));</span>
+            case &quot;POST lists/0&quot; -&gt;
+<span class="nc" id="L235">                ok(createList(query.get(&quot;idBoard&quot;), query.get(&quot;name&quot;)).json());</span>
+<span class="nc" id="L236">            case &quot;POST cards/0&quot; -&gt; ok(createCard(query).json(List.of()));</span>
+<span class="nc" id="L237">            case &quot;GET cards/1&quot; -&gt; cardRead(path.get(1));</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            case &quot;PUT cards/2&quot; -&gt; &quot;idList&quot;.equals(path.get(2)) ? moveCardRoute(path.get(1), query) : notFound();</span>
+<span class="nc" id="L239">            case &quot;POST cards/3&quot; -&gt; addCommentRoute(path.get(1), query);</span>
+<span class="nc" id="L240">            case &quot;PUT actions/2&quot; -&gt; updateComment(path.get(1), query);</span>
+<span class="nc" id="L241">            default -&gt; notFound();</span>
+        };
+    }
+
+    private Board createBoard(String name, String workspaceId) {
+<span class="nc" id="L246">        String id = nextId();</span>
+<span class="nc" id="L247">        String shortLink = &quot;SYNTH%03d&quot;.formatted(boards.size() + 1);</span>
+<span class="nc" id="L248">        var board = new Board(id, name, shortLink, workspaceId);</span>
+<span class="nc" id="L249">        boards.put(id, board);</span>
+<span class="nc" id="L250">        return board;</span>
+    }
+
+    private Reply boardRoute(String method, String boardId, Map&lt;String, String&gt; query) {
+<span class="nc" id="L254">        Board board = boards.get(boardId);</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (board == null) {</span>
+<span class="nc" id="L256">            return notFound();</span>
+        }
+<span class="nc bnc" id="L258" title="All 4 branches missed.">        if (&quot;PUT&quot;.equals(method) &amp;&amp; query.containsKey(&quot;closed&quot;)) {</span>
+<span class="nc" id="L259">            board.closed = Boolean.parseBoolean(query.get(&quot;closed&quot;));</span>
+        }
+<span class="nc" id="L261">        return ok(board.json());</span>
+    }
+
+    private Reply boardLists(String boardId) {
+<span class="nc" id="L265">        List&lt;Map&lt;String, Object&gt;&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        for (TrelloList list : lists.values()) {</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            if (list.boardId.equals(boardId)) {</span>
+<span class="nc" id="L268">                values.add(list.json());</span>
+            }
+<span class="nc" id="L270">        }</span>
+<span class="nc" id="L271">        return ok(values);</span>
+    }
+
+    private TrelloList createList(String boardId, String name) {
+<span class="nc" id="L275">        var list = new TrelloList(nextId(), boardId, name);</span>
+<span class="nc" id="L276">        lists.put(list.id, list);</span>
+<span class="nc" id="L277">        return list;</span>
+    }
+
+    private Card createCard(Map&lt;String, String&gt; query) {
+<span class="nc" id="L281">        TrelloList list = lists.get(query.get(&quot;idList&quot;));</span>
+<span class="nc" id="L282">        var card = new Card(nextId(), list.boardId, query.get(&quot;name&quot;));</span>
+<span class="nc" id="L283">        card.listId = list.id;</span>
+<span class="nc" id="L284">        cards.put(card.id, card);</span>
+<span class="nc" id="L285">        return card;</span>
+    }
+
+    private Reply cardRead(String cardId) {
+<span class="nc" id="L289">        Card card = cards.get(cardId);</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (card == null) {</span>
+<span class="nc" id="L291">            return notFound();</span>
+        }
+<span class="nc" id="L293">        List&lt;Map&lt;String, Object&gt;&gt; actions = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">        for (Comment comment : comments.values()) {</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">            if (comment.cardId.equals(cardId)) {</span>
+                // Trello returns comment actions newest first.
+<span class="nc" id="L297">                actions.addFirst(comment.json());</span>
+            }
+<span class="nc" id="L299">        }</span>
+<span class="nc" id="L300">        return ok(card.json(actions));</span>
+    }
+
+    private Reply moveCardRoute(String cardId, Map&lt;String, String&gt; query) {
+<span class="nc" id="L304">        Card card = cards.get(cardId);</span>
+<span class="nc bnc" id="L305" title="All 4 branches missed.">        if (card == null || !lists.containsKey(query.get(&quot;value&quot;))) {</span>
+<span class="nc" id="L306">            return notFound();</span>
+        }
+<span class="nc" id="L308">        card.listId = query.get(&quot;value&quot;);</span>
+<span class="nc" id="L309">        return ok(card.json(List.of()));</span>
+    }
+
+    private Reply addCommentRoute(String cardId, Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L313" title="All 2 branches missed.">        if (!cards.containsKey(cardId)) {</span>
+<span class="nc" id="L314">            return notFound();</span>
+        }
+<span class="nc" id="L316">        String id = nextId();</span>
+<span class="nc" id="L317">        var comment = new Comment(id, cardId, query.get(&quot;text&quot;));</span>
+<span class="nc" id="L318">        comments.put(id, comment);</span>
+<span class="nc" id="L319">        return ok(comment.json());</span>
+    }
+
+    private Reply updateComment(String commentId, Map&lt;String, String&gt; query) {
+<span class="nc" id="L323">        Comment comment = comments.get(commentId);</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">        if (comment == null) {</span>
+<span class="nc" id="L325">            return notFound();</span>
+        }
+<span class="nc" id="L327">        comment.text = query.get(&quot;value&quot;);</span>
+<span class="nc" id="L328">        return ok(comment.json());</span>
+    }
+
+    private Board board(String boardId) {
+<span class="nc" id="L332">        Board board = boards.get(boardId);</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if (board == null) {</span>
+<span class="nc" id="L334">            throw new IllegalStateException(&quot;No board &quot; + boardId);</span>
+        }
+<span class="nc" id="L336">        return board;</span>
+    }
+
+    private Card card(String cardId) {
+<span class="nc" id="L340">        Card card = cards.get(cardId);</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        if (card == null) {</span>
+<span class="nc" id="L342">            throw new IllegalStateException(&quot;No card &quot; + cardId);</span>
+        }
+<span class="nc" id="L344">        return card;</span>
+    }
+
+    /// Same shape as Trello's 24-character ids, clearly synthetic.
+    private String nextId() {
+<span class="nc" id="L349">        int id = nextId;</span>
+<span class="nc" id="L350">        nextId++;</span>
+<span class="nc" id="L351">        return &quot;%024d&quot;.formatted(id);</span>
+    }
+
+    private static Reply ok(Object body) {
+        try {
+<span class="nc" id="L356">            return new Reply(200, JSON.writeValueAsString(body));</span>
+<span class="nc" id="L357">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L358">            throw new IllegalStateException(e);</span>
+        }
+    }
+
+    private static Reply notFound() {
+<span class="nc" id="L363">        return new Reply(404, &quot;The requested resource was not found.&quot;);</span>
+    }
+
+<span class="nc" id="L366">    private record Reply(int status, String body) {}</span>
+
+<span class="nc" id="L368">    private record Workspace(String id, String displayName) {</span>
+        Map&lt;String, Object&gt; json() {
+<span class="nc" id="L370">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, id, &quot;displayName&quot;, displayName, &quot;url&quot;, &quot;https://trello.com/w/&quot; + id);</span>
+        }
+    }
+
+    private static final class Board {
+        private final String id;
+        private final String name;
+        private final String shortLink;
+        private final String workspaceId;
+        private boolean closed;
+
+<span class="nc" id="L381">        private Board(String id, String name, String shortLink, String workspaceId) {</span>
+<span class="nc" id="L382">            this.id = id;</span>
+<span class="nc" id="L383">            this.name = name;</span>
+<span class="nc" id="L384">            this.shortLink = shortLink;</span>
+<span class="nc" id="L385">            this.workspaceId = workspaceId;</span>
+<span class="nc" id="L386">        }</span>
+
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L389">            return Map.of(</span>
+                    &quot;id&quot;,
+                    id,
+                    &quot;name&quot;,
+                    name,
+                    &quot;shortLink&quot;,
+                    shortLink,
+                    &quot;url&quot;,
+                    &quot;https://trello.com/b/&quot; + shortLink + &quot;/synthetic-board&quot;,
+                    &quot;closed&quot;,
+<span class="nc" id="L399">                    closed);</span>
+        }
+    }
+
+<span class="nc" id="L403">    private record TrelloList(String id, String boardId, String name) {</span>
+        Map&lt;String, Object&gt; json() {
+<span class="nc" id="L405">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, name, &quot;closed&quot;, false, &quot;pos&quot;, 1);</span>
+        }
+    }
+
+    private static final class Card {
+        private final String id;
+        private final String boardId;
+        private final String name;
+        private String listId;
+
+<span class="nc" id="L415">        private Card(String id, String boardId, String name) {</span>
+<span class="nc" id="L416">            this.id = id;</span>
+<span class="nc" id="L417">            this.boardId = boardId;</span>
+<span class="nc" id="L418">            this.name = name;</span>
+<span class="nc" id="L419">        }</span>
+
+        private Map&lt;String, Object&gt; json(List&lt;Map&lt;String, Object&gt;&gt; actions) {
+<span class="nc" id="L422">            return Map.of(&quot;id&quot;, id, &quot;name&quot;, name, &quot;idList&quot;, listId, &quot;closed&quot;, false, &quot;actions&quot;, actions);</span>
+        }
+    }
+
+    private static final class Comment {
+        private final String id;
+        private final String cardId;
+        private String text;
+
+<span class="nc" id="L431">        private Comment(String id, String cardId, String text) {</span>
+<span class="nc" id="L432">            this.id = id;</span>
+<span class="nc" id="L433">            this.cardId = cardId;</span>
+<span class="nc" id="L434">            this.text = text;</span>
+<span class="nc" id="L435">        }</span>
+
+        private Map&lt;String, Object&gt; json() {
+<span class="nc" id="L438">            return Map.of(&quot;id&quot;, id, &quot;type&quot;, &quot;commentCard&quot;, &quot;data&quot;, Map.of(&quot;text&quot;, text));</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

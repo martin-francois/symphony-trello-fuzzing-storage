@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExecutableResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.process</a> &gt; <span class="el_source">ExecutableResolver.java</span></div><h1>ExecutableResolver.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.process;
+
+import com.google.common.base.CharMatcher;
+import com.google.common.base.Splitter;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+/// Finds a tool on `PATH` the way the platform shell does and builds the command that starts it.
+///
+/// On Windows, `ProcessBuilder` hands a bare name to `CreateProcess`, which appends only `.exe`.
+/// npm installs Codex as a `codex.cmd` batch shim, so a bare `codex` does not start even though it
+/// works in PowerShell. This class searches `PATH` with `PATHEXT` and starts batch shims through
+/// `cmd.exe`. ADR 0114 records why.
+public final class ExecutableResolver {
+<span class="nc" id="L25">    private static final Splitter POSIX_PATH_SPLITTER = Splitter.on(File.pathSeparator);</span>
+<span class="nc" id="L26">    private static final Splitter WINDOWS_LIST_SPLITTER = Splitter.on(';');</span>
+<span class="nc" id="L27">    private static final List&lt;String&gt; DEFAULT_WINDOWS_PATH_EXTENSIONS = List.of(&quot;.COM&quot;, &quot;.EXE&quot;, &quot;.BAT&quot;, &quot;.CMD&quot;);</span>
+<span class="nc" id="L28">    private static final List&lt;String&gt; WINDOWS_BATCH_EXTENSIONS = List.of(&quot;.cmd&quot;, &quot;.bat&quot;);</span>
+
+    /// `cmd.exe` expands `%` and, with delayed expansion, `!` inside double quotes, a quote ends the
+    /// quoted argument, and it splits a quoted argument at `&amp;`, `|`, `&lt;`, `&gt;` and `^`. ADR 0114
+    /// records the evidence and the characters shown to pass.
+    private static final String CMD_CHANGED_CHARACTERS = &quot;\&quot;%!&amp;|&lt;&gt;^&quot;;
+
+    /// A carriage return or line feed also ends the quoted argument.
+    private static final String LINE_BREAK_CHARACTERS = &quot;\r\n&quot;;
+
+<span class="nc" id="L38">    private static final CharMatcher CMD_UNSAFE_CHARACTERS =</span>
+<span class="nc" id="L39">            CharMatcher.anyOf(CMD_CHANGED_CHARACTERS + LINE_BREAK_CHARACTERS).precomputed();</span>
+<span class="nc" id="L40">    private static final String CMD_UNSAFE_ARGUMENT_MESSAGE = &quot;cannot pass an argument containing any of &quot;</span>
+<span class="nc" id="L41">            + CMD_CHANGED_CHARACTERS.chars().mapToObj(Character::toString).collect(Collectors.joining(&quot; &quot;))</span>
+            + &quot; or a line break to a Windows batch file through cmd.exe&quot;;
+
+<span class="nc" id="L44">    private static final CharMatcher BACKSLASH = CharMatcher.is('\\');</span>
+
+    private final PlatformEnvironment environment;
+    private final boolean windows;
+
+<span class="nc" id="L49">    public ExecutableResolver(PlatformEnvironment environment) {</span>
+<span class="nc" id="L50">        this.environment = environment;</span>
+<span class="nc" id="L51">        this.windows = environment.windows();</span>
+<span class="nc" id="L52">    }</span>
+
+    public ExecutableResolver(Map&lt;String, String&gt; environment, String osName) {
+<span class="nc" id="L55">        this(PlatformEnvironment.of(environment, osName));</span>
+<span class="nc" id="L56">    }</span>
+
+    public static ExecutableResolver forCurrentProcess() {
+<span class="nc" id="L59">        return new ExecutableResolver(PlatformEnvironment.current());</span>
+    }
+
+    /// Returns the file the shell would start for `tool`, or empty when `PATH` has no match. On
+    /// Windows the search tries each `PATHEXT` extension in each `PATH` directory in order.
+    public Optional&lt;Path&gt; find(String tool) {
+<span class="nc" id="L65">        return validPath(tool)</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                .flatMap(toolPath -&gt; windows ? findOnWindows(tool, toolPath) : findOnPosix(tool, toolPath));</span>
+    }
+
+    /// Returns `command` in the form `ProcessBuilder` can start. On Windows, a batch file, named
+    /// directly or found on `PATH`, starts through `cmd.exe /d /s /c` with every argument quoted.
+    /// Every other command is returned unchanged.
+    ///
+    /// @throws IOException when a batch-file argument contains a character that `cmd.exe` would
+    ///     change, so the launch fails instead of passing a different argument
+    public List&lt;String&gt; launchCommand(List&lt;String&gt; command) throws IOException {
+<span class="nc bnc" id="L76" title="All 4 branches missed.">        if (!windows || command.isEmpty()) {</span>
+<span class="nc" id="L77">            return command;</span>
+        }
+<span class="nc" id="L79">        String program = command.getFirst();</span>
+<span class="nc" id="L80">        String executable = find(program).map(Path::toString).orElse(program);</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (!isWindowsBatchFile(executable)) {</span>
+<span class="nc" id="L82">            return command;</span>
+        }
+<span class="nc" id="L84">        List&lt;String&gt; parts = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L85">        parts.add(executable);</span>
+<span class="nc" id="L86">        parts.addAll(command.subList(1, command.size()));</span>
+<span class="nc" id="L87">        List&lt;String&gt; quoted = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        for (String part : parts) {</span>
+<span class="nc" id="L89">            quoted.add(quoteForCmd(part));</span>
+<span class="nc" id="L90">        }</span>
+        // With /s, cmd.exe strips exactly the outer quote pair and runs the rest as written.
+<span class="nc" id="L92">        return List.of(commandInterpreter(), &quot;/d&quot;, &quot;/s&quot;, &quot;/c&quot;, &quot;\&quot;&quot; + String.join(&quot; &quot;, quoted) + &quot;\&quot;&quot;);</span>
+    }
+
+    /// `ComSpec` names the system's `cmd.exe`. A bare `cmd.exe` would let `CreateProcess` pick up a
+    /// copy from the current directory first.
+    private String commandInterpreter() {
+<span class="nc" id="L98">        return environment</span>
+<span class="nc" id="L99">                .value(&quot;ComSpec&quot;)</span>
+<span class="nc" id="L100">                .filter(value -&gt; validPath(value).map(Path::isAbsolute).orElse(false))</span>
+<span class="nc" id="L101">                .orElse(&quot;cmd.exe&quot;);</span>
+    }
+
+    private Optional&lt;Path&gt; findOnWindows(String tool, Path toolPath) {
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (toolPath.getParent() != null) {</span>
+<span class="nc" id="L106">            return Optional.empty();</span>
+        }
+<span class="nc" id="L108">        return environment.value(&quot;PATH&quot;).stream()</span>
+<span class="nc" id="L109">                .flatMap(this::windowsPathEntries)</span>
+<span class="nc" id="L110">                .flatMap(directory -&gt; windowsCandidates(directory, tool))</span>
+<span class="nc" id="L111">                .filter(Files::isRegularFile)</span>
+<span class="nc" id="L112">                .findFirst();</span>
+    }
+
+    private Optional&lt;Path&gt; findOnPosix(String tool, Path toolPath) {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (toolPath.getParent() != null) {</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            return Files.exists(toolPath) ? Optional.of(toolPath) : Optional.empty();</span>
+        }
+<span class="nc" id="L119">        return environment.value(&quot;PATH&quot;).stream()</span>
+<span class="nc" id="L120">                .flatMap(path -&gt; POSIX_PATH_SPLITTER.splitToStream(path).map(String::trim))</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                .filter(entry -&gt; !entry.isBlank())</span>
+<span class="nc" id="L122">                .flatMap(entry -&gt; validPath(entry).stream())</span>
+<span class="nc" id="L123">                .map(directory -&gt; directory.resolve(tool))</span>
+<span class="nc bnc" id="L124" title="All 4 branches missed.">                .filter(path -&gt; Files.isRegularFile(path) &amp;&amp; Files.isExecutable(path))</span>
+<span class="nc" id="L125">                .findFirst();</span>
+    }
+
+    private Stream&lt;Path&gt; windowsPathEntries(String path) {
+<span class="nc" id="L129">        return WINDOWS_LIST_SPLITTER</span>
+<span class="nc" id="L130">                .splitToStream(path)</span>
+<span class="nc" id="L131">                .map(String::trim)</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                .filter(entry -&gt; !entry.isBlank())</span>
+<span class="nc" id="L133">                .map(ExecutableResolver::unquote)</span>
+<span class="nc" id="L134">                .flatMap(entry -&gt; validPath(entry).stream());</span>
+    }
+
+    private Stream&lt;Path&gt; windowsCandidates(Path directory, String tool) {
+<span class="nc bnc" id="L138" title="All 2 branches missed.">        if (tool.contains(&quot;.&quot;)) {</span>
+<span class="nc" id="L139">            return Stream.of(directory.resolve(tool));</span>
+        }
+<span class="nc" id="L141">        return windowsPathExtensions().stream().map(extension -&gt; directory.resolve(tool + extension));</span>
+    }
+
+    private List&lt;String&gt; windowsPathExtensions() {
+<span class="nc" id="L145">        return environment</span>
+<span class="nc" id="L146">                .value(&quot;PATHEXT&quot;)</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                .filter(value -&gt; !value.isBlank())</span>
+<span class="nc" id="L148">                .map(value -&gt; WINDOWS_LIST_SPLITTER</span>
+<span class="nc" id="L149">                        .splitToStream(value)</span>
+<span class="nc" id="L150">                        .map(String::trim)</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                        .filter(extension -&gt; !extension.isBlank())</span>
+<span class="nc" id="L152">                        .toList())</span>
+<span class="nc" id="L153">                .orElse(DEFAULT_WINDOWS_PATH_EXTENSIONS);</span>
+    }
+
+    private static boolean isWindowsBatchFile(String executable) {
+<span class="nc" id="L157">        String lowerCase = executable.toLowerCase(Locale.ROOT);</span>
+<span class="nc" id="L158">        return WINDOWS_BATCH_EXTENSIONS.stream().anyMatch(lowerCase::endsWith);</span>
+    }
+
+    private static String quoteForCmd(String value) throws IOException {
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        if (CMD_UNSAFE_CHARACTERS.matchesAnyOf(value)) {</span>
+<span class="nc" id="L163">            throw new IOException(CMD_UNSAFE_ARGUMENT_MESSAGE);</span>
+        }
+        // The program reads `\&quot;` as a literal quote, so trailing backslashes are doubled to keep
+        // them in front of the closing quote.
+<span class="nc" id="L167">        int trailingBackslashes =</span>
+<span class="nc" id="L168">                value.length() - BACKSLASH.trimTrailingFrom(value).length();</span>
+<span class="nc" id="L169">        return &quot;\&quot;&quot; + value + &quot;\\&quot;.repeat(trailingBackslashes) + &quot;\&quot;&quot;;</span>
+    }
+
+    private static Optional&lt;Path&gt; validPath(String value) {
+        try {
+<span class="nc" id="L174">            return Optional.of(Path.of(value));</span>
+<span class="nc" id="L175">        } catch (InvalidPathException e) {</span>
+<span class="nc" id="L176">            return Optional.empty();</span>
+        }
+    }
+
+    private static String unquote(String value) {
+<span class="nc" id="L181">        String stripped = value.strip();</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (stripped.length() &lt; 2) {</span>
+<span class="nc" id="L183">            return stripped;</span>
+        }
+<span class="nc" id="L185">        char first = stripped.charAt(0);</span>
+<span class="nc" id="L186">        char last = stripped.charAt(stripped.length() - 1);</span>
+<span class="nc bnc" id="L187" title="All 8 branches missed.">        if ((first == '&quot;' &amp;&amp; last == '&quot;') || (first == '\'' &amp;&amp; last == '\'')) {</span>
+<span class="nc" id="L188">            return stripped.substring(1, stripped.length() - 1);</span>
+        }
+<span class="nc" id="L190">        return stripped;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

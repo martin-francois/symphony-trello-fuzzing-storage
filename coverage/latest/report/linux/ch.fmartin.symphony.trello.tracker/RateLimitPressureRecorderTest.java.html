@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RateLimitPressureRecorderTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">RateLimitPressureRecorderTest.java</span></div><h1>RateLimitPressureRecorderTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.EnumSet;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+
+<span class="nc" id="L14">final class RateLimitPressureRecorderTest {</span>
+<span class="nc" id="L15">    private static final Instant NOW = Instant.parse(&quot;2026-10-04T10:00:00Z&quot;);</span>
+<span class="nc" id="L16">    private static final Duration LONGEST_RETRY_AFTER = Duration.ofSeconds(12);</span>
+<span class="nc" id="L17">    private static final Duration SHORTER_RETRY_AFTER = Duration.ofSeconds(3);</span>
+<span class="nc" id="L18">    private static final Duration TEST_WAIT_LIMIT = Duration.ofSeconds(10);</span>
+<span class="nc" id="L19">    private static final Duration THREAD_STATE_POLL_INTERVAL = Duration.ofMillis(1);</span>
+    /// A drain that ran to completion, or one that waits for the merge to publish first.
+<span class="nc" id="L21">    private static final Set&lt;Thread.State&gt; DRAIN_DONE_OR_WAITING =</span>
+<span class="nc" id="L22">            EnumSet.of(Thread.State.TERMINATED, Thread.State.BLOCKED, Thread.State.WAITING);</span>
+
+<span class="nc" id="L24">    private final RateLimitPressureRecorder recorder = new RateLimitPressureRecorder();</span>
+
+    @Test
+    void batchKeepsTheLatestRetryAfterDeadlineAcrossResponses() {
+        // given
+<span class="nc" id="L29">        recorder.record(NOW, Optional.of(LONGEST_RETRY_AFTER));</span>
+<span class="nc" id="L30">        recorder.record(NOW, Optional.empty());</span>
+<span class="nc" id="L31">        recorder.record(NOW, Optional.of(SHORTER_RETRY_AFTER));</span>
+
+        // when
+<span class="nc" id="L34">        RateLimitPressure pressure = recorder.drain();</span>
+
+        // then
+<span class="nc" id="L37">        assertThat(pressure)</span>
+<span class="nc" id="L38">                .isEqualTo(new RateLimitPressure(3, Optional.of(NOW), Optional.of(NOW.plus(LONGEST_RETRY_AFTER))));</span>
+<span class="nc" id="L39">        assertThat(recorder.drain()).isEqualTo(RateLimitPressure.NONE);</span>
+<span class="nc" id="L40">    }</span>
+
+    @Test
+    void drainBetweenReadingAndPublishingAMergeCountsEveryResponseInExactlyOneBatch() throws Exception {
+        // given
+<span class="nc" id="L45">        recorder.record(NOW, Optional.empty());</span>
+<span class="nc" id="L46">        var firstMerge = new AtomicBoolean(true);</span>
+<span class="nc" id="L47">        var concurrentDrain = new AtomicReference&lt;RateLimitPressure&gt;();</span>
+<span class="nc" id="L48">        var drainer = new AtomicReference&lt;Thread&gt;();</span>
+<span class="nc" id="L49">        recorder.mergeHookForTests = () -&gt; {</span>
+<span class="nc bnc" id="L50" title="All 2 branches missed.">            if (firstMerge.compareAndSet(true, false)) {</span>
+<span class="nc" id="L51">                Thread thread = Thread.ofPlatform().start(() -&gt; concurrentDrain.set(recorder.drain()));</span>
+<span class="nc" id="L52">                drainer.set(thread);</span>
+<span class="nc" id="L53">                awaitDoneOrWaiting(thread);</span>
+            }
+<span class="nc" id="L55">        };</span>
+
+        // when
+<span class="nc" id="L58">        recorder.record(NOW, Optional.of(SHORTER_RETRY_AFTER));</span>
+<span class="nc" id="L59">        drainer.get().join(TEST_WAIT_LIMIT);</span>
+<span class="nc" id="L60">        RateLimitPressure remaining = recorder.drain();</span>
+
+        // then
+<span class="nc" id="L63">        assertThat(drainer.get().isAlive())</span>
+<span class="nc" id="L64">                .as(&quot;the concurrent drain finishes within %s&quot;, TEST_WAIT_LIMIT)</span>
+<span class="nc" id="L65">                .isFalse();</span>
+<span class="nc" id="L66">        assertThat(concurrentDrain.get().rateLimitedResponses() + remaining.rateLimitedResponses())</span>
+<span class="nc" id="L67">                .as(</span>
+                        &quot;two 429 responses were recorded; a drain racing the second merge must neither lose &quot;
+                                + &quot;nor repeat one (concurrent drain %s, remaining %s)&quot;,
+<span class="nc" id="L70">                        concurrentDrain.get(), remaining)</span>
+<span class="nc" id="L71">                .isEqualTo(2);</span>
+<span class="nc" id="L72">    }</span>
+
+    /// Waits until the drain either finished or waits for the merge, so the merge continues only
+    /// after the drain had its chance to interleave.
+    private static void awaitDoneOrWaiting(Thread drainer) {
+<span class="nc" id="L77">        long deadline = System.nanoTime() + TEST_WAIT_LIMIT.toNanos();</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">        while (!DRAIN_DONE_OR_WAITING.contains(drainer.getState())) {</span>
+<span class="nc" id="L79">            assertThat(System.nanoTime() - deadline)</span>
+<span class="nc" id="L80">                    .as(&quot;the concurrent drain finishes or waits within %s&quot;, TEST_WAIT_LIMIT)</span>
+<span class="nc" id="L81">                    .isNegative();</span>
+            try {
+<span class="nc" id="L83">                Thread.sleep(THREAD_STATE_POLL_INTERVAL);</span>
+<span class="nc" id="L84">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L85">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L86">                throw new AssertionError(&quot;interrupted while waiting for the concurrent drain&quot;, e);</span>
+<span class="nc" id="L87">            }</span>
+        }
+<span class="nc" id="L89">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

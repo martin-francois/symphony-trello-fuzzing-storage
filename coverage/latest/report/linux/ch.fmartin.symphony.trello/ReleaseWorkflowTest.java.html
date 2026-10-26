@@ -7,20 +7,25 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
-<span class="nc" id="L12">final class ReleaseWorkflowTest {</span>
+<span class="nc" id="L14">final class ReleaseWorkflowTest {</span>
+<span class="nc" id="L15">    private static final Pattern POSIX_FIRST_SIGNED_RELEASE_VERSION =</span>
+<span class="nc" id="L16">            Pattern.compile(&quot;(?m)^FIRST_SIGNED_RELEASE_VERSION=\&quot;([^\&quot;]+)\&quot;$&quot;);</span>
+
     @Test
     void releaseWorkflowBuildsAssetsOnlyForReleasePleaseCreatedTags() throws IOException {
         // given
-<span class="nc" id="L16">        String workflow = releaseWorkflowSource();</span>
+<span class="nc" id="L21">        String workflow = releaseWorkflowSource();</span>
 
         // when
-<span class="nc" id="L19">        String source = releaseImplementation();</span>
+<span class="nc" id="L24">        String source = releaseImplementation();</span>
 
         // then
-<span class="nc" id="L22">        assertThat(source)</span>
-<span class="nc" id="L23">                .contains(</span>
+<span class="nc" id="L27">        assertThat(source)</span>
+<span class="nc" id="L28">                .contains(</span>
                         &quot;on:&quot;,
                         &quot;push:&quot;,
                         &quot;Checkout release workflow source&quot;,
@@ -50,6 +55,8 @@ import org.junit.jupiter.api.Test;
                         &quot;PROVENANCE_BUNDLE: ${{ steps.attest-release-assets.outputs.bundle-path }}&quot;,
                         &quot;release provenance bundle was not created&quot;,
                         &quot;symphony-trello-$RELEASE_VERSION.intoto.jsonl&quot;,
+                        &quot;Verify release signatures&quot;,
+                        &quot;run: scripts/verify-release-signatures&quot;,
                         &quot;existing_assets=\&quot;$(gh release view --repo \&quot;$GITHUB_REPOSITORY\&quot; \&quot;$RELEASE_TAG\&quot; --json assets --jq '.assets[].name')\&quot;&quot;,
                         &quot;grep -Fx -- \&quot;$asset\&quot; &lt;&lt;&lt;\&quot;$existing_assets\&quot;&quot;,
                         &quot;release already contains every expected public asset; refusing same-tag asset reuse&quot;,
@@ -57,89 +64,126 @@ import org.junit.jupiter.api.Test;
                         &quot;Verify release assets&quot;,
                         &quot;Publish release&quot;,
                         &quot;gh release edit \&quot;$RELEASE_TAG\&quot; --repo \&quot;$GITHUB_REPOSITORY\&quot; --draft=false --latest&quot;)
-<span class="nc" id="L60">                .contains(&quot;if: ${{ github.event_name == 'push' }}&quot;)</span>
-<span class="nc" id="L61">                .containsPattern(&quot;(?m)^\\s*uses: actions/attest@[0-9a-f]{40} # v[0-9]+\\.[0-9]+\\.[0-9]+$&quot;)</span>
-<span class="nc" id="L62">                .doesNotContain(</span>
+<span class="nc" id="L67">                .contains(&quot;if: ${{ github.event_name == 'push' }}&quot;)</span>
+<span class="nc" id="L68">                .containsPattern(&quot;(?m)^\\s*uses: actions/attest@[0-9a-f]{40} # v[0-9]+\\.[0-9]+\\.[0-9]+$&quot;)</span>
+<span class="nc" id="L69">                .doesNotContain(</span>
                         &quot;workflow_dispatch:&quot;,
                         &quot;DISPATCH_VERSION&quot;,
                         &quot;DISPATCH_TAG&quot;,
                         &quot;git ls-remote --exit-code origin&quot;,
                         &quot;gh release upload \&quot;$RELEASE_TAG\&quot; dist/release-assets/*&quot;,
                         &quot;--clobber&quot;);
-<span class="nc" id="L69">        assertAppearsBefore(workflow, &quot;Resolve release asset upload target&quot;, &quot;Checkout release source tag&quot;);</span>
-<span class="nc" id="L70">        assertAppearsBefore(workflow, &quot;Build release assets&quot;, &quot;Attest release assets&quot;);</span>
-<span class="nc" id="L71">        assertAppearsBefore(workflow, &quot;Attest release assets&quot;, &quot;Add release provenance asset&quot;);</span>
-<span class="nc" id="L72">        assertAppearsBefore(workflow, &quot;Add release provenance asset&quot;, &quot;Upload release assets&quot;);</span>
-<span class="nc" id="L73">        assertAppearsBefore(workflow, &quot;Upload release assets&quot;, &quot;Verify release assets&quot;);</span>
-<span class="nc" id="L74">        assertAppearsBefore(workflow, &quot;Verify release assets&quot;, &quot;Publish release&quot;);</span>
-<span class="nc" id="L75">    }</span>
+<span class="nc" id="L76">        assertAppearsBefore(workflow, &quot;Resolve release asset upload target&quot;, &quot;Checkout release source tag&quot;);</span>
+<span class="nc" id="L77">        assertAppearsBefore(workflow, &quot;Build release assets&quot;, &quot;Attest release assets&quot;);</span>
+<span class="nc" id="L78">        assertAppearsBefore(workflow, &quot;Attest release assets&quot;, &quot;Add release provenance asset&quot;);</span>
+<span class="nc" id="L79">        assertAppearsBefore(workflow, &quot;Add release provenance asset&quot;, &quot;Verify release signatures&quot;);</span>
+<span class="nc" id="L80">        assertAppearsBefore(workflow, &quot;Verify release signatures&quot;, &quot;Upload release assets&quot;);</span>
+<span class="nc" id="L81">        assertAppearsBefore(workflow, &quot;Upload release assets&quot;, &quot;Verify release assets&quot;);</span>
+<span class="nc" id="L82">        assertAppearsBefore(workflow, &quot;Verify release assets&quot;, &quot;Publish release&quot;);</span>
+<span class="nc" id="L83">    }</span>
+
+    @Test
+    void installersAndReleaseWorkflowAgreeOnTheReleaseSignerIdentity() throws IOException {
+        // given
+<span class="nc" id="L88">        String signerWorkflow = &quot;.github/workflows/release-please.yml@refs/heads/main&quot;;</span>
+
+        // when
+<span class="nc" id="L91">        String workflow = releaseWorkflowSource();</span>
+<span class="nc" id="L92">        String posixInstaller = Files.readString(Path.of(&quot;install.sh&quot;));</span>
+<span class="nc" id="L93">        String powerShellInstaller = Files.readString(Path.of(&quot;install.ps1&quot;));</span>
+<span class="nc" id="L94">        String signatureCheck = Files.readString(Path.of(&quot;scripts/verify-release-signatures&quot;));</span>
+<span class="nc" id="L95">        String readme = Files.readString(Path.of(&quot;README.md&quot;));</span>
+<span class="nc" id="L96">        String contributing = Files.readString(Path.of(&quot;CONTRIBUTING.md&quot;));</span>
+
+        // then
+<span class="nc" id="L99">        assertThat(workflow)</span>
+<span class="nc" id="L100">                .as(&quot;the signer identity names this workflow, which must keep running from pushes to main&quot;)</span>
+<span class="nc" id="L101">                .containsPattern(&quot;branches:\\R\\s+- main\\R&quot;)</span>
+<span class="nc" id="L102">                .contains(&quot;attestations: write&quot;, &quot;id-token: write&quot;);</span>
+<span class="nc" id="L103">        assertThat(Map.of(</span>
+                        &quot;install.sh&quot;, posixInstaller,
+                        &quot;install.ps1&quot;, powerShellInstaller,
+                        &quot;scripts/verify-release-signatures&quot;, signatureCheck))
+<span class="nc" id="L107">                .allSatisfy((file, source) -&gt;</span>
+<span class="nc" id="L108">                        assertThat(source).as(file).contains(signerWorkflow, &quot;--cert-identity&quot;, &quot;GH_HOST&quot;));</span>
+<span class="nc" id="L109">        assertThat(Map.of(&quot;README.md&quot;, readme, &quot;CONTRIBUTING.md&quot;, contributing))</span>
+<span class="nc" id="L110">                .as(&quot;manual verification docs name the identity the installers pin&quot;)</span>
+<span class="nc" id="L111">                .allSatisfy((file, source) -&gt; assertThat(source).as(file).contains(signerWorkflow));</span>
+<span class="nc" id="L112">        Matcher posixFirstSignedVersion = POSIX_FIRST_SIGNED_RELEASE_VERSION.matcher(posixInstaller);</span>
+<span class="nc" id="L113">        assertThat(posixFirstSignedVersion.find())</span>
+<span class="nc" id="L114">                .as(&quot;install.sh declares FIRST_SIGNED_RELEASE_VERSION&quot;)</span>
+<span class="nc" id="L115">                .isTrue();</span>
+<span class="nc" id="L116">        assertThat(powerShellInstaller)</span>
+<span class="nc" id="L117">                .as(&quot;install.ps1 and install.sh must skip signature checks for the same older releases&quot;)</span>
+<span class="nc" id="L118">                .contains(&quot;$FirstSignedReleaseVersion = \&quot;&quot; + posixFirstSignedVersion.group(1) + &quot;\&quot;&quot;);</span>
+<span class="nc" id="L119">    }</span>
 
     @Test
     void releasePleaseConfigCreatesDraftReleasesRefreshesMetadataAndCreditsContributors() throws IOException {
         // given
-<span class="nc" id="L80">        Path normalConfig = Path.of(&quot;release-please-config.json&quot;);</span>
+<span class="nc" id="L124">        Path normalConfig = Path.of(&quot;release-please-config.json&quot;);</span>
 
         // when
-<span class="nc" id="L83">        String normalSource = Files.readString(normalConfig);</span>
+<span class="nc" id="L127">        String normalSource = Files.readString(normalConfig);</span>
 
         // then
-<span class="nc" id="L86">        assertThat(normalSource)</span>
-<span class="nc" id="L87">                .contains(</span>
+<span class="nc" id="L130">        assertThat(normalSource)</span>
+<span class="nc" id="L131">                .contains(</span>
                         &quot;\&quot;changelog-type\&quot;: \&quot;github\&quot;&quot;,
                         &quot;\&quot;draft\&quot;: true&quot;,
                         &quot;\&quot;force-tag-creation\&quot;: true&quot;,
                         &quot;\&quot;always-update\&quot;: true&quot;);
-<span class="nc" id="L92">    }</span>
+<span class="nc" id="L136">    }</span>
 
     @Test
     void releasePleasePullRequestsSkipBuildAndTemplateChecksButKeepConfigurationGuard() throws IOException {
         // given
-<span class="nc" id="L97">        Path releaseConfig = Path.of(&quot;release-please-config.json&quot;);</span>
-<span class="nc" id="L98">        Path compatibilityLabelerWorkflow = Path.of(&quot;.github/workflows/compatibility-labeler.yml&quot;);</span>
-<span class="nc" id="L99">        Path commitlintWorkflow = Path.of(&quot;.github/workflows/commitlint.yml&quot;);</span>
-<span class="nc" id="L100">        Path sizeLabelerWorkflow = Path.of(&quot;.github/workflows/size-labeler.yml&quot;);</span>
-<span class="nc" id="L101">        Path codeQlWorkflow = Path.of(&quot;.github/workflows/codeql.yml&quot;);</span>
-<span class="nc" id="L102">        Path codeRabbitConfig = Path.of(&quot;.coderabbit.yaml&quot;);</span>
-<span class="nc" id="L103">        Path codeRabbitGuard = Path.of(&quot;.github/workflows/coderabbit-config-guard.yml&quot;);</span>
+<span class="nc" id="L141">        Path releaseConfig = Path.of(&quot;release-please-config.json&quot;);</span>
+<span class="nc" id="L142">        Path compatibilityLabelerWorkflow = Path.of(&quot;.github/workflows/compatibility-labeler.yml&quot;);</span>
+<span class="nc" id="L143">        Path commitlintWorkflow = Path.of(&quot;.github/workflows/commitlint.yml&quot;);</span>
+<span class="nc" id="L144">        Path sizeLabelerWorkflow = Path.of(&quot;.github/workflows/size-labeler.yml&quot;);</span>
+<span class="nc" id="L145">        Path codeQlWorkflow = Path.of(&quot;.github/workflows/codeql.yml&quot;);</span>
+<span class="nc" id="L146">        Path codeRabbitConfig = Path.of(&quot;.coderabbit.yaml&quot;);</span>
+<span class="nc" id="L147">        Path codeRabbitGuard = Path.of(&quot;.github/workflows/coderabbit-config-guard.yml&quot;);</span>
 
         // when
-<span class="nc" id="L106">        String releaseSource = Files.readString(releaseConfig);</span>
-<span class="nc" id="L107">        String compatibilityLabelerSource = Files.readString(compatibilityLabelerWorkflow);</span>
-<span class="nc" id="L108">        String commitlintSource = Files.readString(commitlintWorkflow);</span>
-<span class="nc" id="L109">        String sizeLabelerSource = Files.readString(sizeLabelerWorkflow);</span>
-<span class="nc" id="L110">        String codeQlSource = Files.readString(codeQlWorkflow);</span>
-<span class="nc" id="L111">        String codeRabbitSource = Files.readString(codeRabbitConfig);</span>
-<span class="nc" id="L112">        String codeRabbitGuardSource = Files.readString(codeRabbitGuard);</span>
+<span class="nc" id="L150">        String releaseSource = Files.readString(releaseConfig);</span>
+<span class="nc" id="L151">        String compatibilityLabelerSource = Files.readString(compatibilityLabelerWorkflow);</span>
+<span class="nc" id="L152">        String commitlintSource = Files.readString(commitlintWorkflow);</span>
+<span class="nc" id="L153">        String sizeLabelerSource = Files.readString(sizeLabelerWorkflow);</span>
+<span class="nc" id="L154">        String codeQlSource = Files.readString(codeQlWorkflow);</span>
+<span class="nc" id="L155">        String codeRabbitSource = Files.readString(codeRabbitConfig);</span>
+<span class="nc" id="L156">        String codeRabbitGuardSource = Files.readString(codeRabbitGuard);</span>
 
         // then
-<span class="nc" id="L115">        assertThat(releaseSource)</span>
-<span class="nc" id="L116">                .contains(</span>
+<span class="nc" id="L159">        assertThat(releaseSource)</span>
+<span class="nc" id="L160">                .contains(</span>
                         &quot;\&quot;pull-request-title-pattern\&quot;: \&quot;chore${scope}: release${component} ${version} [skip ci]\&quot;&quot;,
                         &quot;\&quot;group-pull-request-title-pattern\&quot;: \&quot;chore${scope}: release${component} ${version} [skip ci]\&quot;&quot;);
-<span class="nc" id="L119">        assertThat(Map.of(</span>
+<span class="nc" id="L163">        assertThat(Map.of(</span>
                         &quot;compatibility labeler&quot;, compatibilityLabelerSource,
                         &quot;size labeler&quot;, sizeLabelerSource,
                         &quot;CodeQL&quot;, codeQlSource))
-<span class="nc" id="L123">                .allSatisfy((workflow, source) -&gt; assertThat(source)</span>
-<span class="nc" id="L124">                        .as(&quot;%s workflow&quot;, workflow)</span>
-<span class="nc" id="L125">                        .contains(</span>
+<span class="nc" id="L167">                .allSatisfy((workflow, source) -&gt; assertThat(source)</span>
+<span class="nc" id="L168">                        .as(&quot;%s workflow&quot;, workflow)</span>
+<span class="nc" id="L169">                        .contains(</span>
                                 &quot;paths-ignore:&quot;,
                                 &quot;- .release-please-manifest.json&quot;,
                                 &quot;- CHANGELOG.md&quot;,
                                 &quot;- install.ps1&quot;,
                                 &quot;- install.sh&quot;,
                                 &quot;- pom.xml&quot;));
-<span class="nc" id="L132">        assertThat(compatibilityLabelerSource)</span>
-<span class="nc" id="L133">                .contains(&quot;pull_request_target:&quot;)</span>
-<span class="nc" id="L134">                .doesNotContain(&quot;startsWith(github.head_ref, 'release-please--branches--')&quot;);</span>
-<span class="nc" id="L135">        assertThat(commitlintSource)</span>
-<span class="nc" id="L136">                .contains(</span>
+<span class="nc" id="L176">        assertThat(compatibilityLabelerSource)</span>
+<span class="nc" id="L177">                .contains(&quot;pull_request_target:&quot;)</span>
+<span class="nc" id="L178">                .doesNotContain(&quot;startsWith(github.head_ref, 'release-please--branches--')&quot;);</span>
+<span class="nc" id="L179">        assertThat(commitlintSource)</span>
+<span class="nc" id="L180">                .contains(</span>
                         &quot;name: Commitlint&quot;,
                         &quot;pull_request:&quot;,
                         &quot;types: [opened, reopened, synchronize, ready_for_review, edited]&quot;)
-<span class="nc" id="L140">                .doesNotContain(&quot;paths:&quot;, &quot;paths-ignore:&quot;);</span>
-<span class="nc" id="L141">        assertThat(sizeLabelerSource)</span>
-<span class="nc" id="L142">                .contains(</span>
+<span class="nc" id="L184">                .doesNotContain(&quot;paths:&quot;, &quot;paths-ignore:&quot;);</span>
+<span class="nc" id="L185">        assertThat(sizeLabelerSource)</span>
+<span class="nc" id="L186">                .contains(</span>
                         &quot;pull_request_target:&quot;,
                         &quot;paths-ignore:&quot;,
                         &quot;workflow_run:&quot;,
@@ -147,13 +191,13 @@ import org.junit.jupiter.api.Test;
                         &quot;types: [completed]&quot;,
                         &quot;github.event.workflow_run.event == 'pull_request'&quot;,
                         &quot;schedule:&quot;)
-<span class="nc" id="L150">                .doesNotContain(&quot;startsWith(github.head_ref, 'release-please--branches--')&quot;);</span>
-<span class="nc" id="L151">        assertThat(codeQlSource).contains(&quot;pull_request:&quot;);</span>
-<span class="nc" id="L152">        assertThat(codeRabbitGuardSource)</span>
-<span class="nc" id="L153">                .contains(&quot;pull_request_target:&quot;, &quot;Only martinfrancois may change .coderabbit.yaml.&quot;)</span>
-<span class="nc" id="L154">                .doesNotContain(&quot;paths:&quot;, &quot;paths-ignore:&quot;, &quot;if:&quot;, &quot;release-please--branches--&quot;);</span>
-<span class="nc" id="L155">        assertThat(codeRabbitSource)</span>
-<span class="nc" id="L156">                .contains(</span>
+<span class="nc" id="L194">                .doesNotContain(&quot;startsWith(github.head_ref, 'release-please--branches--')&quot;);</span>
+<span class="nc" id="L195">        assertThat(codeQlSource).contains(&quot;pull_request:&quot;);</span>
+<span class="nc" id="L196">        assertThat(codeRabbitGuardSource)</span>
+<span class="nc" id="L197">                .contains(&quot;pull_request_target:&quot;, &quot;Only martinfrancois may change .coderabbit.yaml.&quot;)</span>
+<span class="nc" id="L198">                .doesNotContain(&quot;paths:&quot;, &quot;paths-ignore:&quot;, &quot;if:&quot;, &quot;release-please--branches--&quot;);</span>
+<span class="nc" id="L199">        assertThat(codeRabbitSource)</span>
+<span class="nc" id="L200">                .contains(</span>
                         &quot;commit_status: false&quot;,
                         &quot;review_status: false&quot;,
                         &quot;ignore_title_keywords:&quot;,
@@ -161,12 +205,12 @@ import org.junit.jupiter.api.Test;
                         &quot;ignore_usernames:&quot;,
                         &quot;- \&quot;github-actions[bot]\&quot;&quot;,
                         &quot;- \&quot;renovate[bot]\&quot;&quot;);
-<span class="nc" id="L164">    }</span>
+<span class="nc" id="L208">    }</span>
 
     @Test
     void releaseWorkflowUploadsAndVerifiesEveryPublicDownloadAsset() throws IOException {
         // given
-<span class="nc" id="L169">        List&lt;String&gt; expectedAssetsAndChecks = List.of(</span>
+<span class="nc" id="L213">        List&lt;String&gt; expectedAssetsAndChecks = List.of(</span>
                 &quot;\&quot;install.sh\&quot;&quot;,
                 &quot;\&quot;install.ps1\&quot;&quot;,
                 &quot;\&quot;uninstall.sh\&quot;&quot;,
@@ -180,42 +224,42 @@ import org.junit.jupiter.api.Test;
                 &quot;release asset is missing after upload: $asset&quot;);
 
         // when
-<span class="nc" id="L183">        String source = releaseImplementation();</span>
+<span class="nc" id="L227">        String source = releaseImplementation();</span>
 
         // then
-<span class="nc" id="L186">        assertThat(source).as(&quot;release implementation&quot;).contains(expectedAssetsAndChecks.toArray(String[]::new));</span>
-<span class="nc" id="L187">        assertThat(source).doesNotContain(&quot;--clobber&quot;);</span>
-<span class="nc" id="L188">    }</span>
+<span class="nc" id="L230">        assertThat(source).as(&quot;release implementation&quot;).contains(expectedAssetsAndChecks.toArray(String[]::new));</span>
+<span class="nc" id="L231">        assertThat(source).doesNotContain(&quot;--clobber&quot;);</span>
+<span class="nc" id="L232">    }</span>
 
     @Test
     void releaseWorkflowSkipsAssetsWhenReleasePleaseDoesNotCreateRelease() throws IOException {
         // given
-<span class="nc" id="L193">        String workflow = releaseWorkflowSource();</span>
+<span class="nc" id="L237">        String workflow = releaseWorkflowSource();</span>
 
         // when
-<span class="nc" id="L196">        String source = releaseImplementation();</span>
+<span class="nc" id="L240">        String source = releaseImplementation();</span>
 
         // then
-<span class="nc" id="L199">        assertThat(source)</span>
-<span class="nc" id="L200">                .contains(</span>
+<span class="nc" id="L243">        assertThat(source)</span>
+<span class="nc" id="L244">                .contains(</span>
                         &quot;if [[ \&quot;$RELEASE_CREATED\&quot; != \&quot;true\&quot; ]]; then&quot;,
                         &quot;echo \&quot;upload_assets=false\&quot; &gt;&gt;\&quot;$GITHUB_OUTPUT\&quot;&quot;,
                         &quot;if: ${{ steps.release-assets.outputs.upload_assets == 'true' }}&quot;)
-<span class="nc" id="L204">                .doesNotContain(&quot;workflow_dispatch:&quot;, &quot;DISPATCH_VERSION&quot;, &quot;DISPATCH_TAG&quot;);</span>
-<span class="nc" id="L205">        assertAppearsBefore(workflow, &quot;run: scripts/resolve-release-asset-target&quot;, &quot;Checkout release source tag&quot;);</span>
-<span class="nc" id="L206">    }</span>
+<span class="nc" id="L248">                .doesNotContain(&quot;workflow_dispatch:&quot;, &quot;DISPATCH_VERSION&quot;, &quot;DISPATCH_TAG&quot;);</span>
+<span class="nc" id="L249">        assertAppearsBefore(workflow, &quot;run: scripts/resolve-release-asset-target&quot;, &quot;Checkout release source tag&quot;);</span>
+<span class="nc" id="L250">    }</span>
 
     @Test
     void releasePackagingUsesTagLocalToolingForInstallersAndApp() throws IOException {
         // given
-<span class="nc" id="L211">        Path script = Path.of(&quot;scripts/package-release-assets.sh&quot;);</span>
+<span class="nc" id="L255">        Path script = Path.of(&quot;scripts/package-release-assets.sh&quot;);</span>
 
         // when
-<span class="nc" id="L214">        String source = Files.readString(script);</span>
+<span class="nc" id="L258">        String source = Files.readString(script);</span>
 
         // then
-<span class="nc" id="L217">        assertThat(source)</span>
-<span class="nc" id="L218">                .contains(</span>
+<span class="nc" id="L261">        assertThat(source)</span>
+<span class="nc" id="L262">                .contains(</span>
                         &quot;Usage: scripts/package-release-assets.sh VERSION [DIST]&quot;,
                         &quot;stamp_posix_installer&quot;,
                         &quot;stamp_powershell_installer&quot;,
@@ -227,33 +271,34 @@ import org.junit.jupiter.api.Test;
                         &quot;cp -R \&quot;$ROOT/target/quarkus-app\&quot; \&quot;$STAGING/target/quarkus-app\&quot;&quot;,
                         &quot;cp \&quot;$ROOT/README.md\&quot; \&quot;$STAGING/README.md\&quot;&quot;,
                         &quot;cp \&quot;$ROOT/uninstall.sh\&quot; \&quot;$ROOT/uninstall.ps1\&quot; \&quot;$ASSET_DIR/\&quot;&quot;)
-<span class="nc" id="L230">                .doesNotContain(&quot;SOURCE_ROOT&quot;, &quot;[SOURCE_ROOT]&quot;);</span>
-<span class="nc" id="L231">    }</span>
+<span class="nc" id="L274">                .doesNotContain(&quot;SOURCE_ROOT&quot;, &quot;[SOURCE_ROOT]&quot;);</span>
+<span class="nc" id="L275">    }</span>
 
     private static void assertAppearsBefore(String source, String earlier, String later) {
-<span class="nc" id="L234">        assertThat(source.indexOf(earlier))</span>
-<span class="nc" id="L235">                .as(&quot;expected `%s` to appear&quot;, earlier)</span>
-<span class="nc" id="L236">                .isNotNegative();</span>
-<span class="nc" id="L237">        assertThat(source.indexOf(later)).as(&quot;expected `%s` to appear&quot;, later).isNotNegative();</span>
-<span class="nc" id="L238">        assertThat(source.indexOf(earlier))</span>
-<span class="nc" id="L239">                .as(&quot;expected `%s` before `%s`&quot;, earlier, later)</span>
-<span class="nc" id="L240">                .isLessThan(source.indexOf(later));</span>
-<span class="nc" id="L241">    }</span>
+<span class="nc" id="L278">        assertThat(source.indexOf(earlier))</span>
+<span class="nc" id="L279">                .as(&quot;expected `%s` to appear&quot;, earlier)</span>
+<span class="nc" id="L280">                .isNotNegative();</span>
+<span class="nc" id="L281">        assertThat(source.indexOf(later)).as(&quot;expected `%s` to appear&quot;, later).isNotNegative();</span>
+<span class="nc" id="L282">        assertThat(source.indexOf(earlier))</span>
+<span class="nc" id="L283">                .as(&quot;expected `%s` before `%s`&quot;, earlier, later)</span>
+<span class="nc" id="L284">                .isLessThan(source.indexOf(later));</span>
+<span class="nc" id="L285">    }</span>
 
     private static String releaseWorkflowSource() throws IOException {
-<span class="nc" id="L244">        return Files.readString(Path.of(&quot;.github/workflows/release-please.yml&quot;));</span>
+<span class="nc" id="L288">        return Files.readString(Path.of(&quot;.github/workflows/release-please.yml&quot;));</span>
     }
 
     private static String releaseImplementation() throws IOException {
-<span class="nc" id="L248">        return String.join(</span>
-<span class="nc" id="L249">                System.lineSeparator(),</span>
-<span class="nc" id="L250">                releaseWorkflowSource(),</span>
-<span class="nc" id="L251">                Files.readString(Path.of(&quot;scripts/list-release-assets&quot;)),</span>
-<span class="nc" id="L252">                Files.readString(Path.of(&quot;scripts/resolve-release-asset-target&quot;)),</span>
-<span class="nc" id="L253">                Files.readString(Path.of(&quot;scripts/build-release-assets&quot;)),</span>
-<span class="nc" id="L254">                Files.readString(Path.of(&quot;scripts/add-release-provenance&quot;)),</span>
-<span class="nc" id="L255">                Files.readString(Path.of(&quot;scripts/upload-release-assets&quot;)),</span>
-<span class="nc" id="L256">                Files.readString(Path.of(&quot;scripts/verify-release-assets&quot;)));</span>
+<span class="nc" id="L292">        return String.join(</span>
+<span class="nc" id="L293">                System.lineSeparator(),</span>
+<span class="nc" id="L294">                releaseWorkflowSource(),</span>
+<span class="nc" id="L295">                Files.readString(Path.of(&quot;scripts/list-release-assets&quot;)),</span>
+<span class="nc" id="L296">                Files.readString(Path.of(&quot;scripts/resolve-release-asset-target&quot;)),</span>
+<span class="nc" id="L297">                Files.readString(Path.of(&quot;scripts/build-release-assets&quot;)),</span>
+<span class="nc" id="L298">                Files.readString(Path.of(&quot;scripts/add-release-provenance&quot;)),</span>
+<span class="nc" id="L299">                Files.readString(Path.of(&quot;scripts/verify-release-signatures&quot;)),</span>
+<span class="nc" id="L300">                Files.readString(Path.of(&quot;scripts/upload-release-assets&quot;)),</span>
+<span class="nc" id="L301">                Files.readString(Path.of(&quot;scripts/verify-release-assets&quot;)));</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

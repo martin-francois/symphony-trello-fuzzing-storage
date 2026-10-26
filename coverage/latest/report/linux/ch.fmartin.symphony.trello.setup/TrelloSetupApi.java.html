@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloSetupApi.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TrelloSetupApi.java</span></div><h1>TrelloSetupApi.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.SLASHES;
+
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.TrelloCredentials;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.ws.rs.core.Response.Status;
+import jakarta.ws.rs.core.Response.Status.Family;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+/// Sends the Trello REST requests that setup commands make and maps every failure to a setup error
+/// code, so board setup and other setup commands report Trello problems the same way.
+final class TrelloSetupApi {
+<span class="nc" id="L27">    private static final TypeReference&lt;Map&lt;String, Object&gt;&gt; MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L28">    private static final TypeReference&lt;List&lt;Map&lt;String, Object&gt;&gt;&gt; LIST_MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+    private static final String UNKNOWN_WRITE_OUTCOME_CODE = &quot;trello_write_outcome_unknown&quot;;
+    private static final String UNKNOWN_WRITE_OUTCOME =
+            &quot;Trello write outcome is unknown. Inspect Trello before retrying setup.&quot;;
+<span class="nc" id="L32">    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);</span>
+<span class="nc" id="L33">    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);</span>
+    /// The longest one request can take before it has an answer or fails.
+<span class="nc" id="L35">    static final Duration LONGEST_REQUEST = CONNECT_TIMEOUT.plus(REQUEST_TIMEOUT);</span>
+
+    private final ObjectMapper json;
+    private final HttpClient httpClient;
+
+<span class="nc" id="L40">    TrelloSetupApi(ObjectMapper json) {</span>
+<span class="nc" id="L41">        this.json = json;</span>
+<span class="nc" id="L42">        this.httpClient =</span>
+<span class="nc" id="L43">                HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build();</span>
+<span class="nc" id="L44">    }</span>
+
+    Map&lt;String, Object&gt; getMap(URI endpoint, String path, Map&lt;String, String&gt; query, TrelloCredentials credentials) {
+<span class="nc" id="L47">        return request(TrelloRequestKind.READ, endpoint, path, query, credentials, MAP_TYPE);</span>
+    }
+
+    List&lt;Map&lt;String, Object&gt;&gt; getList(
+            URI endpoint, String path, Map&lt;String, String&gt; query, TrelloCredentials credentials) {
+<span class="nc" id="L52">        return request(TrelloRequestKind.READ, endpoint, path, query, credentials, LIST_MAP_TYPE);</span>
+    }
+
+    Map&lt;String, Object&gt; postMap(
+            URI endpoint,
+            String path,
+            Map&lt;String, String&gt; query,
+            TrelloCredentials credentials,
+            String... requiredKeys) {
+<span class="nc" id="L61">        Map&lt;String, Object&gt; payload = request(TrelloRequestKind.CREATE, endpoint, path, query, credentials, MAP_TYPE);</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (payload == null) {</span>
+<span class="nc" id="L63">            throw unknownTrelloWriteOutcomeWithoutCause(</span>
+                    new TrelloBoardSetupException(&quot;trello_unknown_payload&quot;, &quot;Trello payload is empty&quot;));
+        }
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        for (String requiredKey : requiredKeys) {</span>
+<span class="nc" id="L67">            Object value = payload.get(requiredKey);</span>
+<span class="nc bnc" id="L68" title="All 4 branches missed.">            if (value == null || value.toString().isBlank()) {</span>
+<span class="nc" id="L69">                throw unknownTrelloWriteOutcomeWithoutCause(new TrelloBoardSetupException(</span>
+                        &quot;trello_unknown_payload&quot;, &quot;Trello payload is missing &quot; + requiredKey));
+            }
+        }
+<span class="nc" id="L73">        return payload;</span>
+    }
+
+    Map&lt;String, Object&gt; putMap(URI endpoint, String path, Map&lt;String, String&gt; query, TrelloCredentials credentials) {
+<span class="nc" id="L77">        return request(TrelloRequestKind.UPDATE, endpoint, path, query, credentials, MAP_TYPE);</span>
+    }
+
+    static String encodeSegment(String value) {
+<span class="nc" id="L81">        return encode(value).replace(&quot;+&quot;, &quot;%20&quot;);</span>
+    }
+
+    private &lt;T&gt; T request(
+            TrelloRequestKind requestKind,
+            URI endpoint,
+            String path,
+            Map&lt;String, String&gt; query,
+            TrelloCredentials credentials,
+            TypeReference&lt;T&gt; type) {
+        try {
+<span class="nc" id="L92">            HttpRequest.Builder builder = HttpRequest.newBuilder(uri(endpoint, path, query))</span>
+<span class="nc" id="L93">                    .timeout(REQUEST_TIMEOUT)</span>
+<span class="nc" id="L94">                    .header(&quot;Accept&quot;, &quot;application/json&quot;)</span>
+<span class="nc" id="L95">                    .header(&quot;Authorization&quot;, TrelloClient.authorization(credentials.apiKey(), credentials.apiToken()));</span>
+<span class="nc" id="L96">            HttpRequest request =</span>
+<span class="nc bnc" id="L97" title="All 3 branches missed.">                    switch (requestKind) {</span>
+<span class="nc" id="L98">                        case READ -&gt; builder.GET().build();</span>
+                        case CREATE -&gt;
+<span class="nc" id="L100">                            builder.POST(HttpRequest.BodyPublishers.noBody()).build();</span>
+                        case UPDATE -&gt;
+<span class="nc" id="L102">                            builder.PUT(HttpRequest.BodyPublishers.noBody()).build();</span>
+                    };
+<span class="nc" id="L104">            HttpResponse&lt;String&gt; response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">            if (isSuccessfulStatus(response.statusCode())) {</span>
+                try {
+<span class="nc" id="L107">                    return json.readValue(response.body(), type);</span>
+<span class="nc" id="L108">                } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L109">                    throw trelloPayloadException(requestKind, e);</span>
+                }
+            }
+<span class="nc" id="L112">            throw statusException(requestKind, response.statusCode(), response.body());</span>
+<span class="nc" id="L113">        } catch (IOException e) {</span>
+<span class="nc" id="L114">            throw trelloTransportException(requestKind, &quot;Trello request failed&quot;, e);</span>
+<span class="nc" id="L115">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L116">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L117">            throw trelloTransportException(requestKind, &quot;Trello request interrupted&quot;, e);</span>
+        }
+    }
+
+    private static TrelloBoardSetupException trelloPayloadException(
+            TrelloRequestKind requestKind, JsonProcessingException cause) {
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        return requestKind.write()</span>
+<span class="nc" id="L124">                ? unknownTrelloWriteOutcomeWithoutCause(cause)</span>
+<span class="nc" id="L125">                : new TrelloBoardSetupException(</span>
+                        &quot;trello_unknown_payload&quot;, &quot;Trello response payload could not be parsed&quot;, cause);
+    }
+
+    private static TrelloBoardSetupException trelloTransportException(
+            TrelloRequestKind requestKind, String message, Exception cause) {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        return requestKind.write()</span>
+<span class="nc" id="L132">                ? SetupFailureCauses.setupFailure(UNKNOWN_WRITE_OUTCOME_CODE, UNKNOWN_WRITE_OUTCOME, cause)</span>
+<span class="nc" id="L133">                : SetupFailureCauses.setupFailure(&quot;trello_api_request&quot;, message, cause);</span>
+    }
+
+    /// Payload and status causes can quote Trello response content, so the message leaves them out.
+    private static TrelloBoardSetupException unknownTrelloWriteOutcomeWithoutCause(Exception cause) {
+<span class="nc" id="L138">        return new TrelloBoardSetupException(UNKNOWN_WRITE_OUTCOME_CODE, UNKNOWN_WRITE_OUTCOME, cause);</span>
+    }
+
+    private static URI uri(URI endpoint, String path, Map&lt;String, String&gt; query) {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        String normalizedPath = path.startsWith(&quot;/&quot;) ? path.substring(1) : path;</span>
+<span class="nc bnc" id="L143" title="All 6 branches missed.">        if (normalizedPath.contains(&quot;..&quot;) || normalizedPath.contains(&quot;?&quot;) || normalizedPath.contains(&quot;#&quot;)) {</span>
+<span class="nc" id="L144">            throw new TrelloBoardSetupException(&quot;setup_invalid_path&quot;, &quot;Invalid Trello API path&quot;);</span>
+        }
+<span class="nc" id="L146">        String queryString = query.entrySet().stream()</span>
+<span class="nc" id="L147">                .map(entry -&gt; encode(entry.getKey()) + &quot;=&quot; + encode(entry.getValue()))</span>
+<span class="nc" id="L148">                .collect(Collectors.joining(&quot;&amp;&quot;));</span>
+<span class="nc" id="L149">        String base = SLASHES.trimTrailingFrom(endpoint.toString());</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">        return URI.create(base + &quot;/&quot; + normalizedPath + (queryString.isBlank() ? &quot;&quot; : &quot;?&quot; + queryString));</span>
+    }
+
+    private static TrelloBoardSetupException statusException(
+            TrelloRequestKind requestKind, int statusCode, String responseBody) {
+<span class="nc bnc" id="L155" title="All 4 branches missed.">        String detail = responseBody == null || responseBody.isBlank()</span>
+<span class="nc" id="L156">                ? &quot;&quot;</span>
+<span class="nc" id="L157">                : &quot;: &quot; + responseBody.strip().lines().findFirst().orElse(&quot;&quot;);</span>
+<span class="nc" id="L158">        Status status = Status.fromStatusCode(statusCode);</span>
+<span class="nc bnc" id="L159" title="All 4 branches missed.">        if (requestKind.write() &amp;&amp; Family.SERVER_ERROR == Family.familyOf(statusCode)) {</span>
+<span class="nc" id="L160">            return unknownTrelloWriteOutcomeWithoutCause(new TrelloBoardSetupException(</span>
+                    &quot;trello_api_status&quot;, &quot;Trello returned HTTP &quot; + statusCode + detail, statusCode));
+        }
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (status == null) {</span>
+<span class="nc" id="L164">            return new TrelloBoardSetupException(</span>
+                    &quot;trello_api_status&quot;, &quot;Trello returned HTTP &quot; + statusCode + detail, statusCode);
+        }
+<span class="nc bnc" id="L167" title="All 5 branches missed.">        return switch (status) {</span>
+            case BAD_REQUEST -&gt;
+<span class="nc" id="L169">                new TrelloBoardSetupException(</span>
+                        &quot;trello_invalid_request&quot;, &quot;Trello rejected the setup request&quot; + detail, statusCode);
+            case UNAUTHORIZED -&gt;
+<span class="nc" id="L172">                new TrelloBoardSetupException(</span>
+                        &quot;trello_auth_failed&quot;, &quot;Trello authentication failed&quot; + detail, statusCode);
+            case FORBIDDEN -&gt;
+<span class="nc" id="L175">                new TrelloBoardSetupException(</span>
+                        &quot;trello_permission_denied&quot;, &quot;Trello permission denied&quot; + detail, statusCode);
+            case NOT_FOUND -&gt;
+<span class="nc" id="L178">                new TrelloBoardSetupException(</span>
+                        &quot;trello_resource_not_found&quot;, &quot;Trello resource not found&quot; + detail, statusCode);
+            default -&gt;
+<span class="nc" id="L181">                new TrelloBoardSetupException(</span>
+                        &quot;trello_api_status&quot;, &quot;Trello returned HTTP &quot; + statusCode + detail, statusCode);
+        };
+    }
+
+    private static boolean isSuccessfulStatus(int statusCode) {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        return Family.SUCCESSFUL == Family.familyOf(statusCode);</span>
+    }
+
+    private static String encode(String value) {
+<span class="nc" id="L191">        return URLEncoder.encode(value, StandardCharsets.UTF_8);</span>
+    }
+
+<span class="nc" id="L194">    private enum TrelloRequestKind {</span>
+<span class="nc" id="L195">        READ,</span>
+<span class="nc" id="L196">        CREATE,</span>
+<span class="nc" id="L197">        UPDATE;</span>
+
+        /// A failed write may still have changed Trello, so its outcome is reported as unknown.
+        boolean write() {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            return this != READ;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

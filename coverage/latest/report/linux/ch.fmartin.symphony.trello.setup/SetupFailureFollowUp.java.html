@@ -1,0 +1,468 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SetupFailureFollowUp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">SetupFailureFollowUp.java</span></div><h1>SetupFailureFollowUp.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.setup.CodexInvestigationFinding.Classification;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationFinding.ValidationRun;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.CodexCommand;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.Outcome;
+import ch.fmartin.symphony.trello.setup.SetupFailureFollowUp.Investigation.Answered;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.BooleanSupplier;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
+
+/// Interactive follow-up after an unexpected setup failure wrote a sanitized troubleshooting
+/// report: an opt-in local Codex investigation, then the optional GitHub issue.
+///
+/// The prompt sent to Codex and every GitHub issue draft contain only sanitized text: the report,
+/// and Codex answers passed through the report's sanitizer. Codex itself runs locally and sees local
+/// paths through its working directory and writable roots, like any local Codex session. ADR 0104
+/// (`docs/adr/0104-codex-investigation-before-setup-failure-issues.md`) records the decision.
+final class SetupFailureFollowUp {
+<span class="nc" id="L30">    static final Duration CODEX_INVESTIGATION_TIMEOUT = Duration.ofMinutes(15);</span>
+    static final String ISSUE_REPOSITORY = &quot;martin-francois/symphony-trello&quot;;
+    static final String ISSUE_TITLE = &quot;Local setup failed&quot;;
+    private static final String TOKEN_PLACEHOLDER = &quot;&lt;token&gt;&quot;;
+    static final int ANSWER_TEXT_LIMIT = 2_000;
+    private static final int ANSWER_LIST_LIMIT = 50;
+    static final String ISSUE_DRAFT_SUFFIX = &quot;-github-issue.md&quot;;
+    static final String REPORT_SUFFIX = &quot;.md&quot;;
+<span class="nc" id="L38">    private static final Investigation NO_ANSWER = new Investigation.NoAnswer();</span>
+
+    private final CommandRunner commands;
+    private final CodexInvestigationRunner codexRunner;
+    private final BooleanSupplier consoleAttached;
+    private final Map&lt;String, String&gt; environment;
+    private final Duration codexTimeout;
+
+    SetupFailureFollowUp(
+            CommandRunner commands,
+            CodexInvestigationRunner codexRunner,
+            BooleanSupplier consoleAttached,
+            Map&lt;String, String&gt; environment,
+<span class="nc" id="L51">            Duration codexTimeout) {</span>
+<span class="nc" id="L52">        this.commands = commands;</span>
+<span class="nc" id="L53">        this.codexRunner = codexRunner;</span>
+<span class="nc" id="L54">        this.consoleAttached = consoleAttached;</span>
+<span class="nc" id="L55">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L56">        this.codexTimeout = codexTimeout;</span>
+<span class="nc" id="L57">    }</span>
+
+    static SetupFailureFollowUp forConsole(CommandRunner commands, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L60">        return new SetupFailureFollowUp(</span>
+                commands,
+                new ProcessCodexInvestigationRunner(),
+<span class="nc bnc" id="L63" title="All 2 branches missed.">                () -&gt; SystemConsole.current() != null,</span>
+                environment,
+                CODEX_INVESTIGATION_TIMEOUT);
+    }
+
+    /// Offers the follow-up steps. Callers invoke this only for interactive commands; the console
+    /// check additionally keeps piped or scripted runs from waiting on prompts.
+    void offer(FailedSetup failure, Terminal terminal) {
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (!consoleAttached.getAsBoolean()) {</span>
+<span class="nc" id="L72">            return;</span>
+        }
+        try {
+<span class="nc" id="L75">            Investigation investigation = investigateWithCodex(failure, terminal);</span>
+<span class="nc bnc" id="L76" title="All 4 branches missed.">            if (investigation instanceof Answered answered &amp;&amp; isLocalConfiguration(answered.finding())) {</span>
+<span class="nc" id="L77">                terminal.err().println(localConfigurationClosing(answered.finding()));</span>
+            }
+<span class="nc" id="L79">            offerGithubIssue(failure, investigation, terminal);</span>
+<span class="nc" id="L80">        } catch (IOException e) {</span>
+<span class="nc" id="L81">            terminal.err()</span>
+<span class="nc" id="L82">                    .println(failure.sanitizer()</span>
+<span class="nc" id="L83">                            .apply(SetupFailureCauses.withCause(&quot;Setup failure follow-up failed&quot;, e)));</span>
+<span class="nc" id="L84">        }</span>
+<span class="nc" id="L85">    }</span>
+
+    private static boolean isLocalConfiguration(CodexInvestigationFinding finding) {
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        return finding.classification() == Classification.LOCAL_CONFIGURATION;</span>
+    }
+
+    /// Gives the user an action after a local configuration finding, even when Codex left
+    /// `next_step` blank.
+    private static String localConfigurationClosing(CodexInvestigationFinding finding) {
+        String action;
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (finding.verifiedFix()) {</span>
+<span class="nc" id="L96">            action = &quot;Codex fixed it locally. Rerun the command.&quot;;</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        } else if (finding.nextStep().isBlank()) {</span>
+<span class="nc" id="L98">            action = &quot;Codex did not name a next step. Fix the cause described above, then rerun the command.&quot;;</span>
+        } else {
+<span class="nc" id="L100">            action = &quot;Follow the next step above, then rerun the command.&quot;;</span>
+        }
+<span class="nc" id="L102">        return &quot;Codex found a local configuration problem. &quot; + action;</span>
+    }
+
+    private Investigation investigateWithCodex(FailedSetup failure, Terminal terminal) throws IOException {
+<span class="nc bnc" id="L106" title="All 2 branches missed.">        if (environment.containsKey(CodexInvestigationRunner.INVESTIGATION_MARKER_ENV)) {</span>
+<span class="nc" id="L107">            return NO_ANSWER;</span>
+        }
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        return switch (failure.codex()) {</span>
+<span class="nc" id="L110">            case CodexCli.OnPath onPath</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            when codexAuthenticated(onPath.command()) -&gt; offerInvestigation(onPath.command(), failure, terminal);</span>
+<span class="nc" id="L112">            case CodexCli _ -&gt; NO_ANSWER;</span>
+        };
+    }
+
+    private Investigation offerInvestigation(CodexCommand codex, FailedSetup failure, Terminal terminal)
+            throws IOException {
+<span class="nc" id="L118">        List&lt;Path&gt; additionalWritableRoots = sourceCheckout(failure.paths())</span>
+<span class="nc bnc" id="L119" title="All 2 branches missed.">                .filter(root -&gt; !root.equals(failure.paths().configDir()))</span>
+<span class="nc" id="L120">                .map(List::of)</span>
+<span class="nc" id="L121">                .orElseGet(List::of);</span>
+<span class="nc" id="L122">        terminal.err().println();</span>
+<span class="nc" id="L123">        terminal.err()</span>
+<span class="nc" id="L124">                .println(&quot;Codex CLI is installed and signed in. Codex can investigate this failure on this machine&quot;</span>
+                        + &quot; and may fix it before you open a GitHub issue.&quot;);
+<span class="nc" id="L126">        terminal.err()</span>
+<span class="nc" id="L127">                .println(&quot;Codex receives the Symphony for Trello version, the command name and how it was started,&quot;</span>
+                        + &quot; the error code, and the sanitized troubleshooting report with its location.&quot;
+                        + &quot; It runs locally, can read your files, and sees local paths while it works.&quot;);
+<span class="nc" id="L130">        terminal.err()</span>
+<span class="nc" id="L131">                .println(&quot;Apart from temporary files, it can change files only in the Symphony config directory&quot;</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                        + (additionalWritableRoots.isEmpty() ? &quot;&quot; : &quot; and the Symphony source checkout&quot;)</span>
+                        + &quot;. It does not commit, push, or post anything, and only sanitized text goes into a&quot;
+                        + &quot; GitHub issue draft.&quot;);
+<span class="nc" id="L135">        String answer = terminal.readLine(&quot;Ask Codex to investigate this failure? [y/N] &quot;);</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        if (!confirmed(answer)) {</span>
+<span class="nc" id="L137">            return NO_ANSWER;</span>
+        }
+<span class="nc" id="L139">        Path configDir = failure.paths().configDir();</span>
+        try {
+<span class="nc" id="L141">            Files.createDirectories(configDir);</span>
+<span class="nc" id="L142">        } catch (IOException e) {</span>
+<span class="nc" id="L143">            terminal.err()</span>
+<span class="nc" id="L144">                    .println(failure.sanitizer()</span>
+<span class="nc" id="L145">                            .apply(SetupFailureCauses.withCause(</span>
+                                    &quot;cannot prepare Codex configuration directory: create or repair it before retrying&quot;,
+                                    e)));
+<span class="nc" id="L148">            return NO_ANSWER;</span>
+<span class="nc" id="L149">        }</span>
+<span class="nc" id="L150">        terminal.err()</span>
+<span class="nc" id="L151">                .println(&quot;Codex is investigating. This can take up to &quot;</span>
+<span class="nc" id="L152">                        + CodexInvestigationRunner.describe(codexTimeout) + &quot;. Press Ctrl+C to stop.&quot;);</span>
+<span class="nc" id="L153">        Outcome outcome = codexRunner.investigate(new CodexInvestigationRunner.Request(</span>
+<span class="nc" id="L154">                codex, prompt(failure), configDir, additionalWritableRoots, codexTimeout));</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        return switch (outcome) {</span>
+<span class="nc" id="L156">            case Outcome.Completed completed -&gt; {</span>
+<span class="nc" id="L157">                CodexInvestigationFinding finding = sanitized(completed.finding(), failure.sanitizer());</span>
+<span class="nc" id="L158">                printFinding(finding, terminal.err());</span>
+<span class="nc" id="L159">                yield new Answered(finding);</span>
+            }
+<span class="nc" id="L161">            case Outcome.Failed failed -&gt; {</span>
+<span class="nc" id="L162">                terminal.err()</span>
+<span class="nc" id="L163">                        .println(&quot;Codex investigation did not complete: &quot;</span>
+<span class="nc" id="L164">                                + failure.sanitizer().apply(failed.reason()) + &quot;.&quot;);</span>
+<span class="nc" id="L165">                yield NO_ANSWER;</span>
+            }
+        };
+    }
+
+    private boolean codexAuthenticated(CodexCommand codex) {
+<span class="nc" id="L171">        return commands.run(codex.command(&quot;login&quot;, &quot;status&quot;)).success();</span>
+    }
+
+    /// Only a Git checkout from a source install can take a code fix; a release archive cannot.
+    private static Optional&lt;Path&gt; sourceCheckout(LocalWorkerPaths paths) {
+<span class="nc" id="L176">        Path appHome = paths.appHome();</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        return Files.exists(appHome.resolve(&quot;.git&quot;)) ? Optional.of(appHome) : Optional.empty();</span>
+    }
+
+    private String prompt(FailedSetup failure) throws IOException {
+<span class="nc" id="L181">        UnaryOperator&lt;String&gt; sanitizer = failure.sanitizer();</span>
+<span class="nc" id="L182">        String report = Files.readString(failure.reportPath());</span>
+<span class="nc" id="L183">        String fence = SetupReportMarkdown.markdownFence(report);</span>
+<span class="nc" id="L184">        return &quot;&quot;&quot;</span>
+                You are investigating an unexpected Symphony for Trello setup failure on this machine. The user \
+                asked for this investigation after the failure.
+
+                Failure:
+                - symphony_trello_version: %s
+                - command: %s
+                - started_by: %s
+                - error_code: %s
+                - troubleshooting_report: `%s`
+
+                Tasks:
+                1. Find the cause. Classify it as one of:
+                %s
+                2. Change files only when you can make a safe fix that stays scoped to this failure. Never \
+                change or print credential values, .env secrets, Codex auth or session files, or GitHub \
+                credentials. Do not commit, push, open pull requests, or post issues.
+                3. After any change, run the closest local validation, such as `%s setup-local \
+                check`, the failed command with --dry-run when it supports it, or the focused Maven test in \
+                a source checkout. Report every validation command and whether it passed.
+                4. When the user has to act, give one direct next step.
+
+                Inspect local files directly when you need more detail. Your working directory is the \
+                Symphony config directory. The troubleshooting_report path starts with the token of the Symphony \
+                state directory. An additional writable directory, when present, is the Symphony for \
+                Trello source checkout of a source install; `git log -1` there shows the installed commit.
+
+                The troubleshooting report below replaces private values with tokens: `&lt;path:...&gt;` for local \
+                paths, `&lt;id:...&gt;`, `board_hash`, and `key_hash` for Trello identifiers, `&lt;value:...&gt;` for \
+                other private values, and `&lt;redacted&gt;` for secrets. To map one token to its local value, run \
+                `%s`. Use mapped values only for your local work.
+
+                Your final answer may be shown in a public GitHub issue. It must not contain credentials, \
+                tokens, Codex auth or session data, Trello URLs, board names, board or card ids, account \
+                names, or absolute paths. Name files by their role or by a path relative to the Symphony \
+                config directory or source checkout. Answer with JSON that matches the provided schema.
+
+                Sanitized troubleshooting report:
+
+                %s
+                %s
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L227">                .formatted(</span>
+<span class="nc" id="L228">                        new TrelloBoardSetupMain.ProjectVersion().getVersion()[0],</span>
+<span class="nc" id="L229">                        sanitizer.apply(failure.commandName()),</span>
+<span class="nc" id="L230">                        startedBy(),</span>
+<span class="nc" id="L231">                        sanitizer.apply(failure.errorCode()),</span>
+<span class="nc" id="L232">                        reportLocation(failure),</span>
+<span class="nc" id="L233">                        classificationDescriptions(),</span>
+                        LocalSetup.DEFAULT_COMMAND,
+<span class="nc" id="L235">                        PrivateContextTokens.lookupCommand(TOKEN_PLACEHOLDER),</span>
+                        fence + &quot;markdown&quot;,
+<span class="nc" id="L237">                        report.stripTrailing(),</span>
+                        fence);
+    }
+
+    private static String classificationDescriptions() {
+<span class="nc" id="L242">        return Arrays.stream(Classification.values())</span>
+<span class="nc" id="L243">                .map(classification -&gt; &quot;   - &quot; + classification.jsonValue() + &quot;: &quot; + classification.description())</span>
+<span class="nc" id="L244">                .collect(Collectors.joining(&quot;\n&quot;));</span>
+    }
+
+    /// Names the report by the state directory token plus its fixed relative path, so Codex can open
+    /// it after one token lookup while the prompt keeps no raw local path.
+    private static String reportLocation(FailedSetup failure) {
+<span class="nc" id="L250">        Path stateHome = failure.paths().stateHome();</span>
+<span class="nc" id="L251">        Path report = failure.reportPath();</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        if (!report.startsWith(stateHome)) {</span>
+<span class="nc" id="L253">            return failure.sanitizer().apply(report.toString());</span>
+        }
+<span class="nc" id="L255">        return failure.sanitizer().apply(stateHome.toString())</span>
+<span class="nc" id="L256">                + stateHome.getFileSystem().getSeparator()</span>
+<span class="nc" id="L257">                + stateHome.relativize(report);</span>
+    }
+
+    private String startedBy() {
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (environment.containsKey(LocalSetup.INSTALLER_COMPLETION_ENV)) {</span>
+<span class="nc" id="L262">            return &quot;installer onboarding&quot;;</span>
+        }
+<span class="nc bnc" id="L264" title="All 2 branches missed.">        if (environment.containsKey(LocalSetup.COMMAND_ENV)) {</span>
+<span class="nc" id="L265">            return &quot;installed symphony-trello command&quot;;</span>
+        }
+<span class="nc" id="L267">        return &quot;direct Java command&quot;;</span>
+    }
+
+    /// Applies the report sanitizer and the text length limit to every text Codex returned, once, so
+    /// the console output and the issue draft can only show sanitized text. List limits apply when
+    /// rendering, so [CodexInvestigationFinding#verifiedFix()] still sees every validation run.
+    private static CodexInvestigationFinding sanitized(
+            CodexInvestigationFinding finding, UnaryOperator&lt;String&gt; sanitizer) {
+<span class="nc" id="L275">        return new CodexInvestigationFinding(</span>
+<span class="nc" id="L276">                finding.classification(),</span>
+<span class="nc" id="L277">                sanitizedText(finding.diagnosis(), sanitizer),</span>
+<span class="nc" id="L278">                finding.fixApplied(),</span>
+<span class="nc" id="L279">                sanitizedText(finding.fixSummary(), sanitizer),</span>
+<span class="nc" id="L280">                finding.changedFiles().stream()</span>
+<span class="nc" id="L281">                        .map(value -&gt; sanitizedText(value, sanitizer))</span>
+<span class="nc" id="L282">                        .toList(),</span>
+<span class="nc" id="L283">                finding.validation().stream()</span>
+<span class="nc" id="L284">                        .map(run -&gt; new ValidationRun(sanitizedText(run.command(), sanitizer), run.passed()))</span>
+<span class="nc" id="L285">                        .toList(),</span>
+<span class="nc" id="L286">                sanitizedText(finding.nextStep(), sanitizer));</span>
+    }
+
+    private static void printFinding(CodexInvestigationFinding finding, PrintStream err) {
+<span class="nc" id="L290">        err.println();</span>
+<span class="nc" id="L291">        err.println(&quot;Codex investigation&quot;);</span>
+<span class="nc" id="L292">        err.println(&quot;  Finding: &quot; + finding.classification().label());</span>
+<span class="nc" id="L293">        printField(err, &quot;Diagnosis&quot;, finding.diagnosis());</span>
+<span class="nc" id="L294">        err.println(&quot;  Changed files: &quot; + changedFiles(finding, UnaryOperator.identity()));</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        if (finding.fixApplied()) {</span>
+<span class="nc" id="L296">            printField(err, &quot;Fix&quot;, finding.fixSummary());</span>
+        }
+<span class="nc" id="L298">        err.println(&quot;  Validation: &quot; + validationSummary(finding));</span>
+<span class="nc" id="L299">        printField(err, &quot;Next step&quot;, finding.nextStep());</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">        if (finding.classification() == Classification.EXTERNAL_TOOL_OR_SERVICE) {</span>
+<span class="nc" id="L301">            err.println(&quot;  The failure comes from an external tool or service. A GitHub issue still helps when&quot;</span>
+                    + &quot; Symphony for Trello should detect or explain this failure better.&quot;);
+        }
+<span class="nc" id="L304">    }</span>
+
+    private static void printField(PrintStream err, String label, String value) {
+<span class="nc bnc" id="L307" title="All 2 branches missed.">        if (!value.isBlank()) {</span>
+<span class="nc" id="L308">            err.println(&quot;  &quot; + label + &quot;: &quot; + value);</span>
+        }
+<span class="nc" id="L310">    }</span>
+
+    private static String changedFiles(CodexInvestigationFinding finding, UnaryOperator&lt;String&gt; format) {
+<span class="nc" id="L313">        List&lt;String&gt; files = finding.changedFiles().stream()</span>
+<span class="nc" id="L314">                .limit(ANSWER_LIST_LIMIT)</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                .filter(file -&gt; !file.isBlank())</span>
+<span class="nc" id="L316">                .map(format)</span>
+<span class="nc" id="L317">                .toList();</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        return files.isEmpty() ? &quot;none&quot; : String.join(&quot;, &quot;, files);</span>
+    }
+
+    private static String validationSummary(CodexInvestigationFinding finding) {
+<span class="nc bnc" id="L322" title="All 2 branches missed.">        if (finding.validation().isEmpty()) {</span>
+<span class="nc" id="L323">            return &quot;none run&quot;;</span>
+        }
+<span class="nc" id="L325">        return finding.validation().stream()</span>
+<span class="nc" id="L326">                .limit(ANSWER_LIST_LIMIT)</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">                .map(run -&gt; (run.passed() ? &quot;passed&quot; : &quot;failed&quot;) + &quot; `&quot; + run.command() + &quot;`&quot;)</span>
+<span class="nc" id="L328">                .collect(Collectors.joining(&quot;; &quot;));</span>
+    }
+
+    private void offerGithubIssue(FailedSetup failure, Investigation investigation, Terminal terminal)
+            throws IOException {
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if (!commands.run(&quot;gh&quot;, &quot;auth&quot;, &quot;status&quot;).success()) {</span>
+<span class="nc" id="L334">            return;</span>
+        }
+        String question =
+<span class="nc bnc" id="L337" title="All 3 branches missed.">                switch (investigation) {</span>
+<span class="nc" id="L338">                    case Answered answered</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">                    when isLocalConfiguration(answered.finding()) -&gt; &quot;Post a GitHub issue anyway? [y/N] &quot;;</span>
+<span class="nc" id="L340">                    case Answered answered</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">                    when answered.finding().verifiedSymphonyFix() -&gt;</span>
+<span class="nc" id="L342">                        &quot;Codex changed files locally and validation passed. Open a GitHub issue that describes the&quot;</span>
+                                + &quot; failure and the local fix? [y/N] &quot;;
+<span class="nc" id="L344">                    case Investigation _ -&gt; &quot;GitHub CLI is authenticated. Open a GitHub issue with this report? [y/N] &quot;;</span>
+<span class="nc" id="L345">                };</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">        if (!confirmed(terminal.readLine(question))) {</span>
+<span class="nc" id="L347">            return;</span>
+        }
+        Path bodyFile =
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                switch (investigation) {</span>
+<span class="nc" id="L351">                    case Answered answered -&gt; writeIssueDraft(failure, answered.finding());</span>
+<span class="nc" id="L352">                    case Investigation.NoAnswer _ -&gt; failure.reportPath();</span>
+<span class="nc" id="L353">                };</span>
+<span class="nc" id="L354">        printIssueDraft(terminal.out(), Files.readString(bodyFile));</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if (!confirmed(terminal.readLine(&quot;Post this GitHub issue now? [y/N] &quot;))) {</span>
+<span class="nc" id="L356">            return;</span>
+        }
+<span class="nc" id="L358">        CommandResult result = commands.run(</span>
+                &quot;gh&quot;,
+                &quot;issue&quot;,
+                &quot;create&quot;,
+                &quot;--repo&quot;,
+                ISSUE_REPOSITORY,
+                &quot;--title&quot;,
+                ISSUE_TITLE,
+                &quot;--body-file&quot;,
+<span class="nc" id="L367">                bodyFile.toString());</span>
+<span class="nc bnc" id="L368" title="All 2 branches missed.">        if (result.success()) {</span>
+<span class="nc" id="L369">            terminal.out().println(SetupReportMarkdown.firstLine(result.output()));</span>
+        } else {
+<span class="nc" id="L371">            terminal.err()</span>
+<span class="nc" id="L372">                    .println(&quot;GitHub issue creation failed: &quot;</span>
+<span class="nc" id="L373">                            + failure.sanitizer().apply(SetupReportMarkdown.firstLine(result.output())));</span>
+        }
+<span class="nc" id="L375">    }</span>
+
+    private static void printIssueDraft(PrintStream out, String body) {
+<span class="nc" id="L378">        out.println();</span>
+<span class="nc" id="L379">        out.println(&quot;Issue title:&quot;);</span>
+<span class="nc" id="L380">        out.println(ISSUE_TITLE);</span>
+<span class="nc" id="L381">        out.println();</span>
+<span class="nc" id="L382">        out.println(&quot;Issue body:&quot;);</span>
+<span class="nc" id="L383">        out.println(body);</span>
+<span class="nc" id="L384">    }</span>
+
+    /// Writes the public issue draft next to the troubleshooting report: the report itself plus the
+    /// sanitized Codex answer. The local file stays available for review after the prompt.
+    private static Path writeIssueDraft(FailedSetup failure, CodexInvestigationFinding finding) throws IOException {
+<span class="nc" id="L389">        Path report = failure.reportPath();</span>
+<span class="nc" id="L390">        Path reportFileName = report.getFileName();</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        String reportName = reportFileName == null ? &quot;setup-failure&quot; + REPORT_SUFFIX : reportFileName.toString();</span>
+<span class="nc bnc" id="L392" title="All 2 branches missed.">        String draftName = (reportName.endsWith(REPORT_SUFFIX)</span>
+<span class="nc" id="L393">                        ? reportName.substring(0, reportName.length() - REPORT_SUFFIX.length())</span>
+<span class="nc" id="L394">                        : reportName)</span>
+                + ISSUE_DRAFT_SUFFIX;
+<span class="nc" id="L396">        Path draft = report.resolveSibling(draftName);</span>
+<span class="nc" id="L397">        Files.writeString(draft, issueBody(Files.readString(report), finding));</span>
+<span class="nc" id="L398">        return draft;</span>
+    }
+
+    /// Appends the already sanitized Codex finding to the sanitized report.
+    private static String issueBody(String report, CodexInvestigationFinding finding) {
+<span class="nc" id="L403">        var body = new StringBuilder(report.stripTrailing()).append(&quot;\n\n## Local Codex Investigation\n\n&quot;);</span>
+<span class="nc" id="L404">        body.append(&quot;Codex ran on the reporter's machine. Its changes were not committed or pushed.\n\n&quot;);</span>
+<span class="nc" id="L405">        SetupReportMarkdown.line(</span>
+<span class="nc" id="L406">                body, &quot;classification&quot;, finding.classification().jsonValue());</span>
+<span class="nc" id="L407">        SetupReportMarkdown.line(body, &quot;diagnosis&quot;, finding.diagnosis());</span>
+<span class="nc" id="L408">        SetupReportMarkdown.line(body, &quot;fix_applied&quot;, finding.fixApplied());</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">        if (finding.fixApplied()) {</span>
+<span class="nc" id="L410">            SetupReportMarkdown.line(body, &quot;fix_summary&quot;, finding.fixSummary());</span>
+        }
+<span class="nc" id="L412">        SetupReportMarkdown.line(body, &quot;changed_files&quot;, changedFiles(finding, file -&gt; &quot;`&quot; + file + &quot;`&quot;));</span>
+<span class="nc" id="L413">        SetupReportMarkdown.line(body, &quot;validation&quot;, validationSummary(finding));</span>
+<span class="nc" id="L414">        SetupReportMarkdown.line(body, &quot;next_step&quot;, finding.nextStep());</span>
+<span class="nc" id="L415">        return body.toString();</span>
+    }
+
+    private static String sanitizedText(String value, UnaryOperator&lt;String&gt; sanitizer) {
+<span class="nc" id="L419">        String sanitized = sanitizer.apply(value).strip();</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">        if (sanitized.length() &lt;= ANSWER_TEXT_LIMIT) {</span>
+<span class="nc" id="L421">            return sanitized;</span>
+        }
+<span class="nc" id="L423">        int end = ANSWER_TEXT_LIMIT;</span>
+        // Keep the UTF-16 limit without splitting a supplementary character before UTF-8 output.
+<span class="nc bnc" id="L425" title="All 4 branches missed.">        if (Character.isHighSurrogate(sanitized.charAt(end - 1)) &amp;&amp; Character.isLowSurrogate(sanitized.charAt(end))) {</span>
+<span class="nc" id="L426">            end--;</span>
+        }
+<span class="nc" id="L428">        return sanitized.substring(0, end) + &quot; ...&quot;;</span>
+    }
+
+    private static boolean confirmed(String answer) {
+<span class="nc bnc" id="L432" title="All 4 branches missed.">        return answer != null &amp;&amp; answer.strip().toLowerCase(Locale.ROOT).startsWith(&quot;y&quot;);</span>
+    }
+
+    /// Everything the follow-up needs about one failure.
+    ///
+    /// @param codex whether a Codex executable is on `PATH`
+    /// @param sanitizer the report's sanitizer; it applies the same redaction to Codex answers
+<span class="nc" id="L439">    record FailedSetup(</span>
+            Path reportPath,
+            String errorCode,
+            String commandName,
+            LocalWorkerPaths paths,
+            CodexCli codex,
+            UnaryOperator&lt;String&gt; sanitizer) {}
+
+    /// Whether the diagnostics tool probe found Codex CLI on `PATH`.
+    sealed interface CodexCli {
+<span class="nc" id="L449">        record NotOnPath() implements CodexCli {}</span>
+
+        /// Codex CLI was found on `PATH`.
+        ///
+        /// @param command builds the process command for the resolved executable
+<span class="nc" id="L454">        record OnPath(CodexCommand command) implements CodexCli {}</span>
+    }
+
+    /// What the optional Codex step leaves for the closing message and the issue draft.
+    sealed interface Investigation {
+        /// Codex was not offered, was declined, or returned no usable answer.
+<span class="nc" id="L460">        record NoAnswer() implements Investigation {}</span>
+
+        /// Codex returned a usable answer for the follow-up.
+        ///
+        /// @param finding the Codex answer after sanitizing
+<span class="nc" id="L465">        record Answered(CodexInvestigationFinding finding) implements Investigation {}</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

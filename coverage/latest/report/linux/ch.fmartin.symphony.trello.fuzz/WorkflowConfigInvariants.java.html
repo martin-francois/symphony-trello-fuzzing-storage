@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowConfigInvariants.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.fuzz</a> &gt; <span class="el_source">WorkflowConfigInvariants.java</span></div><h1>WorkflowConfigInvariants.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.fuzz;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import ch.fmartin.symphony.trello.TrelloEnvironment;
+import ch.fmartin.symphony.trello.config.ConfigException;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.TypedWorkflowConfig;
+import ch.fmartin.symphony.trello.config.WorkflowConfigIngestion;
+import ch.fmartin.symphony.trello.config.WorkflowIntegerSetting;
+import ch.fmartin.symphony.trello.config.WorkflowServerPortClassification;
+import ch.fmartin.symphony.trello.workflow.CodexSandboxPolicy;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.regex.Pattern;
+
+/// Resolves a loaded workflow into typed configuration the way the service does before dispatch, and
+/// checks properties of the result. Shared by the standalone `WorkflowLoaderFuzzer` and the JUnit
+/// `WorkflowLoaderFuzzTest`. It throws [AssertionError] instead of using AssertJ because the OSS-Fuzz
+/// runtime classpath has no test libraries.
+///
+/// Resolution reads only the fixed environments and in-memory secret files below, never the process
+/// environment, a `.env` file, or a host file. A [ConfigException] is the expected rejection of bad
+/// configuration. Any other exception escapes to the fuzzer as a finding.
+public final class WorkflowConfigInvariants {
+    // The seed corpus refers to these names, so mutations start from references that resolve.
+<span class="fc" id="L43">    private static final Map&lt;String, String&gt; BASE_ENVIRONMENT = Map.ofEntries(</span>
+<span class="fc" id="L44">            Map.entry(TrelloEnvironment.API_KEY, &quot;env-api-key&quot;),</span>
+<span class="fc" id="L45">            Map.entry(TrelloEnvironment.API_TOKEN, &quot;env-api-token&quot;),</span>
+<span class="fc" id="L46">            Map.entry(&quot;SYMPHONY_FUZZ_BOARD&quot;, &quot;env-board&quot;),</span>
+<span class="fc" id="L47">            Map.entry(&quot;SYMPHONY_FUZZ_BLANK&quot;, &quot; &quot;),</span>
+<span class="fc" id="L48">            Map.entry(&quot;SYMPHONY_FUZZ_PORT&quot;, &quot;18080&quot;),</span>
+<span class="fc" id="L49">            Map.entry(&quot;SYMPHONY_FUZZ_HIGH_PORT&quot;, &quot;65536&quot;),</span>
+<span class="fc" id="L50">            Map.entry(&quot;SYMPHONY_FUZZ_FRACTIONAL_PORT&quot;, &quot;8080.5&quot;),</span>
+<span class="fc" id="L51">            Map.entry(&quot;SYMPHONY_FUZZ_ROOT&quot;, &quot;/srv/symphony&quot;),</span>
+<span class="fc" id="L52">            Map.entry(&quot;SYMPHONY_FUZZ_RELATIVE_ROOT&quot;, &quot;relative/root&quot;));</span>
+    // The operator overrides change which sandbox rules apply, so each input is resolved once
+    // without them and once with each of them.
+<span class="fc" id="L55">    private static final List&lt;Map&lt;String, String&gt;&gt; ENVIRONMENTS = List.of(</span>
+            BASE_ENVIRONMENT,
+<span class="fc" id="L57">            withVariable(</span>
+                    ConfigResolver.ADDITIONAL_WRITABLE_ROOTS_ENVIRONMENT,
+<span class="fc" id="L59">                    String.join(File.pathSeparator, &quot;extra-root&quot;, &quot;/srv/extra-root&quot;, &quot; &quot;)),</span>
+<span class="fc" id="L60">            withVariable(ConfigResolver.DANGER_FULL_ACCESS_ENVIRONMENT, &quot;true&quot;));</span>
+    // Keyed by file name, so relative and absolute `file:` references reach the same secret.
+<span class="fc" id="L62">    private static final Map&lt;String, String&gt; SECRET_FILES = Map.of(</span>
+            &quot;trello-api-key&quot;, &quot;file-api-key\n&quot;,
+            &quot;trello-api-token&quot;, &quot;file-api-token\r\n&quot;,
+            &quot;blank-secret&quot;, &quot;\n&quot;);
+    private static final String OVERSIZED_SECRET_FILE = &quot;oversized-secret&quot;;
+<span class="fc" id="L67">    private static final ConfigResolver.SecretFiles IN_MEMORY_SECRET_FILES = new ConfigResolver.SecretFiles() {</span>
+        @Override
+        public long size(Path path) throws IOException {
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            return OVERSIZED_SECRET_FILE.equals(fileName(path))</span>
+<span class="nc" id="L71">                    ? Long.MAX_VALUE</span>
+<span class="nc" id="L72">                    : secret(path).getBytes(UTF_8).length;</span>
+        }
+
+        @Override
+        public String readString(Path path) throws IOException {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">            check(!OVERSIZED_SECRET_FILE.equals(fileName(path)), &quot;a secret file over the size limit is never read&quot;);</span>
+<span class="nc" id="L78">            return secret(path);</span>
+        }
+    };
+<span class="fc" id="L81">    private static final Pattern ERROR_CODE = Pattern.compile(&quot;[a-z]+(_[a-z]+)*&quot;);</span>
+<span class="fc" id="L82">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+
+    private WorkflowConfigInvariants() {}
+
+    public static void assertResolutionProperties(WorkflowDefinition workflow) {
+<span class="fc bfc" id="L87" title="All 2 branches covered.">        for (Map&lt;String, String&gt; environment : ENVIRONMENTS) {</span>
+<span class="fc" id="L88">            assertResolutionProperties(workflow, environment);</span>
+<span class="fc" id="L89">        }</span>
+<span class="fc" id="L90">    }</span>
+
+    private static void assertResolutionProperties(WorkflowDefinition workflow, Map&lt;String, String&gt; environment) {
+<span class="fc" id="L93">        Function&lt;String, Optional&lt;String&gt;&gt; lookup = name -&gt; Optional.ofNullable(environment.get(name));</span>
+<span class="fc" id="L94">        var resolver = new ConfigResolver(lookup, IN_MEMORY_SECRET_FILES);</span>
+        EffectiveConfig config;
+        try {
+<span class="fc" id="L97">            config = resolver.resolve(workflow);</span>
+<span class="fc" id="L98">        } catch (ConfigException rejected) {</span>
+<span class="fc" id="L99">            assertExplicitRejection(rejected);</span>
+<span class="fc" id="L100">            return;</span>
+<span class="fc" id="L101">        }</span>
+<span class="fc" id="L102">        assertResolvedValues(workflow, config, environment.containsKey(ConfigResolver.DANGER_FULL_ACCESS_ENVIRONMENT));</span>
+<span class="fc" id="L103">        assertServerPortViewsAgree(WorkflowConfigIngestion.collect(workflow, lookup), config);</span>
+<span class="fc" id="L104">        assertSandboxPolicyBuilds(config.codex());</span>
+        try {
+<span class="nc" id="L106">            resolver.validateForDispatch(config);</span>
+<span class="fc" id="L107">        } catch (ConfigException rejected) {</span>
+<span class="fc" id="L108">            assertExplicitRejection(rejected);</span>
+<span class="nc" id="L109">        }</span>
+<span class="fc" id="L110">    }</span>
+
+    private static void assertExplicitRejection(ConfigException rejected) {
+<span class="fc" id="L113">        check(</span>
+<span class="pc bpc" id="L114" title="2 of 4 branches missed.">                rejected.code() != null &amp;&amp; ERROR_CODE.matcher(rejected.code()).matches(),</span>
+                &quot;rejection has a snake_case error code&quot;);
+<span class="pc bpc" id="L116" title="2 of 4 branches missed.">        check(rejected.getMessage() != null &amp;&amp; !rejected.getMessage().isBlank(), &quot;rejection explains the problem&quot;);</span>
+<span class="fc" id="L117">    }</span>
+
+    private static void assertResolvedValues(
+            WorkflowDefinition workflow, EffectiveConfig config, boolean forceDangerFullAccess) {
+<span class="fc" id="L121">        check(workflow.path().equals(config.workflowPath()), &quot;config keeps the workflow path&quot;);</span>
+<span class="fc" id="L122">        List&lt;Path&gt; paths = new ArrayList&lt;&gt;(config.codex().additionalWritableRoots());</span>
+<span class="fc" id="L123">        paths.add(config.workspace().root());</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">        if (config.repository().defaultPath() != null) {</span>
+<span class="nc" id="L125">            paths.add(config.repository().defaultPath());</span>
+        }
+<span class="fc bfc" id="L127" title="All 2 branches covered.">        for (Path path : paths) {</span>
+<span class="pc bpc" id="L128" title="2 of 4 branches missed.">            check(path.isAbsolute() &amp;&amp; path.equals(path.normalize()), &quot;resolved paths are absolute and normal&quot;);</span>
+<span class="fc" id="L129">        }</span>
+<span class="fc" id="L130">        List&lt;Duration&gt; durations = List.of(</span>
+<span class="fc" id="L131">                config.tracker().requestTimeout(),</span>
+<span class="fc" id="L132">                config.tracker().apiRetryBaseDelay(),</span>
+<span class="fc" id="L133">                config.hooks().timeout(),</span>
+<span class="fc" id="L134">                config.agent().maxRetryBackoff(),</span>
+<span class="fc" id="L135">                config.codex().turnTimeout(),</span>
+<span class="fc" id="L136">                config.codex().readTimeout(),</span>
+<span class="fc" id="L137">                config.codex().stallTimeout());</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">        for (Duration duration : durations) {</span>
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">            check(!duration.isNegative(), &quot;timeouts and delays are not negative&quot;);</span>
+<span class="fc" id="L140">        }</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">        check(config.polling().interval().compareTo(Duration.ZERO) &gt; 0, &quot;the polling interval is positive&quot;);</span>
+<span class="pc bpc" id="L142" title="2 of 4 branches missed.">        check(config.agent().maxConcurrentAgents() &gt; 0 &amp;&amp; config.agent().maxTurns() &gt; 0, &quot;agent limits are positive&quot;);</span>
+<span class="fc" id="L143">        List&lt;Integer&gt; limits = new ArrayList&lt;&gt;(config.tracker().priorityLabels().values());</span>
+<span class="fc" id="L144">        limits.addAll(config.agent().maxConcurrentAgentsByState().values());</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">        for (int limit : limits) {</span>
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">            check(limit &gt; 0, &quot;priorities and per-state limits are positive&quot;);</span>
+<span class="fc" id="L147">        }</span>
+<span class="fc" id="L148">        check(</span>
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">                config.codex().forceDangerFullAccess() == forceDangerFullAccess,</span>
+                &quot;only the operator override forces full access&quot;);
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        check(</span>
+                !forceDangerFullAccess
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">                        || config.codex().additionalWritableRoots().isEmpty(),</span>
+                &quot;forced full access has no additional writable roots&quot;);
+<span class="fc" id="L155">    }</span>
+
+    // Setup diagnostics read the port through the typed view; the service binds the resolved one.
+    private static void assertServerPortViewsAgree(TypedWorkflowConfig typed, EffectiveConfig config) {
+<span class="fc" id="L159">        OptionalInt resolvedPort = config.server().port();</span>
+<span class="fc" id="L160">        WorkflowServerPortClassification classification = typed.serverPortClassification();</span>
+<span class="fc" id="L161">        check(</span>
+                classification
+<span class="fc" id="L163">                        .port()</span>
+<span class="fc" id="L164">                        .map(OptionalInt::of)</span>
+<span class="fc" id="L165">                        .orElseGet(OptionalInt::empty)</span>
+<span class="fc" id="L166">                        .equals(resolvedPort),</span>
+                &quot;diagnostics classify the port the service resolved&quot;);
+<span class="fc" id="L168">        check(</span>
+                classification
+<span class="fc" id="L170">                        .probeOrSkipPort()</span>
+<span class="fc" id="L171">                        .map(OptionalInt::of)</span>
+<span class="fc" id="L172">                        .orElseGet(OptionalInt::empty)</span>
+<span class="fc" id="L173">                        .equals(resolvedPort),</span>
+                &quot;diagnostics probe or skip exactly the resolved port&quot;);
+<span class="fc" id="L175">        WorkflowIntegerSetting localPort = typed.localServerPortSetting();</span>
+<span class="fc" id="L176">        check(</span>
+<span class="pc bpc" id="L177" title="2 of 4 branches missed.">                localPort.value().isPresent() == (classification.kind() == WorkflowServerPortClassification.Kind.VALID),</span>
+                &quot;setup accepts a local port exactly when diagnostics classify it as valid&quot;);
+<span class="fc" id="L179">        localPort</span>
+<span class="fc" id="L180">                .value()</span>
+<span class="fc" id="L181">                .ifPresent(port -&gt;</span>
+<span class="nc" id="L182">                        check(WorkflowConfigIngestion.localServerPortInRange(port), &quot;an accepted port is in range&quot;));</span>
+<span class="fc" id="L183">    }</span>
+
+    // The Codex client builds this policy for every turn of a dispatched card.
+    private static void assertSandboxPolicyBuilds(EffectiveConfig.CodexConfig codex) {
+<span class="fc" id="L187">        JsonNode policy = CodexSandboxPolicy.effectivePolicy(</span>
+<span class="fc" id="L188">                JSON, codex.turnSandboxPolicy(), codex.additionalWritableRoots(), codex.forceDangerFullAccess());</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">        if (policy == null) {</span>
+<span class="fc" id="L190">            check(</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">                    !codex.forceDangerFullAccess()</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">                            &amp;&amp; codex.additionalWritableRoots().isEmpty(),</span>
+                    &quot;forced full access and additional roots always send a policy&quot;);
+<span class="fc" id="L194">            return;</span>
+        }
+<span class="fc" id="L196">        boolean fullAccess = CodexSandboxPolicy.DANGER_FULL_ACCESS.equals(</span>
+<span class="fc" id="L197">                policy.path(CodexSandboxPolicy.TYPE).asText());</span>
+<span class="fc bfc" id="L198" title="All 2 branches covered.">        if (codex.forceDangerFullAccess()) {</span>
+<span class="fc" id="L199">            check(fullAccess, &quot;forced full access sends a dangerFullAccess policy&quot;);</span>
+<span class="fc" id="L200">            return;</span>
+        }
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">        if (fullAccess) {</span>
+<span class="nc" id="L203">            return;</span>
+        }
+<span class="fc" id="L205">        Set&lt;String&gt; writableRoots = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L206">        policy.path(CodexSandboxPolicy.WRITABLE_ROOTS).forEach(root -&gt; writableRoots.add(root.asText()));</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">        for (Path root : codex.additionalWritableRoots()) {</span>
+<span class="fc" id="L208">            check(writableRoots.contains(root.toString()), &quot;the sandbox policy grants every additional root&quot;);</span>
+<span class="fc" id="L209">        }</span>
+<span class="fc" id="L210">    }</span>
+
+    private static Map&lt;String, String&gt; withVariable(String name, String value) {
+<span class="fc" id="L213">        Map&lt;String, String&gt; environment = new HashMap&lt;&gt;(BASE_ENVIRONMENT);</span>
+<span class="fc" id="L214">        environment.put(name, value);</span>
+<span class="fc" id="L215">        return Map.copyOf(environment);</span>
+    }
+
+    private static String secret(Path path) throws NoSuchFileException {
+<span class="nc" id="L219">        String content = SECRET_FILES.get(fileName(path));</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        if (content == null) {</span>
+<span class="nc" id="L221">            throw new NoSuchFileException(path.toString());</span>
+        }
+<span class="nc" id="L223">        return content;</span>
+    }
+
+    private static String fileName(Path path) {
+<span class="nc" id="L227">        Path fileName = path.getFileName();</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        return fileName == null ? &quot;&quot; : fileName.toString();</span>
+    }
+
+    private static void check(boolean property, String description) {
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">        if (!property) {</span>
+<span class="nc" id="L233">            throw new AssertionError(&quot;workflow config property violated: &quot; + description);</span>
+        }
+<span class="fc" id="L235">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

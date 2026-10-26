@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TutorialInputTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TutorialInputTest.java</span></div><h1>TutorialInputTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.setup.TutorialInput.Answer;
+import java.io.ByteArrayOutputStream;
+import java.io.InterruptedIOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+
+<span class="nc" id="L18">final class TutorialInputTest {</span>
+<span class="nc" id="L19">    private static final Duration SHORT_WAIT = Duration.ofMillis(20);</span>
+<span class="nc" id="L20">    private static final Duration LATCH_WAIT = Duration.ofSeconds(10);</span>
+<span class="nc" id="L21">    private static final Duration POLL_INTERVAL = Duration.ofMillis(5);</span>
+
+    @Test
+    void timedOutWaitsShareOneTerminalRead() throws Exception {
+        // given
+<span class="nc" id="L26">        var terminal = new BlockingTerminal(&quot;typed later&quot;);</span>
+
+        // when
+        Optional&lt;Answer&gt; first;
+        Optional&lt;Answer&gt; second;
+        Optional&lt;Answer&gt; delivered;
+<span class="nc" id="L32">        try (var input = new TutorialInput(terminal)) {</span>
+<span class="nc" id="L33">            first = input.poll(&quot;Check: &quot;, SHORT_WAIT);</span>
+<span class="nc" id="L34">            second = input.poll(&quot;Check: &quot;, SHORT_WAIT);</span>
+<span class="nc" id="L35">            terminal.release();</span>
+<span class="nc" id="L36">            delivered = input.poll(&quot;Check: &quot;, LATCH_WAIT);</span>
+        }
+
+        // then
+<span class="nc" id="L40">        assertThat(first).isEmpty();</span>
+<span class="nc" id="L41">        assertThat(second).isEmpty();</span>
+<span class="nc" id="L42">        assertThat(delivered)</span>
+<span class="nc" id="L43">                .hasValueSatisfying(answer -&gt; assertThat(answer.line()).isEqualTo(&quot;typed later&quot;));</span>
+<span class="nc" id="L44">        assertThat(terminal.prompts())</span>
+<span class="nc" id="L45">                .as(&quot;a second read while the first one waits would take a line meant for a later prompt&quot;)</span>
+<span class="nc" id="L46">                .containsExactly(&quot;Check: &quot;);</span>
+<span class="nc" id="L47">    }</span>
+
+    @Test
+    void lineTypedBeforeTheNextPromptAppearedDoesNotAnswerIt() throws Exception {
+        // given
+<span class="nc" id="L52">        var terminal = new BlockingTerminal(&quot;typed for the old prompt&quot;);</span>
+
+        // when
+        Answer answer;
+<span class="nc" id="L56">        try (var input = new TutorialInput(terminal)) {</span>
+<span class="nc" id="L57">            input.poll(&quot;Check: &quot;, SHORT_WAIT);</span>
+<span class="nc" id="L58">            terminal.release();</span>
+<span class="nc" id="L59">            waitUntilLineWaiting(input);</span>
+<span class="nc" id="L60">            terminal.answerNextWith(&quot;typed for the cleanup prompt&quot;);</span>
+<span class="nc" id="L61">            answer = input.read(&quot;Archive? &quot;);</span>
+        }
+
+        // then
+<span class="nc" id="L65">        assertThat(answer.line()).isEqualTo(&quot;typed for the cleanup prompt&quot;);</span>
+<span class="nc" id="L66">        assertThat(terminal.prompts()).containsExactly(&quot;Check: &quot;, &quot;Archive? &quot;);</span>
+<span class="nc" id="L67">    }</span>
+
+    @Test
+    void waitingReadAnswersTheNextPromptWhenTheLineArrivesAfterItAppeared() throws Exception {
+        // given
+<span class="nc" id="L72">        var terminal = new BlockingTerminal(&quot;typed after the new prompt&quot;);</span>
+<span class="nc" id="L73">        String nextPrompt = &quot;Next question: &quot;;</span>
+
+        // when
+        Answer answer;
+<span class="nc" id="L77">        try (var input = new TutorialInput(terminal)) {</span>
+<span class="nc" id="L78">            input.poll(&quot;First question: &quot;, SHORT_WAIT);</span>
+<span class="nc" id="L79">            Optional&lt;Answer&gt; beforeRelease = input.poll(nextPrompt, SHORT_WAIT);</span>
+<span class="nc" id="L80">            assertThat(beforeRelease).isEmpty();</span>
+<span class="nc" id="L81">            terminal.release();</span>
+<span class="nc" id="L82">            answer = input.read(nextPrompt);</span>
+        }
+
+        // then
+<span class="nc" id="L86">        assertThat(answer.line()).isEqualTo(&quot;typed after the new prompt&quot;);</span>
+<span class="nc" id="L87">        assertThat(terminal.prompts()).containsExactly(&quot;First question: &quot;);</span>
+<span class="nc" id="L88">        assertThat(terminal.stdout())</span>
+<span class="nc" id="L89">                .as(&quot;the waiting read shows the new prompt once&quot;)</span>
+<span class="nc" id="L90">                .isEqualTo(&quot;First question: Next question: &quot;);</span>
+<span class="nc" id="L91">    }</span>
+
+    @Test
+    void showsThePromptAgainOnlyWhenOtherOutputHidItAndStartsANewReadAfterAnAnswer() throws Exception {
+        // given
+<span class="nc" id="L96">        var terminal = new BlockingTerminal(&quot;first answer&quot;);</span>
+
+        // when
+        Answer secondAnswer;
+<span class="nc" id="L100">        try (var input = new TutorialInput(terminal)) {</span>
+<span class="nc" id="L101">            input.poll(&quot;Check: &quot;, SHORT_WAIT);</span>
+<span class="nc" id="L102">            input.showPromptAgain();</span>
+<span class="nc" id="L103">            input.poll(&quot;Check: &quot;, SHORT_WAIT);</span>
+<span class="nc" id="L104">            terminal.release();</span>
+<span class="nc" id="L105">            input.read(&quot;Check: &quot;);</span>
+<span class="nc" id="L106">            terminal.answerNextWith(&quot;second answer&quot;);</span>
+<span class="nc" id="L107">            secondAnswer = input.read(&quot;Continue: &quot;);</span>
+        }
+
+        // then
+<span class="nc" id="L111">        assertThat(terminal.stdout()).isEqualTo(&quot;Check: Check: Continue: &quot;);</span>
+<span class="nc" id="L112">        assertThat(terminal.prompts()).containsExactly(&quot;Check: &quot;, &quot;Continue: &quot;);</span>
+<span class="nc" id="L113">        assertThat(secondAnswer.line()).isEqualTo(&quot;second answer&quot;);</span>
+<span class="nc" id="L114">    }</span>
+
+    @Test
+    void endOfInputIsAnAnswer() throws Exception {
+        // given
+<span class="nc" id="L119">        var terminal = new BlockingTerminal(null);</span>
+<span class="nc" id="L120">        terminal.release();</span>
+
+        // when
+        Answer answer;
+<span class="nc" id="L124">        try (var input = new TutorialInput(terminal)) {</span>
+<span class="nc" id="L125">            answer = input.read(&quot;Question: &quot;);</span>
+        }
+
+        // then
+<span class="nc" id="L129">        assertThat(answer.line()).as(&quot;a null line means standard input ended&quot;).isNull();</span>
+<span class="nc" id="L130">    }</span>
+
+    private static void waitUntilLineWaiting(TutorialInput input) throws InterruptedException {
+<span class="nc" id="L133">        long deadline = System.nanoTime() + LATCH_WAIT.toNanos();</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        while (!input.lineWaiting()) {</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">            if (System.nanoTime() &gt; deadline) {</span>
+<span class="nc" id="L136">                throw new AssertionError(&quot;The released read never delivered its line&quot;);</span>
+            }
+<span class="nc" id="L138">            Thread.sleep(POLL_INTERVAL);</span>
+        }
+<span class="nc" id="L140">    }</span>
+
+    /// A terminal whose first read blocks until the test releases it, like a person who has not
+    /// typed anything yet.
+    private static final class BlockingTerminal implements Terminal {
+<span class="nc" id="L145">        private final CountDownLatch released = new CountDownLatch(1);</span>
+<span class="nc" id="L146">        private final List&lt;String&gt; prompts = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L147">        private final ByteArrayOutputStream stdout = new ByteArrayOutputStream();</span>
+<span class="nc" id="L148">        private final PrintStream out = new PrintStream(stdout, true, StandardCharsets.UTF_8);</span>
+        private volatile String nextLine;
+
+<span class="nc" id="L151">        private BlockingTerminal(String firstLine) {</span>
+<span class="nc" id="L152">            this.nextLine = firstLine;</span>
+<span class="nc" id="L153">        }</span>
+
+        @Override
+        public String readLine(String prompt) throws InterruptedIOException {
+<span class="nc" id="L157">            prompts.add(prompt);</span>
+<span class="nc" id="L158">            out.print(prompt);</span>
+            try {
+<span class="nc bnc" id="L160" title="All 2 branches missed.">                if (!released.await(LATCH_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {</span>
+<span class="nc" id="L161">                    throw new AssertionError(&quot;The test never released the blocked read&quot;);</span>
+                }
+<span class="nc" id="L163">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L164">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L165">                var failure = new InterruptedIOException(&quot;interrupted&quot;);</span>
+<span class="nc" id="L166">                failure.initCause(e);</span>
+<span class="nc" id="L167">                throw failure;</span>
+<span class="nc" id="L168">            }</span>
+<span class="nc" id="L169">            return nextLine;</span>
+        }
+
+        private void release() {
+<span class="nc" id="L173">            released.countDown();</span>
+<span class="nc" id="L174">        }</span>
+
+        private void answerNextWith(String line) {
+<span class="nc" id="L177">            nextLine = line;</span>
+<span class="nc" id="L178">        }</span>
+
+        private List&lt;String&gt; prompts() {
+<span class="nc" id="L181">            return List.copyOf(prompts);</span>
+        }
+
+        private String stdout() {
+<span class="nc" id="L185">            return stdout.toString(StandardCharsets.UTF_8);</span>
+        }
+
+        @Override
+        public char[] readSecret(String prompt) {
+<span class="nc" id="L190">            throw new UnsupportedOperationException(&quot;not used&quot;);</span>
+        }
+
+        @Override
+        public void info(String line) {
+<span class="nc" id="L195">            out.println(line);</span>
+<span class="nc" id="L196">        }</span>
+
+        @Override
+        public void warn(String line) {
+<span class="nc" id="L200">            out.println(line);</span>
+<span class="nc" id="L201">        }</span>
+
+        @Override
+        public void error(String line) {
+<span class="nc" id="L205">            out.println(line);</span>
+<span class="nc" id="L206">        }</span>
+
+        @Override
+        public PrintStream out() {
+<span class="nc" id="L210">            return out;</span>
+        }
+
+        @Override
+        public PrintStream err() {
+<span class="nc" id="L215">            return out;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

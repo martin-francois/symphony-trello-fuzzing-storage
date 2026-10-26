@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TutorialTrello.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TutorialTrello.java</span></div><h1>TutorialTrello.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.TrelloCredentials;
+import ch.fmartin.symphony.trello.setup.TrelloBoardSetup.WorkspaceInfo;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.URI;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+/// The Trello calls the guided tutorial makes. Every write targets the temporary tutorial board or
+/// the card on it, so the tutorial cannot change a board it did not create.
+final class TutorialTrello {
+    /// Trello returns at most this many comments for the tutorial card. The tutorial card only gets
+    /// a handful, so this is far above what one run produces.
+    private static final String COMMENT_LIMIT = &quot;50&quot;;
+
+    private final TrelloSetupApi api;
+    private final URI endpoint;
+    private final TrelloCredentials credentials;
+    private final TrelloBoardSetup boardSetup;
+
+<span class="nc" id="L23">    TutorialTrello(URI endpoint, TrelloCredentials credentials) {</span>
+<span class="nc" id="L24">        var json = new ObjectMapper();</span>
+<span class="nc" id="L25">        this.api = new TrelloSetupApi(json);</span>
+<span class="nc" id="L26">        this.endpoint = TrelloApiEndpoint.normalize(Objects.requireNonNull(endpoint, &quot;endpoint&quot;));</span>
+<span class="nc" id="L27">        this.credentials = Objects.requireNonNull(credentials, &quot;credentials&quot;);</span>
+<span class="nc" id="L28">        this.boardSetup = new TrelloBoardSetup(json);</span>
+<span class="nc" id="L29">    }</span>
+
+    List&lt;WorkspaceInfo&gt; workspaces() {
+<span class="nc" id="L32">        return boardSetup.listWorkspaces(new TrelloBoardSetup.WorkspaceListRequest(endpoint, credentials));</span>
+    }
+
+    Board createBoard(String name, String workspaceId) {
+<span class="nc" id="L36">        Map&lt;String, Object&gt; board = api.postMap(</span>
+<span class="nc" id="L37">                endpoint, &quot;boards/&quot;, TrelloBoardSetup.createBoardQuery(name, workspaceId), credentials, &quot;id&quot;);</span>
+<span class="nc" id="L38">        return new Board(string(board, &quot;id&quot;), string(board, &quot;url&quot;));</span>
+    }
+
+    String createList(Board board, String name) {
+<span class="nc" id="L42">        return string(</span>
+<span class="nc" id="L43">                api.postMap(endpoint, &quot;lists&quot;, TrelloBoardSetup.listCreationQuery(name, board.id()), credentials, &quot;id&quot;),</span>
+                &quot;id&quot;);
+    }
+
+    String createCard(String listId, String name, String description) {
+<span class="nc" id="L48">        Map&lt;String, String&gt; query = Map.of(&quot;idList&quot;, listId, &quot;name&quot;, name, &quot;desc&quot;, description);</span>
+<span class="nc" id="L49">        return string(api.postMap(endpoint, &quot;cards&quot;, query, credentials, &quot;id&quot;), &quot;id&quot;);</span>
+    }
+
+    CardSnapshot card(String cardId) {
+<span class="nc" id="L53">        Map&lt;String, String&gt; query = Map.of(</span>
+                &quot;fields&quot;,
+                &quot;id,idList,closed&quot;,
+                &quot;actions&quot;,
+                &quot;commentCard&quot;,
+                &quot;actions_limit&quot;,
+                COMMENT_LIMIT,
+                &quot;action_fields&quot;,
+                &quot;id,data,date&quot;);
+<span class="nc" id="L62">        Map&lt;String, Object&gt; card = api.getMap(endpoint, cardPath(cardId), query, credentials);</span>
+<span class="nc" id="L63">        return new CardSnapshot(string(card, &quot;idList&quot;), Boolean.parseBoolean(string(card, &quot;closed&quot;)), comments(card));</span>
+    }
+
+    String addComment(String cardId, String text) {
+<span class="nc" id="L67">        return string(</span>
+<span class="nc" id="L68">                api.postMap(endpoint, cardPath(cardId) + &quot;/actions/comments&quot;, Map.of(&quot;text&quot;, text), credentials, &quot;id&quot;),</span>
+                &quot;id&quot;);
+    }
+
+    void updateComment(String commentId, String text) {
+<span class="nc" id="L73">        api.putMap(</span>
+                endpoint,
+<span class="nc" id="L75">                &quot;actions/&quot; + TrelloSetupApi.encodeSegment(commentId) + &quot;/text&quot;,</span>
+<span class="nc" id="L76">                Map.of(&quot;value&quot;, text),</span>
+                credentials);
+<span class="nc" id="L78">    }</span>
+
+    void moveCard(String cardId, String listId) {
+<span class="nc" id="L81">        api.putMap(endpoint, cardPath(cardId) + &quot;/idList&quot;, Map.of(&quot;value&quot;, listId), credentials);</span>
+<span class="nc" id="L82">    }</span>
+
+    /// Archives the board. Trello's API calls archived boards `closed`.
+    void archiveBoard(Board board) {
+<span class="nc" id="L86">        api.putMap(</span>
+<span class="nc" id="L87">                endpoint, &quot;boards/&quot; + TrelloSetupApi.encodeSegment(board.id()), Map.of(&quot;closed&quot;, &quot;true&quot;), credentials);</span>
+<span class="nc" id="L88">    }</span>
+
+    private static String cardPath(String cardId) {
+<span class="nc" id="L91">        return &quot;cards/&quot; + TrelloSetupApi.encodeSegment(cardId);</span>
+    }
+
+    private static List&lt;Comment&gt; comments(Map&lt;String, Object&gt; card) {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (!(card.get(&quot;actions&quot;) instanceof List&lt;?&gt; actions)) {</span>
+<span class="nc" id="L96">            return List.of();</span>
+        }
+<span class="nc" id="L98">        return actions.stream()</span>
+<span class="nc" id="L99">                .filter(Map.class::isInstance)</span>
+<span class="nc" id="L100">                .map(Map.class::cast)</span>
+<span class="nc" id="L101">                .map(TutorialTrello::comment)</span>
+<span class="nc" id="L102">                .toList();</span>
+    }
+
+    private static Comment comment(Map&lt;?, ?&gt; action) {
+<span class="nc" id="L106">        Object id = action.get(&quot;id&quot;);</span>
+<span class="nc bnc" id="L107" title="All 4 branches missed.">        String text = action.get(&quot;data&quot;) instanceof Map&lt;?, ?&gt; data &amp;&amp; data.get(&quot;text&quot;) != null</span>
+<span class="nc" id="L108">                ? data.get(&quot;text&quot;).toString()</span>
+<span class="nc" id="L109">                : &quot;&quot;;</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        return new Comment(id == null ? &quot;&quot; : id.toString(), text);</span>
+    }
+
+    private static String string(Map&lt;String, Object&gt; payload, String key) {
+<span class="nc" id="L114">        Object value = payload.get(key);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        return value == null ? &quot;&quot; : value.toString();</span>
+    }
+
+<span class="nc" id="L118">    record Board(String id, String url) {}</span>
+
+<span class="nc" id="L120">    record Comment(String id, String text) {}</span>
+
+    record CardSnapshot(String listId, boolean archived, List&lt;Comment&gt; comments) {
+<span class="nc" id="L123">        CardSnapshot {</span>
+<span class="nc" id="L124">            comments = List.copyOf(comments);</span>
+<span class="nc" id="L125">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

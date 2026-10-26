@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TutorialBoardCleanupTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TutorialBoardCleanupTest.java</span></div><h1>TutorialBoardCleanupTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+
+import ch.fmartin.symphony.trello.setup.TutorialTrello.Board;
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+
+<span class="nc" id="L15">final class TutorialBoardCleanupTest {</span>
+<span class="nc" id="L16">    private static final Board TUTORIAL_BOARD =</span>
+            new Board(&quot;000000000000000000000001&quot;, &quot;https://trello.com/b/SYNTH001/synthetic-board&quot;);
+<span class="nc" id="L18">    private static final Duration LATCH_WAIT = Duration.ofSeconds(10);</span>
+<span class="nc" id="L19">    private static final Duration POLL_INTERVAL = Duration.ofMillis(5);</span>
+
+    @Test
+    void ctrlCDuringAnArchiveInProgressDoesNotSendASecondArchive() throws Exception {
+        // given
+<span class="nc" id="L24">        var archiveStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L25">        var finishArchive = new CountDownLatch(1);</span>
+<span class="nc" id="L26">        List&lt;Board&gt; archived = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L27">        var cleanup = new TutorialBoardCleanup(</span>
+                board -&gt; {
+<span class="nc" id="L29">                    archived.add(board);</span>
+<span class="nc bnc" id="L30" title="All 2 branches missed.">                    if (archived.size() == 1) {</span>
+<span class="nc" id="L31">                        archiveStarted.countDown();</span>
+<span class="nc" id="L32">                        await(finishArchive);</span>
+                    }
+<span class="nc" id="L34">                },</span>
+                LATCH_WAIT);
+<span class="nc" id="L36">        cleanup.create(() -&gt; TUTORIAL_BOARD);</span>
+<span class="nc" id="L37">        CompletableFuture&lt;Boolean&gt; tutorialThread = CompletableFuture.supplyAsync(cleanup::archive);</span>
+<span class="nc" id="L38">        await(archiveStarted);</span>
+
+        // when
+<span class="nc" id="L41">        var shutdownHookArchived = new CompletableFuture&lt;Boolean&gt;();</span>
+<span class="nc" id="L42">        Thread shutdownHook = Thread.ofPlatform().start(() -&gt; shutdownHookArchived.complete(cleanup.archive()));</span>
+<span class="nc" id="L43">        awaitBlockedOrFinished(shutdownHook);</span>
+<span class="nc" id="L44">        boolean hookReturnedBeforeArchive = shutdownHookArchived.isDone();</span>
+<span class="nc" id="L45">        finishArchive.countDown();</span>
+
+        // then
+<span class="nc" id="L48">        assertThat(hookReturnedBeforeArchive)</span>
+<span class="nc" id="L49">                .as(&quot;the shutdown hook waits for the archive request before the JVM exits&quot;)</span>
+<span class="nc" id="L50">                .isFalse();</span>
+<span class="nc" id="L51">        assertThat(shutdownHookArchived.get(LATCH_WAIT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L52">                .as(&quot;the hook sees that the tutorial thread already claimed the board&quot;)</span>
+<span class="nc" id="L53">                .isFalse();</span>
+<span class="nc" id="L54">        assertThat(tutorialThread.get(LATCH_WAIT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L55">                .as(&quot;the tutorial thread archived the board&quot;)</span>
+<span class="nc" id="L56">                .isTrue();</span>
+<span class="nc" id="L57">        assertThat(archived).containsExactly(TUTORIAL_BOARD);</span>
+<span class="nc" id="L58">    }</span>
+
+    @Test
+    void keptBoardIsNeverArchivedLater() {
+        // given
+<span class="nc" id="L63">        List&lt;Board&gt; archived = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L64">        var cleanup = new TutorialBoardCleanup(archived::add, LATCH_WAIT);</span>
+<span class="nc" id="L65">        cleanup.create(() -&gt; TUTORIAL_BOARD);</span>
+
+        // when
+<span class="nc" id="L68">        boolean kept = cleanup.keep();</span>
+<span class="nc" id="L69">        boolean archivedAfterKeep = cleanup.archive();</span>
+
+        // then
+<span class="nc" id="L72">        assertThat(kept).as(&quot;the first settlement keeps the board&quot;).isTrue();</span>
+<span class="nc" id="L73">        assertThat(archivedAfterKeep)</span>
+<span class="nc" id="L74">                .as(&quot;a later Ctrl+C must not archive a kept board&quot;)</span>
+<span class="nc" id="L75">                .isFalse();</span>
+<span class="nc" id="L76">        assertThat(archived).isEmpty();</span>
+<span class="nc" id="L77">    }</span>
+
+    @Test
+    void nothingIsArchivedBeforeTheBoardExists() {
+        // given
+<span class="nc" id="L82">        List&lt;Board&gt; archived = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L83">        var cleanup = new TutorialBoardCleanup(archived::add, LATCH_WAIT);</span>
+
+        // when
+<span class="nc" id="L86">        boolean archivedWithoutBoard = cleanup.archive();</span>
+<span class="nc" id="L87">        cleanup.create(() -&gt; TUTORIAL_BOARD);</span>
+<span class="nc" id="L88">        boolean archivedWithBoard = cleanup.archive();</span>
+
+        // then
+<span class="nc" id="L91">        assertThat(archivedWithoutBoard).as(&quot;there is no board to archive yet&quot;).isFalse();</span>
+<span class="nc" id="L92">        assertThat(archivedWithBoard).as(&quot;the board is archived once it exists&quot;).isTrue();</span>
+<span class="nc" id="L93">        assertThat(archived).containsExactly(TUTORIAL_BOARD);</span>
+<span class="nc" id="L94">    }</span>
+
+    @Test
+    void ctrlCWhileTheBoardRequestWaitsForTrelloArchivesTheBoardTrelloReturns() throws Exception {
+        // given
+<span class="nc" id="L99">        var boardRequestSent = new CountDownLatch(1);</span>
+<span class="nc" id="L100">        var trelloAnswers = new CountDownLatch(1);</span>
+<span class="nc" id="L101">        List&lt;Board&gt; archived = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L102">        var cleanup = new TutorialBoardCleanup(archived::add, LATCH_WAIT);</span>
+<span class="nc" id="L103">        CompletableFuture&lt;Board&gt; tutorialThread = CompletableFuture.supplyAsync(() -&gt; cleanup.create(() -&gt; {</span>
+<span class="nc" id="L104">            boardRequestSent.countDown();</span>
+<span class="nc" id="L105">            await(trelloAnswers);</span>
+<span class="nc" id="L106">            return TUTORIAL_BOARD;</span>
+        }));
+<span class="nc" id="L108">        await(boardRequestSent);</span>
+
+        // when
+<span class="nc" id="L111">        var shutdownHookArchived = new CompletableFuture&lt;Boolean&gt;();</span>
+<span class="nc" id="L112">        Thread shutdownHook = Thread.ofPlatform().start(() -&gt; shutdownHookArchived.complete(cleanup.archive()));</span>
+<span class="nc" id="L113">        awaitBlockedOrFinished(shutdownHook);</span>
+<span class="nc" id="L114">        trelloAnswers.countDown();</span>
+
+        // then
+<span class="nc" id="L117">        assertThat(shutdownHookArchived.get(LATCH_WAIT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L118">                .as(&quot;the hook waits for the board request and archives the board Trello returns&quot;)</span>
+<span class="nc" id="L119">                .isTrue();</span>
+<span class="nc" id="L120">        assertThat(tutorialThread.get(LATCH_WAIT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L121">                .isEqualTo(TUTORIAL_BOARD);</span>
+<span class="nc" id="L122">        assertThat(archived).containsExactly(TUTORIAL_BOARD);</span>
+<span class="nc" id="L123">    }</span>
+
+    @Test
+    void failedBoardRequestLeavesNothingToArchive() {
+        // given
+<span class="nc" id="L128">        List&lt;Board&gt; archived = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L129">        var cleanup = new TutorialBoardCleanup(archived::add, LATCH_WAIT);</span>
+<span class="nc" id="L130">        Throwable failure = catchThrowable(() -&gt; cleanup.create(() -&gt; {</span>
+<span class="nc" id="L131">            throw new TrelloBoardSetupException(&quot;trello_write_outcome_unknown&quot;, &quot;no answer&quot;);</span>
+        }));
+
+        // when
+<span class="nc" id="L135">        boolean archivedAfterFailure = cleanup.archive();</span>
+
+        // then
+<span class="nc" id="L138">        assertThat(failure).isInstanceOf(TrelloBoardSetupException.class);</span>
+<span class="nc" id="L139">        assertThat(cleanup.creationStarted())</span>
+<span class="nc" id="L140">                .as(&quot;the request was sent, so Trello may have created the board&quot;)</span>
+<span class="nc" id="L141">                .isTrue();</span>
+<span class="nc" id="L142">        assertThat(cleanup.createdBoard()).isEmpty();</span>
+<span class="nc" id="L143">        assertThat(archivedAfterFailure)</span>
+<span class="nc" id="L144">                .as(&quot;no board came back, so there is nothing to archive&quot;)</span>
+<span class="nc" id="L145">                .isFalse();</span>
+<span class="nc" id="L146">        assertThat(archived).isEmpty();</span>
+<span class="nc" id="L147">    }</span>
+
+    /// Waits until the hook thread blocks or ends, so Trello answers only after the hook looked for
+    /// the board.
+    private static void awaitBlockedOrFinished(Thread thread) throws InterruptedException {
+<span class="nc" id="L152">        long deadline = System.nanoTime() + LATCH_WAIT.toNanos();</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">        while (thread.getState() == Thread.State.NEW || thread.getState() == Thread.State.RUNNABLE) {</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            if (System.nanoTime() &gt; deadline) {</span>
+<span class="nc" id="L155">                throw new AssertionError(&quot;Timed out waiting for the hook thread to block or finish&quot;);</span>
+            }
+<span class="nc" id="L157">            Thread.sleep(POLL_INTERVAL);</span>
+        }
+<span class="nc" id="L159">    }</span>
+
+    private static void await(CountDownLatch latch) {
+        try {
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (!latch.await(LATCH_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {</span>
+<span class="nc" id="L164">                throw new AssertionError(&quot;Timed out waiting for the archive to start or finish&quot;);</span>
+            }
+<span class="nc" id="L166">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L167">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L168">            throw new AssertionError(&quot;Interrupted&quot;, e);</span>
+<span class="nc" id="L169">        }</span>
+<span class="nc" id="L170">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

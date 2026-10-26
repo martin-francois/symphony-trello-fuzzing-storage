@@ -1,0 +1,788 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SetupFailureFollowUpTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">SetupFailureFollowUpTest.java</span></div><h1>SetupFailureFollowUpTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.params.provider.Arguments.argumentSet;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.setup.CodexInvestigationFinding.Classification;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationFinding.ValidationRun;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.Outcome;
+import ch.fmartin.symphony.trello.testsupport.RecordingTerminal;
+import java.io.File;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/// Covers the interactive follow-up after an unexpected setup failure: the opt-in Codex
+/// investigation and the GitHub issue prompt, driven through the real troubleshooting report and
+/// sanitizer with a fake Codex runner and a fake `gh`.
+<span class="nc" id="L41">final class SetupFailureFollowUpTest {</span>
+    private static final String TRELLO_API_KEY = &quot;0123456789abcdef0123456789abcdef&quot;;
+    // Split so the private-context scanner does not read the synthetic token as a real one.
+    private static final String TRELLO_API_TOKEN = &quot;ATTA&quot; + &quot;syntheticTrelloToken0123456789abcdefXYZ&quot;;
+    private static final String BOARD_NAME = &quot;Synthetic Private Board&quot;;
+    private static final String TRELLO_BOARD_URL = &quot;https://trello.com/b/SYNTH001/synthetic-board&quot;;
+    private static final String UNEXPECTED_CODE = &quot;setup_workflow_write_failed&quot;;
+    private static final String CODEX_QUESTION = &quot;Ask Codex to investigate this failure? [y/N] &quot;;
+    private static final String REPORT_ISSUE_QUESTION =
+            &quot;GitHub CLI is authenticated. Open a GitHub issue with this report?&quot;;
+    private static final String FIX_ISSUE_QUESTION =
+            &quot;Codex changed files locally and validation passed. Open a GitHub issue that describes the failure and&quot;
+                    + &quot; the local fix?&quot;;
+    private static final String LOCAL_ISSUE_QUESTION = &quot;Post a GitHub issue anyway? [y/N] &quot;;
+    private static final String POSTED_ISSUE_URL = &quot;https://github.com/martin-francois/symphony-trello/issues/1&quot;;
+    private static final String SUPPLEMENTARY_CHARACTER = &quot;\uD83D\uDE00&quot;;
+<span class="nc" id="L57">    private static final Instant NOW = Instant.parse(&quot;2026-05-02T03:04:05Z&quot;);</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void promptFailureKeepsThePathFreeCauseSummary() throws IOException {
+        // given
+<span class="nc" id="L65">        Scenario scenario = scenario(ScenarioOptions.signedInCodex());</span>
+<span class="nc" id="L66">        Terminal terminal = mock();</span>
+<span class="nc" id="L67">        when(terminal.err()).thenReturn(scenario.terminal().err());</span>
+<span class="nc" id="L68">        when(terminal.readLine(anyString()))</span>
+<span class="nc" id="L69">                .thenThrow(new FileSystemException(</span>
+                        &quot;synthetic-private-input&quot;, &quot;synthetic-private-target&quot;, &quot;access denied&quot;));
+
+        // when
+<span class="nc" id="L73">        scenario.reporter()</span>
+<span class="nc" id="L74">                .reportFailure(</span>
+                        new TrelloBoardSetupException(UNEXPECTED_CODE, &quot;Workflow write failed&quot;),
+<span class="nc" id="L76">                        scenario.request(),</span>
+                        terminal);
+
+        // then
+<span class="nc" id="L80">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L81">                .contains(&quot;Setup failure follow-up failed (FileSystemException: access denied)&quot;)</span>
+<span class="nc" id="L82">                .doesNotContain(&quot;synthetic-private-input&quot;, &quot;synthetic-private-target&quot;);</span>
+<span class="nc" id="L83">    }</span>
+
+    @Test
+    void expectedFailureOffersNeitherCodexNorGithubIssue() throws IOException {
+        // given
+<span class="nc" id="L88">        Scenario scenario = scenario(ScenarioOptions.signedInCodex(), &quot;y&quot;, &quot;y&quot;, &quot;y&quot;);</span>
+
+        // when
+<span class="nc" id="L91">        Optional&lt;Path&gt; report = scenario.fail(new TrelloBoardSetupException(&quot;setup_missing_api_key&quot;, &quot;missing&quot;));</span>
+
+        // then
+<span class="nc" id="L94">        assertThat(report)</span>
+<span class="nc" id="L95">                .as(&quot;expected failures write no troubleshooting report&quot;)</span>
+<span class="nc" id="L96">                .isEmpty();</span>
+<span class="nc" id="L97">        assertThat(scenario.codex().requests()).isEmpty();</span>
+<span class="nc" id="L98">        assertThat(scenario.terminal().stdout()).doesNotContain(CODEX_QUESTION, REPORT_ISSUE_QUESTION);</span>
+<span class="nc" id="L99">        assertThat(scenario.commands().commands()).doesNotContain(List.of(&quot;gh&quot;, &quot;auth&quot;, &quot;status&quot;));</span>
+<span class="nc" id="L100">    }</span>
+
+    @MethodSource(&quot;unavailableCodex&quot;)
+    @ParameterizedTest(name = &quot;{argumentSetName}&quot;)
+    void unavailableCodexFallsBackToGithubIssuePrompt(ScenarioOptions options) throws IOException {
+        // given
+<span class="nc" id="L106">        Scenario scenario = scenario(options, &quot;n&quot;);</span>
+
+        // when
+<span class="nc" id="L109">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L112">        assertThat(scenario.terminal().stdout()).contains(REPORT_ISSUE_QUESTION).doesNotContain(CODEX_QUESTION);</span>
+<span class="nc" id="L113">        assertThat(scenario.codex().requests()).isEmpty();</span>
+<span class="nc" id="L114">    }</span>
+
+    static Stream&lt;Arguments&gt; unavailableCodex() {
+<span class="nc" id="L117">        return Stream.of(</span>
+<span class="nc" id="L118">                argumentSet(&quot;codex not on PATH&quot;, ScenarioOptions.signedInCodex().with(Condition.NO_CODEX_ON_PATH)),</span>
+<span class="nc" id="L119">                argumentSet(&quot;codex signed out&quot;, ScenarioOptions.signedInCodex().with(Condition.CODEX_SIGNED_OUT)));</span>
+    }
+
+    @Test
+    void signedInCodexIsOfferedBeforeTheIssuePromptAndCanBeDeclined() throws IOException {
+        // given
+<span class="nc" id="L125">        Scenario scenario = scenario(ScenarioOptions.signedInCodex(), &quot;n&quot;, &quot;n&quot;);</span>
+
+        // when
+<span class="nc" id="L128">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L131">        assertThat(scenario.terminal().stdout()).containsSubsequence(CODEX_QUESTION, REPORT_ISSUE_QUESTION);</span>
+<span class="nc" id="L132">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L133">                .contains(</span>
+                        &quot;Codex receives the Symphony for Trello version, the command name and how it was started,&quot;
+                                + &quot; the error code, and the sanitized troubleshooting report with its location.&quot;,
+                        &quot;sees local paths while it works&quot;,
+                        &quot;only sanitized text goes into a GitHub issue draft&quot;);
+<span class="nc" id="L138">        assertThat(scenario.codex().requests())</span>
+<span class="nc" id="L139">                .as(&quot;declining must not start Codex&quot;)</span>
+<span class="nc" id="L140">                .isEmpty();</span>
+<span class="nc" id="L141">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void missingConfigDirectoryIsCreatedOnlyAfterInvestigationConsent(boolean consent) throws IOException {
+        // given
+<span class="nc" id="L147">        Path configDir = tempDir.resolve(&quot;missing-config&quot;);</span>
+<span class="nc" id="L148">        Path report = Files.writeString(tempDir.resolve(&quot;report.md&quot;), &quot;sanitized report&quot;);</span>
+<span class="nc" id="L149">        var commands = new FakeCommandRunner().returns(0, &quot;&quot;, &quot;login&quot;, &quot;status&quot;);</span>
+<span class="nc" id="L150">        var codex = new RecordingCodex(new Outcome.Failed(&quot;no answer&quot;));</span>
+<span class="nc" id="L151">        var followUp = new SetupFailureFollowUp(</span>
+<span class="nc" id="L152">                commands, codex, () -&gt; true, Map.of(), SetupFailureFollowUp.CODEX_INVESTIGATION_TIMEOUT);</span>
+<span class="nc" id="L153">        var failure = new SetupFailureFollowUp.FailedSetup(</span>
+                report,
+                UNEXPECTED_CODE,
+                &quot;setup-local&quot;,
+<span class="nc" id="L157">                new LocalWorkerPaths(tempDir.resolve(&quot;app&quot;), configDir, tempDir.resolve(&quot;workspaces&quot;), tempDir),</span>
+<span class="nc" id="L158">                new SetupFailureFollowUp.CodexCli.OnPath(arguments -&gt; arguments),</span>
+<span class="nc" id="L159">                text -&gt; &quot;sanitized&quot;);</span>
+
+        // when
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        followUp.offer(failure, new RecordingTerminal(consent ? &quot;y&quot; : &quot;n&quot;, &quot;n&quot;));</span>
+
+        // then
+<span class="nc" id="L165">        assertThat(Files.isDirectory(configDir))</span>
+<span class="nc" id="L166">                .as(&quot;only consent creates the missing writable root&quot;)</span>
+<span class="nc" id="L167">                .isEqualTo(consent);</span>
+<span class="nc" id="L168">        assertThat(codex.requests())</span>
+<span class="nc" id="L169">                .extracting(CodexInvestigationRunner.Request::workingRoot)</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                .containsExactlyElementsOf(consent ? List.of(configDir) : List.of());</span>
+<span class="nc" id="L171">    }</span>
+
+    @Test
+    void uncreatableConfigDirectoryKeepsIssuePromptWithoutBroadeningWriteAccess() throws IOException {
+        // given
+<span class="nc" id="L176">        Scenario scenario = scenario(ScenarioOptions.signedInCodex().with(Condition.CONFIG_CREATION_BLOCKED), &quot;y&quot;, &quot;n&quot;);</span>
+
+        // when
+<span class="nc" id="L179">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L182">        assertThat(scenario.codex().requests())</span>
+<span class="nc" id="L183">                .as(&quot;no other directory becomes a writable fallback&quot;)</span>
+<span class="nc" id="L184">                .isEmpty();</span>
+<span class="nc" id="L185">        assertThat(scenario.terminal().stdout()).containsSubsequence(CODEX_QUESTION, REPORT_ISSUE_QUESTION);</span>
+<span class="nc" id="L186">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L187">                .contains(&quot;cannot prepare Codex configuration directory: create or repair it before retrying&quot;)</span>
+<span class="nc" id="L188">                .doesNotContain(scenario.configDir().toString());</span>
+<span class="nc" id="L189">    }</span>
+
+    @Test
+    void investigationWithoutChangesExplainsTheDiagnosisAndKeepsTheIssuePrompt() throws IOException {
+        // given
+<span class="nc" id="L194">        Scenario scenario = scenario(</span>
+<span class="nc" id="L195">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L196">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.ENVIRONMENT,
+                                &quot;Java 21 is first on PATH, but Symphony for Trello needs Java 25.&quot;,
+                                false,
+                                &quot;&quot;,
+<span class="nc" id="L201">                                List.of(),</span>
+<span class="nc" id="L202">                                List.of(),</span>
+                                &quot;Put a Java 25 JDK first on PATH, then rerun setup-local.&quot;))),
+                &quot;y&quot;,
+                &quot;n&quot;);
+
+        // when
+<span class="nc" id="L208">        Optional&lt;Path&gt; report = scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L211">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L212">                .contains(</span>
+                        &quot;Finding: problem in this machine's environment&quot;,
+                        &quot;Diagnosis: Java 21 is first on PATH, but Symphony for Trello needs Java 25.&quot;,
+                        &quot;Changed files: none&quot;,
+                        &quot;Validation: none run&quot;,
+                        &quot;Next step: Put a Java 25 JDK first on PATH, then rerun setup-local.&quot;);
+<span class="nc" id="L218">        assertThat(scenario.terminal().stdout()).containsSubsequence(CODEX_QUESTION, REPORT_ISSUE_QUESTION);</span>
+<span class="nc" id="L219">        assertThat(scenario.codex().requests()).singleElement().satisfies(request -&gt; {</span>
+<span class="nc" id="L220">            assertThat(request.workingRoot()).isEqualTo(scenario.configDir());</span>
+<span class="nc" id="L221">            assertThat(request.additionalWritableRoots()).isEmpty();</span>
+<span class="nc" id="L222">            assertThat(request.timeout()).isEqualTo(SetupFailureFollowUp.CODEX_INVESTIGATION_TIMEOUT);</span>
+<span class="nc" id="L223">            assertThat(request.prompt())</span>
+<span class="nc" id="L224">                    .contains(</span>
+                            &quot;- command: setup-local&quot;,
+                            &quot;- error_code: &quot; + UNEXPECTED_CODE,
+                            &quot;- troubleshooting_report: `&lt;path:&quot;,
+<span class="nc" id="L228">                            &quot;&gt;&quot; + File.separator + stateHomeRelativePath(report) + &quot;`&quot;,</span>
+                            &quot;# Symphony for Trello Setup Failure&quot;,
+                            &quot;symphony-trello diagnostics --show-private-context --lookup '&lt;token&gt;'&quot;,
+                            &quot;Inspect local files directly when you need more detail.&quot;);
+<span class="nc" id="L232">        });</span>
+<span class="nc" id="L233">    }</span>
+
+    @Test
+    void verifiedLocalFixAsksToPostAnIssueWithTheSolutionSummary() throws IOException {
+        // given
+<span class="nc" id="L238">        Scenario scenario = scenario(</span>
+<span class="nc" id="L239">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L240">                        .with(Condition.SOURCE_CHECKOUT)</span>
+<span class="nc" id="L241">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.SYMPHONY_BUG,
+                                &quot;The workflow writer did not create the missing parent directory.&quot;,
+                                true,
+                                &quot;Create the parent directory before writing the workflow.&quot;,
+<span class="nc" id="L246">                                List.of(&quot;src/main/java/ch/fmartin/symphony/trello/setup/WorkflowConfigEditor.java&quot;),</span>
+<span class="nc" id="L247">                                List.of(new ValidationRun(&quot;./mvnw -q -Dtest=WorkflowConfigEditorTest test&quot;, true)),</span>
+                                &quot;Rerun setup-local.&quot;))),
+                &quot;y&quot;,
+                &quot;y&quot;,
+                &quot;y&quot;);
+
+        // when
+<span class="nc" id="L254">        Optional&lt;Path&gt; report = scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L257">        assertThat(scenario.codex().requests()).singleElement().satisfies(request -&gt; assertThat(</span>
+<span class="nc" id="L258">                        request.additionalWritableRoots())</span>
+<span class="nc" id="L259">                .containsExactly(scenario.appHome()));</span>
+<span class="nc" id="L260">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L261">                .contains(</span>
+                        &quot;and the Symphony source checkout&quot;,
+                        &quot;Fix: Create the parent directory before writing the workflow.&quot;,
+                        &quot;Changed files: src/main/java/ch/fmartin/symphony/trello/setup/WorkflowConfigEditor.java&quot;,
+                        &quot;Validation: passed `./mvnw -q -Dtest=WorkflowConfigEditorTest test`&quot;);
+<span class="nc" id="L266">        assertThat(scenario.terminal().stdout())</span>
+<span class="nc" id="L267">                .contains(FIX_ISSUE_QUESTION, POSTED_ISSUE_URL)</span>
+<span class="nc" id="L268">                .doesNotContain(REPORT_ISSUE_QUESTION);</span>
+<span class="nc" id="L269">        Path draft = issueDraft(report);</span>
+<span class="nc" id="L270">        assertThat(scenario.commands().commands())</span>
+<span class="nc" id="L271">                .contains(List.of(</span>
+                        &quot;gh&quot;,
+                        &quot;issue&quot;,
+                        &quot;create&quot;,
+                        &quot;--repo&quot;,
+                        SetupFailureFollowUp.ISSUE_REPOSITORY,
+                        &quot;--title&quot;,
+                        SetupFailureFollowUp.ISSUE_TITLE,
+                        &quot;--body-file&quot;,
+<span class="nc" id="L280">                        draft.toString()));</span>
+<span class="nc" id="L281">        assertThat(draft)</span>
+<span class="nc" id="L282">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L283">                .contains(</span>
+                        &quot;# Symphony for Trello Setup Failure&quot;,
+                        &quot;## Local Codex Investigation&quot;,
+                        &quot;- **classification:** symphony_bug&quot;,
+                        &quot;- **fix_applied:** true&quot;,
+                        &quot;- **fix_summary:** Create the parent directory before writing the workflow.&quot;,
+                        &quot;- **changed_files:** `src/main/java/ch/fmartin/symphony/trello/setup/WorkflowConfigEditor.java`&quot;,
+                        &quot;- **validation:** passed `./mvnw -q -Dtest=WorkflowConfigEditorTest test`&quot;);
+<span class="nc" id="L291">    }</span>
+
+    @Test
+    void localConfigurationFindingGivesTheNextStepAndOffersAnIssueWithDefaultNo() throws IOException {
+        // given
+<span class="nc" id="L296">        Scenario scenario = scenario(</span>
+<span class="nc" id="L297">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L298">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.LOCAL_CONFIGURATION,
+                                &quot;The workflow sets server.port to a port another program uses.&quot;,
+                                false,
+                                &quot;&quot;,
+<span class="nc" id="L303">                                List.of(),</span>
+<span class="nc" id="L304">                                List.of(),</span>
+                                &quot;Run setup-local repair-port for this board.&quot;))),
+                &quot;y&quot;,
+                &quot;&quot;);
+
+        // when
+<span class="nc" id="L310">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L313">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L314">                .contains(</span>
+                        &quot;Next step: Run setup-local repair-port for this board.&quot;,
+                        &quot;Codex found a local configuration problem.&quot;);
+<span class="nc" id="L317">        assertThat(scenario.terminal().stdout())</span>
+<span class="nc" id="L318">                .contains(LOCAL_ISSUE_QUESTION)</span>
+<span class="nc" id="L319">                .doesNotContain(REPORT_ISSUE_QUESTION, FIX_ISSUE_QUESTION);</span>
+<span class="nc" id="L320">        assertThat(scenario.commands().commands())</span>
+<span class="nc" id="L321">                .noneSatisfy(command -&gt; assertThat(command).startsWith(&quot;gh&quot;, &quot;issue&quot;, &quot;create&quot;));</span>
+<span class="nc" id="L322">    }</span>
+
+    @Test
+    void localConfigurationFindingWithoutANextStepStillTellsTheUserWhatToDo() throws IOException {
+        // given
+<span class="nc" id="L327">        Scenario scenario = scenario(</span>
+<span class="nc" id="L328">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L329">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.LOCAL_CONFIGURATION,
+                                &quot;The workflow sets server.port to a port another program uses.&quot;,
+                                false,
+                                &quot;&quot;,
+<span class="nc" id="L334">                                List.of(),</span>
+<span class="nc" id="L335">                                List.of(),</span>
+                                &quot; &quot;))),
+                &quot;y&quot;,
+                &quot;&quot;);
+
+        // when
+<span class="nc" id="L341">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L344">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L345">                .contains(&quot;Codex did not name a next step. Fix the cause described above, then rerun the command.&quot;)</span>
+<span class="nc" id="L346">                .doesNotContain(&quot;Next step:&quot;, &quot;Follow the next step above&quot;);</span>
+<span class="nc" id="L347">        assertThat(scenario.terminal().stdout())</span>
+<span class="nc" id="L348">                .contains(LOCAL_ISSUE_QUESTION)</span>
+<span class="nc" id="L349">                .doesNotContain(REPORT_ISSUE_QUESTION, FIX_ISSUE_QUESTION);</span>
+<span class="nc" id="L350">        assertThat(scenario.commands().commands())</span>
+<span class="nc" id="L351">                .noneSatisfy(command -&gt; assertThat(command).startsWith(&quot;gh&quot;, &quot;issue&quot;, &quot;create&quot;));</span>
+<span class="nc" id="L352">    }</span>
+
+    @Test
+    void fixedLocalConfigurationAsksForARerunAndOffersAnIssueWithDefaultNo() throws IOException {
+        // given
+<span class="nc" id="L357">        Scenario scenario = scenario(</span>
+<span class="nc" id="L358">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L359">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.LOCAL_CONFIGURATION,
+                                &quot;The workflow sets server.port to a port another program uses.&quot;,
+                                true,
+                                &quot;Moved the workflow to the next free port.&quot;,
+<span class="nc" id="L364">                                List.of(&quot;WORKFLOW.md&quot;),</span>
+<span class="nc" id="L365">                                List.of(new ValidationRun(&quot;symphony-trello setup-local check&quot;, true)),</span>
+                                &quot;Rerun setup-local.&quot;))),
+                &quot;y&quot;,
+                &quot;&quot;);
+
+        // when
+<span class="nc" id="L371">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L374">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L375">                .contains(&quot;Changed files: WORKFLOW.md&quot;, &quot;Codex fixed it locally. Rerun the command.&quot;);</span>
+<span class="nc" id="L376">        assertThat(scenario.terminal().stdout())</span>
+<span class="nc" id="L377">                .contains(LOCAL_ISSUE_QUESTION)</span>
+<span class="nc" id="L378">                .doesNotContain(REPORT_ISSUE_QUESTION, FIX_ISSUE_QUESTION);</span>
+<span class="nc" id="L379">        assertThat(scenario.commands().commands())</span>
+<span class="nc" id="L380">                .noneSatisfy(command -&gt; assertThat(command).startsWith(&quot;gh&quot;, &quot;issue&quot;, &quot;create&quot;));</span>
+<span class="nc" id="L381">    }</span>
+
+    @Test
+    void acceptedLocalConfigurationIssueIncludesTheFindingAfterDraftConfirmation() throws IOException {
+        // given
+<span class="nc" id="L386">        Scenario scenario = scenario(</span>
+<span class="nc" id="L387">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L388">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.LOCAL_CONFIGURATION,
+                                &quot;The configured workspace parent is read-only.&quot;,
+                                false,
+                                &quot;&quot;,
+<span class="nc" id="L393">                                List.of(),</span>
+<span class="nc" id="L394">                                List.of(),</span>
+                                &quot;Choose a writable workspace parent.&quot;))),
+                &quot;y&quot;,
+                &quot;y&quot;,
+                &quot;y&quot;);
+
+        // when
+<span class="nc" id="L401">        Optional&lt;Path&gt; report = scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L404">        assertThat(scenario.terminal().stdout())</span>
+<span class="nc" id="L405">                .contains(LOCAL_ISSUE_QUESTION, &quot;Post this GitHub issue now? [y/N]&quot;, POSTED_ISSUE_URL)</span>
+<span class="nc" id="L406">                .doesNotContain(REPORT_ISSUE_QUESTION, FIX_ISSUE_QUESTION);</span>
+<span class="nc" id="L407">        assertThat(issueDraft(report))</span>
+<span class="nc" id="L408">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L409">                .contains(</span>
+                        &quot;## Local Codex Investigation&quot;,
+                        &quot;- **classification:** local_configuration&quot;,
+                        &quot;- **diagnosis:** The configured workspace parent is read-only.&quot;,
+                        &quot;- **next_step:** Choose a writable workspace parent.&quot;);
+<span class="nc" id="L414">    }</span>
+
+    @Test
+    void codexInvestigationIsOfferedWhenGithubCliIsSignedOut() throws IOException {
+        // given
+<span class="nc" id="L419">        Scenario scenario = scenario(ScenarioOptions.signedInCodex().with(Condition.GITHUB_SIGNED_OUT), &quot;y&quot;);</span>
+
+        // when
+<span class="nc" id="L422">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L425">        assertThat(scenario.codex().requests()).hasSize(1);</span>
+<span class="nc" id="L426">        assertThat(scenario.terminal().stdout())</span>
+<span class="nc" id="L427">                .contains(CODEX_QUESTION)</span>
+<span class="nc" id="L428">                .doesNotContain(LOCAL_ISSUE_QUESTION, REPORT_ISSUE_QUESTION, FIX_ISSUE_QUESTION);</span>
+<span class="nc" id="L429">        assertThat(scenario.commands().commands())</span>
+<span class="nc" id="L430">                .noneSatisfy(command -&gt; assertThat(command).startsWith(&quot;gh&quot;, &quot;issue&quot;, &quot;create&quot;));</span>
+<span class="nc" id="L431">    }</span>
+
+    @Test
+    void truncatingADiagnosisKeepsSupplementaryCharactersWholeInThePostedDraft() throws IOException {
+        // given
+<span class="nc" id="L436">        String prefix = &quot;a&quot;.repeat(SetupFailureFollowUp.ANSWER_TEXT_LIMIT - 1);</span>
+<span class="nc" id="L437">        String diagnosis = prefix + SUPPLEMENTARY_CHARACTER + &quot;more detail&quot;;</span>
+<span class="nc" id="L438">        Scenario scenario = scenario(</span>
+<span class="nc" id="L439">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L440">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                Classification.ENVIRONMENT,
+                                diagnosis,
+                                false,
+                                &quot;&quot;,
+<span class="nc" id="L445">                                List.of(),</span>
+<span class="nc" id="L446">                                List.of(),</span>
+                                &quot;Check Java.&quot;))),
+                &quot;y&quot;,
+                &quot;y&quot;,
+                &quot;y&quot;);
+
+        // when
+<span class="nc" id="L453">        Optional&lt;Path&gt; report = scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L456">        assertThat(scenario.terminal().stderr()).doesNotContain(&quot;Setup failure follow-up failed&quot;);</span>
+<span class="nc" id="L457">        assertThat(scenario.terminal().stdout()).contains(POSTED_ISSUE_URL);</span>
+<span class="nc" id="L458">        assertThat(issueDraft(report)).content(StandardCharsets.UTF_8).contains(prefix + &quot; ...&quot;);</span>
+<span class="nc" id="L459">    }</span>
+
+    @MethodSource(&quot;failedInvestigationReasons&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void failedInvestigationStillOffersTheExistingIssuePrompt(String reason) throws IOException {
+        // given
+<span class="nc" id="L465">        Scenario scenario =</span>
+<span class="nc" id="L466">                scenario(ScenarioOptions.signedInCodex().withCodexOutcome(new Outcome.Failed(reason)), &quot;y&quot;, &quot;n&quot;);</span>
+
+        // when
+<span class="nc" id="L469">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L472">        assertThat(scenario.terminal().stderr()).contains(&quot;Codex investigation did not complete: &quot; + reason + &quot;.&quot;);</span>
+<span class="nc" id="L473">        assertThat(scenario.terminal().stdout()).containsSubsequence(CODEX_QUESTION, REPORT_ISSUE_QUESTION);</span>
+<span class="nc" id="L474">    }</span>
+
+    static Stream&lt;String&gt; failedInvestigationReasons() {
+<span class="nc" id="L477">        return Stream.of(</span>
+<span class="nc" id="L478">                ProcessCodexInvestigationRunner.timeoutReason(SetupFailureFollowUp.CODEX_INVESTIGATION_TIMEOUT),</span>
+<span class="nc" id="L479">                ProcessCodexInvestigationRunner.exitCodeReason(1),</span>
+                ProcessCodexInvestigationRunner.UNEXPECTED_ANSWER);
+    }
+
+    @MethodSource(&quot;unverifiedOrNonCodeFixes&quot;)
+    @ParameterizedTest(name = &quot;{argumentSetName}&quot;)
+    void unverifiedOrNonCodeFixKeepsTheExistingIssuePromptAndAddsTheFindingToTheDraft(
+            Classification classification, List&lt;String&gt; changedFiles, ValidationRun validation, String draftLine)
+            throws IOException {
+        // given
+<span class="nc" id="L489">        Scenario scenario = scenario(</span>
+<span class="nc" id="L490">                ScenarioOptions.signedInCodex()</span>
+<span class="nc" id="L491">                        .withCodexOutcome(completed(new CodexInvestigationFinding(</span>
+                                classification,
+                                &quot;The workflow writer ignores a read-only parent directory.&quot;,
+                                true,
+                                &quot;Check the parent directory before writing.&quot;,
+                                changedFiles,
+<span class="nc" id="L497">                                List.of(validation),</span>
+                                &quot;&quot;))),
+                &quot;y&quot;,
+                &quot;y&quot;,
+                &quot;n&quot;);
+
+        // when
+<span class="nc" id="L504">        Optional&lt;Path&gt; report = scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L507">        assertThat(scenario.terminal().stdout()).contains(REPORT_ISSUE_QUESTION).doesNotContain(FIX_ISSUE_QUESTION);</span>
+<span class="nc" id="L508">        assertThat(issueDraft(report)).content(StandardCharsets.UTF_8).contains(draftLine);</span>
+<span class="nc" id="L509">        assertThat(scenario.commands().commands())</span>
+<span class="nc" id="L510">                .noneSatisfy(command -&gt; assertThat(command).startsWith(&quot;gh&quot;, &quot;issue&quot;, &quot;create&quot;));</span>
+<span class="nc" id="L511">    }</span>
+
+    static Stream&lt;Arguments&gt; unverifiedOrNonCodeFixes() {
+<span class="nc" id="L514">        return Stream.of(</span>
+<span class="nc" id="L515">                argumentSet(</span>
+                        &quot;validation failed&quot;,
+                        Classification.SYMPHONY_BUG,
+<span class="nc" id="L518">                        List.of(&quot;WORKFLOW.md&quot;),</span>
+                        new ValidationRun(&quot;symphony-trello setup-local check&quot;, false),
+                        &quot;- **validation:** failed `symphony-trello setup-local check`&quot;),
+<span class="nc" id="L521">                argumentSet(</span>
+                        &quot;no changed files reported&quot;,
+                        Classification.SYMPHONY_BUG,
+<span class="nc" id="L524">                        List.of(),</span>
+                        new ValidationRun(&quot;symphony-trello setup-local check&quot;, true),
+                        &quot;- **changed_files:** none&quot;),
+<span class="nc" id="L527">                argumentSet(</span>
+                        &quot;validated fix of a cause outside Symphony for Trello code&quot;,
+                        Classification.ENVIRONMENT,
+<span class="nc" id="L530">                        List.of(&quot;WORKFLOW.md&quot;),</span>
+                        new ValidationRun(&quot;symphony-trello setup-local check&quot;, true),
+                        &quot;- **classification:** environment&quot;));
+    }
+
+    @MethodSource(&quot;codexNotOffered&quot;)
+    @ParameterizedTest(name = &quot;{argumentSetName}&quot;)
+    void codexIsNotOfferedOutsideAnInteractiveFirstFailure(ScenarioOptions options) throws IOException {
+        // given
+<span class="nc" id="L539">        Scenario scenario = scenario(options, &quot;y&quot;, &quot;y&quot;, &quot;y&quot;);</span>
+
+        // when
+<span class="nc" id="L542">        scenario.failUnexpectedly();</span>
+
+        // then
+<span class="nc" id="L545">        assertThat(scenario.codex().requests()).isEmpty();</span>
+<span class="nc" id="L546">        assertThat(scenario.terminal().stdout()).doesNotContain(CODEX_QUESTION);</span>
+<span class="nc" id="L547">    }</span>
+
+    static Stream&lt;Arguments&gt; codexNotOffered() {
+<span class="nc" id="L550">        return Stream.of(</span>
+<span class="nc" id="L551">                argumentSet(&quot;--non-interactive&quot;, ScenarioOptions.signedInCodex().with(Condition.NON_INTERACTIVE)),</span>
+<span class="nc" id="L552">                argumentSet(</span>
+<span class="nc" id="L553">                        &quot;no console attached&quot;, ScenarioOptions.signedInCodex().with(Condition.NO_CONSOLE)),</span>
+<span class="nc" id="L554">                argumentSet(</span>
+                        &quot;command started by a Codex investigation&quot;,
+<span class="nc" id="L556">                        ScenarioOptions.signedInCodex().with(Condition.STARTED_BY_CODEX_INVESTIGATION)));</span>
+    }
+
+    @Test
+    void codexPromptAndPublicIssueTextStaySanitized() throws IOException {
+        // given
+<span class="nc" id="L562">        Scenario scenario = scenario(ScenarioOptions.signedInCodex(), &quot;y&quot;, &quot;y&quot;, &quot;y&quot;);</span>
+<span class="nc" id="L563">        Path privateWorkflow = scenario.configDir().resolve(&quot;WORKFLOW.private.md&quot;);</span>
+<span class="nc" id="L564">        scenario.codex()</span>
+<span class="nc" id="L565">                .answer(completed(new CodexInvestigationFinding(</span>
+                        Classification.EXTERNAL_TOOL_OR_SERVICE,
+                        &quot;Trello rejected TRELLO_API_TOKEN=&quot; + TRELLO_API_TOKEN + &quot; with key &quot; + TRELLO_API_KEY + &quot; for &quot;
+                                + BOARD_NAME + &quot; at &quot; + TRELLO_BOARD_URL,
+                        false,
+                        &quot;&quot;,
+<span class="nc" id="L571">                        List.of(privateWorkflow.toString()),</span>
+<span class="nc" id="L572">                        List.of(),</span>
+                        &quot;Check &quot; + privateWorkflow)));
+
+        // when
+<span class="nc" id="L576">        Optional&lt;Path&gt; report = scenario.fail(new TrelloBoardSetupException(</span>
+                UNEXPECTED_CODE, &quot;Workflow write failed for &quot; + BOARD_NAME + &quot; in &quot; + privateWorkflow));
+
+        // then
+<span class="nc" id="L580">        String[] privateValues = {TRELLO_API_KEY, TRELLO_API_TOKEN, BOARD_NAME, TRELLO_BOARD_URL, tempDir.toString()};</span>
+<span class="nc" id="L581">        assertThat(scenario.codex().requests()).singleElement().satisfies(request -&gt; assertThat(request.prompt())</span>
+<span class="nc" id="L582">                .contains(&quot;- error_code: &quot; + UNEXPECTED_CODE)</span>
+<span class="nc" id="L583">                .doesNotContain(privateValues));</span>
+<span class="nc" id="L584">        assertThat(issueDraft(report))</span>
+<span class="nc" id="L585">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L586">                .contains(&quot;## Local Codex Investigation&quot;, &quot;&lt;redacted&gt;&quot;, &quot;&lt;path:&quot;)</span>
+<span class="nc" id="L587">                .doesNotContain(privateValues);</span>
+<span class="nc" id="L588">        assertThat(scenario.terminal().stdout()).contains(POSTED_ISSUE_URL).doesNotContain(privateValues);</span>
+<span class="nc" id="L589">        assertThat(scenario.terminal().stderr())</span>
+<span class="nc" id="L590">                .contains(&quot;A GitHub issue still helps&quot;)</span>
+<span class="nc" id="L591">                .doesNotContain(TRELLO_API_KEY, TRELLO_API_TOKEN, BOARD_NAME, TRELLO_BOARD_URL);</span>
+<span class="nc" id="L592">    }</span>
+
+    private static Path issueDraft(Optional&lt;Path&gt; report) {
+<span class="nc" id="L595">        assertThat(report)</span>
+<span class="nc" id="L596">                .as(&quot;unexpected failures write a troubleshooting report&quot;)</span>
+<span class="nc" id="L597">                .isPresent();</span>
+<span class="nc" id="L598">        Path reportPath = report.orElseThrow();</span>
+<span class="nc" id="L599">        String reportName = reportPath.getFileName().toString();</span>
+<span class="nc" id="L600">        return reportPath.resolveSibling(</span>
+<span class="nc" id="L601">                reportName.substring(0, reportName.length() - SetupFailureFollowUp.REPORT_SUFFIX.length())</span>
+                        + SetupFailureFollowUp.ISSUE_DRAFT_SUFFIX);
+    }
+
+    /// The report lives in a fixed directory directly below the state directory.
+    private static Path stateHomeRelativePath(Optional&lt;Path&gt; report) {
+<span class="nc" id="L607">        Path reportPath = report.orElseThrow();</span>
+<span class="nc" id="L608">        return reportPath.getParent().getFileName().resolve(reportPath.getFileName());</span>
+    }
+
+    private static Outcome completed(CodexInvestigationFinding finding) {
+<span class="nc" id="L612">        return new Outcome.Completed(finding);</span>
+    }
+
+    private Scenario scenario(ScenarioOptions options, String... answers) throws IOException {
+<span class="nc" id="L616">        Path root = Files.createTempDirectory(tempDir, &quot;follow-up-&quot;);</span>
+<span class="nc" id="L617">        Path configDir = root.resolve(&quot;config&quot;);</span>
+<span class="nc bnc" id="L618" title="All 2 branches missed.">        if (options.has(Condition.CONFIG_CREATION_BLOCKED)) {</span>
+<span class="nc" id="L619">            configDir = Files.writeString(root.resolve(&quot;blocked&quot;), &quot;not a directory&quot;)</span>
+<span class="nc" id="L620">                    .resolve(&quot;config&quot;);</span>
+        } else {
+<span class="nc" id="L622">            Files.createDirectories(configDir);</span>
+        }
+<span class="nc" id="L624">        Path appHome = Files.createDirectories(root.resolve(&quot;app&quot;));</span>
+<span class="nc bnc" id="L625" title="All 2 branches missed.">        if (options.has(Condition.SOURCE_CHECKOUT)) {</span>
+<span class="nc" id="L626">            Files.createDirectories(appHome.resolve(&quot;.git&quot;));</span>
+        }
+<span class="nc" id="L628">        Path tools = Files.createDirectories(root.resolve(&quot;tools&quot;));</span>
+<span class="nc" id="L629">        Path codexExecutable = tools.resolve(&quot;codex&quot;);</span>
+<span class="nc bnc" id="L630" title="All 2 branches missed.">        if (!options.has(Condition.NO_CODEX_ON_PATH)) {</span>
+<span class="nc" id="L631">            Files.writeString(codexExecutable, &quot;&quot;);</span>
+<span class="nc" id="L632">            assertThat(codexExecutable.toFile().setExecutable(true))</span>
+<span class="nc" id="L633">                    .as(&quot;the fake codex executable must be executable so PATH lookup finds it&quot;)</span>
+<span class="nc" id="L634">                    .isTrue();</span>
+        }
+<span class="nc" id="L636">        Map&lt;String, String&gt; environment = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L637">        environment.put(&quot;PATH&quot;, tools.toString());</span>
+<span class="nc" id="L638">        environment.put(&quot;SYMPHONY_TRELLO_APP_HOME&quot;, appHome.toString());</span>
+<span class="nc bnc" id="L639" title="All 2 branches missed.">        if (options.has(Condition.CONFIG_CREATION_BLOCKED)) {</span>
+<span class="nc" id="L640">            environment.put(&quot;SYMPHONY_TRELLO_STATE_HOME&quot;, root.resolve(&quot;state&quot;).toString());</span>
+        }
+<span class="nc bnc" id="L642" title="All 2 branches missed.">        if (options.has(Condition.STARTED_BY_CODEX_INVESTIGATION)) {</span>
+<span class="nc" id="L643">            environment.put(CodexInvestigationRunner.INVESTIGATION_MARKER_ENV, &quot;1&quot;);</span>
+        }
+<span class="nc" id="L645">        FakeCommandRunner commands = new FakeCommandRunner()</span>
+<span class="nc" id="L646">                .returns(</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">                        options.has(Condition.CODEX_SIGNED_OUT) ? 1 : 0,</span>
+                        &quot;&quot;,
+<span class="nc" id="L649">                        codexExecutable.toString(),</span>
+                        &quot;login&quot;,
+                        &quot;status&quot;)
+<span class="nc bnc" id="L652" title="All 2 branches missed.">                .returns(options.has(Condition.GITHUB_SIGNED_OUT) ? 1 : 0, &quot;github.com\n&quot;, &quot;gh&quot;, &quot;auth&quot;, &quot;status&quot;)</span>
+<span class="nc" id="L653">                .returnsForPrefix(0, POSTED_ISSUE_URL + &quot;\n&quot;, &quot;gh&quot;, &quot;issue&quot;, &quot;create&quot;);</span>
+<span class="nc" id="L654">        var codex = new RecordingCodex(options.codexOutcome());</span>
+<span class="nc" id="L655">        var followUp = new SetupFailureFollowUp(</span>
+                commands,
+                codex,
+<span class="nc bnc" id="L658" title="All 2 branches missed.">                () -&gt; !options.has(Condition.NO_CONSOLE),</span>
+                environment,
+                SetupFailureFollowUp.CODEX_INVESTIGATION_TIMEOUT);
+<span class="nc" id="L661">        var reporter = new SetupDiagnosticReporter(</span>
+<span class="nc" id="L662">                environment, commands, Files::list, Clock.fixed(NOW, ZoneOffset.UTC), &quot;Linux&quot;, followUp);</span>
+<span class="nc" id="L663">        return new Scenario(</span>
+                configDir,
+                appHome,
+                commands,
+                codex,
+                reporter,
+                new RecordingTerminal(answers),
+<span class="nc" id="L670">                options.has(Condition.NON_INTERACTIVE));</span>
+    }
+
+<span class="nc" id="L673">    private record Scenario(</span>
+            Path configDir,
+            Path appHome,
+            FakeCommandRunner commands,
+            RecordingCodex codex,
+            SetupDiagnosticReporter reporter,
+            RecordingTerminal terminal,
+            boolean nonInteractive) {
+
+        Optional&lt;Path&gt; failUnexpectedly() {
+<span class="nc" id="L683">            return fail(new TrelloBoardSetupException(UNEXPECTED_CODE, &quot;Workflow write failed&quot;));</span>
+        }
+
+        Optional&lt;Path&gt; fail(TrelloBoardSetupException exception) {
+<span class="nc" id="L687">            return reporter.reportFailure(exception, request(), terminal);</span>
+        }
+
+        private LocalSetupRequest request() {
+<span class="nc" id="L691">            return new LocalSetupRequest(</span>
+                    LocalSetupRequest.Action.SETUP,
+                    false,
+                    nonInteractive,
+                    false,
+                    false,
+<span class="nc" id="L697">                    Optional.empty(),</span>
+<span class="nc" id="L698">                    Optional.of(TRELLO_API_KEY),</span>
+<span class="nc" id="L699">                    Optional.of(TRELLO_API_TOKEN),</span>
+<span class="nc" id="L700">                    Optional.of(BOARD_NAME),</span>
+<span class="nc" id="L701">                    Optional.empty(),</span>
+<span class="nc" id="L702">                    Optional.empty(),</span>
+<span class="nc" id="L703">                    List.of(&quot;Ready&quot;),</span>
+<span class="nc" id="L704">                    List.of(&quot;Done&quot;),</span>
+                    &quot;In Progress&quot;,
+                    false,
+                    &quot;Blocked&quot;,
+<span class="nc" id="L708">                    Optional.of(configDir.resolve(&quot;WORKFLOW.private.md&quot;)),</span>
+<span class="nc" id="L709">                    Optional.of(configDir.resolveSibling(&quot;workspaces&quot;)),</span>
+<span class="nc" id="L710">                    Optional.of(configDir),</span>
+<span class="nc" id="L711">                    Optional.empty(),</span>
+<span class="nc" id="L712">                    Optional.empty(),</span>
+                    1,
+                    false,
+<span class="nc" id="L715">                    Optional.empty(),</span>
+<span class="nc" id="L716">                    Optional.empty(),</span>
+<span class="nc" id="L717">                    Optional.of(configDir.resolve(&quot;.env&quot;)),</span>
+<span class="nc" id="L718">                    List.of(),</span>
+                    false,
+                    false,
+                    true,
+<span class="nc" id="L722">                    URI.create(&quot;https://api.trello.com/1&quot;));</span>
+        }
+    }
+
+    /// Ways a scenario departs from the default: Codex on PATH and signed in, a console attached,
+    /// an interactive command, a release install, and a command the user started directly.
+<span class="nc" id="L728">    enum Condition {</span>
+<span class="nc" id="L729">        CONFIG_CREATION_BLOCKED,</span>
+<span class="nc" id="L730">        NO_CODEX_ON_PATH,</span>
+<span class="nc" id="L731">        CODEX_SIGNED_OUT,</span>
+<span class="nc" id="L732">        GITHUB_SIGNED_OUT,</span>
+<span class="nc" id="L733">        NO_CONSOLE,</span>
+<span class="nc" id="L734">        NON_INTERACTIVE,</span>
+<span class="nc" id="L735">        SOURCE_CHECKOUT,</span>
+<span class="nc" id="L736">        STARTED_BY_CODEX_INVESTIGATION</span>
+    }
+
+    record ScenarioOptions(Set&lt;Condition&gt; conditions, Outcome codexOutcome) {
+<span class="nc" id="L740">        ScenarioOptions {</span>
+<span class="nc" id="L741">            conditions = Set.copyOf(conditions);</span>
+<span class="nc" id="L742">        }</span>
+
+        static ScenarioOptions signedInCodex() {
+<span class="nc" id="L745">            return new ScenarioOptions(Set.of(), new Outcome.Failed(&quot;no Codex answer configured&quot;));</span>
+        }
+
+        ScenarioOptions with(Condition condition) {
+<span class="nc" id="L749">            Set&lt;Condition&gt; combined = EnumSet.of(condition);</span>
+<span class="nc" id="L750">            combined.addAll(conditions);</span>
+<span class="nc" id="L751">            return new ScenarioOptions(combined, codexOutcome);</span>
+        }
+
+        ScenarioOptions withCodexOutcome(Outcome outcome) {
+<span class="nc" id="L755">            return new ScenarioOptions(conditions, outcome);</span>
+        }
+
+        boolean has(Condition condition) {
+<span class="nc" id="L759">            return conditions.contains(condition);</span>
+        }
+    }
+
+    /// Records each investigation request and answers with the configured outcome, so tests can
+    /// check exactly what Symphony would send to Codex.
+    private static final class RecordingCodex implements CodexInvestigationRunner {
+<span class="nc" id="L766">        private final List&lt;Request&gt; requests = new ArrayList&lt;&gt;();</span>
+        private Outcome outcome;
+
+<span class="nc" id="L769">        RecordingCodex(Outcome outcome) {</span>
+<span class="nc" id="L770">            this.outcome = outcome;</span>
+<span class="nc" id="L771">        }</span>
+
+        void answer(Outcome configuredOutcome) {
+<span class="nc" id="L774">            this.outcome = configuredOutcome;</span>
+<span class="nc" id="L775">        }</span>
+
+        List&lt;Request&gt; requests() {
+<span class="nc" id="L778">            return requests;</span>
+        }
+
+        @Override
+        public Outcome investigate(Request request) {
+<span class="nc" id="L783">            requests.add(request);</span>
+<span class="nc" id="L784">            return outcome;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

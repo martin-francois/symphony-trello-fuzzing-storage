@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TutorialInput.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TutorialInput.java</span></div><h1>TutorialInput.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.time.Duration;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.jspecify.annotations.Nullable;
+
+/// Reads tutorial answers through [Terminal#readLine] while the tutorial keeps checking Trello.
+///
+/// A terminal read cannot time out, so a waiting step hands the read to one background thread and
+/// polls Trello until the line arrives. When Trello shows the expected state first, the read stays
+/// pending and answers the next prompt. There is never more than one read in flight. A line that
+/// arrived before a new prompt appeared was typed for the old prompt, so it is dropped instead of
+/// answering a question the user has not seen yet.
+final class TutorialInput implements AutoCloseable {
+    private final Terminal terminal;
+    private final ExecutorService reader;
+    private @Nullable Future&lt;String&gt; pendingLine;
+    /// The prompt the user currently sees for the pending read.
+    private @Nullable String shownPrompt;
+    /// The prompt that was showing when the pending read could last receive a line.
+    private @Nullable String answeredPrompt;
+
+<span class="nc" id="L31">    TutorialInput(Terminal terminal) {</span>
+<span class="nc" id="L32">        this.terminal = terminal;</span>
+        // A daemon thread, because a read blocked on standard input must not keep the CLI alive.
+<span class="nc" id="L34">        this.reader = Executors.newSingleThreadExecutor(</span>
+<span class="nc" id="L35">                Thread.ofPlatform().daemon().name(&quot;tutorial-input&quot;).factory());</span>
+<span class="nc" id="L36">    }</span>
+
+    /// Waits for the next line. Returns empty when no line arrived within the timeout.
+    Optional&lt;Answer&gt; poll(String prompt, Duration timeout) throws IOException {
+<span class="nc" id="L40">        Future&lt;String&gt; line = startOrReuseRead(prompt);</span>
+        try {
+<span class="nc" id="L42">            return Optional.of(take(line.get(timeout.toMillis(), TimeUnit.MILLISECONDS)));</span>
+<span class="nc" id="L43">        } catch (TimeoutException e) {</span>
+<span class="nc" id="L44">            return Optional.empty();</span>
+<span class="nc" id="L45">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L46">            throw interrupted(e);</span>
+<span class="nc" id="L47">        } catch (ExecutionException e) {</span>
+<span class="nc" id="L48">            pendingLine = null;</span>
+<span class="nc" id="L49">            throw readFailure(e);</span>
+        }
+    }
+
+    /// Waits until the next line arrives.
+    Answer read(String prompt) throws IOException {
+<span class="nc" id="L55">        Future&lt;String&gt; line = startOrReuseRead(prompt);</span>
+        try {
+<span class="nc" id="L57">            return take(line.get());</span>
+<span class="nc" id="L58">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L59">            throw interrupted(e);</span>
+<span class="nc" id="L60">        } catch (ExecutionException e) {</span>
+<span class="nc" id="L61">            pendingLine = null;</span>
+<span class="nc" id="L62">            throw readFailure(e);</span>
+        }
+    }
+
+    /// Prints the prompt again on the next wait, because other output pushed it out of view.
+    void showPromptAgain() {
+<span class="nc" id="L68">        shownPrompt = null;</span>
+<span class="nc" id="L69">    }</span>
+
+    /// Whether a typed line is waiting that no prompt has taken yet.
+    boolean lineWaiting() {
+<span class="nc" id="L73">        Future&lt;String&gt; line = pendingLine;</span>
+<span class="nc bnc" id="L74" title="All 4 branches missed.">        return line != null &amp;&amp; line.isDone();</span>
+    }
+
+    @Override
+    public void close() {
+<span class="nc" id="L79">        reader.shutdownNow();</span>
+<span class="nc" id="L80">    }</span>
+
+    private Future&lt;String&gt; startOrReuseRead(String prompt) {
+<span class="nc" id="L83">        Future&lt;String&gt; line = pendingLine;</span>
+<span class="nc bnc" id="L84" title="All 6 branches missed.">        if (line != null &amp;&amp; line.isDone() &amp;&amp; !prompt.equals(answeredPrompt)) {</span>
+<span class="nc" id="L85">            line = null;</span>
+        }
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        if (line == null) {</span>
+<span class="nc" id="L88">            line = reader.submit(() -&gt; terminal.readLine(prompt));</span>
+<span class="nc" id="L89">            pendingLine = line;</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        } else if (!prompt.equals(shownPrompt)) {</span>
+            // The earlier read is still waiting behind an older or scrolled-away prompt.
+<span class="nc" id="L92">            terminal.out().print(prompt);</span>
+        }
+<span class="nc" id="L94">        shownPrompt = prompt;</span>
+<span class="nc" id="L95">        answeredPrompt = prompt;</span>
+<span class="nc" id="L96">        return line;</span>
+    }
+
+    private Answer take(@Nullable String line) {
+<span class="nc" id="L100">        pendingLine = null;</span>
+<span class="nc" id="L101">        return new Answer(line);</span>
+    }
+
+    private static InterruptedIOException interrupted(InterruptedException cause) {
+<span class="nc" id="L105">        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L106">        var failure = new InterruptedIOException(&quot;Interrupted while waiting for tutorial input&quot;);</span>
+<span class="nc" id="L107">        failure.initCause(cause);</span>
+<span class="nc" id="L108">        return failure;</span>
+    }
+
+    private static IOException readFailure(ExecutionException e) {
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        return e.getCause() instanceof IOException io ? io : new IOException(&quot;Could not read tutorial input&quot;, e);</span>
+    }
+
+    /// One answer. A null line means standard input ended.
+<span class="nc" id="L116">    record Answer(@Nullable String line) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

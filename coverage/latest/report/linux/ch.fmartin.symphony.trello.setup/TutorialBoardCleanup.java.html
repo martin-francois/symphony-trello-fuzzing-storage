@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TutorialBoardCleanup.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TutorialBoardCleanup.java</span></div><h1>TutorialBoardCleanup.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.setup.TutorialTrello.Board;
+import java.time.Duration;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
+
+/// Settles the temporary tutorial board exactly once: archived or kept.
+///
+/// The tutorial thread settles the board when the walkthrough ends or fails. A shutdown hook
+/// settles it when the user presses Ctrl+C. Both can run at the same time during JVM shutdown, so
+/// the first caller claims the board before it calls Trello and later callers wait for that request to finish.
+/// That keeps a &quot;keep the board&quot; answer from being overridden and avoids a second archive request.
+/// A hook that runs while the board request waits for Trello's answer waits for that answer, so
+/// the board Trello returns is still archived.
+final class TutorialBoardCleanup {
+    private final Consumer&lt;Board&gt; archiver;
+    private final Duration creationAnswerWait;
+<span class="nc" id="L24">    private final AtomicReference&lt;Board&gt; board = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L25">    private final AtomicReference&lt;Settlement&gt; settlement = new AtomicReference&lt;&gt;(Settlement.OPEN);</span>
+<span class="nc" id="L26">    private final CountDownLatch creationAnswered = new CountDownLatch(1);</span>
+<span class="nc" id="L27">    private final CountDownLatch archiveFinished = new CountDownLatch(1);</span>
+    private volatile boolean creationStarted;
+
+    /// `creationAnswerWait` is the longest a settlement waits for the board request to be answered.
+<span class="nc" id="L31">    TutorialBoardCleanup(Consumer&lt;Board&gt; archiver, Duration creationAnswerWait) {</span>
+<span class="nc" id="L32">        this.archiver = archiver;</span>
+<span class="nc" id="L33">        this.creationAnswerWait = creationAnswerWait;</span>
+<span class="nc" id="L34">    }</span>
+
+    /// Sends the board request and tracks the board that Trello returns.
+    Board create(Supplier&lt;Board&gt; request) {
+<span class="nc" id="L38">        creationStarted = true;</span>
+        try {
+<span class="nc" id="L40">            Board created = request.get();</span>
+<span class="nc" id="L41">            board.set(created);</span>
+<span class="nc" id="L42">            return created;</span>
+        } finally {
+<span class="nc" id="L44">            creationAnswered.countDown();</span>
+        }
+    }
+
+    /// Whether the board request was sent, so Trello may have created a board.
+    boolean creationStarted() {
+<span class="nc" id="L50">        return creationStarted;</span>
+    }
+
+    boolean creationPending() {
+<span class="nc bnc" id="L54" title="All 4 branches missed.">        return creationStarted &amp;&amp; creationAnswered.getCount() != 0;</span>
+    }
+
+    /// The board Trello returned, after waiting for a board request that is still in flight. Empty
+    /// when the request failed or got no answer within the wait.
+    Optional&lt;Board&gt; createdBoard() {
+<span class="nc" id="L60">        return Optional.ofNullable(awaitCreatedBoard());</span>
+    }
+
+    /// Archives the tracked board unless it was already archived or kept. Returns whether this
+    /// call archived it.
+    boolean archive() {
+<span class="nc" id="L66">        Board tracked = awaitCreatedBoard();</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        if (tracked == null) {</span>
+<span class="nc" id="L68">            return false;</span>
+        }
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if (!settlement.compareAndSet(Settlement.OPEN, Settlement.ARCHIVED)) {</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            if (settlement.get() == Settlement.ARCHIVED) {</span>
+<span class="nc" id="L72">                awaitAnswer(archiveFinished);</span>
+            }
+<span class="nc" id="L74">            return false;</span>
+        }
+        try {
+<span class="nc" id="L77">            archiver.accept(tracked);</span>
+<span class="nc" id="L78">            return true;</span>
+        } finally {
+<span class="nc" id="L80">            archiveFinished.countDown();</span>
+        }
+    }
+
+    /// Keeps the tracked board. Returns whether this call settled it, so a board is reported as kept
+    /// only once.
+    boolean keep() {
+<span class="nc" id="L87">        return settlement.compareAndSet(Settlement.OPEN, Settlement.KEPT);</span>
+    }
+
+    private @Nullable Board awaitCreatedBoard() {
+<span class="nc bnc" id="L91" title="All 4 branches missed.">        boolean answered = !creationStarted || awaitAnswer(creationAnswered);</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        return answered ? board.get() : null;</span>
+    }
+
+    /// Returns false when no answer arrived in time. The caller then reports that the board may
+    /// exist in Trello.
+    private boolean awaitAnswer(CountDownLatch answer) {
+        try {
+<span class="nc" id="L99">            return answer.await(creationAnswerWait.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L100">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L101">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L102">            return false;</span>
+        }
+    }
+
+<span class="nc" id="L106">    private enum Settlement {</span>
+<span class="nc" id="L107">        OPEN,</span>
+<span class="nc" id="L108">        ARCHIVED,</span>
+<span class="nc" id="L109">        KEPT</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

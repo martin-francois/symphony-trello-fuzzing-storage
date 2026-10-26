@@ -7,46 +7,57 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
-<span class="nc" id="L18">final class ContinuousFuzzingWorkflowTest {</span>
-<span class="nc" id="L19">    private static final Path WORKFLOW = of(&quot;.github/workflows/continuous-fuzzing.yml&quot;);</span>
-<span class="nc" id="L20">    private static final Path WATCHDOG = of(&quot;.github/workflows/continuous-fuzzing-watchdog.yml&quot;);</span>
-<span class="nc" id="L21">    private static final Path WATCHDOG_MONITOR = of(&quot;scripts/monitor-clusterfuzzlite-running&quot;);</span>
-<span class="nc" id="L22">    private static final Path OSS_FUZZ_BUILD = of(&quot;oss-fuzz/build.sh&quot;);</span>
+<span class="nc" id="L21">final class ContinuousFuzzingWorkflowTest {</span>
+<span class="nc" id="L22">    private static final Path WORKFLOW = of(&quot;.github/workflows/continuous-fuzzing.yml&quot;);</span>
+<span class="nc" id="L23">    private static final Path WATCHDOG = of(&quot;.github/workflows/continuous-fuzzing-watchdog.yml&quot;);</span>
+<span class="nc" id="L24">    private static final Path WATCHDOG_MONITOR = of(&quot;scripts/monitor-clusterfuzzlite-running&quot;);</span>
+<span class="nc" id="L25">    private static final Path OSS_FUZZ_BUILD = of(&quot;oss-fuzz/build.sh&quot;);</span>
     private static final String UNSAFE_WORKAROUND_EXPIRY_CHECK =
             &quot;.clusterfuzzlite/check-unsafe-memory-access-workaround&quot;;
-<span class="nc" id="L25">    private static final Path STANDALONE_FUZZERS = of(&quot;src/test/java/ch/fmartin/symphony/trello/fuzz&quot;);</span>
-<span class="nc" id="L26">    private static final Path COVERAGE_VERIFIER = of(&quot;scripts/verify-clusterfuzzlite-coverage&quot;);</span>
+<span class="nc" id="L28">    private static final Path STANDALONE_FUZZERS = of(&quot;src/test/java/ch/fmartin/symphony/trello/fuzz&quot;);</span>
+<span class="nc" id="L29">    private static final Path TARGET_SELECTOR = of(&quot;scripts/select-clusterfuzzlite-target&quot;);</span>
+<span class="nc" id="L30">    private static final Path COVERAGE_VERIFIER = of(&quot;scripts/verify-clusterfuzzlite-coverage&quot;);</span>
+<span class="nc" id="L31">    private static final Path TEST_SOURCES = of(&quot;src/test/java&quot;);</span>
+<span class="nc" id="L32">    private static final Pattern PROJECT_IMPORT =</span>
+<span class="nc" id="L33">            Pattern.compile(&quot;^import (?:static )?(ch\\.fmartin\\.symphony\\.trello\\.[\\w.]+);$&quot;, Pattern.MULTILINE);</span>
+    // The explicit helper manifest is relative to test_class_root in oss-fuzz/build.sh.
+<span class="nc" id="L35">    private static final Pattern COPIED_TEST_HELPERS = Pattern.compile(&quot;^  ([\\w/]+)$&quot;, Pattern.MULTILINE);</span>
     private static final String CLUSTERFUZZLITE_COMMIT = &quot;884713a6c30a92e5e8544c39945cd7cb630abcd1&quot;;
-<span class="nc" id="L28">    private static final Pattern UNPINNED_ACTION = Pattern.compile(&quot;uses: [^\\s]+@(?![0-9a-f]{40}(?:\\s|$))&quot;);</span>
-<span class="nc" id="L29">    private static final Pattern PINNED_TEMURIN_IMAGE =</span>
-<span class="nc" id="L30">            Pattern.compile(&quot;FROM eclipse-temurin:25\\.\\d+\\.\\d+_\\d+-jdk@sha256:[0-9a-f]{64} AS jdk&quot;);</span>
+<span class="nc" id="L37">    private static final Pattern UNPINNED_ACTION = Pattern.compile(&quot;uses: [^\\s]+@(?![0-9a-f]{40}(?:\\s|$))&quot;);</span>
+<span class="nc" id="L38">    private static final Pattern PINNED_TEMURIN_IMAGE =</span>
+<span class="nc" id="L39">            Pattern.compile(&quot;FROM eclipse-temurin:25\\.\\d+\\.\\d+_\\d+-jdk@sha256:[0-9a-f]{64} AS jdk&quot;);</span>
 
     @Test
     void batchFuzzingRunsOnlyOnMainWithPersistentCorporaAndNativeReporting() throws IOException {
         // given
-<span class="nc" id="L35">        String source = workflowSource();</span>
+<span class="nc" id="L44">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L38">        String batchJob = source.substring(source.indexOf(&quot;  batch:&quot;), source.indexOf(&quot;  prune:&quot;));</span>
+<span class="nc" id="L47">        String batchJob = source.substring(source.indexOf(&quot;  batch:&quot;), source.indexOf(&quot;  prune:&quot;));</span>
 
         // then
-<span class="nc" id="L41">        assertThat(batchJob)</span>
-<span class="nc" id="L42">                .contains(</span>
+<span class="nc" id="L50">        assertThat(batchJob)</span>
+<span class="nc" id="L51">                .contains(</span>
                         &quot;github.ref == 'refs/heads/main'&quot;,
                         &quot;runs-on: ubuntu-latest&quot;,
                         &quot;timeout-minutes: 100&quot;,
                         &quot;fail-fast: false&quot;,
                         &quot;max-parallel: 1&quot;,
                         &quot;group: continuous-fuzzing-batch-main-${{ matrix.target }}&quot;,
-                        &quot;CFL_TARGET: ${{ matrix.target }}\n          CFL_FULL_SHARE_SECONDS: ${{ inputs.fuzz_seconds }}\n&quot;,
+                        &quot;CFL_TARGET: ${{ matrix.target }}&quot;,
+                        &quot;CFL_FULL_SHARE_SECONDS: ${{ inputs.fuzz_seconds }}&quot;,
+                        &quot;CFL_AUTOMATIC_BUDGET: ${{ inputs.automatic_budget }}&quot;,
                         &quot;scripts/select-clusterfuzzlite-target \&quot;$CFL_TARGET\&quot; \&quot;$CFL_FULL_SHARE_SECONDS\&quot;&quot;,
                         &quot;google/clusterfuzzlite/actions/build_fuzzers@&quot; + CLUSTERFUZZLITE_COMMIT,
                         &quot;google/clusterfuzzlite/actions/run_fuzzers@&quot; + CLUSTERFUZZLITE_COMMIT,
@@ -65,25 +76,25 @@ import org.junit.jupiter.api.Test;
                         &quot;CFL_TARGET: ${{ matrix.target }}&quot;,
                         &quot;scripts/report-clusterfuzzlite-failure&quot;,
                         &quot;!cancelled()&quot;)
-<span class="nc" id="L68">                .doesNotContain(&quot;blacksmith-&quot;, &quot;parallel-fuzzing: true&quot;);</span>
-<span class="nc" id="L69">        String issueStep = batchJob.substring(batchJob.indexOf(&quot;      - name: Create or update fuzz failure issue&quot;));</span>
-<span class="nc" id="L70">        assertThat(issueStep.substring(0, issueStep.indexOf(&quot;      - name: Fail after publishing&quot;)))</span>
-<span class="nc" id="L71">                .doesNotContain(&quot;hashFiles('cifuzz-sarif/results.sarif')&quot;);</span>
-<span class="nc" id="L72">    }</span>
+<span class="nc" id="L79">                .doesNotContain(&quot;blacksmith-&quot;, &quot;parallel-fuzzing: true&quot;);</span>
+<span class="nc" id="L80">        String issueStep = batchJob.substring(batchJob.indexOf(&quot;      - name: Create or update fuzz failure issue&quot;));</span>
+<span class="nc" id="L81">        assertThat(issueStep.substring(0, issueStep.indexOf(&quot;      - name: Fail after publishing&quot;)))</span>
+<span class="nc" id="L82">                .doesNotContain(&quot;hashFiles('cifuzz-sarif/results.sarif')&quot;);</span>
+<span class="nc" id="L83">    }</span>
 
     @Test
     void corpusPruningRunsEveryFourthCycleAndCanBeDispatchedManually() throws IOException {
         // given
-<span class="nc" id="L77">        String source = workflowSource();</span>
+<span class="nc" id="L88">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L80">        String pruneJob = source.substring(source.indexOf(&quot;  prune:&quot;));</span>
+<span class="nc" id="L91">        String pruneJob = source.substring(source.indexOf(&quot;  prune:&quot;));</span>
 
         // then
-<span class="nc" id="L83">        assertThat(source)</span>
-<span class="nc" id="L84">                .contains(&quot;workflow_dispatch:&quot;, &quot;operation:&quot;, &quot;fuzz_seconds:&quot;, &quot;continue_fuzzing:&quot;, &quot;cycle_index:&quot;);</span>
-<span class="nc" id="L85">        assertThat(pruneJob)</span>
-<span class="nc" id="L86">                .contains(</span>
+<span class="nc" id="L94">        assertThat(source)</span>
+<span class="nc" id="L95">                .contains(&quot;workflow_dispatch:&quot;, &quot;operation:&quot;, &quot;fuzz_seconds:&quot;, &quot;continue_fuzzing:&quot;, &quot;cycle_index:&quot;);</span>
+<span class="nc" id="L96">        assertThat(pruneJob)</span>
+<span class="nc" id="L97">                .contains(</span>
                         &quot;github.ref == 'refs/heads/main'&quot;,
                         &quot;inputs.operation == 'prune'&quot;,
                         &quot;inputs.continue_fuzzing&quot;,
@@ -93,20 +104,20 @@ import org.junit.jupiter.api.Test;
                         &quot;fuzz-seconds: 600&quot;,
                         &quot;mode: prune&quot;,
                         &quot;scripts/verify-clusterfuzzlite-storage corpus&quot;)
-<span class="nc" id="L96">                .doesNotContain(&quot;github.event_name == 'schedule'&quot;, &quot;blacksmith-&quot;);</span>
-<span class="nc" id="L97">    }</span>
+<span class="nc" id="L107">                .doesNotContain(&quot;github.event_name == 'schedule'&quot;, &quot;blacksmith-&quot;);</span>
+<span class="nc" id="L108">    }</span>
 
     @Test
     void frequentWatchdogRestartsOnlyAnIdleContinuousChain() throws IOException {
         // given
-<span class="nc" id="L102">        String watchdog = Files.readString(WATCHDOG);</span>
+<span class="nc" id="L113">        String watchdog = Files.readString(WATCHDOG);</span>
 
         // when
-<span class="nc" id="L105">        var unpinnedAction = UNPINNED_ACTION.matcher(watchdog);</span>
+<span class="nc" id="L116">        var unpinnedAction = UNPINNED_ACTION.matcher(watchdog);</span>
 
         // then
-<span class="nc" id="L108">        assertThat(watchdog)</span>
-<span class="nc" id="L109">                .contains(</span>
+<span class="nc" id="L119">        assertThat(watchdog)</span>
+<span class="nc" id="L120">                .contains(</span>
                         &quot;push:&quot;,
                         &quot;branches:&quot;,
                         &quot;- main&quot;,
@@ -130,66 +141,66 @@ import org.junit.jupiter.api.Test;
                         &quot;contents: read&quot;,
                         &quot;scripts/queue-clusterfuzzlite-watchdog&quot;,
                         &quot;scripts/monitor-clusterfuzzlite-running&quot;)
-<span class="nc" id="L133">                .doesNotContain(&quot;schedule:&quot;, &quot;blacksmith-&quot;);</span>
-<span class="nc" id="L134">        assertThat(unpinnedAction.find())</span>
-<span class="nc" id="L135">                .as(&quot;watchdog workflow has an unpinned action&quot;)</span>
-<span class="nc" id="L136">                .isFalse();</span>
-<span class="nc" id="L137">    }</span>
+<span class="nc" id="L144">                .doesNotContain(&quot;schedule:&quot;, &quot;blacksmith-&quot;);</span>
+<span class="nc" id="L145">        assertThat(unpinnedAction.find())</span>
+<span class="nc" id="L146">                .as(&quot;watchdog workflow has an unpinned action&quot;)</span>
+<span class="nc" id="L147">                .isFalse();</span>
+<span class="nc" id="L148">    }</span>
 
     @Test
     void watchdogQueuesItsSuccessorBeforeMonitoringTheContinuousChain() throws IOException {
         // given
-<span class="nc" id="L142">        String watchdog = Files.readString(WATCHDOG);</span>
-<span class="nc" id="L143">        String monitor = Files.readString(WATCHDOG_MONITOR);</span>
-<span class="nc" id="L144">        String source = workflowSource();</span>
+<span class="nc" id="L153">        String watchdog = Files.readString(WATCHDOG);</span>
+<span class="nc" id="L154">        String monitor = Files.readString(WATCHDOG_MONITOR);</span>
+<span class="nc" id="L155">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L147">        int queueCall = monitor.indexOf(&quot;$script_directory/queue-clusterfuzzlite-watchdog&quot;);</span>
-<span class="nc" id="L148">        int chainCheck = monitor.indexOf(&quot;$script_directory/ensure-clusterfuzzlite-running&quot;);</span>
+<span class="nc" id="L158">        int queueCall = monitor.indexOf(&quot;$script_directory/queue-clusterfuzzlite-watchdog&quot;);</span>
+<span class="nc" id="L159">        int chainCheck = monitor.indexOf(&quot;$script_directory/ensure-clusterfuzzlite-running&quot;);</span>
 
         // then
-<span class="nc" id="L151">        assertThat(watchdog)</span>
-<span class="nc" id="L152">                .contains(</span>
+<span class="nc" id="L162">        assertThat(watchdog)</span>
+<span class="nc" id="L163">                .contains(</span>
                         &quot;CFL_WATCH_ITERATIONS: 18&quot;,
                         &quot;CFL_WATCH_INTERVAL_SECONDS: 900&quot;,
                         &quot;CFL_WATCH_COMMAND_TIMEOUT_SECONDS: 120&quot;,
                         &quot;run: scripts/monitor-clusterfuzzlite-running&quot;)
-<span class="nc" id="L157">                .doesNotContain(&quot;schedule:&quot;, &quot;blacksmith-&quot;);</span>
-<span class="nc" id="L158">        assertThat(queueCall).isNotNegative().isLessThan(chainCheck);</span>
-<span class="nc" id="L159">        assertThat(source).doesNotContain(&quot;schedule:&quot;, &quot;  watchdog:&quot;);</span>
-<span class="nc" id="L160">    }</span>
+<span class="nc" id="L168">                .doesNotContain(&quot;schedule:&quot;, &quot;blacksmith-&quot;);</span>
+<span class="nc" id="L169">        assertThat(queueCall).isNotNegative().isLessThan(chainCheck);</span>
+<span class="nc" id="L170">        assertThat(source).doesNotContain(&quot;schedule:&quot;, &quot;  watchdog:&quot;);</span>
+<span class="nc" id="L171">    }</span>
 
     @Test
     void watchdogRecoveryEventsCannotStartFromPullRequestRuns() throws IOException {
         // given
-<span class="nc" id="L165">        String watchdog = Files.readString(WATCHDOG);</span>
+<span class="nc" id="L176">        String watchdog = Files.readString(WATCHDOG);</span>
 
         // when
-<span class="nc" id="L168">        String recoveryCondition =</span>
-<span class="nc" id="L169">                watchdog.substring(watchdog.indexOf(&quot;    if: &gt;-&quot;), watchdog.indexOf(&quot;    concurrency:&quot;));</span>
+<span class="nc" id="L179">        String recoveryCondition =</span>
+<span class="nc" id="L180">                watchdog.substring(watchdog.indexOf(&quot;    if: &gt;-&quot;), watchdog.indexOf(&quot;    concurrency:&quot;));</span>
 
         // then
-<span class="nc" id="L172">        assertThat(recoveryCondition)</span>
-<span class="nc" id="L173">                .contains(</span>
+<span class="nc" id="L183">        assertThat(recoveryCondition)</span>
+<span class="nc" id="L184">                .contains(</span>
                         &quot;github.event.workflow_run.event == 'workflow_dispatch'&quot;,
                         &quot;github.event.workflow_run.head_branch == 'main'&quot;,
                         &quot;startsWith(github.event.workflow_run.display_title, 'Continuous batch cycle ')&quot;)
-<span class="nc" id="L177">                .doesNotContain(&quot;github.event.workflow_run.conclusion != 'success'&quot;);</span>
-<span class="nc" id="L178">    }</span>
+<span class="nc" id="L188">                .doesNotContain(&quot;github.event.workflow_run.conclusion != 'success'&quot;);</span>
+<span class="nc" id="L189">    }</span>
 
     @Test
     void completedLongBatchDispatchesItsSuccessorAndCarriesDailyMaintenance() throws IOException {
         // given
-<span class="nc" id="L183">        String source = workflowSource();</span>
+<span class="nc" id="L194">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L186">        String continuationJob = source.substring(source.indexOf(&quot;  continue-batch:&quot;));</span>
-<span class="nc" id="L187">        String pruneJob = source.substring(source.indexOf(&quot;  prune:&quot;), source.indexOf(&quot;  coverage:&quot;));</span>
-<span class="nc" id="L188">        String coverageJob = coverageJobSource(source);</span>
+<span class="nc" id="L197">        String continuationJob = source.substring(source.indexOf(&quot;  continue-batch:&quot;));</span>
+<span class="nc" id="L198">        String pruneJob = source.substring(source.indexOf(&quot;  prune:&quot;), source.indexOf(&quot;  coverage:&quot;));</span>
+<span class="nc" id="L199">        String coverageJob = coverageJobSource(source);</span>
 
         // then
-<span class="nc" id="L191">        assertThat(source)</span>
-<span class="nc" id="L192">                .contains(</span>
+<span class="nc" id="L202">        assertThat(source)</span>
+<span class="nc" id="L203">                .contains(</span>
                         &quot;format('Continuous batch cycle {0}', inputs.cycle_index)&quot;,
                         &quot;continue_fuzzing:&quot;,
                         &quot;cycle_index:&quot;,
@@ -199,14 +210,14 @@ import org.junit.jupiter.api.Test;
                         &quot;inputs.operation == 'prune'&quot;,
                         &quot;&amp;&amp; 'corpus-main'&quot;,
                         &quot;cancel-in-progress: false&quot;);
-<span class="nc" id="L202">        assertThat(pruneJob)</span>
-<span class="nc" id="L203">                .contains(&quot;inputs.continue_fuzzing&quot;, &quot;inputs.cycle_index == 3&quot;)</span>
-<span class="nc" id="L204">                .doesNotContain(&quot;blacksmith-&quot;);</span>
-<span class="nc" id="L205">        assertThat(coverageJob)</span>
-<span class="nc" id="L206">                .contains(&quot;inputs.continue_fuzzing&quot;, &quot;inputs.cycle_index == 3&quot;)</span>
-<span class="nc" id="L207">                .doesNotContain(&quot;blacksmith-&quot;);</span>
-<span class="nc" id="L208">        assertThat(continuationJob)</span>
-<span class="nc" id="L209">                .contains(</span>
+<span class="nc" id="L213">        assertThat(pruneJob)</span>
+<span class="nc" id="L214">                .contains(&quot;inputs.continue_fuzzing&quot;, &quot;inputs.cycle_index == 3&quot;)</span>
+<span class="nc" id="L215">                .doesNotContain(&quot;blacksmith-&quot;);</span>
+<span class="nc" id="L216">        assertThat(coverageJob)</span>
+<span class="nc" id="L217">                .contains(&quot;inputs.continue_fuzzing&quot;, &quot;inputs.cycle_index == 3&quot;)</span>
+<span class="nc" id="L218">                .doesNotContain(&quot;blacksmith-&quot;);</span>
+<span class="nc" id="L219">        assertThat(continuationJob)</span>
+<span class="nc" id="L220">                .contains(</span>
                         &quot;always()&quot;,
                         &quot;!cancelled()&quot;,
                         &quot;needs: [batch, prune, coverage]&quot;,
@@ -214,23 +225,23 @@ import org.junit.jupiter.api.Test;
                         &quot;actions: write&quot;,
                         &quot;runs-on: ubuntu-latest&quot;,
                         &quot;scripts/continue-clusterfuzzlite-batch&quot;)
-<span class="nc" id="L217">                .doesNotContain(&quot;blacksmith-&quot;);</span>
-<span class="nc" id="L218">    }</span>
+<span class="nc" id="L228">                .doesNotContain(&quot;blacksmith-&quot;);</span>
+<span class="nc" id="L229">    }</span>
 
     @Test
     void usefulClusterFuzzLiteModesUseDedicatedVerifiedStorage() throws IOException {
         // given
-<span class="nc" id="L223">        String source = workflowSource();</span>
+<span class="nc" id="L234">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L226">        String codeChangeJob =</span>
-<span class="nc" id="L227">                source.substring(source.indexOf(&quot;  code-change:&quot;), source.indexOf(&quot;  continuous-build:&quot;));</span>
-<span class="nc" id="L228">        String continuousBuildJob = source.substring(source.indexOf(&quot;  continuous-build:&quot;), source.indexOf(&quot;  batch:&quot;));</span>
-<span class="nc" id="L229">        String coverageJob = coverageJobSource(source);</span>
+<span class="nc" id="L237">        String codeChangeJob =</span>
+<span class="nc" id="L238">                source.substring(source.indexOf(&quot;  code-change:&quot;), source.indexOf(&quot;  continuous-build:&quot;));</span>
+<span class="nc" id="L239">        String continuousBuildJob = source.substring(source.indexOf(&quot;  continuous-build:&quot;), source.indexOf(&quot;  batch:&quot;));</span>
+<span class="nc" id="L240">        String coverageJob = coverageJobSource(source);</span>
 
         // then
-<span class="nc" id="L232">        assertThat(codeChangeJob)</span>
-<span class="nc" id="L233">                .contains(</span>
+<span class="nc" id="L243">        assertThat(codeChangeJob)</span>
+<span class="nc" id="L244">                .contains(</span>
                         &quot;github.event_name == 'pull_request'&quot;,
                         &quot;fuzz-seconds: 300&quot;,
                         &quot;mode: code-change&quot;,
@@ -240,49 +251,49 @@ import org.junit.jupiter.api.Test;
                         &quot;storage-repo-branch: main&quot;,
                         &quot;storage-repo-branch-coverage: gh-pages&quot;,
                         &quot;github.event.pull_request.head.repo.full_name == github.repository&quot;)
-<span class="nc" id="L243">                .doesNotContain(&quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;, &quot;parallel-fuzzing: true&quot;);</span>
-<span class="nc" id="L244">        assertThat(continuousBuildJob).contains(&quot;github.event_name == 'push'&quot;, &quot;upload-build: true&quot;);</span>
-<span class="nc" id="L245">        assertThat(continuousBuildJob).doesNotContain(&quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;, &quot;storage-repo:&quot;);</span>
-<span class="nc" id="L246">        assertThat(coverageJob)</span>
-<span class="nc" id="L247">                .contains(</span>
+<span class="nc" id="L254">                .doesNotContain(&quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;, &quot;parallel-fuzzing: true&quot;);</span>
+<span class="nc" id="L255">        assertThat(continuousBuildJob).contains(&quot;github.event_name == 'push'&quot;, &quot;upload-build: true&quot;);</span>
+<span class="nc" id="L256">        assertThat(continuousBuildJob).doesNotContain(&quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;, &quot;storage-repo:&quot;);</span>
+<span class="nc" id="L257">        assertThat(coverageJob)</span>
+<span class="nc" id="L258">                .contains(</span>
                         &quot;Generate and publish Java 25 fuzzing coverage&quot;,
                         &quot;sanitizer: coverage&quot;,
                         &quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;,
                         &quot;scripts/run-clusterfuzzlite-coverage&quot;,
                         &quot;scripts/verify-clusterfuzzlite-storage coverage&quot;);
-<span class="nc" id="L253">        assertThat(source)</span>
-<span class="nc" id="L254">                .contains(</span>
+<span class="nc" id="L264">        assertThat(source)</span>
+<span class="nc" id="L265">                .contains(</span>
                         &quot;storage-repo-branch: main&quot;,
                         &quot;storage-repo-branch-coverage: gh-pages&quot;,
                         &quot;CLUSTERFUZZLITE_STORAGE_TOKEN&quot;)
-<span class="nc" id="L258">                .doesNotContain(&quot;blacksmith-&quot;, &quot;PERSONAL_ACCESS_TOKEN&quot;, &quot;contents: write&quot;);</span>
-<span class="nc" id="L259">    }</span>
+<span class="nc" id="L269">                .doesNotContain(&quot;blacksmith-&quot;, &quot;PERSONAL_ACCESS_TOKEN&quot;, &quot;contents: write&quot;);</span>
+<span class="nc" id="L270">    }</span>
 
     @Test
     void coverageInstallsJava25BeforeRunningTheHostMavenWrapper() throws IOException {
         // given
-<span class="nc" id="L264">        String source = workflowSource();</span>
+<span class="nc" id="L275">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L267">        String coverageJob = coverageJobSource(source);</span>
+<span class="nc" id="L278">        String coverageJob = coverageJobSource(source);</span>
 
         // then
-<span class="nc" id="L270">        assertThat(coverageJob)</span>
-<span class="nc" id="L271">                .containsSubsequence(</span>
+<span class="nc" id="L281">        assertThat(coverageJob)</span>
+<span class="nc" id="L282">                .containsSubsequence(</span>
                         &quot;uses: actions/setup-java@&quot;,
                         &quot;distribution: temurin&quot;,
                         &quot;java-version: \&quot;25.0.4+7.0.LTS\&quot;&quot;,
                         &quot;scripts/run-clusterfuzzlite-coverage&quot;);
-<span class="nc" id="L276">    }</span>
+<span class="nc" id="L287">    }</span>
 
     private static String coverageJobSource(String source) {
-<span class="nc" id="L279">        return source.substring(source.indexOf(&quot;  coverage:&quot;));</span>
+<span class="nc" id="L290">        return source.substring(source.indexOf(&quot;  coverage:&quot;));</span>
     }
 
     @Test
     void longRunningOperationsHaveIndependentConcurrencyGroups() throws IOException {
         // given
-<span class="nc" id="L285">        List&lt;String&gt; expectedGroups = List.of(</span>
+<span class="nc" id="L296">        List&lt;String&gt; expectedGroups = List.of(</span>
                 &quot;group: continuous-fuzzing-batch-main-${{ matrix.target }}&quot;,
                 &quot;group: continuous-fuzzing-prune-main&quot;,
                 &quot;group: continuous-fuzzing-coverage-main&quot;,
@@ -290,149 +301,214 @@ import org.junit.jupiter.api.Test;
                 &quot;group: continuous-fuzzing-code-change-${{ github.event.pull_request.number }}&quot;);
 
         // when
-<span class="nc" id="L293">        String source = workflowSource();</span>
+<span class="nc" id="L304">        String source = workflowSource();</span>
 
         // then
-<span class="nc" id="L296">        assertThat(expectedGroups).allSatisfy(group -&gt; assertThat(source).containsOnlyOnce(group));</span>
-<span class="nc" id="L297">    }</span>
+<span class="nc" id="L307">        assertThat(expectedGroups).allSatisfy(group -&gt; assertThat(source).containsOnlyOnce(group));</span>
+<span class="nc" id="L308">    }</span>
 
     @Test
     void workflowActionsArePinnedAndBuildIntegrationReusesOssFuzzPackaging() throws IOException {
         // given
-<span class="nc" id="L302">        String workflow = workflowSource();</span>
-<span class="nc" id="L303">        String dockerfile = Files.readString(of(&quot;.clusterfuzzlite/Dockerfile&quot;));</span>
-<span class="nc" id="L304">        String coverageDockerfile = Files.readString(of(&quot;.clusterfuzzlite/coverage-runner.Dockerfile&quot;));</span>
-<span class="nc" id="L305">        String ossFuzzDockerfile = Files.readString(of(&quot;oss-fuzz/Dockerfile&quot;));</span>
-<span class="nc" id="L306">        String buildScript = Files.readString(of(&quot;.clusterfuzzlite/build.sh&quot;));</span>
-<span class="nc" id="L307">        String project = Files.readString(of(&quot;.clusterfuzzlite/project.yaml&quot;));</span>
+<span class="nc" id="L313">        String workflow = workflowSource();</span>
+<span class="nc" id="L314">        String dockerfile = Files.readString(of(&quot;.clusterfuzzlite/Dockerfile&quot;));</span>
+<span class="nc" id="L315">        String coverageDockerfile = Files.readString(of(&quot;.clusterfuzzlite/coverage-runner.Dockerfile&quot;));</span>
+<span class="nc" id="L316">        String ossFuzzDockerfile = Files.readString(of(&quot;oss-fuzz/Dockerfile&quot;));</span>
+<span class="nc" id="L317">        String buildScript = Files.readString(of(&quot;.clusterfuzzlite/build.sh&quot;));</span>
+<span class="nc" id="L318">        String project = Files.readString(of(&quot;.clusterfuzzlite/project.yaml&quot;));</span>
 
         // when
-<span class="nc" id="L310">        var unpinnedAction = UNPINNED_ACTION.matcher(workflow);</span>
+<span class="nc" id="L321">        var unpinnedAction = UNPINNED_ACTION.matcher(workflow);</span>
 
         // then
-<span class="nc" id="L313">        assertThat(unpinnedAction.find()).as(&quot;workflow has an unpinned action&quot;).isFalse();</span>
-<span class="nc" id="L314">        assertThat(dockerfile)</span>
-<span class="nc" id="L315">                .contains(</span>
+<span class="nc" id="L324">        assertThat(unpinnedAction.find()).as(&quot;workflow has an unpinned action&quot;).isFalse();</span>
+<span class="nc" id="L325">        assertThat(dockerfile)</span>
+<span class="nc" id="L326">                .contains(</span>
                         &quot;COPY --from=jdk /opt/java/openjdk/ \&quot;$JAVA_HOME/\&quot;&quot;,
                         &quot;FROM gcr.io/oss-fuzz-base/base-builder-jvm@sha256:&quot;,
                         &quot;COPY . /src/symphony-trello&quot;,
                         &quot;COPY .clusterfuzzlite/build.sh /src/build.sh&quot;)
-<span class="nc" id="L320">                .doesNotContain(&quot;git clone&quot;, &quot;api.adoptium.net/v3/binary/latest&quot;);</span>
-<span class="nc" id="L321">        assertThat(dockerfile).containsPattern(PINNED_TEMURIN_IMAGE);</span>
-<span class="nc" id="L322">        assertThat(coverageDockerfile)</span>
-<span class="nc" id="L323">                .contains(</span>
+<span class="nc" id="L331">                .doesNotContain(&quot;git clone&quot;, &quot;api.adoptium.net/v3/binary/latest&quot;);</span>
+<span class="nc" id="L332">        assertThat(dockerfile).containsPattern(PINNED_TEMURIN_IMAGE);</span>
+<span class="nc" id="L333">        assertThat(coverageDockerfile)</span>
+<span class="nc" id="L334">                .contains(</span>
                         &quot;FROM gcr.io/oss-fuzz-base/clusterfuzzlite-run-fuzzers:v1@sha256:&quot;,
                         &quot;COPY org.jacoco.agent-*-runtime.jar /opt/jacoco-agent.jar&quot;,
                         &quot;COPY org.jacoco.cli-*-nodeps.jar /opt/jacoco-cli.jar&quot;)
-<span class="nc" id="L327">                .doesNotContain(&quot;clusterfuzzlite-run-fuzzers:v1\n&quot;);</span>
-<span class="nc" id="L328">        assertThat(ossFuzzDockerfile)</span>
-<span class="nc" id="L329">                .containsPattern(PINNED_TEMURIN_IMAGE)</span>
-<span class="nc" id="L330">                .contains(&quot;COPY --from=jdk /opt/java/openjdk/ \&quot;$JAVA_HOME/\&quot;&quot;)</span>
-<span class="nc" id="L331">                .doesNotContain(&quot;api.adoptium.net/v3/binary/latest&quot;);</span>
-<span class="nc" id="L332">        assertThat(buildScript).contains(&quot;bash \&quot;$SRC/symphony-trello/oss-fuzz/build.sh\&quot;&quot;);</span>
-<span class="nc" id="L333">        assertThat(OSS_FUZZ_BUILD)</span>
-<span class="nc" id="L334">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L335">                .as(&quot;the standalone fuzzers call these test helpers, so OSS-Fuzz must package them&quot;)</span>
-<span class="nc" id="L336">                .contains(</span>
+<span class="nc" id="L338">                .doesNotContain(&quot;clusterfuzzlite-run-fuzzers:v1\n&quot;);</span>
+<span class="nc" id="L339">        assertThat(ossFuzzDockerfile)</span>
+<span class="nc" id="L340">                .containsPattern(PINNED_TEMURIN_IMAGE)</span>
+<span class="nc" id="L341">                .contains(&quot;COPY --from=jdk /opt/java/openjdk/ \&quot;$JAVA_HOME/\&quot;&quot;)</span>
+<span class="nc" id="L342">                .doesNotContain(&quot;api.adoptium.net/v3/binary/latest&quot;);</span>
+<span class="nc" id="L343">        assertThat(buildScript).contains(&quot;bash \&quot;$SRC/symphony-trello/oss-fuzz/build.sh\&quot;&quot;);</span>
+<span class="nc" id="L344">        assertThat(OSS_FUZZ_BUILD)</span>
+<span class="nc" id="L345">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L346">                .as(&quot;the standalone fuzzers call these test helpers, so OSS-Fuzz must package them&quot;)</span>
+<span class="nc" id="L347">                .contains(</span>
                         &quot;  TestCards\n&quot;,
                         &quot;agent/TrelloHandoffToolFuzzInvariants&quot;,
                         &quot;testsupport/TestRepositoryUris&quot;,
                         &quot;tracker/InMemoryTrelloBoard&quot;,
                         &quot;tracker/TrelloReferenceFuzzInvariants&quot;);
-<span class="nc" id="L342">        assertThat(project).contains(&quot;language: jvm&quot;);</span>
-<span class="nc" id="L343">    }</span>
+<span class="nc" id="L353">        assertThat(project).contains(&quot;language: jvm&quot;);</span>
+<span class="nc" id="L354">    }</span>
 
     @Test
     void fuzzerJvmGrantsJazzerNativeAccessAndChecksTheUnsafeWorkaroundForExpiry() throws IOException {
         // given
-<span class="nc" id="L348">        String ossFuzzBuild = Files.readString(OSS_FUZZ_BUILD);</span>
-<span class="nc" id="L349">        String clusterFuzzLiteBuild = Files.readString(of(&quot;.clusterfuzzlite/build.sh&quot;));</span>
+<span class="nc" id="L359">        String ossFuzzBuild = Files.readString(OSS_FUZZ_BUILD);</span>
+<span class="nc" id="L360">        String clusterFuzzLiteBuild = Files.readString(of(&quot;.clusterfuzzlite/build.sh&quot;));</span>
 
         // when
-<span class="nc" id="L352">        String expiryCheck = Files.readString(of(UNSAFE_WORKAROUND_EXPIRY_CHECK));</span>
+<span class="nc" id="L363">        String expiryCheck = Files.readString(of(UNSAFE_WORKAROUND_EXPIRY_CHECK));</span>
 
         // then
-<span class="nc" id="L355">        assertThat(ossFuzzBuild)</span>
-<span class="nc" id="L356">                .contains(</span>
+<span class="nc" id="L366">        assertThat(ossFuzzBuild)</span>
+<span class="nc" id="L367">                .contains(</span>
                         &quot;jvm_permissions='--enable-native-access=ALL-UNNAMED:-Xshare\\\\:off'&quot;,
                         &quot;--sun-misc-unsafe-memory-access=\\${SYMPHONY_TRELLO_FUZZ_UNSAFE_MEMORY_ACCESS:-allow}&quot;,
                         &quot;--jvm_args=\&quot;\\$mem_settings:-Djava.awt.headless=true:\\$jvm_permissions:\\$unsafe_memory_access\&quot;&quot;);
-<span class="nc" id="L360">        assertThat(clusterFuzzLiteBuild)</span>
-<span class="nc" id="L361">                .as(&quot;the Unsafe workaround (#913) runs only together with its expiry check&quot;)</span>
-<span class="nc" id="L362">                .contains(&quot;bash \&quot;$SRC/symphony-trello/oss-fuzz/build.sh\&quot;\n&quot; + &quot;\&quot;$SRC/symphony-trello/&quot;</span>
+<span class="nc" id="L371">        assertThat(clusterFuzzLiteBuild)</span>
+<span class="nc" id="L372">                .as(&quot;the Unsafe workaround (#913) runs only together with its expiry check&quot;)</span>
+<span class="nc" id="L373">                .contains(&quot;bash \&quot;$SRC/symphony-trello/oss-fuzz/build.sh\&quot;\n&quot; + &quot;\&quot;$SRC/symphony-trello/&quot;</span>
                         + UNSAFE_WORKAROUND_EXPIRY_CHECK + &quot;\&quot;\n&quot;);
-<span class="nc" id="L364">        assertThat(expiryCheck)</span>
-<span class="nc" id="L365">                .contains(</span>
+<span class="nc" id="L375">        assertThat(expiryCheck)</span>
+<span class="nc" id="L376">                .contains(</span>
                         &quot;SYMPHONY_TRELLO_FUZZ_UNSAFE_MEMORY_ACCESS=warn&quot;,
                         &quot;WARNING: A terminally deprecated method in sun.misc.Unsafe has been called&quot;);
-<span class="nc" id="L368">    }</span>
+<span class="nc" id="L379">    }</span>
 
     @Test
     void everyStandaloneFuzzerIsWiredIntoBatchPruneAndCoverage() throws IOException {
         // given
-<span class="nc" id="L373">        Set&lt;String&gt; fuzzerNames = standaloneFuzzerNames();</span>
-<span class="nc" id="L374">        String source = workflowSource();</span>
+<span class="nc" id="L384">        Set&lt;String&gt; fuzzerNames = standaloneFuzzerNames();</span>
+<span class="nc" id="L385">        String source = workflowSource();</span>
 
         // when
-<span class="nc" id="L377">        int matrixStart = source.indexOf(&quot;      matrix:&quot;);</span>
-<span class="nc" id="L378">        String batchMatrix = source.substring(matrixStart, source.indexOf(&quot;    concurrency:&quot;, matrixStart));</span>
-<span class="nc" id="L379">        String prunedCorpora = source.substring(</span>
-<span class="nc" id="L380">                source.indexOf(&quot;          scripts/verify-clusterfuzzlite-storage corpus&quot;),</span>
-<span class="nc" id="L381">                source.indexOf(&quot;  coverage:&quot;));</span>
+<span class="nc" id="L388">        int matrixStart = source.indexOf(&quot;      matrix:&quot;);</span>
+<span class="nc" id="L389">        String batchMatrix = source.substring(matrixStart, source.indexOf(&quot;    concurrency:&quot;, matrixStart));</span>
+<span class="nc" id="L390">        String prunedCorpora = source.substring(</span>
+<span class="nc" id="L391">                source.indexOf(&quot;          scripts/verify-clusterfuzzlite-storage corpus&quot;),</span>
+<span class="nc" id="L392">                source.indexOf(&quot;  coverage:&quot;));</span>
 
         // then
-<span class="nc" id="L384">        assertThat(fuzzerNames)</span>
-<span class="nc" id="L385">                .as(&quot;a standalone fuzzer missing from one place is never fuzzed, pruned, or coverage-checked&quot;)</span>
-<span class="nc" id="L386">                .allSatisfy(fuzzer -&gt; {</span>
-<span class="nc" id="L387">                    assertThat(batchMatrix).as(&quot;batch matrix&quot;).contains(&quot;- &quot; + fuzzer + &quot;\n&quot;);</span>
-<span class="nc" id="L388">                    assertThat(prunedCorpora).as(&quot;pruned corpus verification&quot;).contains(&quot; &quot; + fuzzer + &quot;\n&quot;);</span>
-<span class="nc" id="L389">                    assertThat(COVERAGE_VERIFIER)</span>
-<span class="nc" id="L390">                            .as(&quot;coverage contract&quot;)</span>
-<span class="nc" id="L391">                            .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L392">                            .contains(&quot;\&quot;&quot; + fuzzer + &quot;|&quot;);</span>
-<span class="nc" id="L393">                });</span>
-<span class="nc" id="L394">    }</span>
+<span class="nc" id="L395">        assertThat(fuzzerNames)</span>
+<span class="nc" id="L396">                .as(&quot;a standalone fuzzer missing from one place is never fuzzed, pruned, or coverage-checked&quot;)</span>
+<span class="nc" id="L397">                .allSatisfy(fuzzer -&gt; {</span>
+<span class="nc" id="L398">                    assertThat(batchMatrix).as(&quot;batch matrix&quot;).contains(&quot;- &quot; + fuzzer + &quot;\n&quot;);</span>
+<span class="nc" id="L399">                    assertThat(prunedCorpora).as(&quot;pruned corpus verification&quot;).contains(&quot; &quot; + fuzzer + &quot;\n&quot;);</span>
+<span class="nc" id="L400">                    assertThat(TARGET_SELECTOR)</span>
+<span class="nc" id="L401">                            .as(&quot;target budget&quot;)</span>
+<span class="nc" id="L402">                            .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L403">                            .contains(&quot;[&quot; + fuzzer + &quot;]=&quot;);</span>
+<span class="nc" id="L404">                    assertThat(COVERAGE_VERIFIER)</span>
+<span class="nc" id="L405">                            .as(&quot;coverage contract&quot;)</span>
+<span class="nc" id="L406">                            .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L407">                            .contains(&quot;\&quot;&quot; + fuzzer + &quot;|&quot;);</span>
+<span class="nc" id="L408">                });</span>
+<span class="nc" id="L409">    }</span>
+
+    @Test
+    void ossFuzzBuildCopiesEveryTestHelperAStandaloneFuzzerImports() throws IOException {
+        // given
+<span class="nc" id="L414">        Set&lt;String&gt; importedTestHelpers = testClassesImportedByStandaloneFuzzers();</span>
+<span class="nc" id="L415">        String ossFuzzBuild = Files.readString(OSS_FUZZ_BUILD);</span>
+
+        // when
+<span class="nc" id="L418">        Set&lt;String&gt; copiedTestHelpers = copiedTestHelpers(ossFuzzBuild);</span>
+
+        // then
+<span class="nc" id="L421">        assertThat(importedTestHelpers)</span>
+<span class="nc" id="L422">                .as(&quot;a test helper missing from the OSS-Fuzz class path fails its fuzzer when the class loads&quot;)</span>
+<span class="nc" id="L423">                .isNotEmpty()</span>
+<span class="nc" id="L424">                .isSubsetOf(copiedTestHelpers);</span>
+<span class="nc" id="L425">    }</span>
 
     @Test
     void everyStandaloneFuzzerHasASeedCorpus() throws IOException {
         // given
-<span class="nc" id="L399">        Path corpora = of(&quot;oss-fuzz/corpora&quot;);</span>
+<span class="nc" id="L430">        Path corpora = of(&quot;oss-fuzz/corpora&quot;);</span>
 
         // when
-<span class="nc" id="L402">        Set&lt;String&gt; fuzzerNames = standaloneFuzzerNames();</span>
-<span class="nc" id="L403">        Map&lt;String, Integer&gt; seedCounts = new TreeMap&lt;&gt;();</span>
-<span class="nc" id="L404">        try (var directories = Files.newDirectoryStream(corpora)) {</span>
-<span class="nc bnc" id="L405" title="All 2 branches missed.">            for (Path directory : directories) {</span>
-<span class="nc bnc" id="L406" title="All 2 branches missed.">                if (!Files.isDirectory(directory)) {</span>
-<span class="nc" id="L407">                    continue;</span>
+<span class="nc" id="L433">        Set&lt;String&gt; fuzzerNames = standaloneFuzzerNames();</span>
+<span class="nc" id="L434">        Map&lt;String, Integer&gt; seedCounts = new TreeMap&lt;&gt;();</span>
+<span class="nc" id="L435">        try (var directories = Files.newDirectoryStream(corpora)) {</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">            for (Path directory : directories) {</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">                if (!Files.isDirectory(directory)) {</span>
+<span class="nc" id="L438">                    continue;</span>
                 }
                 int count;
-<span class="nc" id="L410">                try (var seeds = Files.list(directory)) {</span>
-<span class="nc" id="L411">                    count = Math.toIntExact(seeds.count());</span>
+<span class="nc" id="L441">                try (var seeds = Files.list(directory)) {</span>
+<span class="nc" id="L442">                    count = Math.toIntExact(seeds.count());</span>
                 }
-<span class="nc" id="L413">                seedCounts.put(directory.getFileName().toString(), count);</span>
-<span class="nc" id="L414">            }</span>
+<span class="nc" id="L444">                seedCounts.put(directory.getFileName().toString(), count);</span>
+<span class="nc" id="L445">            }</span>
         }
 
         // then
-<span class="nc" id="L418">        assertThat(seedCounts).hasSameSizeAs(fuzzerNames).doesNotContainValue(0);</span>
-<span class="nc" id="L419">        assertThat(seedCounts.keySet())</span>
-<span class="nc" id="L420">                .as(&quot;every standalone fuzzer has exactly one corpus directory&quot;)</span>
-<span class="nc" id="L421">                .containsExactlyElementsOf(fuzzerNames);</span>
-<span class="nc" id="L422">    }</span>
+<span class="nc" id="L449">        assertThat(seedCounts).hasSameSizeAs(fuzzerNames).doesNotContainValue(0);</span>
+<span class="nc" id="L450">        assertThat(seedCounts.keySet())</span>
+<span class="nc" id="L451">                .as(&quot;every standalone fuzzer has exactly one corpus directory&quot;)</span>
+<span class="nc" id="L452">                .containsExactlyElementsOf(fuzzerNames);</span>
+<span class="nc" id="L453">    }</span>
 
     private static Set&lt;String&gt; standaloneFuzzerNames() throws IOException {
-<span class="nc" id="L425">        Set&lt;String&gt; fuzzerNames = new TreeSet&lt;&gt;();</span>
-<span class="nc" id="L426">        try (var sources = Files.newDirectoryStream(STANDALONE_FUZZERS, &quot;*Fuzzer.java&quot;)) {</span>
-<span class="nc bnc" id="L427" title="All 2 branches missed.">            for (Path source : sources) {</span>
-<span class="nc" id="L428">                fuzzerNames.add(source.getFileName().toString().replace(&quot;.java&quot;, &quot;&quot;));</span>
-<span class="nc" id="L429">            }</span>
+<span class="nc" id="L456">        Set&lt;String&gt; fuzzerNames = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L457">        try (var sources = Files.newDirectoryStream(STANDALONE_FUZZERS, &quot;*Fuzzer.java&quot;)) {</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">            for (Path source : sources) {</span>
+<span class="nc" id="L459">                fuzzerNames.add(source.getFileName().toString().replace(&quot;.java&quot;, &quot;&quot;));</span>
+<span class="nc" id="L460">            }</span>
         }
-<span class="nc" id="L431">        return fuzzerNames;</span>
+<span class="nc" id="L462">        return fuzzerNames;</span>
+    }
+
+    // Class files under target/test-classes, for example ch/fmartin/symphony/trello/tracker/X.class.
+    private static Set&lt;String&gt; testClassesImportedByStandaloneFuzzers() throws IOException {
+<span class="nc" id="L467">        Set&lt;String&gt; testClasses = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L468">        try (var sources = Files.newDirectoryStream(STANDALONE_FUZZERS, &quot;*Fuzzer.java&quot;)) {</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">            for (Path source : sources) {</span>
+<span class="nc" id="L470">                Matcher projectImport = PROJECT_IMPORT.matcher(Files.readString(source));</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">                while (projectImport.find()) {</span>
+<span class="nc" id="L472">                    testClassOf(projectImport.group(1)).ifPresent(testClasses::add);</span>
+                }
+<span class="nc" id="L474">            }</span>
+        }
+<span class="nc" id="L476">        return testClasses;</span>
+    }
+
+    // A static import names a member, so drop trailing segments until a test source matches.
+    private static Optional&lt;String&gt; testClassOf(String importedName) {
+<span class="nc bnc" id="L481" title="All 2 branches missed.">        for (String name = importedName; name.contains(&quot;.&quot;); name = name.substring(0, name.lastIndexOf('.'))) {</span>
+<span class="nc" id="L482">            String classPath = name.replace('.', '/');</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">            if (Files.isRegularFile(TEST_SOURCES.resolve(classPath + &quot;.java&quot;))) {</span>
+<span class="nc" id="L484">                return Optional.of(classPath + &quot;.class&quot;);</span>
+            }
+        }
+<span class="nc" id="L487">        return Optional.empty();</span>
+    }
+
+    private static Set&lt;String&gt; copiedTestHelpers(String ossFuzzBuild) throws IOException {
+<span class="nc" id="L491">        int start = ossFuzzBuild.indexOf(&quot;fuzzer_helpers=(\n&quot;);</span>
+<span class="nc" id="L492">        int end = ossFuzzBuild.indexOf(&quot;\n)&quot;, start);</span>
+<span class="nc" id="L493">        Matcher copy = COPIED_TEST_HELPERS.matcher(ossFuzzBuild.substring(start, end));</span>
+<span class="nc" id="L494">        Set&lt;String&gt; helpers = new HashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">        while (copy.find()) {</span>
+<span class="nc" id="L496">            helpers.add(&quot;ch/fmartin/symphony/trello/&quot; + copy.group(1) + &quot;.class&quot;);</span>
+        }
+<span class="nc bnc" id="L498" title="All 2 branches missed.">        if (ossFuzzBuild.contains(&quot;cp -R \&quot;$fuzzer_class_dir\&quot; \&quot;$OUT/test-classes/ch/fmartin/symphony/trello/\&quot;&quot;)) {</span>
+<span class="nc" id="L499">            try (var sources = Files.newDirectoryStream(STANDALONE_FUZZERS, &quot;*.java&quot;)) {</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">                for (Path source : sources) {</span>
+<span class="nc" id="L501">                    String classPath =</span>
+<span class="nc" id="L502">                            TEST_SOURCES.relativize(source).toString().replace('\\', '/');</span>
+<span class="nc" id="L503">                    helpers.add(classPath.substring(0, classPath.length() - &quot;.java&quot;.length()) + &quot;.class&quot;);</span>
+<span class="nc" id="L504">                }</span>
+            }
+        }
+<span class="nc" id="L507">        return helpers;</span>
     }
 
     private static String workflowSource() throws IOException {
-<span class="nc" id="L435">        return Files.readString(WORKFLOW);</span>
+<span class="nc" id="L511">        return Files.readString(WORKFLOW);</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

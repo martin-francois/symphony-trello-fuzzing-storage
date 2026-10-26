@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodexModelPickerTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">CodexModelPickerTest.java</span></div><h1>CodexModelPickerTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_LINE_SEPARATOR;
+import static ch.fmartin.symphony.trello.setup.TerminalInputFixture.ESCAPE;
+import static ch.fmartin.symphony.trello.testsupport.TerminalTranscriptAssertions.assertThatTranscript;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import ch.fmartin.symphony.trello.setup.CodexModelSelectionDefaults.CatalogModel;
+import ch.fmartin.symphony.trello.testsupport.RecordingTerminal;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Stream;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L19">final class CodexModelPickerTest {</span>
+    private static final String SOL = &quot;gpt-6.1-sol&quot;;
+    private static final String TERRA = &quot;gpt-5.6-terra&quot;;
+    private static final String DAYBREAK = &quot;gpt-daybreak-blue-latest&quot;;
+    private static final String UNLISTED_MODEL = &quot;gpt-7-preview&quot;;
+<span class="nc" id="L24">    private static final List&lt;CatalogModel&gt; CATALOG = List.of(</span>
+            new CatalogModel(SOL, &quot;GPT-6.1-Sol&quot;, false),
+            new CatalogModel(TERRA, &quot;GPT-5.6-Terra&quot;, true),
+            new CatalogModel(DAYBREAK, &quot;Daybreak Blue&quot;, false));
+    /// The picker lists the catalog, then the other-model choice; the current model is listed.
+<span class="nc" id="L29">    private static final int CHOICE_COUNT = CATALOG.size() + 1;</span>
+<span class="nc" id="L30">    private static final String OTHER_MODEL_CHOICE = Integer.toString(CHOICE_COUNT);</span>
+<span class="nc" id="L31">    private static final String CHOICE_OUT_OF_RANGE = &quot;Choice must be a number between 1 and &quot; + CHOICE_COUNT + &quot;.&quot;;</span>
+    private static final String BLANK_MODEL_ID = &quot;Model ID must not be blank.&quot;;
+    private static final String UNSAFE_MODEL_ID = &quot;Model ID must not contain control characters or line breaks.&quot;;
+    /// What a line-based prompt receives when the operator presses the up-arrow key.
+<span class="nc" id="L35">    private static final String ARROW_UP_KEY = ESCAPE + &quot;[A&quot;;</span>
+    private static final int TERMINAL_COLUMNS = 80;
+
+<span class="nc" id="L38">    private final CodexModelPicker picker = new CodexModelPicker();</span>
+
+    @Test
+    void listsCatalogModelsInCatalogOrderAndPreselectsTheRecommendation() throws Exception {
+        // given
+<span class="nc" id="L43">        var terminal = new RecordingTerminal(&quot;&quot;);</span>
+
+        // when
+<span class="nc" id="L46">        picker.choose(terminal, CATALOG, TERRA);</span>
+
+        // then
+<span class="nc" id="L49">        assertThatTranscript(terminal.stdout())</span>
+<span class="nc" id="L50">                .containsSectionsInOrder(</span>
+                        &quot;Models listed by the installed Codex CLI:&quot;,
+                        &quot;  1. &quot; + SOL,
+                        &quot;  2. &quot; + TERRA + &quot; (recommended)&quot;,
+                        &quot;  3. &quot; + DAYBREAK + &quot; - Daybreak Blue&quot;,
+                        &quot;  &quot; + OTHER_MODEL_CHOICE + &quot;. Other model ID&quot;,
+                        &quot;Press Enter to keep 2, type another number, or type a model ID.&quot;,
+                        &quot;Model [2]: &quot;);
+<span class="nc" id="L58">        assertThat(terminal.stdout()).doesNotContain(&quot;GPT-6.1-Sol&quot;, &quot;GPT-5.6-Terra&quot;);</span>
+<span class="nc" id="L59">    }</span>
+
+    @MethodSource(&quot;choiceScenarios&quot;)
+    @ParameterizedTest
+    void returnsTheChosenModelOrEmptyWhenTheCurrentModelIsKept(ChoiceScenario scenario) throws Exception {
+        // given
+<span class="nc" id="L65">        var terminal = new RecordingTerminal(scenario.answers().toArray(String[]::new));</span>
+
+        // when
+<span class="nc" id="L68">        Optional&lt;String&gt; chosen = picker.choose(terminal, CATALOG, TERRA);</span>
+
+        // then
+<span class="nc" id="L71">        assertThat(chosen).isEqualTo(scenario.expected());</span>
+<span class="nc" id="L72">    }</span>
+
+    @MethodSource(&quot;invalidAnswerScenarios&quot;)
+    @ParameterizedTest
+    void rejectsInvalidAnswersWithAnExpectedSetupError(InvalidAnswerScenario scenario) {
+        // given
+<span class="nc" id="L78">        var terminal = new RecordingTerminal(scenario.answers().toArray(String[]::new));</span>
+
+        // when
+<span class="nc" id="L81">        ThrowingCallable choose = () -&gt; picker.choose(terminal, CATALOG, TERRA);</span>
+
+        // then
+<span class="nc" id="L84">        assertThatThrownBy(choose)</span>
+<span class="nc" id="L85">                .isInstanceOfSatisfying(TrelloBoardSetupException.class, error -&gt; assertThat(error.code())</span>
+<span class="nc" id="L86">                        .isEqualTo(&quot;setup_invalid_choice&quot;))</span>
+<span class="nc" id="L87">                .hasMessage(scenario.message());</span>
+<span class="nc" id="L88">    }</span>
+
+    @Test
+    void marksAListedWorkflowModelAsCurrentAndPreselectsIt() throws Exception {
+        // given
+<span class="nc" id="L93">        var terminal = new RecordingTerminal(&quot;&quot;);</span>
+
+        // when
+<span class="nc" id="L96">        Optional&lt;String&gt; chosen = picker.choose(terminal, CATALOG, DAYBREAK);</span>
+
+        // then
+<span class="nc" id="L99">        assertThat(chosen).isEmpty();</span>
+<span class="nc" id="L100">        assertThatTranscript(terminal.stdout())</span>
+<span class="nc" id="L101">                .containsSectionsInOrder(</span>
+                        &quot;  2. &quot; + TERRA + &quot; (recommended)&quot;,
+                        &quot;  3. &quot; + DAYBREAK + &quot; (current) - Daybreak Blue&quot;,
+                        &quot;  &quot; + OTHER_MODEL_CHOICE + &quot;. Other model ID&quot;,
+                        &quot;Model [3]: &quot;);
+<span class="nc" id="L106">    }</span>
+
+    @Test
+    void keepsAnUnlistedWorkflowModelAsItsOwnPreselectedChoice() throws Exception {
+        // given
+<span class="nc" id="L111">        var terminal = new RecordingTerminal(&quot;4&quot;);</span>
+
+        // when
+<span class="nc" id="L114">        Optional&lt;String&gt; chosen = picker.choose(terminal, CATALOG, &quot;gpt-hand-edited&quot;);</span>
+
+        // then
+<span class="nc" id="L117">        assertThat(chosen).isEmpty();</span>
+<span class="nc" id="L118">        assertThatTranscript(terminal.stdout())</span>
+<span class="nc" id="L119">                .containsSectionsInOrder(</span>
+                        &quot;  3. &quot; + DAYBREAK + &quot; - Daybreak Blue&quot;,
+                        &quot;  4. gpt-hand-edited (current, not listed by Codex)&quot;,
+                        &quot;  5. Other model ID&quot;,
+                        &quot;Model [4]: &quot;);
+<span class="nc" id="L124">    }</span>
+
+    @Test
+    void offersToKeepAnOmittedWorkflowModel() throws Exception {
+        // given
+<span class="nc" id="L129">        var terminal = new RecordingTerminal(&quot;&quot;);</span>
+
+        // when
+<span class="nc" id="L132">        Optional&lt;String&gt; chosen = picker.choose(terminal, CATALOG, null);</span>
+
+        // then
+<span class="nc" id="L135">        assertThat(chosen).isEmpty();</span>
+<span class="nc" id="L136">        assertThatTranscript(terminal.stdout())</span>
+<span class="nc" id="L137">                .containsSectionsInOrder(</span>
+                        &quot;  2. &quot; + TERRA + &quot; (recommended)&quot;,
+                        &quot;  4. Keep the workflow default (Codex chooses the model)&quot;,
+                        &quot;  5. Other model ID&quot;,
+                        &quot;Model [4]: &quot;);
+<span class="nc" id="L142">    }</span>
+
+    @Test
+    void shortensLongDisplayNamesSoPickerLinesFitAnEightyColumnTerminal() throws Exception {
+        // given
+<span class="nc" id="L147">        String longDisplayName = &quot;Experimental research preview with a very long marketing name&quot;;</span>
+<span class="nc" id="L148">        var terminal = new RecordingTerminal(&quot;&quot;);</span>
+
+        // when
+<span class="nc" id="L151">        picker.choose(terminal, List.of(new CatalogModel(&quot;gpt-long&quot;, longDisplayName, true)), &quot;gpt-long&quot;);</span>
+
+        // then
+<span class="nc" id="L154">        assertThat(terminal.stdout())</span>
+<span class="nc" id="L155">                .contains(&quot;  1. gpt-long (recommended) - Experimental research preview with a...&quot;)</span>
+<span class="nc" id="L156">                .doesNotContain(longDisplayName);</span>
+<span class="nc" id="L157">        assertThat(terminal.stdout().split(&quot;\\R&quot;))</span>
+<span class="nc" id="L158">                .allSatisfy(line -&gt; assertThat(line).hasSizeLessThanOrEqualTo(TERMINAL_COLUMNS));</span>
+<span class="nc" id="L159">    }</span>
+
+    private static Stream&lt;ChoiceScenario&gt; choiceScenarios() {
+<span class="nc" id="L162">        return Stream.of(</span>
+<span class="nc" id="L163">                new ChoiceScenario(&quot;Enter keeps the preselected model&quot;, List.of(&quot;&quot;), Optional.empty()),</span>
+<span class="nc" id="L164">                new ChoiceScenario(&quot;end of input keeps the preselected model&quot;, List.of(), Optional.empty()),</span>
+<span class="nc" id="L165">                new ChoiceScenario(&quot;a number selects a listed model&quot;, List.of(&quot;1&quot;), Optional.of(SOL)),</span>
+<span class="nc" id="L166">                new ChoiceScenario(&quot;a padded number selects a listed model&quot;, List.of(&quot; 3 &quot;), Optional.of(DAYBREAK)),</span>
+<span class="nc" id="L167">                new ChoiceScenario(&quot;the preselected number keeps the model&quot;, List.of(&quot;2&quot;), Optional.empty()),</span>
+<span class="nc" id="L168">                new ChoiceScenario(&quot;a typed listed model id selects it&quot;, List.of(SOL), Optional.of(SOL)),</span>
+                new ChoiceScenario(
+<span class="nc" id="L170">                        &quot;a typed unlisted model id is accepted&quot;, List.of(UNLISTED_MODEL), Optional.of(UNLISTED_MODEL)),</span>
+                new ChoiceScenario(
+                        &quot;the other-model choice asks for a model id&quot;,
+<span class="nc" id="L173">                        List.of(OTHER_MODEL_CHOICE, UNLISTED_MODEL),</span>
+<span class="nc" id="L174">                        Optional.of(UNLISTED_MODEL)),</span>
+                new ChoiceScenario(
+                        &quot;the other-model choice with the current model keeps it&quot;,
+<span class="nc" id="L177">                        List.of(OTHER_MODEL_CHOICE, TERRA),</span>
+<span class="nc" id="L178">                        Optional.empty()));</span>
+    }
+
+    private static Stream&lt;InvalidAnswerScenario&gt; invalidAnswerScenarios() {
+<span class="nc" id="L182">        return Stream.of(</span>
+                new InvalidAnswerScenario(
+<span class="nc" id="L184">                        &quot;a number above the list&quot;, List.of(Integer.toString(CHOICE_COUNT + 1)), CHOICE_OUT_OF_RANGE),</span>
+<span class="nc" id="L185">                new InvalidAnswerScenario(&quot;zero&quot;, List.of(&quot;0&quot;), CHOICE_OUT_OF_RANGE),</span>
+<span class="nc" id="L186">                new InvalidAnswerScenario(&quot;a blank other model id&quot;, List.of(OTHER_MODEL_CHOICE, &quot; &quot;), BLANK_MODEL_ID),</span>
+                new InvalidAnswerScenario(
+<span class="nc" id="L188">                        &quot;end of input at the other model id&quot;, List.of(OTHER_MODEL_CHOICE), BLANK_MODEL_ID),</span>
+<span class="nc" id="L189">                new InvalidAnswerScenario(&quot;an arrow-key escape sequence&quot;, List.of(ARROW_UP_KEY), UNSAFE_MODEL_ID),</span>
+<span class="nc" id="L190">                new InvalidAnswerScenario(&quot;a leading tab&quot;, List.of(&quot;\t&quot; + UNLISTED_MODEL), UNSAFE_MODEL_ID),</span>
+<span class="nc" id="L191">                new InvalidAnswerScenario(&quot;a trailing tab&quot;, List.of(UNLISTED_MODEL + &quot;\t&quot;), UNSAFE_MODEL_ID),</span>
+                new InvalidAnswerScenario(
+<span class="nc" id="L193">                        &quot;a leading line separator&quot;, List.of(UNICODE_LINE_SEPARATOR + UNLISTED_MODEL), UNSAFE_MODEL_ID),</span>
+                new InvalidAnswerScenario(
+                        &quot;a trailing line separator&quot;,
+<span class="nc" id="L196">                        List.of(UNLISTED_MODEL + UNICODE_LINE_SEPARATOR),</span>
+                        UNSAFE_MODEL_ID));
+    }
+
+<span class="nc" id="L200">    private record ChoiceScenario(String name, List&lt;String&gt; answers, Optional&lt;String&gt; expected) {</span>
+        @Override
+        public String toString() {
+<span class="nc" id="L203">            return name;</span>
+        }
+    }
+
+<span class="nc" id="L207">    private record InvalidAnswerScenario(String name, List&lt;String&gt; answers, String message) {</span>
+        @Override
+        public String toString() {
+<span class="nc" id="L210">            return name;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

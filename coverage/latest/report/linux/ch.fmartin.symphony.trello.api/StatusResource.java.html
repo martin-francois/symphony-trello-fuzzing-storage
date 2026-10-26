@@ -16,13 +16,16 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.math.BigDecimal;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
 
 @Path(&quot;/&quot;)
 public class StatusResource {
@@ -30,6 +33,8 @@ public class StatusResource {
     // the resource class in Allow, which wrongly offers POST on the read-only routes.
     private static final String READ_ONLY_ALLOW = &quot;GET, HEAD, OPTIONS&quot;;
     private static final String REFRESH_ALLOW = &quot;OPTIONS, POST&quot;;
+    /// Decimal places that turn a millisecond count into seconds.
+    private static final int MILLIS_SCALE = 3;
 
     private final SymphonyOrchestrator orchestrator;
     private final BooleanSupplier loopbackClient;
@@ -39,29 +44,29 @@ public class StatusResource {
     RoutingContext routingContext;
 
     public StatusResource(SymphonyOrchestrator orchestrator) {
-<span class="nc" id="L42">        this(orchestrator, null, ApplicationClock.systemUtc());</span>
-<span class="nc" id="L43">    }</span>
+<span class="nc" id="L47">        this(orchestrator, null, ApplicationClock.systemUtc());</span>
+<span class="nc" id="L48">    }</span>
 
     @Inject
     public StatusResource(SymphonyOrchestrator orchestrator, Clock clock) {
-<span class="nc" id="L47">        this(orchestrator, null, clock);</span>
-<span class="nc" id="L48">    }</span>
+<span class="nc" id="L52">        this(orchestrator, null, clock);</span>
+<span class="nc" id="L53">    }</span>
 
     StatusResource(SymphonyOrchestrator orchestrator, BooleanSupplier loopbackClient) {
-<span class="nc" id="L51">        this(orchestrator, loopbackClient, ApplicationClock.systemUtc());</span>
-<span class="nc" id="L52">    }</span>
+<span class="nc" id="L56">        this(orchestrator, loopbackClient, ApplicationClock.systemUtc());</span>
+<span class="nc" id="L57">    }</span>
 
-<span class="nc" id="L54">    StatusResource(SymphonyOrchestrator orchestrator, BooleanSupplier loopbackClient, Clock clock) {</span>
-<span class="nc" id="L55">        this.orchestrator = orchestrator;</span>
-<span class="nc" id="L56">        this.loopbackClient = loopbackClient;</span>
-<span class="nc" id="L57">        this.clock = clock;</span>
-<span class="nc" id="L58">    }</span>
+<span class="nc" id="L59">    StatusResource(SymphonyOrchestrator orchestrator, BooleanSupplier loopbackClient, Clock clock) {</span>
+<span class="nc" id="L60">        this.orchestrator = orchestrator;</span>
+<span class="nc" id="L61">        this.loopbackClient = loopbackClient;</span>
+<span class="nc" id="L62">        this.clock = clock;</span>
+<span class="nc" id="L63">    }</span>
 
     @GET
     @Produces(MediaType.TEXT_HTML)
     public String index() {
-<span class="nc" id="L63">        var snapshot = orchestrator.snapshot();</span>
-<span class="nc" id="L64">        return &quot;&quot;&quot;</span>
+<span class="nc" id="L68">        var snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L69">        return &quot;&quot;&quot;</span>
                 &lt;!doctype html&gt;
                 &lt;html lang=&quot;en&quot;&gt;
                 &lt;head&gt;
@@ -79,6 +84,7 @@ public class StatusResource {
                   &lt;h1&gt;Symphony for Trello&lt;/h1&gt;
                   &lt;p&gt;&lt;code&gt;%s&lt;/code&gt; running, &lt;code&gt;%s&lt;/code&gt; retrying.&lt;/p&gt;
                   %s
+                  %s
                   &lt;table&gt;
                     &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Card&lt;/th&gt;&lt;th&gt;State&lt;/th&gt;&lt;th&gt;Session&lt;/th&gt;&lt;th&gt;Last event&lt;/th&gt;&lt;th&gt;Turns&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
                     &lt;tbody&gt;%s&lt;/tbody&gt;
@@ -86,54 +92,77 @@ public class StatusResource {
                 &lt;/body&gt;
                 &lt;/html&gt;
                 &quot;&quot;&quot;
-<span class="nc" id="L89">                .formatted(</span>
-<span class="nc" id="L90">                        snapshot.counts().running(),</span>
-<span class="nc" id="L91">                        snapshot.counts().retrying(),</span>
-<span class="nc" id="L92">                        dispatchPauseBanner(snapshot.dispatchPause()),</span>
-<span class="nc" id="L93">                        snapshot.running().stream()</span>
-<span class="nc" id="L94">                                .map(row -&gt; &quot;&lt;tr&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;/tr&gt;&quot;</span>
-<span class="nc" id="L95">                                        .formatted(</span>
-<span class="nc" id="L96">                                                escape(row.cardIdentifier()),</span>
-<span class="nc" id="L97">                                                escape(row.state()),</span>
-<span class="nc" id="L98">                                                escape(row.sessionId()),</span>
-<span class="nc" id="L99">                                                escape(row.lastEvent()),</span>
-<span class="nc" id="L100">                                                row.turnCount()))</span>
-<span class="nc" id="L101">                                .collect(Collectors.joining()));</span>
+<span class="nc" id="L95">                .formatted(</span>
+<span class="nc" id="L96">                        snapshot.counts().running(),</span>
+<span class="nc" id="L97">                        snapshot.counts().retrying(),</span>
+<span class="nc" id="L98">                        pollingLine(snapshot.polling()),</span>
+<span class="nc" id="L99">                        dispatchPauseBanner(snapshot.dispatchPause()),</span>
+<span class="nc" id="L100">                        snapshot.running().stream()</span>
+<span class="nc" id="L101">                                .map(row -&gt; &quot;&lt;tr&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;td&gt;%s&lt;/td&gt;&lt;/tr&gt;&quot;</span>
+<span class="nc" id="L102">                                        .formatted(</span>
+<span class="nc" id="L103">                                                escape(row.cardIdentifier()),</span>
+<span class="nc" id="L104">                                                escape(row.state()),</span>
+<span class="nc" id="L105">                                                escape(row.sessionId()),</span>
+<span class="nc" id="L106">                                                escape(row.lastEvent()),</span>
+<span class="nc" id="L107">                                                row.turnCount()))</span>
+<span class="nc" id="L108">                                .collect(Collectors.joining()));</span>
+    }
+
+    private static String pollingLine(RuntimeSnapshot.@Nullable Polling polling) {
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (polling == null) {</span>
+<span class="nc" id="L113">            return &quot;&quot;;</span>
+        }
+<span class="nc" id="L115">        String configured = seconds(polling.configuredInterval());</span>
+<span class="nc" id="L116">        return polling.slowdownReason()</span>
+<span class="nc" id="L117">                .map(reason -&gt; switch (reason) {</span>
+                    case TRELLO_RATE_LIMITED -&gt;
+<span class="nc" id="L119">                        &quot;&lt;p role=\&quot;status\&quot;&gt;Polling: configured &lt;code&gt;%s&lt;/code&gt;, currently &lt;code&gt;%s&lt;/code&gt; because Trello asked Symphony to slow down.&lt;/p&gt;&quot;</span>
+<span class="nc" id="L120">                                .formatted(configured, seconds(polling.effectiveInterval()));</span>
+                })
+<span class="nc" id="L122">                .orElseGet(() -&gt; &quot;&lt;p&gt;Polling: every &lt;code&gt;%s&lt;/code&gt; (&lt;code&gt;polling.interval_ms&lt;/code&gt;).&lt;/p&gt;&quot;</span>
+<span class="nc" id="L123">                        .formatted(configured));</span>
+    }
+
+    private static String seconds(Duration interval) {
+<span class="nc" id="L127">        return BigDecimal.valueOf(interval.toMillis(), MILLIS_SCALE)</span>
+<span class="nc" id="L128">                        .stripTrailingZeros()</span>
+<span class="nc" id="L129">                        .toPlainString()</span>
+                + &quot;s&quot;;
     }
 
     private static String dispatchPauseBanner(RuntimeSnapshot.DispatchPause pause) {
-<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (pause == null) {</span>
-<span class="nc" id="L106">            return &quot;&quot;;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">        if (pause == null) {</span>
+<span class="nc" id="L135">            return &quot;&quot;;</span>
         }
-<span class="nc" id="L108">        return &quot;&lt;p role=\&quot;status\&quot;&gt;Codex dispatch is paused (&lt;code&gt;%s&lt;/code&gt;). Detected &lt;time&gt;%s&lt;/time&gt;; next attempt &lt;time&gt;%s&lt;/time&gt;.&lt;/p&gt;&quot;</span>
-<span class="nc" id="L109">                .formatted(</span>
-<span class="nc" id="L110">                        escape(pause.code()),</span>
-<span class="nc" id="L111">                        escape(pause.detected().toString()),</span>
-<span class="nc" id="L112">                        escape(pause.until().toString()));</span>
+<span class="nc" id="L137">        return &quot;&lt;p role=\&quot;status\&quot;&gt;Codex dispatch is paused (&lt;code&gt;%s&lt;/code&gt;). Detected &lt;time&gt;%s&lt;/time&gt;; next attempt &lt;time&gt;%s&lt;/time&gt;.&lt;/p&gt;&quot;</span>
+<span class="nc" id="L138">                .formatted(</span>
+<span class="nc" id="L139">                        escape(pause.code()),</span>
+<span class="nc" id="L140">                        escape(pause.detected().toString()),</span>
+<span class="nc" id="L141">                        escape(pause.until().toString()));</span>
     }
 
     @GET
     @Path(&quot;/api/v1/state&quot;)
     @Produces(MediaType.APPLICATION_JSON)
     public Object state() {
-<span class="nc" id="L119">        return StateSnapshotResponse.from(orchestrator.snapshot());</span>
+<span class="nc" id="L148">        return StateSnapshotResponse.from(orchestrator.snapshot());</span>
     }
 
     @GET
     @Path(&quot;/api/v1/local-status&quot;)
     @Produces(MediaType.APPLICATION_JSON)
     public Object localStatus() {
-<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (!isLoopbackClient()) {</span>
-<span class="nc" id="L127">            throw new NotFoundException();</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (!isLoopbackClient()) {</span>
+<span class="nc" id="L156">            throw new NotFoundException();</span>
         }
-<span class="nc" id="L129">        Map&lt;String, Object&gt; status = new LinkedHashMap&lt;&gt;();</span>
-<span class="nc" id="L130">        status.put(&quot;boardId&quot;, orchestrator.selectedBoardId());</span>
-<span class="nc" id="L131">        status.put(&quot;configuredBoardId&quot;, orchestrator.selectedConfiguredBoardId());</span>
-<span class="nc" id="L132">        status.put(&quot;workflowPath&quot;, orchestrator.selectedWorkflowPath().toString());</span>
+<span class="nc" id="L158">        Map&lt;String, Object&gt; status = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L159">        status.put(&quot;boardId&quot;, orchestrator.selectedBoardId());</span>
+<span class="nc" id="L160">        status.put(&quot;configuredBoardId&quot;, orchestrator.selectedConfiguredBoardId());</span>
+<span class="nc" id="L161">        status.put(&quot;workflowPath&quot;, orchestrator.selectedWorkflowPath().toString());</span>
         // Lifecycle commands use this pid to repair missing managed pid metadata for healthy
         // untracked workers.
-<span class="nc" id="L135">        status.put(&quot;pid&quot;, ProcessHandle.current().pid());</span>
-<span class="nc" id="L136">        return status;</span>
+<span class="nc" id="L164">        status.put(&quot;pid&quot;, ProcessHandle.current().pid());</span>
+<span class="nc" id="L165">        return status;</span>
     }
 
     @GET
@@ -144,33 +173,33 @@ public class StatusResource {
         // card-details lookup may report card_not_found: the segment must look like one of this
         // worker's card identifiers (configured prefix plus short link or id, or the raw
         // 24-character Trello card id fallback) before a miss counts as a missing card.
-<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (!looksLikeCardIdentifier(cardIdentifier)) {</span>
-<span class="nc" id="L148">            throw new NotFoundException(&quot;Unknown local API route.&quot;);</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (!looksLikeCardIdentifier(cardIdentifier)) {</span>
+<span class="nc" id="L177">            throw new NotFoundException(&quot;Unknown local API route.&quot;);</span>
         }
-<span class="nc" id="L150">        return orchestrator</span>
-<span class="nc" id="L151">                .cardDetails(cardIdentifier)</span>
-<span class="nc" id="L152">                .map(CardDebugDetailsResponse::from)</span>
-<span class="nc" id="L153">                .orElseThrow(() -&gt; new CardNotFoundException(&quot;Unknown card: &quot; + cardIdentifier));</span>
+<span class="nc" id="L179">        return orchestrator</span>
+<span class="nc" id="L180">                .cardDetails(cardIdentifier)</span>
+<span class="nc" id="L181">                .map(CardDebugDetailsResponse::from)</span>
+<span class="nc" id="L182">                .orElseThrow(() -&gt; new CardNotFoundException(&quot;Unknown card: &quot; + cardIdentifier));</span>
     }
 
     private boolean looksLikeCardIdentifier(String segment) {
-<span class="nc" id="L157">        String prefix = orchestrator.cardIdentifierPrefix() + &quot;-&quot;;</span>
-<span class="nc bnc" id="L158" title="All 2 branches missed.">        if (segment.startsWith(prefix)) {</span>
-<span class="nc" id="L159">            String suffix = segment.substring(prefix.length());</span>
-<span class="nc bnc" id="L160" title="All 4 branches missed.">            return !suffix.isEmpty() &amp;&amp; suffix.chars().allMatch(Character::isLetterOrDigit);</span>
+<span class="nc" id="L186">        String prefix = orchestrator.cardIdentifierPrefix() + &quot;-&quot;;</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        if (segment.startsWith(prefix)) {</span>
+<span class="nc" id="L188">            String suffix = segment.substring(prefix.length());</span>
+<span class="nc bnc" id="L189" title="All 4 branches missed.">            return !suffix.isEmpty() &amp;&amp; suffix.chars().allMatch(Character::isLetterOrDigit);</span>
         }
-<span class="nc" id="L162">        return segment.matches(&quot;[0-9a-fA-F]{24}&quot;);</span>
+<span class="nc" id="L191">        return segment.matches(&quot;[0-9a-fA-F]{24}&quot;);</span>
     }
 
     @OPTIONS
     public Response indexOptions() {
-<span class="nc" id="L167">        return allowOnly(READ_ONLY_ALLOW);</span>
+<span class="nc" id="L196">        return allowOnly(READ_ONLY_ALLOW);</span>
     }
 
     @OPTIONS
     @Path(&quot;/api/v1/state&quot;)
     public Response stateOptions() {
-<span class="nc" id="L173">        return allowOnly(READ_ONLY_ALLOW);</span>
+<span class="nc" id="L202">        return allowOnly(READ_ONLY_ALLOW);</span>
     }
 
     @OPTIONS
@@ -178,63 +207,63 @@ public class StatusResource {
     public Response localStatusOptions() {
         // The local-status payload is hidden from non-loopback clients, so its OPTIONS answer
         // must not reveal the endpoint either.
-<span class="nc bnc" id="L181" title="All 2 branches missed.">        if (!isLoopbackClient()) {</span>
-<span class="nc" id="L182">            throw new NotFoundException();</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        if (!isLoopbackClient()) {</span>
+<span class="nc" id="L211">            throw new NotFoundException();</span>
         }
-<span class="nc" id="L184">        return allowOnly(READ_ONLY_ALLOW);</span>
+<span class="nc" id="L213">        return allowOnly(READ_ONLY_ALLOW);</span>
     }
 
     @OPTIONS
     @Path(&quot;/api/v1/refresh&quot;)
     public Response refreshOptions() {
-<span class="nc" id="L190">        return allowOnly(REFRESH_ALLOW);</span>
+<span class="nc" id="L219">        return allowOnly(REFRESH_ALLOW);</span>
     }
 
     private static Response allowOnly(String allow) {
-<span class="nc" id="L194">        return Response.ok().header(HttpHeaders.ALLOW, allow).build();</span>
+<span class="nc" id="L223">        return Response.ok().header(HttpHeaders.ALLOW, allow).build();</span>
     }
 
     @POST
     @Path(&quot;/api/v1/refresh&quot;)
     @Produces(MediaType.APPLICATION_JSON)
     public Response refresh() {
-<span class="nc" id="L201">        orchestrator.requestRefresh();</span>
-<span class="nc" id="L202">        return Response.accepted(Map.of(</span>
+<span class="nc" id="L230">        orchestrator.requestRefresh();</span>
+<span class="nc" id="L231">        return Response.accepted(Map.of(</span>
                         &quot;queued&quot;,
-<span class="nc" id="L204">                        true,</span>
+<span class="nc" id="L233">                        true,</span>
                         &quot;coalesced&quot;,
-<span class="nc" id="L206">                        false,</span>
+<span class="nc" id="L235">                        false,</span>
                         &quot;requested_at&quot;,
-<span class="nc" id="L208">                        clock.instant(),</span>
+<span class="nc" id="L237">                        clock.instant(),</span>
                         &quot;operations&quot;,
                         new String[] {&quot;poll&quot;, &quot;reconcile&quot;}))
-<span class="nc" id="L211">                .build();</span>
+<span class="nc" id="L240">                .build();</span>
     }
 
     private static String escape(String value) {
-<span class="nc bnc" id="L215" title="All 2 branches missed.">        if (value == null) {</span>
-<span class="nc" id="L216">            return &quot;&quot;;</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L245">            return &quot;&quot;;</span>
         }
-<span class="nc" id="L218">        return value.replace(&quot;&amp;&quot;, &quot;&amp;amp;&quot;).replace(&quot;&lt;&quot;, &quot;&amp;lt;&quot;).replace(&quot;&gt;&quot;, &quot;&amp;gt;&quot;);</span>
+<span class="nc" id="L247">        return value.replace(&quot;&amp;&quot;, &quot;&amp;amp;&quot;).replace(&quot;&lt;&quot;, &quot;&amp;lt;&quot;).replace(&quot;&gt;&quot;, &quot;&amp;gt;&quot;);</span>
     }
 
     private boolean isLoopbackClient() {
-<span class="nc bnc" id="L222" title="All 2 branches missed.">        if (loopbackClient != null) {</span>
-<span class="nc" id="L223">            return loopbackClient.getAsBoolean();</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">        if (loopbackClient != null) {</span>
+<span class="nc" id="L252">            return loopbackClient.getAsBoolean();</span>
         }
-<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (routingContext == null</span>
-<span class="nc bnc" id="L226" title="All 2 branches missed.">                || routingContext.request() == null</span>
-<span class="nc bnc" id="L227" title="All 2 branches missed.">                || routingContext.request().remoteAddress() == null) {</span>
-<span class="nc" id="L228">            return false;</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        if (routingContext == null</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                || routingContext.request() == null</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                || routingContext.request().remoteAddress() == null) {</span>
+<span class="nc" id="L257">            return false;</span>
         }
-<span class="nc" id="L230">        String hostAddress = routingContext.request().remoteAddress().hostAddress();</span>
-<span class="nc bnc" id="L231" title="All 4 branches missed.">        if (hostAddress == null || hostAddress.isBlank()) {</span>
-<span class="nc" id="L232">            return false;</span>
+<span class="nc" id="L259">        String hostAddress = routingContext.request().remoteAddress().hostAddress();</span>
+<span class="nc bnc" id="L260" title="All 4 branches missed.">        if (hostAddress == null || hostAddress.isBlank()) {</span>
+<span class="nc" id="L261">            return false;</span>
         }
         try {
-<span class="nc" id="L235">            return InetAddress.getByName(hostAddress).isLoopbackAddress();</span>
-<span class="nc" id="L236">        } catch (UnknownHostException ignored) {</span>
-<span class="nc" id="L237">            return false;</span>
+<span class="nc" id="L264">            return InetAddress.getByName(hostAddress).isLoopbackAddress();</span>
+<span class="nc" id="L265">        } catch (UnknownHostException ignored) {</span>
+<span class="nc" id="L266">            return false;</span>
         }
     }
 }

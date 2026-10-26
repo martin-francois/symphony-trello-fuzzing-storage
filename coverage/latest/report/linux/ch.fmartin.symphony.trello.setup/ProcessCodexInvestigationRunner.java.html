@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProcessCodexInvestigationRunner.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">ProcessCodexInvestigationRunner.java</span></div><h1>ProcessCodexInvestigationRunner.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.process.ExecutableResolver;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.Outcome.Completed;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.Outcome.Failed;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+
+/// Runs `codex exec` as a child process for a setup-failure investigation.
+///
+/// Codex gets the prompt on standard input, writes its final answer to a JSON file that matches
+/// [CodexInvestigationFinding#jsonSchema(ObjectMapper)], and runs with the `workspace-write`
+/// sandbox so it can change only its working root, the extra writable roots, and temporary
+/// directories. `--ephemeral` keeps Codex from persisting a session log of the investigation. The
+/// Codex progress output is captured in a scratch file and deleted, because it can echo local file
+/// contents that the user did not ask to see.
+<span class="nc" id="L22">final class ProcessCodexInvestigationRunner implements CodexInvestigationRunner {</span>
+    private static final int SUCCESS_EXIT_CODE = 0;
+    private static final String STANDARD_INPUT_PROMPT = &quot;-&quot;;
+<span class="nc" id="L25">    private static final Duration TERMINATION_GRACE = Duration.ofSeconds(5);</span>
+    private static final String MARKER_VALUE = &quot;1&quot;;
+    static final String UNEXPECTED_ANSWER = &quot;Codex returned an answer in an unexpected format&quot;;
+
+<span class="nc" id="L29">    private final ObjectMapper json = new ObjectMapper();</span>
+
+    @Override
+    public Outcome investigate(Request request) {
+<span class="nc" id="L33">        Path scratch = null;</span>
+        try {
+<span class="nc" id="L35">            scratch = Files.createTempDirectory(&quot;symphony-trello-codex-&quot;);</span>
+<span class="nc" id="L36">            ScratchFiles files = ScratchFiles.in(scratch);</span>
+<span class="nc" id="L37">            Files.writeString(files.prompt(), request.prompt());</span>
+<span class="nc" id="L38">            Files.writeString(files.schema(), CodexInvestigationFinding.jsonSchema(json));</span>
+<span class="nc" id="L39">            return run(request, files);</span>
+<span class="nc" id="L40">        } catch (IOException e) {</span>
+<span class="nc" id="L41">            return new Failed(&quot;the temporary files for Codex could not be written (&quot;</span>
+<span class="nc" id="L42">                    + e.getClass().getSimpleName() + &quot;)&quot;);</span>
+        } finally {
+<span class="nc" id="L44">            deleteScratchBestEffort(scratch);</span>
+        }
+    }
+
+    private Outcome run(Request request, ScratchFiles files) throws IOException {
+        Process process;
+        try {
+<span class="nc" id="L51">            var builder = new ProcessBuilder(</span>
+<span class="nc" id="L52">                            ExecutableResolver.forCurrentProcess().launchCommand(command(request, files)))</span>
+<span class="nc" id="L53">                    .redirectInput(files.prompt().toFile())</span>
+<span class="nc" id="L54">                    .redirectErrorStream(true)</span>
+<span class="nc" id="L55">                    .redirectOutput(files.output().toFile());</span>
+<span class="nc" id="L56">            builder.environment().put(INVESTIGATION_MARKER_ENV, MARKER_VALUE);</span>
+<span class="nc" id="L57">            process = builder.start();</span>
+<span class="nc" id="L58">        } catch (IOException e) {</span>
+<span class="nc" id="L59">            return new Failed(&quot;Codex could not be started (&quot; + e.getClass().getSimpleName() + &quot;)&quot;);</span>
+<span class="nc" id="L60">        }</span>
+<span class="nc" id="L61">        var stopOnExit = new Thread(() -&gt; stop(process), &quot;codex-investigation-stop&quot;);</span>
+<span class="nc" id="L62">        Runtime.getRuntime().addShutdownHook(stopOnExit);</span>
+        try {
+<span class="nc bnc" id="L64" title="All 2 branches missed.">            if (!process.waitFor(request.timeout())) {</span>
+<span class="nc" id="L65">                stop(process);</span>
+<span class="nc" id="L66">                return new Failed(timeoutReason(request.timeout()));</span>
+            }
+<span class="nc" id="L68">            int exitCode = process.exitValue();</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">            if (exitCode != SUCCESS_EXIT_CODE) {</span>
+<span class="nc" id="L70">                return new Failed(exitCodeReason(exitCode));</span>
+            }
+<span class="nc" id="L72">            return finding(files.result());</span>
+<span class="nc" id="L73">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L74">            stop(process);</span>
+<span class="nc" id="L75">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L76">            return new Failed(&quot;Codex investigation was interrupted&quot;);</span>
+        } finally {
+<span class="nc" id="L78">            removeShutdownHookUnlessExiting(stopOnExit);</span>
+        }
+    }
+
+    static String timeoutReason(Duration timeout) {
+<span class="nc" id="L83">        return &quot;Codex did not finish within &quot; + CodexInvestigationRunner.describe(timeout);</span>
+    }
+
+    static String exitCodeReason(int exitCode) {
+<span class="nc" id="L87">        return &quot;Codex exited with code &quot; + exitCode;</span>
+    }
+
+    private static List&lt;String&gt; command(Request request, ScratchFiles files) {
+<span class="nc" id="L91">        List&lt;String&gt; arguments = new ArrayList&lt;&gt;(List.of(</span>
+                &quot;exec&quot;,
+                &quot;--sandbox&quot;,
+                &quot;workspace-write&quot;,
+                &quot;--skip-git-repo-check&quot;,
+                &quot;--ephemeral&quot;,
+                &quot;--color&quot;,
+                &quot;never&quot;,
+                &quot;--output-schema&quot;,
+<span class="nc" id="L100">                files.schema().toString(),</span>
+                &quot;--output-last-message&quot;,
+<span class="nc" id="L102">                files.result().toString(),</span>
+                &quot;--cd&quot;,
+<span class="nc" id="L104">                request.workingRoot().toString()));</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        for (Path root : request.additionalWritableRoots()) {</span>
+<span class="nc" id="L106">            arguments.add(&quot;--add-dir&quot;);</span>
+<span class="nc" id="L107">            arguments.add(root.toString());</span>
+<span class="nc" id="L108">        }</span>
+<span class="nc" id="L109">        arguments.add(STANDARD_INPUT_PROMPT);</span>
+<span class="nc" id="L110">        return List.of(request.codex().command(arguments.toArray(String[]::new)));</span>
+    }
+
+    private Outcome finding(Path result) {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        if (!Files.isRegularFile(result)) {</span>
+<span class="nc" id="L115">            return new Failed(&quot;Codex finished without an answer&quot;);</span>
+        }
+        try {
+<span class="nc" id="L118">            return CodexInvestigationFinding.parse(json.readTree(result.toFile()))</span>
+<span class="nc" id="L119">                    .&lt;Outcome&gt;map(Completed::new)</span>
+<span class="nc" id="L120">                    .orElseGet(() -&gt; new Failed(UNEXPECTED_ANSWER));</span>
+<span class="nc" id="L121">        } catch (IOException e) {</span>
+<span class="nc" id="L122">            return new Failed(UNEXPECTED_ANSWER);</span>
+        }
+    }
+
+    /// Codex starts shell commands of its own, so the whole process tree is stopped, not only the
+    /// direct child.
+    private static void stop(Process process) {
+<span class="nc" id="L129">        process.descendants().forEach(ProcessHandle::destroyForcibly);</span>
+<span class="nc" id="L130">        process.destroyForcibly();</span>
+        try {
+<span class="nc" id="L132">            process.waitFor(TERMINATION_GRACE);</span>
+<span class="nc" id="L133">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L134">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L135">        }</span>
+<span class="nc" id="L136">    }</span>
+
+    private static void removeShutdownHookUnlessExiting(Thread hook) {
+        try {
+<span class="nc" id="L140">            Runtime.getRuntime().removeShutdownHook(hook);</span>
+<span class="nc" id="L141">        } catch (IllegalStateException ignored) {</span>
+            // The JVM is already exiting, so the registered hook is about to stop Codex anyway.
+<span class="nc" id="L143">        }</span>
+<span class="nc" id="L144">    }</span>
+
+    private static void deleteScratchBestEffort(Path scratch) {
+<span class="nc bnc" id="L147" title="All 2 branches missed.">        if (scratch == null) {</span>
+<span class="nc" id="L148">            return;</span>
+        }
+<span class="nc" id="L150">        try (var entries = Files.list(scratch)) {</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            for (Path entry : entries.toList()) {</span>
+<span class="nc" id="L152">                Files.deleteIfExists(entry);</span>
+<span class="nc" id="L153">            }</span>
+<span class="nc" id="L154">            Files.deleteIfExists(scratch);</span>
+<span class="nc" id="L155">        } catch (IOException ignored) {</span>
+            // Best effort: the scratch directory holds only the sanitized prompt, the schema, and
+            // Codex output, and the OS temp cleaner removes leftovers.
+<span class="nc" id="L158">        }</span>
+<span class="nc" id="L159">    }</span>
+
+<span class="nc" id="L161">    private record ScratchFiles(Path prompt, Path schema, Path result, Path output) {</span>
+        static ScratchFiles in(Path scratch) {
+<span class="nc" id="L163">            return new ScratchFiles(</span>
+<span class="nc" id="L164">                    scratch.resolve(&quot;prompt.md&quot;),</span>
+<span class="nc" id="L165">                    scratch.resolve(&quot;schema.json&quot;),</span>
+<span class="nc" id="L166">                    scratch.resolve(&quot;result.json&quot;),</span>
+<span class="nc" id="L167">                    scratch.resolve(&quot;output.log&quot;));</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

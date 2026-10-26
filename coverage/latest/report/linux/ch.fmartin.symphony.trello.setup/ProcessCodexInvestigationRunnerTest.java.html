@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProcessCodexInvestigationRunnerTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">ProcessCodexInvestigationRunnerTest.java</span></div><h1>ProcessCodexInvestigationRunnerTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.setup.CodexInvestigationFinding.Classification;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationFinding.ValidationRun;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.Outcome;
+import ch.fmartin.symphony.trello.setup.CodexInvestigationRunner.Request;
+import ch.fmartin.symphony.trello.testsupport.BoundedWait;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+/// Runs the real process runner against a fake `codex` shell script, so the command line, the
+/// stdin prompt, the structured answer file, and the failure handling are checked at the process
+/// boundary without calling the real Codex service.
+@EnabledOnOs({OS.LINUX, OS.MAC})
+<span class="nc" id="L31">final class ProcessCodexInvestigationRunnerTest {</span>
+    private static final String PROMPT = &quot;Investigate the sanitized failure.\nSecond line.&quot;;
+<span class="nc" id="L33">    private static final Duration GENEROUS_TIMEOUT = Duration.ofMinutes(1);</span>
+    private static final long TIMEOUT_MILLIS = 300;
+    private static final long CHILD_EXIT_WAIT_SECONDS = 10;
+<span class="nc" id="L36">    private static final Duration SHUTDOWN_CHILD_LIFETIME = Duration.ofMinutes(5);</span>
+<span class="nc" id="L37">    private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(10);</span>
+    private static final int SUCCESS_EXIT_CODE = 0;
+    private static final String VALID_ANSWER =
+            &quot;&quot;&quot;
+            {&quot;classification&quot;:&quot;symphony_bug&quot;,&quot;diagnosis&quot;:&quot;Missing parent directory.&quot;,&quot;fix_applied&quot;:true,\
+            &quot;fix_summary&quot;:&quot;Create the parent directory.&quot;,&quot;changed_files&quot;:[&quot;WORKFLOW.md&quot;],\
+            &quot;validation&quot;:[{&quot;command&quot;:&quot;symphony-trello setup-local check&quot;,&quot;passed&quot;:true}],&quot;next_step&quot;:&quot;&quot;}&quot;&quot;&quot;;
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void runsCodexExecWithTheSandboxedCommandLineAndReadsTheStructuredAnswer() throws IOException {
+        // given
+<span class="nc" id="L51">        Path workingRoot = Files.createDirectories(tempDir.resolve(&quot;config&quot;));</span>
+<span class="nc" id="L52">        Path sourceCheckout = Files.createDirectories(tempDir.resolve(&quot;app&quot;));</span>
+<span class="nc" id="L53">        Path codex = fakeCodex(</span>
+                &quot;&quot;&quot;
+                printf '%%s\\n' &quot;$@&quot; &gt; &quot;%1$s/args.txt&quot;
+                cat &gt; &quot;%1$s/prompt.txt&quot;
+                printf '%%s' &quot;${SYMPHONY_TRELLO_CODEX_INVESTIGATION:-}&quot; &gt; &quot;%1$s/marker.txt&quot;
+                cp &quot;$(argument --output-schema &quot;$@&quot;)&quot; &quot;%1$s/schema.json&quot;
+                printf '%%s' '%2$s' &gt; &quot;$(argument --output-last-message &quot;$@&quot;)&quot;
+                &quot;&quot;&quot;
+<span class="nc" id="L61">                        .formatted(tempDir, VALID_ANSWER));</span>
+
+        // when
+<span class="nc" id="L64">        Outcome outcome = new ProcessCodexInvestigationRunner()</span>
+<span class="nc" id="L65">                .investigate(request(codex, workingRoot, List.of(sourceCheckout), GENEROUS_TIMEOUT));</span>
+
+        // then
+<span class="nc" id="L68">        assertThat(outcome)</span>
+<span class="nc" id="L69">                .isEqualTo(new Outcome.Completed(new CodexInvestigationFinding(</span>
+                        Classification.SYMPHONY_BUG,
+                        &quot;Missing parent directory.&quot;,
+                        true,
+                        &quot;Create the parent directory.&quot;,
+<span class="nc" id="L74">                        List.of(&quot;WORKFLOW.md&quot;),</span>
+<span class="nc" id="L75">                        List.of(new ValidationRun(&quot;symphony-trello setup-local check&quot;, true)),</span>
+                        &quot;&quot;)));
+<span class="nc" id="L77">        assertThat(Files.readAllLines(tempDir.resolve(&quot;args.txt&quot;)))</span>
+<span class="nc" id="L78">                .startsWith(</span>
+                        &quot;exec&quot;,
+                        &quot;--sandbox&quot;,
+                        &quot;workspace-write&quot;,
+                        &quot;--skip-git-repo-check&quot;,
+                        &quot;--ephemeral&quot;,
+                        &quot;--color&quot;,
+                        &quot;never&quot;,
+                        &quot;--output-schema&quot;)
+<span class="nc" id="L87">                .containsSubsequence(&quot;--cd&quot;, workingRoot.toString(), &quot;--add-dir&quot;, sourceCheckout.toString(), &quot;-&quot;)</span>
+<span class="nc" id="L88">                .endsWith(&quot;-&quot;);</span>
+<span class="nc" id="L89">        assertThat(tempDir.resolve(&quot;prompt.txt&quot;)).hasContent(PROMPT);</span>
+<span class="nc" id="L90">        assertThat(tempDir.resolve(&quot;marker.txt&quot;))</span>
+<span class="nc" id="L91">                .as(&quot;commands started by Codex must see the marker that blocks a second investigation&quot;)</span>
+<span class="nc" id="L92">                .hasContent(&quot;1&quot;);</span>
+<span class="nc" id="L93">        JsonNode schema =</span>
+<span class="nc" id="L94">                new ObjectMapper().readTree(tempDir.resolve(&quot;schema.json&quot;).toFile());</span>
+<span class="nc" id="L95">        assertThat(schema.path(&quot;required&quot;))</span>
+<span class="nc" id="L96">                .extracting(JsonNode::asText)</span>
+<span class="nc" id="L97">                .containsExactlyInAnyOrderElementsOf(propertyNames(schema));</span>
+<span class="nc" id="L98">    }</span>
+
+    @CsvSource(
+            delimiter = '|',
+            quoteCharacter = '~',
+            textBlock =
+                    &quot;&quot;&quot;
+                    exits non-zero                 | exit 3                                                             | Codex exited with code 3
+                    writes no answer               | exit 0                                                             | Codex finished without an answer
+                    writes malformed JSON          | printf 'not json' &gt; &quot;$(argument --output-last-message &quot;$@&quot;)&quot;       | Codex returned an answer in an unexpected format
+                    uses an unknown classification | printf '{&quot;classification&quot;:&quot;other&quot;}' &gt; &quot;$(argument --output-last-message &quot;$@&quot;)&quot; | Codex returned an answer in an unexpected format
+                    &quot;&quot;&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void reportsUnusableCodexRunsAsFailures(String scenario, String script, String reason) throws IOException {
+        // given
+<span class="nc" id="L113">        Path codex = fakeCodex(script);</span>
+
+        // when
+<span class="nc" id="L116">        Outcome outcome =</span>
+<span class="nc" id="L117">                new ProcessCodexInvestigationRunner().investigate(request(codex, tempDir, List.of(), GENEROUS_TIMEOUT));</span>
+
+        // then
+<span class="nc" id="L120">        assertThat(outcome).as(scenario).isEqualTo(new Outcome.Failed(reason));</span>
+<span class="nc" id="L121">    }</span>
+
+    @Test
+    void stopsCodexAndItsChildProcessWhenTheInvestigationTimesOut() throws IOException {
+        // given
+<span class="nc" id="L126">        Path childPid = tempDir.resolve(&quot;child.pid&quot;);</span>
+<span class="nc" id="L127">        Path codex = fakeCodex(&quot;sleep 30 &amp;\nprintf '%%s' \&quot;$!\&quot; &gt; \&quot;%s\&quot;\nwait&quot;.formatted(childPid));</span>
+<span class="nc" id="L128">        long startNanos = System.nanoTime();</span>
+
+        // when
+<span class="nc" id="L131">        Outcome outcome = new ProcessCodexInvestigationRunner()</span>
+<span class="nc" id="L132">                .investigate(request(codex, tempDir, List.of(), Duration.ofMillis(TIMEOUT_MILLIS)));</span>
+
+        // then
+<span class="nc" id="L135">        assertThat(outcome).isEqualTo(new Outcome.Failed(&quot;Codex did not finish within &quot; + TIMEOUT_MILLIS + &quot; ms&quot;));</span>
+<span class="nc" id="L136">        assertThat(Duration.ofNanos(System.nanoTime() - startNanos))</span>
+<span class="nc" id="L137">                .as(&quot;the runner must stop Codex instead of waiting for it to finish&quot;)</span>
+<span class="nc" id="L138">                .isLessThan(Duration.ofSeconds(20));</span>
+<span class="nc" id="L139">        assertThat(childPid)</span>
+<span class="nc" id="L140">                .as(&quot;the fake codex must have started its child process&quot;)</span>
+<span class="nc" id="L141">                .exists();</span>
+<span class="nc" id="L142">        Optional&lt;ProcessHandle&gt; child = ProcessHandle.of(Long.parseLong(Files.readString(childPid)));</span>
+<span class="nc" id="L143">        child.ifPresent(handle -&gt; handle.onExit()</span>
+<span class="nc" id="L144">                .completeOnTimeout(handle, CHILD_EXIT_WAIT_SECONDS, TimeUnit.SECONDS)</span>
+<span class="nc" id="L145">                .join());</span>
+<span class="nc" id="L146">        assertThat(child.filter(ProcessHandle::isAlive))</span>
+<span class="nc" id="L147">                .as(&quot;the child process that Codex started must be stopped with it&quot;)</span>
+<span class="nc" id="L148">                .isEmpty();</span>
+<span class="nc" id="L149">    }</span>
+
+    @Test
+    void jvmShutdownStopsCodexAndItsChildAfterTheHookIsRegistered() throws Exception {
+        // given
+<span class="nc" id="L154">        Path codexPid = tempDir.resolve(&quot;codex.pid&quot;);</span>
+<span class="nc" id="L155">        Path childPid = tempDir.resolve(&quot;shutdown-child.pid&quot;);</span>
+<span class="nc" id="L156">        Path ready = tempDir.resolve(&quot;shutdown-ready&quot;);</span>
+<span class="nc" id="L157">        Path codex = fakeCodex(</span>
+                &quot;&quot;&quot;
+                printf '%%s' &quot;$$&quot; &gt; &quot;%s&quot;
+                sleep %d &amp;
+                printf '%%s' &quot;$!&quot; &gt; &quot;%s&quot;
+                wait
+                &quot;&quot;&quot;
+<span class="nc" id="L164">                        .formatted(codexPid, SHUTDOWN_CHILD_LIFETIME.toSeconds(), childPid));</span>
+<span class="nc" id="L165">        Process helper = new ProcessBuilder(</span>
+<span class="nc" id="L166">                        Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, &quot;java&quot;).toString(),</span>
+                        &quot;-Djava.io.tmpdir=&quot; + tempDir,
+                        &quot;-cp&quot;,
+<span class="nc" id="L169">                        System.getProperty(&quot;java.class.path&quot;),</span>
+<span class="nc" id="L170">                        ShutdownProbe.class.getName(),</span>
+<span class="nc" id="L171">                        codex.toString(),</span>
+<span class="nc" id="L172">                        tempDir.toString(),</span>
+<span class="nc" id="L173">                        codexPid.toString(),</span>
+<span class="nc" id="L174">                        childPid.toString(),</span>
+<span class="nc" id="L175">                        ready.toString())</span>
+<span class="nc" id="L176">                .redirectErrorStream(true)</span>
+<span class="nc" id="L177">                .redirectOutput(tempDir.resolve(&quot;shutdown-probe.log&quot;).toFile())</span>
+<span class="nc" id="L178">                .start();</span>
+<span class="nc" id="L179">        List&lt;ProcessHandle&gt; cleanup = new ArrayList&lt;&gt;();</span>
+        try {
+<span class="nc" id="L181">            BoundedWait.until(</span>
+<span class="nc" id="L182">                    PROBE_TIMEOUT, () -&gt; Files.exists(ready), &quot;the investigation reaches its registered-hook wait&quot;);</span>
+<span class="nc" id="L183">            Optional&lt;ProcessHandle&gt; codexProcess = processFromPidFile(codexPid);</span>
+<span class="nc" id="L184">            Optional&lt;ProcessHandle&gt; child = processFromPidFile(childPid);</span>
+<span class="nc" id="L185">            child.ifPresent(cleanup::add);</span>
+<span class="nc" id="L186">            codexProcess.ifPresent(cleanup::add);</span>
+<span class="nc" id="L187">            assertThat(codexProcess.filter(ProcessHandle::isAlive))</span>
+<span class="nc" id="L188">                    .as(&quot;the fake Codex process is alive before shutdown&quot;)</span>
+<span class="nc" id="L189">                    .isPresent();</span>
+<span class="nc" id="L190">            assertThat(child.filter(ProcessHandle::isAlive))</span>
+<span class="nc" id="L191">                    .as(&quot;the fake Codex child is alive before shutdown&quot;)</span>
+<span class="nc" id="L192">                    .isPresent();</span>
+
+            // when
+<span class="nc" id="L195">            helper.getOutputStream().write(1);</span>
+<span class="nc" id="L196">            helper.getOutputStream().flush();</span>
+
+            // then
+<span class="nc" id="L199">            assertThat(helper.waitFor(PROBE_TIMEOUT))</span>
+<span class="nc" id="L200">                    .as(&quot;the helper JVM exits after running its shutdown hooks&quot;)</span>
+<span class="nc" id="L201">                    .isTrue();</span>
+<span class="nc" id="L202">            assertThat(helper.exitValue()).isEqualTo(SUCCESS_EXIT_CODE);</span>
+<span class="nc" id="L203">            BoundedWait.until(</span>
+                    PROBE_TIMEOUT,
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                    () -&gt; codexProcess.filter(ProcessHandle::isAlive).isEmpty()</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                            &amp;&amp; child.filter(ProcessHandle::isAlive).isEmpty(),</span>
+                    &quot;the registered hook stops the fake Codex process and its child&quot;);
+        } finally {
+<span class="nc" id="L209">            helper.descendants().forEach(ProcessHandle::destroyForcibly);</span>
+<span class="nc" id="L210">            cleanup.forEach(ProcessHandle::destroyForcibly);</span>
+<span class="nc" id="L211">            helper.destroyForcibly();</span>
+<span class="nc" id="L212">            helper.waitFor(PROBE_TIMEOUT);</span>
+        }
+<span class="nc" id="L214">    }</span>
+
+    private static boolean waitsForProcess(Thread investigation) {
+<span class="nc bnc" id="L217" title="All 2 branches missed.">        for (StackTraceElement frame : investigation.getStackTrace()) {</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">            if (frame.getClassName().startsWith(&quot;java.lang.Process&quot;)</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">                    &amp;&amp; frame.getMethodName().equals(&quot;waitFor&quot;)) {</span>
+<span class="nc" id="L220">                return true;</span>
+            }
+        }
+<span class="nc" id="L223">        return false;</span>
+    }
+
+    private static Optional&lt;ProcessHandle&gt; processFromPidFile(Path path) throws IOException {
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        return Files.exists(path) ? ProcessHandle.of(Long.parseLong(Files.readString(path))) : Optional.empty();</span>
+    }
+
+    public static final class ShutdownProbe {
+        private ShutdownProbe() {}
+
+        public static void main(String[] args) throws Exception {
+<span class="nc" id="L234">            Path codex = Path.of(args[0]);</span>
+<span class="nc" id="L235">            Path root = Path.of(args[1]);</span>
+<span class="nc" id="L236">            Path codexPid = Path.of(args[2]);</span>
+<span class="nc" id="L237">            Path childPid = Path.of(args[3]);</span>
+<span class="nc" id="L238">            Path ready = Path.of(args[4]);</span>
+<span class="nc" id="L239">            Thread investigation = Thread.ofPlatform()</span>
+<span class="nc" id="L240">                    .daemon()</span>
+<span class="nc" id="L241">                    .name(&quot;shutdown-investigation&quot;)</span>
+<span class="nc" id="L242">                    .start(() -&gt; new ProcessCodexInvestigationRunner()</span>
+<span class="nc" id="L243">                            .investigate(request(codex, root, List.of(), GENEROUS_TIMEOUT)));</span>
+            // run() registers its shutdown hook before entering Process.waitFor.
+<span class="nc" id="L245">            BoundedWait.until(</span>
+                    PROBE_TIMEOUT,
+<span class="nc bnc" id="L247" title="All 2 branches missed.">                    () -&gt; codexPid.toFile().length() &gt; 0</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                            &amp;&amp; childPid.toFile().length() &gt; 0</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">                            &amp;&amp; waitsForProcess(investigation),</span>
+                    &quot;the investigation waits for its child after hook registration&quot;);
+<span class="nc" id="L251">            Files.writeString(ready, &quot;ready&quot;);</span>
+<span class="nc" id="L252">            System.in.read();</span>
+<span class="nc" id="L253">            System.exit(SUCCESS_EXIT_CODE);</span>
+<span class="nc" id="L254">        }</span>
+    }
+
+    @Test
+    void reportsACodexExecutableThatCannotStart() {
+        // given
+<span class="nc" id="L260">        Path missing = tempDir.resolve(&quot;missing-codex&quot;);</span>
+
+        // when
+<span class="nc" id="L263">        Outcome outcome = new ProcessCodexInvestigationRunner()</span>
+<span class="nc" id="L264">                .investigate(request(missing, tempDir, List.of(), GENEROUS_TIMEOUT));</span>
+
+        // then
+<span class="nc" id="L267">        assertThat(outcome).isEqualTo(new Outcome.Failed(&quot;Codex could not be started (IOException)&quot;));</span>
+<span class="nc" id="L268">    }</span>
+
+    private static List&lt;String&gt; propertyNames(JsonNode schema) {
+<span class="nc" id="L271">        List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L272">        schema.path(&quot;properties&quot;).fieldNames().forEachRemaining(names::add);</span>
+<span class="nc" id="L273">        return names;</span>
+    }
+
+    private static Request request(Path codex, Path workingRoot, List&lt;Path&gt; additionalRoots, Duration timeout) {
+<span class="nc" id="L277">        return new Request(</span>
+                arguments -&gt; {
+<span class="nc" id="L279">                    String[] command = new String[arguments.length + 1];</span>
+<span class="nc" id="L280">                    command[0] = codex.toString();</span>
+<span class="nc" id="L281">                    System.arraycopy(arguments, 0, command, 1, arguments.length);</span>
+<span class="nc" id="L282">                    return command;</span>
+                },
+                PROMPT,
+                workingRoot,
+                additionalRoots,
+                timeout);
+    }
+
+    /// Writes a fake `codex` script. `argument NAME &quot;$@&quot;` prints the value after option `NAME`.
+    private Path fakeCodex(String body) throws IOException {
+<span class="nc" id="L292">        Path script = Files.createTempFile(tempDir, &quot;codex-&quot;, &quot;.sh&quot;);</span>
+<span class="nc" id="L293">        Files.writeString(</span>
+                script,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -eu
+                argument() {
+                  local name=&quot;$1&quot;
+                  shift
+                  while [ &quot;$#&quot; -gt 0 ]; do
+                    if [ &quot;$1&quot; = &quot;$name&quot; ]; then
+                      printf '%%s' &quot;$2&quot;
+                      return
+                    fi
+                    shift
+                  done
+                }
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L311">                        .formatted(body));</span>
+<span class="nc" id="L312">        assertThat(script.toFile().setExecutable(true))</span>
+<span class="nc" id="L313">                .as(&quot;the fake codex script must be executable&quot;)</span>
+<span class="nc" id="L314">                .isTrue();</span>
+<span class="nc" id="L315">        return script;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -19,7 +19,10 @@ import ch.fmartin.symphony.trello.config.EffectiveConfig;
 import ch.fmartin.symphony.trello.domain.BlockerRef;
 import ch.fmartin.symphony.trello.domain.Card;
 import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.testsupport.BoundedWait;
+import ch.fmartin.symphony.trello.time.ApplicationClock;
 import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.RateLimitPressure;
 import ch.fmartin.symphony.trello.tracker.TrackerClient;
 import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
 import ch.fmartin.symphony.trello.workspace.HookRunner;
@@ -47,67 +50,74 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import java.util.function.LongUnaryOperator;
 import java.util.function.Predicate;
+import java.util.random.RandomGenerator;
 
 final class SymphonyOrchestratorTestSupport {
-<span class="nc" id="L53">    static final Instant COMMENT_TIME = Instant.parse(&quot;2026-01-01T00:00:00Z&quot;);</span>
-<span class="nc" id="L54">    static final Duration POLL_INTERVAL = Duration.ofMillis(25);</span>
+<span class="nc" id="L59">    static final Instant COMMENT_TIME = Instant.parse(&quot;2026-01-01T00:00:00Z&quot;);</span>
+<span class="nc" id="L60">    static final Duration POLL_INTERVAL = Duration.ofMillis(25);</span>
+<span class="nc" id="L61">    private static final Duration CONDITION_TIMEOUT = Duration.ofSeconds(5);</span>
+<span class="nc" id="L62">    static final RandomGenerator NO_JITTER = new FixedRandom(bound -&gt; 0);</span>
+<span class="nc" id="L63">    static final RandomGenerator MAX_JITTER = new FixedRandom(bound -&gt; bound - 1);</span>
+    private static final int PERCENT = 100;
 
     static UsageProbeScenario usageProbeScenario(Path workflow, MutableClock clock, Card first, Card second) {
-<span class="nc" id="L57">        var tracker = new FakeTracker(List.of(first, second));</span>
-<span class="nc" id="L58">        var runs = new AtomicInteger();</span>
-<span class="nc" id="L59">        AgentRunner runner = mock();</span>
-<span class="nc" id="L60">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L61">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
-<span class="nc bnc" id="L62" title="All 2 branches missed.">            if (runs.incrementAndGet() == 1) {</span>
-<span class="nc" id="L63">                return AgentRunResult.codexUsageLimit(&quot;turn_failed: Usage is unavailable.&quot;, Optional.empty());</span>
+<span class="nc" id="L67">        var tracker = new FakeTracker(List.of(first, second));</span>
+<span class="nc" id="L68">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L69">        AgentRunner runner = mock();</span>
+<span class="nc" id="L70">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L71">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            if (runs.incrementAndGet() == 1) {</span>
+<span class="nc" id="L73">                return AgentRunResult.codexUsageLimit(&quot;turn_failed: Usage is unavailable.&quot;, Optional.empty());</span>
             }
-<span class="nc" id="L65">            tracker.setCardState(</span>
-<span class="nc" id="L66">                    TestCards.card(request.card().id(), request.card().identifier(), &quot;Human Review&quot;));</span>
-<span class="nc" id="L67">            return AgentRunResult.ok();</span>
+<span class="nc" id="L75">            tracker.setCardState(</span>
+<span class="nc" id="L76">                    TestCards.card(request.card().id(), request.card().identifier(), &quot;Human Review&quot;));</span>
+<span class="nc" id="L77">            return AgentRunResult.ok();</span>
         });
-<span class="nc" id="L69">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
-<span class="nc" id="L70">        return new UsageProbeScenario(tracker, runs, orchestrator);</span>
+<span class="nc" id="L79">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+<span class="nc" id="L80">        return new UsageProbeScenario(tracker, runs, orchestrator);</span>
     }
 
     static RuntimeSnapshot awaitUsageProbeRecovery(UsageProbeScenario scenario) throws Exception {
-<span class="nc" id="L74">        waitUntil(() -&gt;</span>
-<span class="nc bnc" id="L75" title="All 4 branches missed.">                scenario.runs().get() == 2 &amp;&amp; scenario.orchestrator().snapshot().dispatchPause() == null);</span>
-<span class="nc" id="L76">        RuntimeSnapshot recovered = scenario.orchestrator().snapshot();</span>
-<span class="nc" id="L77">        scenario.orchestrator().stop();</span>
-<span class="nc" id="L78">        return recovered;</span>
+<span class="nc" id="L84">        waitUntil(() -&gt;</span>
+<span class="nc bnc" id="L85" title="All 4 branches missed.">                scenario.runs().get() == 2 &amp;&amp; scenario.orchestrator().snapshot().dispatchPause() == null);</span>
+<span class="nc" id="L86">        RuntimeSnapshot recovered = scenario.orchestrator().snapshot();</span>
+<span class="nc" id="L87">        scenario.orchestrator().stop();</span>
+<span class="nc" id="L88">        return recovered;</span>
     }
 
-<span class="nc" id="L81">    record UsageProbeScenario(FakeTracker tracker, AtomicInteger runs, SymphonyOrchestrator orchestrator) {}</span>
+<span class="nc" id="L91">    record UsageProbeScenario(FakeTracker tracker, AtomicInteger runs, SymphonyOrchestrator orchestrator) {}</span>
 
     static ConcurrentCommandScenario concurrentCommandScenario(Path workflow) throws Exception {
-<span class="nc" id="L84">        writeWorkflowWithCommand(</span>
+<span class="nc" id="L94">        writeWorkflowWithCommand(</span>
                 workflow,
                 &quot;command-a&quot;,
                 &quot;&quot;&quot;
                 agent:
                   max_concurrent_agents: 2
                 &quot;&quot;&quot;);
-<span class="nc" id="L91">        Card first = TestCards.card(&quot;card-a&quot;, &quot;TRELLO-a&quot;, &quot;Todo&quot;);</span>
-<span class="nc" id="L92">        Card second = TestCards.card(&quot;card-b&quot;, &quot;TRELLO-b&quot;, &quot;Todo&quot;);</span>
-<span class="nc" id="L93">        var tracker = new FakeTracker(List.of(first));</span>
-<span class="nc" id="L94">        var requests = new PublishedAgentRequests();</span>
-<span class="nc" id="L95">        var releaseWorkers = new CountDownLatch(1);</span>
-<span class="nc" id="L96">        AgentRunner runner = mock();</span>
-<span class="nc" id="L97">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L98">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
-<span class="nc" id="L99">            requests.publish(request);</span>
-<span class="nc" id="L100">            assertThat(releaseWorkers.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L101">                    .as(&quot;the concurrent-command workers should be released within 5 seconds&quot;)</span>
-<span class="nc" id="L102">                    .isTrue();</span>
-<span class="nc" id="L103">            return AgentRunResult.ok();</span>
+<span class="nc" id="L101">        Card first = TestCards.card(&quot;card-a&quot;, &quot;TRELLO-a&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L102">        Card second = TestCards.card(&quot;card-b&quot;, &quot;TRELLO-b&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L103">        var tracker = new FakeTracker(List.of(first));</span>
+<span class="nc" id="L104">        var requests = new PublishedAgentRequests();</span>
+<span class="nc" id="L105">        var releaseWorkers = new CountDownLatch(1);</span>
+<span class="nc" id="L106">        AgentRunner runner = mock();</span>
+<span class="nc" id="L107">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L108">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L109">            requests.publish(request);</span>
+<span class="nc" id="L110">            assertThat(releaseWorkers.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L111">                    .as(&quot;the concurrent-command workers should be released within 5 seconds&quot;)</span>
+<span class="nc" id="L112">                    .isTrue();</span>
+<span class="nc" id="L113">            return AgentRunResult.ok();</span>
         });
-<span class="nc" id="L105">        SymphonyOrchestrator orchestrator = orchestrator(</span>
-<span class="nc" id="L106">                workflow, tracker, runner, Clock.fixed(COMMENT_TIME, ZoneOffset.UTC), successfulWorkpadHandler());</span>
-<span class="nc" id="L107">        return new ConcurrentCommandScenario(first, second, tracker, requests, releaseWorkers, orchestrator);</span>
+<span class="nc" id="L115">        SymphonyOrchestrator orchestrator = orchestrator(</span>
+<span class="nc" id="L116">                workflow, tracker, runner, Clock.fixed(COMMENT_TIME, ZoneOffset.UTC), successfulWorkpadHandler());</span>
+<span class="nc" id="L117">        return new ConcurrentCommandScenario(first, second, tracker, requests, releaseWorkers, orchestrator);</span>
     }
 
-<span class="nc" id="L110">    record ConcurrentCommandScenario(</span>
+<span class="nc" id="L120">    record ConcurrentCommandScenario(</span>
             Card first,
             Card second,
             FakeTracker tracker,
@@ -115,37 +125,37 @@ final class SymphonyOrchestratorTestSupport {
             CountDownLatch releaseWorkers,
             SymphonyOrchestrator orchestrator) {}
 
-<span class="nc" id="L118">    static final class PublishedAgentRequests {</span>
-<span class="nc" id="L119">        private final Map&lt;String, CompletableFuture&lt;AgentRunner.AgentRunRequest&gt;&gt; requests = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L128">    static final class PublishedAgentRequests {</span>
+<span class="nc" id="L129">        private final Map&lt;String, CompletableFuture&lt;AgentRunner.AgentRunRequest&gt;&gt; requests = new ConcurrentHashMap&lt;&gt;();</span>
 
         void publish(AgentRunner.AgentRunRequest request) {
-<span class="nc" id="L122">            requests.computeIfAbsent(request.config().codex().command(), ignored -&gt; new CompletableFuture&lt;&gt;())</span>
-<span class="nc" id="L123">                    .complete(request);</span>
-<span class="nc" id="L124">        }</span>
+<span class="nc" id="L132">            requests.computeIfAbsent(request.config().codex().command(), ignored -&gt; new CompletableFuture&lt;&gt;())</span>
+<span class="nc" id="L133">                    .complete(request);</span>
+<span class="nc" id="L134">        }</span>
 
         AgentRunner.AgentRunRequest await(String command) {
-<span class="nc" id="L127">            CompletableFuture&lt;AgentRunner.AgentRunRequest&gt; request =</span>
-<span class="nc" id="L128">                    requests.computeIfAbsent(command, ignored -&gt; new CompletableFuture&lt;&gt;());</span>
-<span class="nc" id="L129">            assertThat(request)</span>
-<span class="nc" id="L130">                    .as(&quot;the %s request should be published within 5 seconds&quot;, command)</span>
-<span class="nc" id="L131">                    .succeedsWithin(Duration.ofSeconds(5));</span>
-<span class="nc" id="L132">            return request.join();</span>
+<span class="nc" id="L137">            CompletableFuture&lt;AgentRunner.AgentRunRequest&gt; request =</span>
+<span class="nc" id="L138">                    requests.computeIfAbsent(command, ignored -&gt; new CompletableFuture&lt;&gt;());</span>
+<span class="nc" id="L139">            assertThat(request)</span>
+<span class="nc" id="L140">                    .as(&quot;the %s request should be published within 5 seconds&quot;, command)</span>
+<span class="nc" id="L141">                    .succeedsWithin(Duration.ofSeconds(5));</span>
+<span class="nc" id="L142">            return request.join();</span>
         }
     }
 
     static AgentRunner commandScopedUsageLimitRunner(Instant now, CountDownLatch commandBReturnedUsage) {
-<span class="nc" id="L137">        AgentRunner runner = mock();</span>
-<span class="nc" id="L138">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L139">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
-<span class="nc bnc" id="L140" title="All 2 branches missed.">            if (request.config().codex().command().equals(&quot;command-b&quot;)) {</span>
-<span class="nc" id="L141">                commandBReturnedUsage.countDown();</span>
-<span class="nc" id="L142">                return AgentRunResult.codexUsageLimit(</span>
-<span class="nc" id="L143">                        &quot;turn_failed: Command B is exhausted.&quot;, Optional.of(now.plusSeconds(120)));</span>
+<span class="nc" id="L147">        AgentRunner runner = mock();</span>
+<span class="nc" id="L148">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L149">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (request.config().codex().command().equals(&quot;command-b&quot;)) {</span>
+<span class="nc" id="L151">                commandBReturnedUsage.countDown();</span>
+<span class="nc" id="L152">                return AgentRunResult.codexUsageLimit(</span>
+<span class="nc" id="L153">                        &quot;turn_failed: Command B is exhausted.&quot;, Optional.of(now.plusSeconds(120)));</span>
             }
-<span class="nc" id="L145">            return AgentRunResult.codexUsageLimit(</span>
-<span class="nc" id="L146">                    &quot;turn_failed: Command A is exhausted.&quot;, Optional.of(now.plusSeconds(60)));</span>
+<span class="nc" id="L155">            return AgentRunResult.codexUsageLimit(</span>
+<span class="nc" id="L156">                    &quot;turn_failed: Command A is exhausted.&quot;, Optional.of(now.plusSeconds(60)));</span>
         });
-<span class="nc" id="L148">        return runner;</span>
+<span class="nc" id="L158">        return runner;</span>
     }
 
     static AgentRunResult finishBoardBRun(
@@ -155,61 +165,61 @@ final class SymphonyOrchestratorTestSupport {
             CountDownLatch releaseWorkerB,
             AgentRunner.AgentRunRequest request)
             throws InterruptedException {
-<span class="nc" id="L158">        workerBStarted.countDown();</span>
-<span class="nc" id="L159">        assertThat(releaseWorkerB.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L160">                .as(&quot;the board B worker should be released within 5 seconds&quot;)</span>
-<span class="nc" id="L161">                .isTrue();</span>
-<span class="nc" id="L162">        tracker.setCardState(</span>
+<span class="nc" id="L168">        workerBStarted.countDown();</span>
+<span class="nc" id="L169">        assertThat(releaseWorkerB.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L170">                .as(&quot;the board B worker should be released within 5 seconds&quot;)</span>
+<span class="nc" id="L171">                .isTrue();</span>
+<span class="nc" id="L172">        tracker.setCardState(</span>
                 endpoint,
                 &quot;board-b&quot;,
-<span class="nc" id="L165">                cardOnBoard(request.card().id(), request.card().identifier(), &quot;Human Review&quot;, &quot;board-b&quot;));</span>
-<span class="nc" id="L166">        return AgentRunResult.ok();</span>
+<span class="nc" id="L175">                cardOnBoard(request.card().id(), request.card().identifier(), &quot;Human Review&quot;, &quot;board-b&quot;));</span>
+<span class="nc" id="L176">        return AgentRunResult.ok();</span>
     }
 
     static BlockingRun blockRunnerUntilCancelled(AgentRunner runner) {
-<span class="nc" id="L170">        var started = new CountDownLatch(1);</span>
-<span class="nc" id="L171">        var cancelled = new AtomicInteger();</span>
-<span class="nc" id="L172">        doAnswer(invocation -&gt; {</span>
-<span class="nc" id="L173">                    started.countDown();</span>
+<span class="nc" id="L180">        var started = new CountDownLatch(1);</span>
+<span class="nc" id="L181">        var cancelled = new AtomicInteger();</span>
+<span class="nc" id="L182">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L183">                    started.countDown();</span>
                     try {
-<span class="nc" id="L175">                        blockUntilInterruptedOrTimedOut(Duration.ofSeconds(30));</span>
-<span class="nc" id="L176">                    } catch (InterruptedException e) {</span>
-<span class="nc" id="L177">                        Thread.currentThread().interrupt();</span>
-<span class="nc" id="L178">                    }</span>
-<span class="nc" id="L179">                    return AgentRunResult.fail(&quot;interrupted&quot;);</span>
+<span class="nc" id="L185">                        blockUntilInterruptedOrTimedOut(Duration.ofSeconds(30));</span>
+<span class="nc" id="L186">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L187">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L188">                    }</span>
+<span class="nc" id="L189">                    return AgentRunResult.fail(&quot;interrupted&quot;);</span>
                 })
-<span class="nc" id="L181">                .when(runner)</span>
-<span class="nc" id="L182">                .run(any());</span>
-<span class="nc" id="L183">        doAnswer(invocation -&gt; {</span>
-<span class="nc" id="L184">                    cancelled.incrementAndGet();</span>
-<span class="nc" id="L185">                    return null;</span>
+<span class="nc" id="L191">                .when(runner)</span>
+<span class="nc" id="L192">                .run(any());</span>
+<span class="nc" id="L193">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L194">                    cancelled.incrementAndGet();</span>
+<span class="nc" id="L195">                    return null;</span>
                 })
-<span class="nc" id="L187">                .when(runner)</span>
-<span class="nc" id="L188">                .cancel(any());</span>
-<span class="nc" id="L189">        return new BlockingRun(started, cancelled);</span>
+<span class="nc" id="L197">                .when(runner)</span>
+<span class="nc" id="L198">                .cancel(any());</span>
+<span class="nc" id="L199">        return new BlockingRun(started, cancelled);</span>
     }
 
-<span class="nc" id="L192">    record BlockingRun(CountDownLatch started, AtomicInteger cancelled) {}</span>
+<span class="nc" id="L202">    record BlockingRun(CountDownLatch started, AtomicInteger cancelled) {}</span>
 
     static String dispatchFirstCard(Path workflow, FakeTracker tracker) throws Exception {
-<span class="nc" id="L195">        var dispatched = new AtomicReference&lt;String&gt;();</span>
-<span class="nc" id="L196">        AgentRunner runner = mock();</span>
-<span class="nc" id="L197">        doAnswer(invocation -&gt; {</span>
-<span class="nc" id="L198">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
-<span class="nc" id="L199">                    dispatched.set(request.card().identifier());</span>
-<span class="nc" id="L200">                    return AgentRunResult.ok();</span>
+<span class="nc" id="L205">        var dispatched = new AtomicReference&lt;String&gt;();</span>
+<span class="nc" id="L206">        AgentRunner runner = mock();</span>
+<span class="nc" id="L207">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L208">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L209">                    dispatched.set(request.card().identifier());</span>
+<span class="nc" id="L210">                    return AgentRunResult.ok();</span>
                 })
-<span class="nc" id="L202">                .when(runner)</span>
-<span class="nc" id="L203">                .run(any());</span>
-<span class="nc" id="L204">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
-<span class="nc" id="L205">        orchestrator.start();</span>
-<span class="nc bnc" id="L206" title="All 2 branches missed.">        waitUntil(() -&gt; dispatched.get() != null);</span>
-<span class="nc" id="L207">        orchestrator.stop();</span>
-<span class="nc" id="L208">        return dispatched.get();</span>
+<span class="nc" id="L212">                .when(runner)</span>
+<span class="nc" id="L213">                .run(any());</span>
+<span class="nc" id="L214">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L215">        orchestrator.start();</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        waitUntil(() -&gt; dispatched.get() != null);</span>
+<span class="nc" id="L217">        orchestrator.stop();</span>
+<span class="nc" id="L218">        return dispatched.get();</span>
     }
 
     static Card cardWithPriorityAndBlockers(String id, String identifier, Integer priority, List&lt;BlockerRef&gt; blockers) {
-<span class="nc" id="L212">        return cardWithPriorityBlockersAndProblems(id, identifier, priority, blockers, List.of());</span>
+<span class="nc" id="L222">        return cardWithPriorityBlockersAndProblems(id, identifier, priority, blockers, List.of());</span>
     }
 
     static Card cardWithPriorityBlockersAndProblems(
@@ -218,7 +228,7 @@ final class SymphonyOrchestratorTestSupport {
             Integer priority,
             List&lt;BlockerRef&gt; blockers,
             List&lt;Card.PrerequisiteProblem&gt; prerequisiteProblems) {
-<span class="nc" id="L221">        return new Card(</span>
+<span class="nc" id="L231">        return new Card(</span>
                 id,
                 identifier,
                 &quot;Implement feature&quot;,
@@ -228,42 +238,42 @@ final class SymphonyOrchestratorTestSupport {
                 &quot;list&quot;,
                 &quot;list-todo&quot;,
                 &quot;Todo&quot;,
-<span class="nc" id="L231">                false,</span>
+<span class="nc" id="L241">                false,</span>
                 &quot;board-1&quot;,
-<span class="nc" id="L233">                false,</span>
+<span class="nc" id="L243">                false,</span>
                 false,
-<span class="nc" id="L235">                1,</span>
+<span class="nc" id="L245">                1,</span>
                 identifier,
                 &quot;https://trello.com/c/&quot; + identifier,
                 null,
                 &quot;https://trello.com/c/&quot; + identifier,
-<span class="nc" id="L240">                List.of(),</span>
-<span class="nc" id="L241">                List.of(),</span>
-<span class="nc" id="L242">                List.of(),</span>
-<span class="nc" id="L243">                List.of(),</span>
-<span class="nc" id="L244">                List.of(),</span>
-<span class="nc" id="L245">                List.of(),</span>
+<span class="nc" id="L250">                List.of(),</span>
+<span class="nc" id="L251">                List.of(),</span>
+<span class="nc" id="L252">                List.of(),</span>
+<span class="nc" id="L253">                List.of(),</span>
+<span class="nc" id="L254">                List.of(),</span>
+<span class="nc" id="L255">                List.of(),</span>
                 prerequisiteProblems,
                 blockers,
-<span class="nc" id="L248">                List.of(),</span>
-<span class="nc" id="L249">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
-<span class="nc" id="L250">                Instant.parse(&quot;2026-01-02T00:00:00Z&quot;),</span>
+<span class="nc" id="L258">                List.of(),</span>
+<span class="nc" id="L259">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
+<span class="nc" id="L260">                Instant.parse(&quot;2026-01-02T00:00:00Z&quot;),</span>
                 null,
-<span class="nc" id="L252">                false,</span>
+<span class="nc" id="L262">                false,</span>
                 BigDecimal.ONE);
     }
 
     static void writeWorkflow(Path workflow, String pollIntervalMs) throws Exception {
-<span class="nc" id="L257">        writeWorkflow(workflow, pollIntervalMs, &quot;&quot;);</span>
-<span class="nc" id="L258">    }</span>
+<span class="nc" id="L267">        writeWorkflow(workflow, pollIntervalMs, &quot;&quot;);</span>
+<span class="nc" id="L268">    }</span>
 
     static void writeWorkflow(Path workflow, String pollIntervalMs, String extraConfig) throws Exception {
-<span class="nc" id="L261">        writeWorkflow(workflow, pollIntervalMs, extraConfig, &quot;{{ card.title }}&quot;);</span>
-<span class="nc" id="L262">    }</span>
+<span class="nc" id="L271">        writeWorkflow(workflow, pollIntervalMs, extraConfig, &quot;{{ card.title }}&quot;);</span>
+<span class="nc" id="L272">    }</span>
 
     static void writeWorkflow(Path workflow, String pollIntervalMs, String extraConfig, String prompt)
             throws Exception {
-<span class="nc" id="L266">        Files.writeString(</span>
+<span class="nc" id="L276">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -283,11 +293,11 @@ final class SymphonyOrchestratorTestSupport {
                 ---
                 %s
                 &quot;&quot;&quot;
-<span class="nc" id="L286">                        .formatted(pollIntervalMs, extraConfig, prompt));</span>
-<span class="nc" id="L287">    }</span>
+<span class="nc" id="L296">                        .formatted(pollIntervalMs, extraConfig, prompt));</span>
+<span class="nc" id="L297">    }</span>
 
     static void writeWorkflowWithCommand(Path workflow, String command, String extraConfig) throws Exception {
-<span class="nc" id="L290">        Files.writeString(</span>
+<span class="nc" id="L300">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -307,18 +317,18 @@ final class SymphonyOrchestratorTestSupport {
                 ---
                 {{ card.title }}
                 &quot;&quot;&quot;
-<span class="nc" id="L310">                        .formatted(extraConfig, command));</span>
-<span class="nc" id="L311">    }</span>
+<span class="nc" id="L320">                        .formatted(extraConfig, command));</span>
+<span class="nc" id="L321">    }</span>
 
     static void rewriteWorkflowWithCommand(Path workflow, String command, String extraConfig) throws Exception {
-<span class="nc" id="L314">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
-<span class="nc" id="L315">        writeWorkflowWithCommand(workflow, command, extraConfig);</span>
-<span class="nc" id="L316">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
-<span class="nc" id="L317">    }</span>
+<span class="nc" id="L324">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
+<span class="nc" id="L325">        writeWorkflowWithCommand(workflow, command, extraConfig);</span>
+<span class="nc" id="L326">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
+<span class="nc" id="L327">    }</span>
 
     static void writeWorkflowWithCommandAndBoard(Path workflow, String command, String boardId, String apiToken)
             throws Exception {
-<span class="nc" id="L321">        Files.writeString(</span>
+<span class="nc" id="L331">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -337,21 +347,21 @@ final class SymphonyOrchestratorTestSupport {
                 ---
                 {{ card.title }}
                 &quot;&quot;&quot;
-<span class="nc" id="L340">                        .formatted(apiToken, boardId, command));</span>
-<span class="nc" id="L341">    }</span>
+<span class="nc" id="L350">                        .formatted(apiToken, boardId, command));</span>
+<span class="nc" id="L351">    }</span>
 
     static void rewriteWorkflowWithCommandAndBoard(Path workflow, String command, String boardId, String apiToken)
             throws Exception {
-<span class="nc" id="L345">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
-<span class="nc" id="L346">        writeWorkflowWithCommandAndBoard(workflow, command, boardId, apiToken);</span>
-<span class="nc" id="L347">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
-<span class="nc" id="L348">    }</span>
+<span class="nc" id="L355">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
+<span class="nc" id="L356">        writeWorkflowWithCommandAndBoard(workflow, command, boardId, apiToken);</span>
+<span class="nc" id="L357">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
+<span class="nc" id="L358">    }</span>
 
     static void writeWorkflowWithTarget(
             Path workflow, String endpoint, String boardId, String apiToken, String command, String workspaceRoot)
             throws Exception {
-<span class="nc" id="L353">        writeWorkflowWithTarget(workflow, endpoint, boardId, apiToken, command, workspaceRoot, 60_000, 1);</span>
-<span class="nc" id="L354">    }</span>
+<span class="nc" id="L363">        writeWorkflowWithTarget(workflow, endpoint, boardId, apiToken, command, workspaceRoot, 60_000, 1);</span>
+<span class="nc" id="L364">    }</span>
 
     static void writeWorkflowWithTarget(
             Path workflow,
@@ -363,7 +373,7 @@ final class SymphonyOrchestratorTestSupport {
             long maxRetryBackoffMillis,
             int maxConcurrentAgents)
             throws Exception {
-<span class="nc" id="L366">        Files.writeString(</span>
+<span class="nc" id="L376">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -387,21 +397,21 @@ final class SymphonyOrchestratorTestSupport {
                 ---
                 {{ card.title }}
                 &quot;&quot;&quot;
-<span class="nc" id="L390">                        .formatted(</span>
+<span class="nc" id="L400">                        .formatted(</span>
                                 endpoint,
                                 apiToken,
                                 boardId,
                                 workspaceRoot,
-<span class="nc" id="L395">                                maxRetryBackoffMillis,</span>
-<span class="nc" id="L396">                                maxConcurrentAgents,</span>
+<span class="nc" id="L405">                                maxRetryBackoffMillis,</span>
+<span class="nc" id="L406">                                maxConcurrentAgents,</span>
                                 command));
-<span class="nc" id="L398">    }</span>
+<span class="nc" id="L408">    }</span>
 
     static void rewriteWorkflowWithTarget(
             Path workflow, String endpoint, String boardId, String apiToken, String command, String workspaceRoot)
             throws Exception {
-<span class="nc" id="L403">        rewriteWorkflowWithTarget(workflow, endpoint, boardId, apiToken, command, workspaceRoot, 60_000, 1);</span>
-<span class="nc" id="L404">    }</span>
+<span class="nc" id="L413">        rewriteWorkflowWithTarget(workflow, endpoint, boardId, apiToken, command, workspaceRoot, 60_000, 1);</span>
+<span class="nc" id="L414">    }</span>
 
     static void rewriteWorkflowWithTarget(
             Path workflow,
@@ -413,8 +423,8 @@ final class SymphonyOrchestratorTestSupport {
             long maxRetryBackoffMillis,
             int maxConcurrentAgents)
             throws Exception {
-<span class="nc" id="L416">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
-<span class="nc" id="L417">        writeWorkflowWithTarget(</span>
+<span class="nc" id="L426">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
+<span class="nc" id="L427">        writeWorkflowWithTarget(</span>
                 workflow,
                 endpoint,
                 boardId,
@@ -423,11 +433,11 @@ final class SymphonyOrchestratorTestSupport {
                 workspaceRoot,
                 maxRetryBackoffMillis,
                 maxConcurrentAgents);
-<span class="nc" id="L426">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
-<span class="nc" id="L427">    }</span>
+<span class="nc" id="L436">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
+<span class="nc" id="L437">    }</span>
 
     static void writeWorkflowWithStallTimeout(Path workflow, long stallTimeoutMillis) throws Exception {
-<span class="nc" id="L430">        Files.writeString(</span>
+<span class="nc" id="L440">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -447,62 +457,62 @@ final class SymphonyOrchestratorTestSupport {
                 ---
                 {{ card.title }}
                 &quot;&quot;&quot;
-<span class="nc" id="L450">                        .formatted(stallTimeoutMillis));</span>
-<span class="nc" id="L451">    }</span>
+<span class="nc" id="L460">                        .formatted(stallTimeoutMillis));</span>
+<span class="nc" id="L461">    }</span>
 
     static void rewriteWorkflowWithStallTimeout(Path workflow, long stallTimeoutMillis) throws Exception {
-<span class="nc" id="L454">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
-<span class="nc" id="L455">        writeWorkflowWithStallTimeout(workflow, stallTimeoutMillis);</span>
-<span class="nc" id="L456">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
-<span class="nc" id="L457">    }</span>
+<span class="nc" id="L464">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
+<span class="nc" id="L465">        writeWorkflowWithStallTimeout(workflow, stallTimeoutMillis);</span>
+<span class="nc" id="L466">        Files.setLastModifiedTime(workflow, FileTime.fromMillis(previousModified + 2_000));</span>
+<span class="nc" id="L467">    }</span>
 
     static TrelloHandoffToolHandler recordingWorkpads(List&lt;String&gt; events, Predicate&lt;String&gt; updateResult) {
-<span class="nc" id="L460">        TrelloHandoffToolHandler workpads = mock();</span>
-<span class="nc" id="L461">        when(workpads.updateCodexUsageSection(any(), anyString(), nullable(String.class)))</span>
-<span class="nc" id="L462">                .thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L463">                    EffectiveConfig owner = invocation.getArgument(0);</span>
-<span class="nc" id="L464">                    String section = invocation.getArgument(2);</span>
-<span class="nc" id="L465">                    String event =</span>
-<span class="nc" id="L466">                            owner.tracker().endpoint() + &quot;/&quot; + owner.tracker().resolvedBoardId() + &quot;/&quot;</span>
-<span class="nc bnc" id="L467" title="All 2 branches missed.">                                    + owner.tracker().apiToken() + (section == null ? &quot;:clear&quot; : &quot;:set&quot;);</span>
-<span class="nc" id="L468">                    events.add(event);</span>
-<span class="nc" id="L469">                    return updateResult.test(event);</span>
+<span class="nc" id="L470">        TrelloHandoffToolHandler workpads = mock();</span>
+<span class="nc" id="L471">        when(workpads.updateCodexUsageSection(any(), anyString(), nullable(String.class)))</span>
+<span class="nc" id="L472">                .thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L473">                    EffectiveConfig owner = invocation.getArgument(0);</span>
+<span class="nc" id="L474">                    String section = invocation.getArgument(2);</span>
+<span class="nc" id="L475">                    String event =</span>
+<span class="nc" id="L476">                            owner.tracker().endpoint() + &quot;/&quot; + owner.tracker().resolvedBoardId() + &quot;/&quot;</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                                    + owner.tracker().apiToken() + (section == null ? &quot;:clear&quot; : &quot;:set&quot;);</span>
+<span class="nc" id="L478">                    events.add(event);</span>
+<span class="nc" id="L479">                    return updateResult.test(event);</span>
                 });
-<span class="nc" id="L471">        return workpads;</span>
+<span class="nc" id="L481">        return workpads;</span>
     }
 
     static String targetLabel(String endpoint, String boardId) {
-<span class="nc" id="L475">        return endpoint + &quot;|&quot; + boardId;</span>
+<span class="nc" id="L485">        return endpoint + &quot;|&quot; + boardId;</span>
     }
 
     static AgentEvent rateLimitEvent(AgentRunner.AgentRunRequest request, Instant timestamp, JsonNode payload) {
-<span class="nc" id="L479">        return new AgentEvent(</span>
+<span class="nc" id="L489">        return new AgentEvent(</span>
                 &quot;account/rateLimits/updated&quot;,
                 timestamp,
-<span class="nc" id="L482">                request.workerIdentity(),</span>
-<span class="nc" id="L483">                123L,</span>
+<span class="nc" id="L492">                request.workerIdentity(),</span>
+<span class="nc" id="L493">                123L,</span>
                 &quot;thread-1&quot;,
                 &quot;turn-1&quot;,
                 &quot;rate limits&quot;,
-<span class="nc" id="L487">                Map.of(),</span>
+<span class="nc" id="L497">                Map.of(),</span>
                 payload);
     }
 
     static AgentEvent agentEvent(AgentRunner.AgentRunRequest request, String event, String message) {
-<span class="nc" id="L492">        return new AgentEvent(</span>
+<span class="nc" id="L502">        return new AgentEvent(</span>
                 event,
                 COMMENT_TIME,
-<span class="nc" id="L495">                request.workerIdentity(),</span>
-<span class="nc" id="L496">                123L,</span>
+<span class="nc" id="L505">                request.workerIdentity(),</span>
+<span class="nc" id="L506">                123L,</span>
                 &quot;thread-1&quot;,
                 &quot;turn-1&quot;,
                 message,
-<span class="nc" id="L500">                Map.of(),</span>
-<span class="nc" id="L501">                new ObjectMapper().createObjectNode());</span>
+<span class="nc" id="L510">                Map.of(),</span>
+<span class="nc" id="L511">                new ObjectMapper().createObjectNode());</span>
     }
 
     static Card cardOnBoard(String id, String identifier, String state, String boardId) {
-<span class="nc" id="L505">        return new Card(</span>
+<span class="nc" id="L515">        return new Card(</span>
                 id,
                 identifier,
                 &quot;Implement feature&quot;,
@@ -512,33 +522,33 @@ final class SymphonyOrchestratorTestSupport {
                 &quot;list&quot;,
                 &quot;list-todo&quot;,
                 state,
-<span class="nc" id="L515">                false,</span>
+<span class="nc" id="L525">                false,</span>
                 boardId,
-<span class="nc" id="L517">                false,</span>
+<span class="nc" id="L527">                false,</span>
                 false,
-<span class="nc" id="L519">                1,</span>
+<span class="nc" id="L529">                1,</span>
                 identifier,
                 &quot;https://trello.com/c/&quot; + identifier,
                 null,
                 &quot;https://trello.com/c/&quot; + identifier,
-<span class="nc" id="L524">                List.of(),</span>
-<span class="nc" id="L525">                List.of(),</span>
-<span class="nc" id="L526">                List.of(),</span>
-<span class="nc" id="L527">                List.of(),</span>
-<span class="nc" id="L528">                List.of(),</span>
-<span class="nc" id="L529">                List.of(),</span>
-<span class="nc" id="L530">                List.of(),</span>
-<span class="nc" id="L531">                List.of(),</span>
-<span class="nc" id="L532">                List.of(),</span>
-<span class="nc" id="L533">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
-<span class="nc" id="L534">                Instant.parse(&quot;2026-01-02T00:00:00Z&quot;),</span>
+<span class="nc" id="L534">                List.of(),</span>
+<span class="nc" id="L535">                List.of(),</span>
+<span class="nc" id="L536">                List.of(),</span>
+<span class="nc" id="L537">                List.of(),</span>
+<span class="nc" id="L538">                List.of(),</span>
+<span class="nc" id="L539">                List.of(),</span>
+<span class="nc" id="L540">                List.of(),</span>
+<span class="nc" id="L541">                List.of(),</span>
+<span class="nc" id="L542">                List.of(),</span>
+<span class="nc" id="L543">                Instant.parse(&quot;2026-01-01T00:00:00Z&quot;),</span>
+<span class="nc" id="L544">                Instant.parse(&quot;2026-01-02T00:00:00Z&quot;),</span>
                 null,
-<span class="nc" id="L536">                false,</span>
+<span class="nc" id="L546">                false,</span>
                 BigDecimal.ONE);
     }
 
     static void writeRetryableInProgressWorkflow(Path workflow) throws Exception {
-<span class="nc" id="L541">        Files.writeString(</span>
+<span class="nc" id="L551">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -560,27 +570,51 @@ final class SymphonyOrchestratorTestSupport {
                 ---
                 {{ card.state }}
                 &quot;&quot;&quot;);
-<span class="nc" id="L563">    }</span>
+<span class="nc" id="L573">    }</span>
 
     static void assertCardReleasedForRetry(RuntimeSnapshot snapshot, FakeTracker tracker) {
-<span class="nc" id="L566">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
-<span class="nc" id="L567">                .isEqualTo(&quot;TRELLO-abc&quot;));</span>
-<span class="nc" id="L568">        assertThat(tracker.releasedCards).containsExactly(&quot;TRELLO-abc&quot;);</span>
-<span class="nc" id="L569">        assertThat(tracker.cardState(&quot;card-1&quot;).state()).isEqualTo(&quot;Todo&quot;);</span>
-<span class="nc" id="L570">    }</span>
+<span class="nc" id="L576">        assertThat(snapshot.retrying()).singleElement().satisfies(row -&gt; assertThat(row.cardIdentifier())</span>
+<span class="nc" id="L577">                .isEqualTo(&quot;TRELLO-abc&quot;));</span>
+<span class="nc" id="L578">        assertThat(tracker.releasedCards).containsExactly(&quot;TRELLO-abc&quot;);</span>
+<span class="nc" id="L579">        assertThat(tracker.cardState(&quot;card-1&quot;).state()).isEqualTo(&quot;Todo&quot;);</span>
+<span class="nc" id="L580">    }</span>
 
-<span class="nc" id="L572">    record ReleaseRecord(String currentState, String sourceState) {}</span>
+<span class="nc" id="L582">    record ReleaseRecord(String currentState, String sourceState) {}</span>
 
     static SymphonyOrchestrator orchestrator(Path workflow, TrackerClient tracker, AgentRunner runner) {
-<span class="nc" id="L575">        return orchestrator(workflow, tracker, runner, new WorkspaceManager(new HookRunner()));</span>
+<span class="nc" id="L585">        return orchestrator(workflow, tracker, runner, new WorkspaceManager(new HookRunner()));</span>
     }
 
     static SymphonyOrchestrator orchestrator(
             Path workflow, TrackerClient tracker, AgentRunner runner, WorkspaceManager workspaces) {
-<span class="nc" id="L580">        var orchestrator = new SymphonyOrchestrator(</span>
+<span class="nc" id="L590">        var orchestrator = new SymphonyOrchestrator(</span>
                 new WorkflowLoader(), new ConfigResolver(), tracker, runner, new PromptRenderer(), workspaces);
-<span class="nc" id="L582">        orchestrator.workflowPath = workflow;</span>
-<span class="nc" id="L583">        return orchestrator;</span>
+<span class="nc" id="L592">        orchestrator.workflowPath = workflow;</span>
+<span class="nc" id="L593">        return orchestrator;</span>
+    }
+
+    static SymphonyOrchestrator orchestrator(
+            Path workflow, TrackerClient tracker, AgentRunner runner, RandomGenerator pollJitter) {
+<span class="nc" id="L598">        var orchestrator = new SymphonyOrchestrator(</span>
+                new WorkflowLoader(),
+                new ConfigResolver(),
+                tracker,
+                runner,
+                new PromptRenderer(),
+                new WorkspaceManager(new HookRunner()),
+<span class="nc" id="L605">                ApplicationClock.systemUtc(),</span>
+<span class="nc" id="L606">                Optional.empty(),</span>
+                pollJitter);
+<span class="nc" id="L608">        orchestrator.workflowPath = workflow;</span>
+<span class="nc" id="L609">        return orchestrator;</span>
+    }
+
+    /// The delay [#MAX_JITTER] turns `delay` into: the largest jitter share on top, minus the one
+    /// millisecond the exclusive bound leaves out.
+    static Duration withLargestJitter(Duration delay) {
+<span class="nc" id="L615">        return delay.plus(delay.multipliedBy(AdaptivePollInterval.MAX_JITTER_PERCENT)</span>
+<span class="nc" id="L616">                        .dividedBy(PERCENT))</span>
+<span class="nc" id="L617">                .minusMillis(1);</span>
     }
 
     static SymphonyOrchestrator orchestrator(
@@ -589,7 +623,7 @@ final class SymphonyOrchestratorTestSupport {
             AgentRunner runner,
             Clock clock,
             TrelloHandoffToolHandler usageWorkpads) {
-<span class="nc" id="L592">        var orchestrator = new SymphonyOrchestrator(</span>
+<span class="nc" id="L626">        var orchestrator = new SymphonyOrchestrator(</span>
                 new WorkflowLoader(),
                 new ConfigResolver(),
                 tracker,
@@ -598,348 +632,342 @@ final class SymphonyOrchestratorTestSupport {
                 new WorkspaceManager(new HookRunner()),
                 clock,
                 usageWorkpads);
-<span class="nc" id="L601">        orchestrator.workflowPath = workflow;</span>
-<span class="nc" id="L602">        return orchestrator;</span>
+<span class="nc" id="L635">        orchestrator.workflowPath = workflow;</span>
+<span class="nc" id="L636">        return orchestrator;</span>
     }
 
     static TrelloHandoffToolHandler successfulWorkpadHandler() {
-<span class="nc" id="L606">        TrelloHandoffToolHandler handler = mock();</span>
-<span class="nc" id="L607">        when(handler.updateCodexUsageSection(any(), anyString(), nullable(String.class)))</span>
-<span class="nc" id="L608">                .thenReturn(true);</span>
-<span class="nc" id="L609">        return handler;</span>
+<span class="nc" id="L640">        TrelloHandoffToolHandler handler = mock();</span>
+<span class="nc" id="L641">        when(handler.updateCodexUsageSection(any(), anyString(), nullable(String.class)))</span>
+<span class="nc" id="L642">                .thenReturn(true);</span>
+<span class="nc" id="L643">        return handler;</span>
     }
 
     static RuntimeSnapshot runOnceAndSnapshotIdle(SymphonyOrchestrator orchestrator, AtomicInteger runs)
             throws Exception {
-<span class="nc" id="L614">        orchestrator.start();</span>
-<span class="nc bnc" id="L615" title="All 2 branches missed.">        waitUntil(() -&gt; runs.get() == 1</span>
-<span class="nc bnc" id="L616" title="All 2 branches missed.">                &amp;&amp; orchestrator.snapshot().counts().running() == 0</span>
-<span class="nc bnc" id="L617" title="All 2 branches missed.">                &amp;&amp; orchestrator.snapshot().counts().retrying() == 0);</span>
-<span class="nc" id="L618">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
-<span class="nc" id="L619">        orchestrator.stop();</span>
-<span class="nc" id="L620">        return snapshot;</span>
+<span class="nc" id="L648">        orchestrator.start();</span>
+<span class="nc bnc" id="L649" title="All 2 branches missed.">        waitUntil(() -&gt; runs.get() == 1</span>
+<span class="nc bnc" id="L650" title="All 2 branches missed.">                &amp;&amp; orchestrator.snapshot().counts().running() == 0</span>
+<span class="nc bnc" id="L651" title="All 2 branches missed.">                &amp;&amp; orchestrator.snapshot().counts().retrying() == 0);</span>
+<span class="nc" id="L652">        RuntimeSnapshot snapshot = orchestrator.snapshot();</span>
+<span class="nc" id="L653">        orchestrator.stop();</span>
+<span class="nc" id="L654">        return snapshot;</span>
     }
 
-    static void waitUntil(Condition condition) throws Exception {
-<span class="nc" id="L624">        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);</span>
-<span class="nc bnc" id="L625" title="All 2 branches missed.">        while (System.nanoTime() &lt; deadline) {</span>
-<span class="nc bnc" id="L626" title="All 2 branches missed.">            if (condition.matches()) {</span>
-<span class="nc" id="L627">                return;</span>
-            }
-<span class="nc" id="L629">            pollDelayForBoundedConditionWait();</span>
-        }
-<span class="nc" id="L631">        throw new AssertionError(&quot;Condition was not met before timeout&quot;);</span>
-    }
+    static void waitUntil(BooleanSupplier condition) throws InterruptedException {
+<span class="nc" id="L658">        BoundedWait.until(CONDITION_TIMEOUT, condition, &quot;the orchestrator condition&quot;);</span>
+<span class="nc" id="L659">    }</span>
 
     static boolean containsRetryingCard(RuntimeSnapshot snapshot, String cardIdentifier) {
-<span class="nc" id="L635">        return snapshot.retrying().stream().anyMatch(row -&gt; row.cardIdentifier().equals(cardIdentifier));</span>
+<span class="nc" id="L662">        return snapshot.retrying().stream().anyMatch(row -&gt; row.cardIdentifier().equals(cardIdentifier));</span>
     }
 
     static void pollDelayForBoundedConditionWait() throws InterruptedException {
-<span class="nc" id="L639">        Thread.sleep(POLL_INTERVAL);</span>
-<span class="nc" id="L640">    }</span>
+<span class="nc" id="L666">        Thread.sleep(POLL_INTERVAL);</span>
+<span class="nc" id="L667">    }</span>
 
     static void blockUntilInterruptedOrTimedOut(Duration timeout) throws InterruptedException {
-<span class="nc" id="L643">        new CountDownLatch(1).await(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
-<span class="nc" id="L644">    }</span>
+<span class="nc" id="L670">        new CountDownLatch(1).await(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L671">    }</span>
 
-    @FunctionalInterface
-    interface Condition {
-        boolean matches();
-    }
+<span class="nc" id="L673">    record ScopedRelease(String endpoint, String boardId, Path workspaceRoot, String cardId) {}</span>
 
-<span class="nc" id="L651">    record ScopedRelease(String endpoint, String boardId, Path workspaceRoot, String cardId) {}</span>
-
-<span class="nc" id="L653">    static final class ScopedTracker implements TrackerClient {</span>
-<span class="nc" id="L654">        final Map&lt;String, List&lt;Card&gt;&gt; candidatesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
-<span class="nc" id="L655">        final Map&lt;String, Map&lt;String, CardLookupResult&gt;&gt; statesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
-<span class="nc" id="L656">        final List&lt;String&gt; candidateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L657">        final List&lt;String&gt; stateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L658">        final List&lt;ScopedRelease&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L675">    static final class ScopedTracker implements TrackerClient {</span>
+<span class="nc" id="L676">        final Map&lt;String, List&lt;Card&gt;&gt; candidatesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L677">        final Map&lt;String, Map&lt;String, CardLookupResult&gt;&gt; statesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L678">        final List&lt;String&gt; candidateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L679">        final List&lt;String&gt; stateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L680">        final List&lt;ScopedRelease&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
 
         void setCandidates(String endpoint, String boardId, List&lt;Card&gt; candidates) {
-<span class="nc" id="L661">            String target = targetLabel(endpoint, boardId);</span>
-<span class="nc" id="L662">            candidatesByTarget.put(target, List.copyOf(candidates));</span>
-<span class="nc" id="L663">            Map&lt;String, CardLookupResult&gt; states = new ConcurrentHashMap&lt;&gt;();</span>
-<span class="nc" id="L664">            candidates.forEach(card -&gt; states.put(card.id(), new CardLookupResult.Found(card)));</span>
-<span class="nc" id="L665">            statesByTarget.put(target, states);</span>
-<span class="nc" id="L666">        }</span>
+<span class="nc" id="L683">            String target = targetLabel(endpoint, boardId);</span>
+<span class="nc" id="L684">            candidatesByTarget.put(target, List.copyOf(candidates));</span>
+<span class="nc" id="L685">            Map&lt;String, CardLookupResult&gt; states = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L686">            candidates.forEach(card -&gt; states.put(card.id(), new CardLookupResult.Found(card)));</span>
+<span class="nc" id="L687">            statesByTarget.put(target, states);</span>
+<span class="nc" id="L688">        }</span>
 
         void setCardState(String endpoint, String boardId, Card card) {
-<span class="nc" id="L669">            states(endpoint, boardId).put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L670">        }</span>
+<span class="nc" id="L691">            states(endpoint, boardId).put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L692">        }</span>
 
         void removeCardState(String endpoint, String boardId, String cardId) {
-<span class="nc" id="L673">            states(endpoint, boardId).remove(cardId);</span>
-<span class="nc" id="L674">        }</span>
+<span class="nc" id="L695">            states(endpoint, boardId).remove(cardId);</span>
+<span class="nc" id="L696">        }</span>
 
         Map&lt;String, CardLookupResult&gt; states(String endpoint, String boardId) {
-<span class="nc" id="L677">            return statesByTarget.computeIfAbsent(targetLabel(endpoint, boardId), ignored -&gt; new ConcurrentHashMap&lt;&gt;());</span>
+<span class="nc" id="L699">            return statesByTarget.computeIfAbsent(targetLabel(endpoint, boardId), ignored -&gt; new ConcurrentHashMap&lt;&gt;());</span>
         }
 
         static String target(EffectiveConfig config) {
-<span class="nc" id="L681">            return targetLabel(config.tracker().endpoint(), config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L703">            return targetLabel(config.tracker().endpoint(), config.tracker().resolvedBoardId());</span>
         }
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L686">            return config.tracker().boardId();</span>
+<span class="nc" id="L708">            return config.tracker().boardId();</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L691">            String target = target(config);</span>
-<span class="nc" id="L692">            candidateFetchTargets.add(target);</span>
-<span class="nc" id="L693">            return candidatesByTarget.getOrDefault(target, List.of());</span>
+<span class="nc" id="L713">            String target = target(config);</span>
+<span class="nc" id="L714">            candidateFetchTargets.add(target);</span>
+<span class="nc" id="L715">            return candidatesByTarget.getOrDefault(target, List.of());</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L698">            return List.of();</span>
+<span class="nc" id="L720">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L703">            String target = target(config);</span>
-<span class="nc" id="L704">            stateFetchTargets.add(target);</span>
-<span class="nc" id="L705">            Map&lt;String, CardLookupResult&gt; states = statesByTarget.getOrDefault(target, Map.of());</span>
-<span class="nc" id="L706">            Map&lt;String, CardLookupResult&gt; result = new LinkedHashMap&lt;&gt;();</span>
-<span class="nc" id="L707">            cardIds.forEach(</span>
-<span class="nc" id="L708">                    cardId -&gt; result.put(cardId, states.getOrDefault(cardId, new CardLookupResult.Missing(cardId))));</span>
-<span class="nc" id="L709">            return result;</span>
+<span class="nc" id="L725">            String target = target(config);</span>
+<span class="nc" id="L726">            stateFetchTargets.add(target);</span>
+<span class="nc" id="L727">            Map&lt;String, CardLookupResult&gt; states = statesByTarget.getOrDefault(target, Map.of());</span>
+<span class="nc" id="L728">            Map&lt;String, CardLookupResult&gt; result = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L729">            cardIds.forEach(</span>
+<span class="nc" id="L730">                    cardId -&gt; result.put(cardId, states.getOrDefault(cardId, new CardLookupResult.Missing(cardId))));</span>
+<span class="nc" id="L731">            return result;</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesForPromptByIds(
                 EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L715">            return fetchCardStatesByIds(config, cardIds);</span>
+<span class="nc" id="L737">            return fetchCardStatesByIds(config, cardIds);</span>
         }
 
         @Override
         public Card prepareForDispatch(EffectiveConfig config, Card card) {
-<span class="nc bnc" id="L720" title="All 2 branches missed.">            String state = config.tracker().inProgressState().isBlank()</span>
-<span class="nc" id="L721">                    ? card.state()</span>
-<span class="nc" id="L722">                    : config.tracker().inProgressState();</span>
-<span class="nc" id="L723">            Card prepared = cardOnBoard(</span>
-<span class="nc" id="L724">                    card.id(), card.identifier(), state, config.tracker().resolvedBoardId());</span>
-<span class="nc" id="L725">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), prepared);</span>
-<span class="nc" id="L726">            return prepared;</span>
+<span class="nc bnc" id="L742" title="All 2 branches missed.">            String state = config.tracker().inProgressState().isBlank()</span>
+<span class="nc" id="L743">                    ? card.state()</span>
+<span class="nc" id="L744">                    : config.tracker().inProgressState();</span>
+<span class="nc" id="L745">            Card prepared = cardOnBoard(</span>
+<span class="nc" id="L746">                    card.id(), card.identifier(), state, config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L747">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), prepared);</span>
+<span class="nc" id="L748">            return prepared;</span>
         }
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card, Card dispatchSource) {
-<span class="nc" id="L731">            releases.add(new ScopedRelease(</span>
-<span class="nc" id="L732">                    config.tracker().endpoint(),</span>
-<span class="nc" id="L733">                    config.tracker().resolvedBoardId(),</span>
-<span class="nc" id="L734">                    config.workspace().root(),</span>
-<span class="nc" id="L735">                    card.id()));</span>
-<span class="nc" id="L736">            Card released = cardOnBoard(</span>
-<span class="nc" id="L737">                    card.id(),</span>
-<span class="nc" id="L738">                    card.identifier(),</span>
-<span class="nc" id="L739">                    dispatchSource.state(),</span>
-<span class="nc" id="L740">                    config.tracker().resolvedBoardId());</span>
-<span class="nc" id="L741">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), released);</span>
-<span class="nc" id="L742">        }</span>
+<span class="nc" id="L753">            releases.add(new ScopedRelease(</span>
+<span class="nc" id="L754">                    config.tracker().endpoint(),</span>
+<span class="nc" id="L755">                    config.tracker().resolvedBoardId(),</span>
+<span class="nc" id="L756">                    config.workspace().root(),</span>
+<span class="nc" id="L757">                    card.id()));</span>
+<span class="nc" id="L758">            Card released = cardOnBoard(</span>
+<span class="nc" id="L759">                    card.id(),</span>
+<span class="nc" id="L760">                    card.identifier(),</span>
+<span class="nc" id="L761">                    dispatchSource.state(),</span>
+<span class="nc" id="L762">                    config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L763">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), released);</span>
+<span class="nc" id="L764">        }</span>
     }
 
     static final class FakeTracker implements TrackerClient {
         volatile List&lt;Card&gt; candidates;
         volatile Map&lt;String, CardLookupResult&gt; cardStates;
-<span class="nc" id="L748">        volatile Map&lt;String, CardLookupResult&gt; promptCardStateOverrides = Map.of();</span>
-<span class="nc" id="L749">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
-<span class="nc" id="L750">        final AtomicInteger boardResolutions = new AtomicInteger();</span>
-<span class="nc" id="L751">        final AtomicInteger stateFetches = new AtomicInteger();</span>
-<span class="nc" id="L752">        final AtomicInteger promptStateFetches = new AtomicInteger();</span>
-<span class="nc" id="L753">        final AtomicInteger prepareForDispatchCalls = new AtomicInteger();</span>
-<span class="nc" id="L754">        final List&lt;String&gt; releasedCards = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L755">        final List&lt;ReleaseRecord&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L770">        volatile Map&lt;String, CardLookupResult&gt; promptCardStateOverrides = Map.of();</span>
+<span class="nc" id="L771">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
+<span class="nc" id="L772">        final AtomicInteger boardResolutions = new AtomicInteger();</span>
+<span class="nc" id="L773">        final AtomicInteger stateFetches = new AtomicInteger();</span>
+<span class="nc" id="L774">        final AtomicInteger promptStateFetches = new AtomicInteger();</span>
+<span class="nc" id="L775">        final AtomicInteger prepareForDispatchCalls = new AtomicInteger();</span>
+<span class="nc" id="L776">        final List&lt;String&gt; releasedCards = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L777">        final List&lt;ReleaseRecord&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
         volatile Card preparedCard;
         volatile RuntimeException resolveBoardIdFailure;
         volatile RuntimeException prepareForDispatchFailure;
-<span class="nc" id="L759">        volatile Runnable stateFetchHook = () -&gt; {};</span>
+<span class="nc" id="L781">        volatile Runnable stateFetchHook = () -&gt; {};</span>
         volatile boolean resolveConfiguredBoardId;
+<span class="nc" id="L783">        final AtomicReference&lt;RateLimitPressure&gt; rateLimitPressure = new AtomicReference&lt;&gt;(RateLimitPressure.NONE);</span>
 
-<span class="nc" id="L762">        FakeTracker(List&lt;Card&gt; candidates) {</span>
-<span class="nc" id="L763">            setCandidates(candidates);</span>
-<span class="nc" id="L764">        }</span>
+<span class="nc" id="L785">        FakeTracker(List&lt;Card&gt; candidates) {</span>
+<span class="nc" id="L786">            setCandidates(candidates);</span>
+<span class="nc" id="L787">        }</span>
 
         void setCandidates(List&lt;Card&gt; candidates) {
-<span class="nc" id="L767">            setCandidateList(candidates);</span>
-<span class="nc" id="L768">            this.cardStates = candidates.stream().collect(toImmutableMap(Card::id, CardLookupResult.Found::new));</span>
-<span class="nc" id="L769">        }</span>
+<span class="nc" id="L790">            setCandidateList(candidates);</span>
+<span class="nc" id="L791">            this.cardStates = candidates.stream().collect(toImmutableMap(Card::id, CardLookupResult.Found::new));</span>
+<span class="nc" id="L792">        }</span>
 
         void setCandidateList(List&lt;Card&gt; candidates) {
-<span class="nc" id="L772">            this.candidates = new ArrayList&lt;&gt;(candidates);</span>
-<span class="nc" id="L773">        }</span>
+<span class="nc" id="L795">            this.candidates = new ArrayList&lt;&gt;(candidates);</span>
+<span class="nc" id="L796">        }</span>
 
         void setCardState(Card card) {
-<span class="nc" id="L776">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.cardStates);</span>
-<span class="nc" id="L777">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L778">            this.cardStates = updated;</span>
-<span class="nc" id="L779">        }</span>
+<span class="nc" id="L799">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.cardStates);</span>
+<span class="nc" id="L800">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L801">            this.cardStates = updated;</span>
+<span class="nc" id="L802">        }</span>
 
         void setPromptCardState(Card card) {
-<span class="nc" id="L782">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.promptCardStateOverrides);</span>
-<span class="nc" id="L783">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L784">            this.promptCardStateOverrides = Map.copyOf(updated);</span>
-<span class="nc" id="L785">        }</span>
+<span class="nc" id="L805">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.promptCardStateOverrides);</span>
+<span class="nc" id="L806">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L807">            this.promptCardStateOverrides = Map.copyOf(updated);</span>
+<span class="nc" id="L808">        }</span>
 
         Card cardState(String cardId) {
-<span class="nc" id="L788">            return ((CardLookupResult.Found) cardStates.get(cardId)).card();</span>
+<span class="nc" id="L811">            return ((CardLookupResult.Found) cardStates.get(cardId)).card();</span>
         }
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L793">            boardResolutions.incrementAndGet();</span>
-<span class="nc bnc" id="L794" title="All 2 branches missed.">            if (resolveBoardIdFailure != null) {</span>
-<span class="nc" id="L795">                throw resolveBoardIdFailure;</span>
+<span class="nc" id="L816">            boardResolutions.incrementAndGet();</span>
+<span class="nc bnc" id="L817" title="All 2 branches missed.">            if (resolveBoardIdFailure != null) {</span>
+<span class="nc" id="L818">                throw resolveBoardIdFailure;</span>
             }
-<span class="nc bnc" id="L797" title="All 2 branches missed.">            return resolveConfiguredBoardId ? config.tracker().boardId() : &quot;board-1&quot;;</span>
+<span class="nc bnc" id="L820" title="All 2 branches missed.">            return resolveConfiguredBoardId ? config.tracker().boardId() : &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L802">            candidateFetches.incrementAndGet();</span>
-<span class="nc" id="L803">            return candidates;</span>
+<span class="nc" id="L825">            candidateFetches.incrementAndGet();</span>
+<span class="nc" id="L826">            return candidates;</span>
+        }
+
+        @Override
+        public RateLimitPressure drainRateLimitPressure() {
+<span class="nc" id="L831">            return rateLimitPressure.getAndSet(RateLimitPressure.NONE);</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L808">            return List.of();</span>
+<span class="nc" id="L836">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L813">            stateFetches.incrementAndGet();</span>
-<span class="nc" id="L814">            stateFetchHook.run();</span>
-<span class="nc" id="L815">            return cardStates.entrySet().stream()</span>
-<span class="nc" id="L816">                    .filter(entry -&gt; cardIds.contains(entry.getKey()))</span>
-<span class="nc" id="L817">                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));</span>
+<span class="nc" id="L841">            stateFetches.incrementAndGet();</span>
+<span class="nc" id="L842">            stateFetchHook.run();</span>
+<span class="nc" id="L843">            return cardStates.entrySet().stream()</span>
+<span class="nc" id="L844">                    .filter(entry -&gt; cardIds.contains(entry.getKey()))</span>
+<span class="nc" id="L845">                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesForPromptByIds(
                 EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L823">            promptStateFetches.incrementAndGet();</span>
-<span class="nc" id="L824">            Map&lt;String, CardLookupResult&gt; results = new LinkedHashMap&lt;&gt;(fetchCardStatesByIds(config, cardIds));</span>
-<span class="nc" id="L825">            cardIds.forEach(cardId -&gt; {</span>
-<span class="nc" id="L826">                CardLookupResult promptOverride = promptCardStateOverrides.get(cardId);</span>
-<span class="nc bnc" id="L827" title="All 2 branches missed.">                if (promptOverride != null) {</span>
-<span class="nc" id="L828">                    results.put(cardId, promptOverride);</span>
+<span class="nc" id="L851">            promptStateFetches.incrementAndGet();</span>
+<span class="nc" id="L852">            Map&lt;String, CardLookupResult&gt; results = new LinkedHashMap&lt;&gt;(fetchCardStatesByIds(config, cardIds));</span>
+<span class="nc" id="L853">            cardIds.forEach(cardId -&gt; {</span>
+<span class="nc" id="L854">                CardLookupResult promptOverride = promptCardStateOverrides.get(cardId);</span>
+<span class="nc bnc" id="L855" title="All 2 branches missed.">                if (promptOverride != null) {</span>
+<span class="nc" id="L856">                    results.put(cardId, promptOverride);</span>
                 }
-<span class="nc" id="L830">            });</span>
-<span class="nc" id="L831">            return Map.copyOf(results);</span>
+<span class="nc" id="L858">            });</span>
+<span class="nc" id="L859">            return Map.copyOf(results);</span>
         }
 
         @Override
         public Card prepareForDispatch(EffectiveConfig config, Card card) {
-<span class="nc" id="L836">            prepareForDispatchCalls.incrementAndGet();</span>
-<span class="nc bnc" id="L837" title="All 2 branches missed.">            if (preparedCard == null) {</span>
-<span class="nc" id="L838">                return card;</span>
+<span class="nc" id="L864">            prepareForDispatchCalls.incrementAndGet();</span>
+<span class="nc bnc" id="L865" title="All 2 branches missed.">            if (preparedCard == null) {</span>
+<span class="nc" id="L866">                return card;</span>
             }
-<span class="nc" id="L840">            setCardState(preparedCard);</span>
-<span class="nc bnc" id="L841" title="All 2 branches missed.">            if (prepareForDispatchFailure != null) {</span>
-<span class="nc" id="L842">                throw prepareForDispatchFailure;</span>
+<span class="nc" id="L868">            setCardState(preparedCard);</span>
+<span class="nc bnc" id="L869" title="All 2 branches missed.">            if (prepareForDispatchFailure != null) {</span>
+<span class="nc" id="L870">                throw prepareForDispatchFailure;</span>
             }
-<span class="nc" id="L844">            return preparedCard;</span>
+<span class="nc" id="L872">            return preparedCard;</span>
         }
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card) {
-<span class="nc" id="L849">            releaseFromDispatch(config, card, card);</span>
-<span class="nc" id="L850">        }</span>
+<span class="nc" id="L877">            releaseFromDispatch(config, card, card);</span>
+<span class="nc" id="L878">        }</span>
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card, Card dispatchSource) {
-<span class="nc" id="L854">            releases.add(new ReleaseRecord(card.state(), dispatchSource.state()));</span>
-<span class="nc" id="L855">            releasedCards.add(card.identifier());</span>
-<span class="nc bnc" id="L856" title="All 2 branches missed.">            String releaseState = card.state().equals(dispatchSource.state()) ? &quot;Todo&quot; : dispatchSource.state();</span>
-<span class="nc" id="L857">            setCardState(TestCards.card(card.id(), card.identifier(), releaseState));</span>
-<span class="nc" id="L858">        }</span>
+<span class="nc" id="L882">            releases.add(new ReleaseRecord(card.state(), dispatchSource.state()));</span>
+<span class="nc" id="L883">            releasedCards.add(card.identifier());</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">            String releaseState = card.state().equals(dispatchSource.state()) ? &quot;Todo&quot; : dispatchSource.state();</span>
+<span class="nc" id="L885">            setCardState(TestCards.card(card.id(), card.identifier(), releaseState));</span>
+<span class="nc" id="L886">        }</span>
     }
 
     static final class ThrowingWorkspaceManager extends WorkspaceManager {
-<span class="nc" id="L862">        final AtomicInteger removalAttempts = new AtomicInteger();</span>
+<span class="nc" id="L890">        final AtomicInteger removalAttempts = new AtomicInteger();</span>
 
         ThrowingWorkspaceManager() {
-<span class="nc" id="L865">            super(new HookRunner());</span>
-<span class="nc" id="L866">        }</span>
+<span class="nc" id="L893">            super(new HookRunner());</span>
+<span class="nc" id="L894">        }</span>
 
         @Override
         public void removeForIdentifierIfPresent(String cardIdentifier, EffectiveConfig config) {
-<span class="nc" id="L870">            removalAttempts.incrementAndGet();</span>
-<span class="nc" id="L871">            throw new IllegalStateException(&quot;workspace cleanup failed&quot;);</span>
+<span class="nc" id="L898">            removalAttempts.incrementAndGet();</span>
+<span class="nc" id="L899">            throw new IllegalStateException(&quot;workspace cleanup failed&quot;);</span>
         }
     }
 
-<span class="nc" id="L875">    static final class StartBlockingTracker implements TrackerClient {</span>
-<span class="nc" id="L876">        final CountDownLatch terminalFetchStarted = new CountDownLatch(1);</span>
-<span class="nc" id="L877">        final CountDownLatch releaseTerminalFetch = new CountDownLatch(1);</span>
+<span class="nc" id="L903">    static final class StartBlockingTracker implements TrackerClient {</span>
+<span class="nc" id="L904">        final CountDownLatch terminalFetchStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L905">        final CountDownLatch releaseTerminalFetch = new CountDownLatch(1);</span>
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L881">            return &quot;board-1&quot;;</span>
+<span class="nc" id="L909">            return &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L886">            return List.of();</span>
+<span class="nc" id="L914">            return List.of();</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L891">            terminalFetchStarted.countDown();</span>
+<span class="nc" id="L919">            terminalFetchStarted.countDown();</span>
             try {
-<span class="nc" id="L893">                assertThat(releaseTerminalFetch.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L894">                        .as(&quot;the blocked terminal-card fetch should be released within 5 seconds&quot;)</span>
-<span class="nc" id="L895">                        .isTrue();</span>
-<span class="nc" id="L896">            } catch (InterruptedException e) {</span>
-<span class="nc" id="L897">                Thread.currentThread().interrupt();</span>
-<span class="nc" id="L898">                throw new AssertionError(e);</span>
-<span class="nc" id="L899">            }</span>
-<span class="nc" id="L900">            return List.of();</span>
+<span class="nc" id="L921">                assertThat(releaseTerminalFetch.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L922">                        .as(&quot;the blocked terminal-card fetch should be released within 5 seconds&quot;)</span>
+<span class="nc" id="L923">                        .isTrue();</span>
+<span class="nc" id="L924">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L925">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L926">                throw new AssertionError(e);</span>
+<span class="nc" id="L927">            }</span>
+<span class="nc" id="L928">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L905">            return Map.of();</span>
+<span class="nc" id="L933">            return Map.of();</span>
         }
     }
 
-<span class="nc" id="L909">    static final class BlockingTracker implements TrackerClient {</span>
-<span class="nc" id="L910">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
-<span class="nc" id="L911">        final CountDownLatch firstFetchStarted = new CountDownLatch(1);</span>
-<span class="nc" id="L912">        final CountDownLatch releaseFirstFetch = new CountDownLatch(1);</span>
+<span class="nc" id="L937">    static final class BlockingTracker implements TrackerClient {</span>
+<span class="nc" id="L938">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
+<span class="nc" id="L939">        final CountDownLatch firstFetchStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L940">        final CountDownLatch releaseFirstFetch = new CountDownLatch(1);</span>
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L916">            return &quot;board-1&quot;;</span>
+<span class="nc" id="L944">            return &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc bnc" id="L921" title="All 2 branches missed.">            if (candidateFetches.incrementAndGet() == 1) {</span>
-<span class="nc" id="L922">                firstFetchStarted.countDown();</span>
+<span class="nc bnc" id="L949" title="All 2 branches missed.">            if (candidateFetches.incrementAndGet() == 1) {</span>
+<span class="nc" id="L950">                firstFetchStarted.countDown();</span>
                 try {
-<span class="nc" id="L924">                    assertThat(releaseFirstFetch.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L925">                            .as(&quot;the first blocked candidate-card fetch should be released within 5 seconds&quot;)</span>
-<span class="nc" id="L926">                            .isTrue();</span>
-<span class="nc" id="L927">                } catch (InterruptedException e) {</span>
-<span class="nc" id="L928">                    Thread.currentThread().interrupt();</span>
-<span class="nc" id="L929">                    throw new AssertionError(e);</span>
-<span class="nc" id="L930">                }</span>
+<span class="nc" id="L952">                    assertThat(releaseFirstFetch.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L953">                            .as(&quot;the first blocked candidate-card fetch should be released within 5 seconds&quot;)</span>
+<span class="nc" id="L954">                            .isTrue();</span>
+<span class="nc" id="L955">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L956">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L957">                    throw new AssertionError(e);</span>
+<span class="nc" id="L958">                }</span>
             }
-<span class="nc" id="L932">            return List.of();</span>
+<span class="nc" id="L960">            return List.of();</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L937">            return List.of();</span>
+<span class="nc" id="L965">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L942">            return Map.of();</span>
+<span class="nc" id="L970">            return Map.of();</span>
         }
     }
 
@@ -948,31 +976,44 @@ final class SymphonyOrchestratorTestSupport {
         final ZoneId zone;
 
         MutableClock(Instant now) {
-<span class="nc" id="L951">            this(now, ZoneOffset.UTC);</span>
-<span class="nc" id="L952">        }</span>
+<span class="nc" id="L979">            this(now, ZoneOffset.UTC);</span>
+<span class="nc" id="L980">        }</span>
 
-<span class="nc" id="L954">        MutableClock(Instant now, ZoneId zone) {</span>
-<span class="nc" id="L955">            this.now = new AtomicReference&lt;&gt;(now);</span>
-<span class="nc" id="L956">            this.zone = zone;</span>
-<span class="nc" id="L957">        }</span>
+<span class="nc" id="L982">        MutableClock(Instant now, ZoneId zone) {</span>
+<span class="nc" id="L983">            this.now = new AtomicReference&lt;&gt;(now);</span>
+<span class="nc" id="L984">            this.zone = zone;</span>
+<span class="nc" id="L985">        }</span>
 
         void advance(Duration duration) {
-<span class="nc" id="L960">            now.updateAndGet(instant -&gt; instant.plus(duration));</span>
-<span class="nc" id="L961">        }</span>
+<span class="nc" id="L988">            now.updateAndGet(instant -&gt; instant.plus(duration));</span>
+<span class="nc" id="L989">        }</span>
 
         @Override
         public ZoneId getZone() {
-<span class="nc" id="L965">            return zone;</span>
+<span class="nc" id="L993">            return zone;</span>
         }
 
         @Override
         public Clock withZone(ZoneId zone) {
-<span class="nc" id="L970">            return new MutableClock(now.get(), zone);</span>
+<span class="nc" id="L998">            return new MutableClock(now.get(), zone);</span>
         }
 
         @Override
         public Instant instant() {
-<span class="nc" id="L975">            return now.get();</span>
+<span class="nc" id="L1003">            return now.get();</span>
+        }
+    }
+
+    /// Returns a chosen draw for every bound, so a test can pin the smallest or largest jitter.
+<span class="nc" id="L1008">    record FixedRandom(LongUnaryOperator drawForBound) implements RandomGenerator {</span>
+        @Override
+        public long nextLong() {
+<span class="nc" id="L1011">            throw new UnsupportedOperationException(&quot;the poll interval only draws bounded values&quot;);</span>
+        }
+
+        @Override
+        public long nextLong(long bound) {
+<span class="nc" id="L1016">            return drawForBound.applyAsLong(bound);</span>
         }
     }
 

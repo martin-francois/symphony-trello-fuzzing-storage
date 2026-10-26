@@ -3,6 +3,7 @@
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -13,12 +14,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-<span class="nc" id="L21">final class LocalHealthCheckerTest {</span>
+<span class="nc" id="L25">final class LocalHealthCheckerTest {</span>
+    /// Far above the 500 ms probe timeout, so only a checker that never re-probes reaches it.
+<span class="nc" id="L27">    private static final Duration REPROBE_WAIT_BOUND = Duration.ofSeconds(10);</span>
+
     private HttpServer server;
 
     @TempDir
@@ -26,118 +33,149 @@ import org.junit.jupiter.api.io.TempDir;
 
     @AfterEach
     void stopServer() {
-<span class="nc bnc" id="L29" title="All 2 branches missed.">        if (server != null) {</span>
-<span class="nc" id="L30">            server.stop(0);</span>
+<span class="nc bnc" id="L36" title="All 2 branches missed.">        if (server != null) {</span>
+<span class="nc" id="L37">            server.stop(0);</span>
         }
-<span class="nc" id="L32">    }</span>
+<span class="nc" id="L39">    }</span>
 
     @Test
     void workflowHealthAcceptsConfiguredBoardKeyWhenRuntimeReportsResolvedBoardId() throws Exception {
         // given
-<span class="nc" id="L37">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L38">        startLocalStatusServer(</span>
+<span class="nc" id="L44">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L45">        startLocalStatusServer(</span>
                 &quot;&quot;&quot;
                 {&quot;workflowPath&quot;:&quot;%s&quot;,&quot;boardId&quot;:&quot;full-board-id&quot;,&quot;configuredBoardId&quot;:&quot;abc123&quot;}
                 &quot;&quot;&quot;
-<span class="nc" id="L42">                        .formatted(workflow));</span>
-<span class="nc" id="L43">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L49">                        .formatted(workflow));</span>
+<span class="nc" id="L50">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
 
         // when
-<span class="nc" id="L46">        BoardHealth health = checker.workflowHealth(</span>
-<span class="nc" id="L47">                workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
+<span class="nc" id="L53">        BoardHealth health = checker.workflowHealth(</span>
+<span class="nc" id="L54">                workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
 
         // then
-<span class="nc" id="L50">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
-<span class="nc" id="L51">        assertThat(health.actualBoardId()).hasValue(&quot;full-board-id&quot;);</span>
-<span class="nc" id="L52">        assertThat(health.workerPid()).isEmpty();</span>
-<span class="nc" id="L53">    }</span>
+<span class="nc" id="L57">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
+<span class="nc" id="L58">        assertThat(health.actualBoardId()).hasValue(&quot;full-board-id&quot;);</span>
+<span class="nc" id="L59">        assertThat(health.workerPid()).isEmpty();</span>
+<span class="nc" id="L60">    }</span>
 
     @Test
     void workflowHealthParsesReportedWorkerPid() throws Exception {
         // given
-<span class="nc" id="L58">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L59">        startLocalStatusServer(</span>
+<span class="nc" id="L65">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L66">        startLocalStatusServer(</span>
                 &quot;&quot;&quot;
                 {&quot;workflowPath&quot;:&quot;%s&quot;,&quot;boardId&quot;:&quot;full-board-id&quot;,&quot;configuredBoardId&quot;:&quot;abc123&quot;,&quot;pid&quot;:4242}
                 &quot;&quot;&quot;
-<span class="nc" id="L63">                        .formatted(workflow));</span>
-<span class="nc" id="L64">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L70">                        .formatted(workflow));</span>
+<span class="nc" id="L71">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
 
         // when
-<span class="nc" id="L67">        BoardHealth health = checker.workflowHealth(</span>
-<span class="nc" id="L68">                workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
+<span class="nc" id="L74">        BoardHealth health = checker.workflowHealth(</span>
+<span class="nc" id="L75">                workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
 
         // then
-<span class="nc" id="L71">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
-<span class="nc" id="L72">        assertThat(health.workerPid()).hasValue(4242L);</span>
-<span class="nc" id="L73">    }</span>
+<span class="nc" id="L78">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
+<span class="nc" id="L79">        assertThat(health.workerPid()).hasValue(4242L);</span>
+<span class="nc" id="L80">    }</span>
 
     @Test
-    void workflowHealthRetriesTransientLocalStatusFailureBeforeReportingPortUsed() throws Exception {
+    void workflowHealthReprobesOnceWhenABusyWorkerMissesTheLocalStatusTimeout() throws Exception {
         // given
-<span class="nc" id="L78">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L79">        var requests = new AtomicInteger();</span>
-<span class="nc" id="L80">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
-<span class="nc" id="L81">        server.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; {</span>
-<span class="nc bnc" id="L82" title="All 2 branches missed.">            if (requests.incrementAndGet() == 1) {</span>
-<span class="nc" id="L83">                exchange.sendResponseHeaders(500, -1);</span>
-<span class="nc" id="L84">                exchange.close();</span>
-<span class="nc" id="L85">                return;</span>
-            }
-<span class="nc" id="L87">            byte[] body =</span>
-                    &quot;&quot;&quot;
-                    {&quot;workflowPath&quot;:&quot;%s&quot;,&quot;boardId&quot;:&quot;full-board-id&quot;,&quot;configuredBoardId&quot;:&quot;abc123&quot;}
-                    &quot;&quot;&quot;
-<span class="nc" id="L91">                            .formatted(workflow)</span>
-<span class="nc" id="L92">                            .getBytes(StandardCharsets.UTF_8);</span>
-<span class="nc" id="L93">            exchange.sendResponseHeaders(200, body.length);</span>
-<span class="nc" id="L94">            exchange.getResponseBody().write(body);</span>
-<span class="nc" id="L95">            exchange.close();</span>
-<span class="nc" id="L96">        });</span>
-<span class="nc" id="L97">        server.start();</span>
-<span class="nc" id="L98">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L85">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L86">        var requests = new AtomicInteger();</span>
+<span class="nc" id="L87">        var reprobeArrived = new CountDownLatch(1);</span>
+<span class="nc" id="L88">        try (var handlers = Executors.newVirtualThreadPerTaskExecutor()) {</span>
+<span class="nc" id="L89">            server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+            // The default executor is the single dispatcher thread, which the stalled first
+            // request would block, so the re-probe could never be answered.
+<span class="nc" id="L92">            server.setExecutor(handlers);</span>
+<span class="nc" id="L93">            server.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; {</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                if (requests.incrementAndGet() == 1) {</span>
+                    // Like a worker frozen by a GC or CPU pause: the connection is accepted, but
+                    // no answer comes until the checker has given up on this request.
+<span class="nc" id="L97">                    awaitReprobe(reprobeArrived);</span>
+<span class="nc" id="L98">                    exchange.close();</span>
+<span class="nc" id="L99">                    return;</span>
+                }
+<span class="nc" id="L101">                reprobeArrived.countDown();</span>
+<span class="nc" id="L102">                respondWithJson(</span>
+                        exchange,
+                        &quot;&quot;&quot;
+                        {&quot;workflowPath&quot;:&quot;%s&quot;,&quot;boardId&quot;:&quot;full-board-id&quot;,&quot;configuredBoardId&quot;:&quot;abc123&quot;}
+                        &quot;&quot;&quot;
+<span class="nc" id="L107">                                .formatted(workflow));</span>
+<span class="nc" id="L108">            });</span>
+<span class="nc" id="L109">            server.start();</span>
+<span class="nc" id="L110">            var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+
+            // when
+<span class="nc" id="L113">            BoardHealth health = checker.workflowHealth(</span>
+<span class="nc" id="L114">                    workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
+
+            // then
+<span class="nc" id="L117">            assertThat(health.kind())</span>
+<span class="nc" id="L118">                    .as(&quot;a worker that answers the re-probe must not be reported as a foreign process&quot;)</span>
+<span class="nc" id="L119">                    .isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
+<span class="nc" id="L120">            assertThat(requests).hasValue(2);</span>
+        }
+<span class="nc" id="L122">    }</span>
+
+    @Test
+    void workflowHealthReportsPortUsedForAForeignHttpServerAfterOneReprobe() throws Exception {
+        // given
+<span class="nc" id="L127">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L128">        var requests = new AtomicInteger();</span>
+<span class="nc" id="L129">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L130">        server.createContext(&quot;/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L131">            requests.incrementAndGet();</span>
+<span class="nc" id="L132">            exchange.sendResponseHeaders(404, -1);</span>
+<span class="nc" id="L133">            exchange.close();</span>
+<span class="nc" id="L134">        });</span>
+<span class="nc" id="L135">        server.start();</span>
+<span class="nc" id="L136">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
 
         // when
-<span class="nc" id="L101">        BoardHealth health = checker.workflowHealth(</span>
-<span class="nc" id="L102">                workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
+<span class="nc" id="L139">        BoardHealth health = checker.workflowHealth(</span>
+<span class="nc" id="L140">                workflow, &quot;abc123&quot;, &quot;abc123&quot;, server.getAddress().getPort());</span>
 
         // then
-<span class="nc" id="L105">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
-<span class="nc" id="L106">        assertThat(requests.get()).isEqualTo(2);</span>
-<span class="nc" id="L107">    }</span>
+<span class="nc" id="L143">        assertThat(health.kind()).isEqualTo(BoardHealthKind.PORT_USED);</span>
+<span class="nc" id="L144">        assertThat(requests).hasValue(2);</span>
+<span class="nc" id="L145">    }</span>
 
     @Test
     void portProbeUsesSameIpv4LoopbackHostAsHealthUrls() {
         // given
-<span class="nc" id="L112">        var loopback = LocalHealthChecker.loopbackIpv4ForTests();</span>
+<span class="nc" id="L150">        var loopback = LocalHealthChecker.loopbackIpv4ForTests();</span>
 
         // when
-<span class="nc" id="L115">        String hostAddress = loopback.getHostAddress();</span>
+<span class="nc" id="L153">        String hostAddress = loopback.getHostAddress();</span>
 
         // then
-<span class="nc" id="L118">        assertThat(hostAddress).isEqualTo(&quot;127.0.0.1&quot;);</span>
-<span class="nc" id="L119">    }</span>
+<span class="nc" id="L156">        assertThat(hostAddress).isEqualTo(&quot;127.0.0.1&quot;);</span>
+<span class="nc" id="L157">    }</span>
 
     @Test
     void managedHealthPortRejectsOutOfRangeHttpPortOverride() {
         // given
-<span class="nc" id="L124">        var checker = new LocalHealthChecker(Map.of(&quot;SYMPHONY_HTTP_PORT&quot;, &quot;70000&quot;), new WorkflowConfigEditor());</span>
+<span class="nc" id="L162">        var checker = new LocalHealthChecker(Map.of(&quot;SYMPHONY_HTTP_PORT&quot;, &quot;70000&quot;), new WorkflowConfigEditor());</span>
 
         // when
-<span class="nc" id="L127">        Throwable thrown = catchThrowable(() -&gt; checker.managedHealthPort(tempDir.resolve(&quot;WORKFLOW.md&quot;), 18080, null));</span>
+<span class="nc" id="L165">        Throwable thrown = catchThrowable(() -&gt; checker.managedHealthPort(tempDir.resolve(&quot;WORKFLOW.md&quot;), 18080, null));</span>
 
         // then
-<span class="nc" id="L130">        assertThat(thrown)</span>
-<span class="nc" id="L131">                .isInstanceOf(TrelloBoardSetupException.class)</span>
-<span class="nc" id="L132">                .hasMessageContaining(&quot;SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT must be between 1 and 65535&quot;);</span>
-<span class="nc" id="L133">    }</span>
+<span class="nc" id="L168">        assertThat(thrown)</span>
+<span class="nc" id="L169">                .isInstanceOf(TrelloBoardSetupException.class)</span>
+<span class="nc" id="L170">                .hasMessageContaining(&quot;SYMPHONY_HTTP_PORT/QUARKUS_HTTP_PORT must be between 1 and 65535&quot;);</span>
+<span class="nc" id="L171">    }</span>
 
     @Test
     void managedHealthPortResolvesWorkflowServerPortFromDotenv() throws Exception {
         // given
-<span class="nc" id="L138">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
-<span class="nc" id="L139">        Path dotenv = tempDir.resolve(&quot;.env&quot;);</span>
-<span class="nc" id="L140">        Files.writeString(</span>
+<span class="nc" id="L176">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L177">        Path dotenv = tempDir.resolve(&quot;.env&quot;);</span>
+<span class="nc" id="L178">        Files.writeString(</span>
                 workflow,
                 &quot;&quot;&quot;
                 ---
@@ -146,120 +184,131 @@ import org.junit.jupiter.api.io.TempDir;
                 ---
                 Prompt
                 &quot;&quot;&quot;);
-<span class="nc" id="L149">        Files.writeString(dotenv, &quot;SYMPHONY_TEST_PORT=19091\n&quot;);</span>
-<span class="nc" id="L150">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L187">        Files.writeString(dotenv, &quot;SYMPHONY_TEST_PORT=19091\n&quot;);</span>
+<span class="nc" id="L188">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
 
         // when
-<span class="nc" id="L153">        int port = checker.managedHealthPort(workflow, 18080, dotenv);</span>
+<span class="nc" id="L191">        int port = checker.managedHealthPort(workflow, 18080, dotenv);</span>
 
         // then
-<span class="nc" id="L156">        assertThat(port).isEqualTo(19091);</span>
-<span class="nc" id="L157">    }</span>
+<span class="nc" id="L194">        assertThat(port).isEqualTo(19091);</span>
+<span class="nc" id="L195">    }</span>
 
     @Test
     void waitForSameWorkflowReturnsImmediatelyWhenTheProcessAlreadyDied() throws Exception {
         // given
-<span class="nc" id="L162">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L163">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
-<span class="nc" id="L164">        int unboundPort = unboundLoopbackPort();</span>
-<span class="nc" id="L165">        long started = System.nanoTime();</span>
+<span class="nc" id="L200">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L201">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L202">        int unboundPort = unboundLoopbackPort();</span>
+<span class="nc" id="L203">        long started = System.nanoTime();</span>
 
         // when
-<span class="nc" id="L168">        BoardHealth health = checker.waitForSameWorkflow(</span>
-<span class="nc" id="L169">                board(workflow, unboundPort), unboundPort, () -&gt; false, Duration.ofSeconds(30));</span>
+<span class="nc" id="L206">        BoardHealth health = checker.waitForSameWorkflow(</span>
+<span class="nc" id="L207">                board(workflow, unboundPort), unboundPort, () -&gt; false, Duration.ofSeconds(30));</span>
 
         // then
-<span class="nc" id="L172">        assertThat(health.kind()).isEqualTo(BoardHealthKind.STOPPED);</span>
-<span class="nc" id="L173">        assertThat(Duration.ofNanos(System.nanoTime() - started))</span>
-<span class="nc" id="L174">                .as(&quot;a dead worker process can never become healthy, so the wait budget must not be burned&quot;)</span>
-<span class="nc" id="L175">                .isLessThan(Duration.ofSeconds(10));</span>
-<span class="nc" id="L176">    }</span>
+<span class="nc" id="L210">        assertThat(health.kind()).isEqualTo(BoardHealthKind.STOPPED);</span>
+<span class="nc" id="L211">        assertThat(Duration.ofNanos(System.nanoTime() - started))</span>
+<span class="nc" id="L212">                .as(&quot;a dead worker process can never become healthy, so the wait budget must not be burned&quot;)</span>
+<span class="nc" id="L213">                .isLessThan(Duration.ofSeconds(10));</span>
+<span class="nc" id="L214">    }</span>
 
     @Test
     void waitForSameWorkflowStopsPollingWhenTheProcessDiesMidWait() throws Exception {
         // given
-<span class="nc" id="L181">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L182">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
-<span class="nc" id="L183">        int unboundPort = unboundLoopbackPort();</span>
-<span class="nc" id="L184">        var aliveProbes = new AtomicInteger();</span>
-<span class="nc" id="L185">        long started = System.nanoTime();</span>
+<span class="nc" id="L219">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L220">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L221">        int unboundPort = unboundLoopbackPort();</span>
+<span class="nc" id="L222">        var aliveProbes = new AtomicInteger();</span>
+<span class="nc" id="L223">        long started = System.nanoTime();</span>
 
         // when
-<span class="nc" id="L188">        BoardHealth health = checker.waitForSameWorkflow(</span>
-<span class="nc" id="L189">                board(workflow, unboundPort),</span>
+<span class="nc" id="L226">        BoardHealth health = checker.waitForSameWorkflow(</span>
+<span class="nc" id="L227">                board(workflow, unboundPort),</span>
                 unboundPort,
-<span class="nc bnc" id="L191" title="All 2 branches missed.">                () -&gt; aliveProbes.incrementAndGet() &lt;= 2,</span>
-<span class="nc" id="L192">                Duration.ofSeconds(30));</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                () -&gt; aliveProbes.incrementAndGet() &lt;= 2,</span>
+<span class="nc" id="L230">                Duration.ofSeconds(30));</span>
 
         // then
-<span class="nc" id="L195">        assertThat(health.kind()).isEqualTo(BoardHealthKind.STOPPED);</span>
-<span class="nc" id="L196">        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(10));</span>
-<span class="nc" id="L197">    }</span>
+<span class="nc" id="L233">        assertThat(health.kind()).isEqualTo(BoardHealthKind.STOPPED);</span>
+<span class="nc" id="L234">        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(10));</span>
+<span class="nc" id="L235">    }</span>
 
     @Test
     void waitForSameWorkflowOutlastsSlowStartupWhileTheProcessIsAlive() throws Exception {
         // given
-<span class="nc" id="L202">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L203">        var requests = new AtomicInteger();</span>
-<span class="nc" id="L204">        String healthyJson =</span>
+<span class="nc" id="L240">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L241">        var requests = new AtomicInteger();</span>
+<span class="nc" id="L242">        String healthyJson =</span>
                 &quot;&quot;&quot;
                 {&quot;workflowPath&quot;:&quot;%s&quot;,&quot;boardId&quot;:&quot;board-1&quot;}
-<span class="nc" id="L207">                &quot;&quot;&quot;.formatted(workflow);</span>
-<span class="nc" id="L208">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
-<span class="nc" id="L209">        server.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; {</span>
+<span class="nc" id="L245">                &quot;&quot;&quot;.formatted(workflow);</span>
+<span class="nc" id="L246">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L247">        server.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; {</span>
             // The port is bound from the start, but the worker only becomes healthy after a few
             // probes, like a JVM that is still starting up.
-<span class="nc bnc" id="L212" title="All 2 branches missed.">            if (requests.incrementAndGet() &lt;= 3) {</span>
-<span class="nc" id="L213">                exchange.sendResponseHeaders(503, -1);</span>
-<span class="nc" id="L214">                exchange.close();</span>
-<span class="nc" id="L215">                return;</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">            if (requests.incrementAndGet() &lt;= 3) {</span>
+<span class="nc" id="L251">                exchange.sendResponseHeaders(503, -1);</span>
+<span class="nc" id="L252">                exchange.close();</span>
+<span class="nc" id="L253">                return;</span>
             }
-<span class="nc" id="L217">            byte[] body = healthyJson.getBytes(StandardCharsets.UTF_8);</span>
-<span class="nc" id="L218">            exchange.sendResponseHeaders(200, body.length);</span>
-<span class="nc" id="L219">            exchange.getResponseBody().write(body);</span>
-<span class="nc" id="L220">            exchange.close();</span>
-<span class="nc" id="L221">        });</span>
-<span class="nc" id="L222">        server.start();</span>
-<span class="nc" id="L223">        int port = server.getAddress().getPort();</span>
-<span class="nc" id="L224">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
+<span class="nc" id="L255">            respondWithJson(exchange, healthyJson);</span>
+<span class="nc" id="L256">        });</span>
+<span class="nc" id="L257">        server.start();</span>
+<span class="nc" id="L258">        int port = server.getAddress().getPort();</span>
+<span class="nc" id="L259">        var checker = new LocalHealthChecker(Map.of(), new WorkflowConfigEditor());</span>
 
         // when
-<span class="nc" id="L227">        BoardHealth health =</span>
-<span class="nc" id="L228">                checker.waitForSameWorkflow(board(workflow, port), port, () -&gt; true, Duration.ofSeconds(30));</span>
+<span class="nc" id="L262">        BoardHealth health =</span>
+<span class="nc" id="L263">                checker.waitForSameWorkflow(board(workflow, port), port, () -&gt; true, Duration.ofSeconds(30));</span>
 
         // then
-<span class="nc" id="L231">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
-<span class="nc" id="L232">        assertThat(requests.get()).isGreaterThan(3);</span>
-<span class="nc" id="L233">    }</span>
+<span class="nc" id="L266">        assertThat(health.kind()).isEqualTo(BoardHealthKind.SAME_WORKFLOW);</span>
+<span class="nc" id="L267">        assertThat(requests.get()).isGreaterThan(3);</span>
+<span class="nc" id="L268">    }</span>
 
     private static ConnectedBoard board(Path workflow, int port) {
-<span class="nc" id="L236">        return ConnectedBoardBuilder.connectedBoard(workflow)</span>
-<span class="nc" id="L237">                .withBoardId(&quot;board-1&quot;)</span>
-<span class="nc" id="L238">                .withBoardKey(&quot;board-1&quot;)</span>
-<span class="nc" id="L239">                .withBoardName(&quot;Queue&quot;)</span>
-<span class="nc" id="L240">                .withBoardUrl(&quot;https://trello.com/b/SYNTH001/synthetic-board&quot;)</span>
-<span class="nc" id="L241">                .withEnvPath(null)</span>
-<span class="nc" id="L242">                .withWorkspaceRoot(workflow.getParent())</span>
-<span class="nc" id="L243">                .withServerPort(port)</span>
-<span class="nc" id="L244">                .build();</span>
+<span class="nc" id="L271">        return ConnectedBoardBuilder.connectedBoard(workflow)</span>
+<span class="nc" id="L272">                .withBoardId(&quot;board-1&quot;)</span>
+<span class="nc" id="L273">                .withBoardKey(&quot;board-1&quot;)</span>
+<span class="nc" id="L274">                .withBoardName(&quot;Queue&quot;)</span>
+<span class="nc" id="L275">                .withBoardUrl(&quot;https://trello.com/b/SYNTH001/synthetic-board&quot;)</span>
+<span class="nc" id="L276">                .withEnvPath(null)</span>
+<span class="nc" id="L277">                .withWorkspaceRoot(workflow.getParent())</span>
+<span class="nc" id="L278">                .withServerPort(port)</span>
+<span class="nc" id="L279">                .build();</span>
     }
 
     /// A port that was just bound and released, so nothing accepts connections on it.
     private static int unboundLoopbackPort() throws IOException {
-<span class="nc" id="L249">        try (var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {</span>
-<span class="nc" id="L250">            return socket.getLocalPort();</span>
+<span class="nc" id="L284">        try (var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {</span>
+<span class="nc" id="L285">            return socket.getLocalPort();</span>
         }
     }
 
     private void startLocalStatusServer(String responseJson) throws IOException {
-<span class="nc" id="L255">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
-<span class="nc" id="L256">        server.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; {</span>
-<span class="nc" id="L257">            byte[] body = responseJson.getBytes(StandardCharsets.UTF_8);</span>
-<span class="nc" id="L258">            exchange.sendResponseHeaders(200, body.length);</span>
-<span class="nc" id="L259">            exchange.getResponseBody().write(body);</span>
-<span class="nc" id="L260">            exchange.close();</span>
-<span class="nc" id="L261">        });</span>
-<span class="nc" id="L262">        server.start();</span>
-<span class="nc" id="L263">    }</span>
+<span class="nc" id="L290">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L291">        server.createContext(&quot;/api/v1/local-status&quot;, exchange -&gt; respondWithJson(exchange, responseJson));</span>
+<span class="nc" id="L292">        server.start();</span>
+<span class="nc" id="L293">    }</span>
+
+    private static void respondWithJson(HttpExchange exchange, String json) throws IOException {
+<span class="nc" id="L296">        byte[] body = json.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L297">        exchange.sendResponseHeaders(200, body.length);</span>
+<span class="nc" id="L298">        exchange.getResponseBody().write(body);</span>
+<span class="nc" id="L299">        exchange.close();</span>
+<span class="nc" id="L300">    }</span>
+
+    /// Blocks the stalled first request until the re-probe arrives, so the checker can only see it
+    /// time out. The bound keeps a broken checker from hanging the test.
+    private static void awaitReprobe(CountDownLatch reprobeArrived) {
+        try {
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            if (!reprobeArrived.await(REPROBE_WAIT_BOUND.toMillis(), TimeUnit.MILLISECONDS)) {</span>
+<span class="nc" id="L307">                throw new IllegalStateException(&quot;the checker never sent a re-probe&quot;);</span>
+            }
+<span class="nc" id="L309">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L310">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L311">        }</span>
+<span class="nc" id="L312">    }</span>
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

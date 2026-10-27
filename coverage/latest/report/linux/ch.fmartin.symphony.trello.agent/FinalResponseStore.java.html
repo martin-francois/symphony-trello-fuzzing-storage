@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FinalResponseStore.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">FinalResponseStore.java</span></div><h1>FinalResponseStore.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import ch.fmartin.symphony.trello.Sha3;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.PullRequestMode;
+import ch.fmartin.symphony.trello.prompt.PullRequestHandoff;
+import ch.fmartin.symphony.trello.time.ApplicationClock;
+import ch.fmartin.symphony.trello.tracker.TrackerEndpoint;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFileAttributes;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import org.jboss.logging.Logger;
+import org.jspecify.annotations.NullMarked;
+
+/// Keeps the current private final response outside task workspaces, which terminal cleanup removes.
+/// The existing workflow runtime lock owns the namespace across processes; synchronized operations
+/// serialize its cards within this runner and prevent an older attempt from replacing a newer one.
+@NullMarked
+final class FinalResponseStore {
+    // WorkspaceManager.sanitize always replaces +, so no task key can own or clean this directory.
+    static final String DIRECTORY = &quot;.symphony+final-responses&quot;;
+    static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+    static final int MAX_FINISHED_RECORDS = 128;
+    private static final int MAX_METADATA_BYTES = 64 * 1024;
+    static final int MAX_RECORD_BYTES = MAX_RESPONSE_BYTES * 6 + MAX_METADATA_BYTES;
+    private static final int MAX_ID_BYTES = 1024;
+    private static final int STICKY_BIT = 512;
+<span class="nc" id="L47">    private static final Set&lt;String&gt; STATUSES = Set.of(&quot;running&quot;, &quot;completed&quot;, &quot;failed&quot;);</span>
+<span class="nc" id="L48">    private static final Logger LOG = Logger.getLogger(FinalResponseStore.class);</span>
+<span class="nc" id="L49">    private final ObjectMapper json = new ObjectMapper();</span>
+    private final Clock clock;
+<span class="nc" id="L51">    private final Map&lt;Path, String&gt; active = new HashMap&lt;&gt;();</span>
+
+    FinalResponseStore() {
+<span class="nc" id="L54">        this(ApplicationClock.systemUtc());</span>
+<span class="nc" id="L55">    }</span>
+
+<span class="nc" id="L57">    FinalResponseStore(Clock clock) {</span>
+<span class="nc" id="L58">        this.clock = clock;</span>
+<span class="nc" id="L59">    }</span>
+
+    synchronized Optional&lt;FinalResponseRecording&gt; begin(AgentRunner.AgentRunRequest request) {
+<span class="nc" id="L62">        Path path = path(request);</span>
+<span class="nc" id="L63">        Path namespace = requiredParent(path);</span>
+        try {
+<span class="nc" id="L65">            if (PullRequestHandoff.resolve(request.config().github(), request.card())</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                                    .mode()</span>
+                            != PullRequestMode.BRANCH_ONLY
+<span class="nc bnc" id="L68" title="All 2 branches missed.">                    || TrelloHandoffToolHandler.evidenceWritesEnabled(request.config())) {</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">                if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc" id="L70">                    prepareDirectories(request.config().workspace().root(), namespace);</span>
+<span class="nc" id="L71">                    readRecord(path);</span>
+<span class="nc" id="L72">                    Files.delete(path);</span>
+                }
+<span class="nc" id="L74">                active.remove(path);</span>
+<span class="nc" id="L75">                return Optional.empty();</span>
+            }
+<span class="nc" id="L77">            prepareDirectories(request.config().workspace().root(), namespace);</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc" id="L79">                readRecord(path);</span>
+            }
+<span class="nc" id="L81">            ObjectNode record = metadata(request);</span>
+<span class="nc" id="L82">            trimFinished(namespace, MAX_FINISHED_RECORDS);</span>
+<span class="nc" id="L83">            replace(path, record);</span>
+<span class="nc" id="L84">            active.put(path, request.workerIdentity());</span>
+<span class="nc" id="L85">            return Optional.of(new FinalResponseRecording(this, path, request, record));</span>
+<span class="nc" id="L86">        } catch (IOException e) {</span>
+<span class="nc" id="L87">            throw failure(&quot;prepare&quot;, request.workerIdentity(), e);</span>
+        }
+    }
+
+    private Path path(AgentRunner.AgentRunRequest request) {
+<span class="nc" id="L92">        EffectiveConfig config = request.config();</span>
+<span class="nc" id="L93">        String namespace = String.join(</span>
+                &quot;\n&quot;,
+<span class="nc" id="L95">                config.workflowPath().toAbsolutePath().normalize().toString(),</span>
+<span class="nc" id="L96">                TrackerEndpoint.fingerprint(config.tracker().endpoint()),</span>
+<span class="nc" id="L97">                config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L98">        return config.workspace()</span>
+<span class="nc" id="L99">                .root()</span>
+<span class="nc" id="L100">                .toAbsolutePath()</span>
+<span class="nc" id="L101">                .normalize()</span>
+<span class="nc" id="L102">                .resolve(DIRECTORY)</span>
+<span class="nc" id="L103">                .resolve(Sha3.sha3_256(namespace))</span>
+<span class="nc" id="L104">                .resolve(Sha3.sha3_256(request.card().id()) + &quot;.json&quot;);</span>
+    }
+
+    private ObjectNode metadata(AgentRunner.AgentRunRequest request) throws IOException {
+<span class="nc" id="L108">        ObjectNode record = json.createObjectNode();</span>
+<span class="nc" id="L109">        record.put(&quot;status&quot;, &quot;running&quot;);</span>
+<span class="nc" id="L110">        record.put(&quot;card_id&quot;, checkedIdentity(request.card().id()));</span>
+<span class="nc" id="L111">        record.put(&quot;card_identifier&quot;, checkedIdentity(request.card().identifier()));</span>
+<span class="nc" id="L112">        record.put(&quot;worker_identity&quot;, checkedIdentity(request.workerIdentity()));</span>
+<span class="nc" id="L113">        record.put(&quot;updated_at&quot;, clock.instant().toString());</span>
+<span class="nc" id="L114">        return record;</span>
+    }
+
+    synchronized void complete(
+            Path path, String worker, ObjectNode record, String thread, String turn, String response) {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        if (!worker.equals(active.get(path))) {</span>
+<span class="nc" id="L120">            throw failure(</span>
+                    &quot;save&quot;, worker, new IOException(&quot;cannot save local final response: the current attempt changed&quot;));
+        }
+        try {
+<span class="nc" id="L124">            record.put(&quot;thread_id&quot;, checkedIdentity(thread));</span>
+<span class="nc" id="L125">            record.put(&quot;turn_id&quot;, checkedIdentity(turn));</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (response.getBytes(StandardCharsets.UTF_8).length &gt; MAX_RESPONSE_BYTES) {</span>
+<span class="nc" id="L127">                throw new IOException(</span>
+                        &quot;cannot save local final response: the completed response exceeds the size limit&quot;);
+            }
+<span class="nc" id="L130">            record.put(&quot;response&quot;, response);</span>
+<span class="nc" id="L131">            record.put(&quot;status&quot;, &quot;completed&quot;);</span>
+<span class="nc" id="L132">            record.put(&quot;updated_at&quot;, clock.instant().toString());</span>
+<span class="nc" id="L133">            trimFinished(requiredParent(path), MAX_FINISHED_RECORDS - 1);</span>
+<span class="nc" id="L134">            replace(path, record);</span>
+<span class="nc" id="L135">            active.remove(path, worker);</span>
+            // This is a private local path, like the worker's existing workflow path log. Never log
+            // the response or protocol payload; operators read the private JSON file directly.
+<span class="nc" id="L138">            LOG.infof(&quot;final_response outcome=completed path=%s&quot;, path);</span>
+<span class="nc" id="L139">        } catch (IOException e) {</span>
+<span class="nc" id="L140">            throw failure(&quot;save&quot;, worker, e);</span>
+<span class="nc" id="L141">        }</span>
+<span class="nc" id="L142">    }</span>
+
+    synchronized void abandon(Path path, String worker, ObjectNode record) {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!worker.equals(active.get(path))) {</span>
+<span class="nc" id="L146">            return;</span>
+        }
+        try {
+<span class="nc" id="L149">            record.remove(&quot;response&quot;);</span>
+<span class="nc" id="L150">            record.put(&quot;status&quot;, &quot;failed&quot;);</span>
+<span class="nc" id="L151">            record.put(&quot;updated_at&quot;, clock.instant().toString());</span>
+<span class="nc" id="L152">            trimFinished(requiredParent(path), MAX_FINISHED_RECORDS - 1);</span>
+<span class="nc" id="L153">            replace(path, record);</span>
+<span class="nc" id="L154">        } catch (IOException e) {</span>
+            // The accepted start already removed the old response. Keep that incomplete record and
+            // the original run failure when marking it failed also encounters a storage error.
+<span class="nc" id="L157">            LOG.warn(&quot;cannot mark local final response failed: check private output storage permissions and capacity&quot;);</span>
+        } finally {
+<span class="nc" id="L159">            active.remove(path, worker);</span>
+        }
+<span class="nc" id="L161">    }</span>
+
+    private void trimFinished(Path namespace, int retain) throws IOException {
+<span class="nc" id="L164">        var candidates = new ArrayList&lt;StoredRecord&gt;();</span>
+<span class="nc" id="L165">        try (var files = Files.newDirectoryStream(namespace, &quot;*.json&quot;)) {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            for (Path file : files) {</span>
+<span class="nc" id="L167">                JsonNode record = readRecord(file);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                if (!active.containsKey(file)) {</span>
+<span class="nc" id="L169">                    candidates.add(new StoredRecord(</span>
+<span class="nc" id="L170">                            file, Instant.parse(record.path(&quot;updated_at&quot;).textValue())));</span>
+                }
+<span class="nc" id="L172">            }</span>
+        }
+<span class="nc" id="L174">        candidates.sort(Comparator.comparing(StoredRecord::updatedAt)</span>
+<span class="nc" id="L175">                .thenComparing(record -&gt; record.path().toString()));</span>
+<span class="nc" id="L176">        int remove = Math.max(0, candidates.size() - retain);</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        for (int index = 0; index &lt; remove; index++) {</span>
+<span class="nc" id="L178">            Files.delete(candidates.get(index).path());</span>
+        }
+<span class="nc" id="L180">    }</span>
+
+    private JsonNode readRecord(Path path) throws IOException {
+<span class="nc" id="L183">        requireRegularFile(path);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        if (Files.size(path) &gt; MAX_RECORD_BYTES) {</span>
+<span class="nc" id="L185">            throw new IOException(&quot;cannot read local final response: an existing record exceeds the size limit&quot;);</span>
+        }
+        byte[] bytes;
+<span class="nc" id="L188">        try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc" id="L189">            bytes = input.readNBytes(MAX_RECORD_BYTES + 1);</span>
+        }
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        if (bytes.length &gt; MAX_RECORD_BYTES) {</span>
+<span class="nc" id="L192">            throw new IOException(&quot;cannot read local final response: an existing record exceeds the size limit&quot;);</span>
+        }
+<span class="nc" id="L194">        JsonNode record = json.readTree(bytes);</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if (record == null</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                || !record.isObject()</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">                || !STATUSES.contains(record.path(&quot;status&quot;).asText())) {</span>
+<span class="nc" id="L198">            throw new IOException(&quot;cannot read local final response: expected valid status metadata&quot;);</span>
+        }
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        for (String field : Set.of(&quot;card_id&quot;, &quot;card_identifier&quot;, &quot;worker_identity&quot;, &quot;updated_at&quot;)) {</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            if (!record.path(field).isTextual()) {</span>
+<span class="nc" id="L202">                throw new IOException(&quot;cannot read local final response: expected valid identity metadata&quot;);</span>
+            }
+<span class="nc" id="L204">            checkedIdentity(record.path(field).textValue());</span>
+<span class="nc" id="L205">        }</span>
+        // A verified regular record is not a filesystem root and therefore has a filename.
+<span class="nc" id="L207">        if (!Objects.requireNonNull(path.getFileName(), &quot;cannot read local final response: expected a record filename&quot;)</span>
+<span class="nc" id="L208">                .toString()</span>
+<span class="nc bnc" id="L209" title="All 2 branches missed.">                .equals(Sha3.sha3_256(record.path(&quot;card_id&quot;).textValue()) + &quot;.json&quot;)) {</span>
+<span class="nc" id="L210">            throw new IOException(</span>
+                    &quot;cannot read local final response: the record filename does not match its card identity&quot;);
+        }
+        try {
+<span class="nc" id="L214">            Instant.parse(record.path(&quot;updated_at&quot;).textValue());</span>
+<span class="nc" id="L215">        } catch (DateTimeParseException e) {</span>
+<span class="nc" id="L216">            throw new IOException(&quot;cannot read local final response: expected a valid timestamp&quot;, e);</span>
+<span class="nc" id="L217">        }</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (&quot;completed&quot;.equals(record.path(&quot;status&quot;).textValue())) {</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            for (String field : Set.of(&quot;thread_id&quot;, &quot;turn_id&quot;)) {</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">                if (!record.path(field).isTextual()) {</span>
+<span class="nc" id="L221">                    throw new IOException(</span>
+                            &quot;cannot read local final response: expected completed thread and turn identities&quot;);
+                }
+<span class="nc" id="L224">                checkedIdentity(record.path(field).textValue());</span>
+<span class="nc" id="L225">            }</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (!record.path(&quot;response&quot;).isTextual()</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                    || record.path(&quot;response&quot;).textValue().isBlank()</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                    || record.path(&quot;response&quot;).textValue().getBytes(StandardCharsets.UTF_8).length</span>
+                            &gt; MAX_RESPONSE_BYTES) {
+<span class="nc" id="L230">                throw new IOException(&quot;cannot read local final response: expected response text within the size limit&quot;);</span>
+            }
+<span class="nc bnc" id="L232" title="All 2 branches missed.">        } else if (record.has(&quot;response&quot;)) {</span>
+<span class="nc" id="L233">            throw new IOException(</span>
+                    &quot;cannot read local final response: an incomplete record must not contain response text&quot;);
+        }
+<span class="nc" id="L236">        return record;</span>
+    }
+
+    private static String checkedIdentity(String value) throws IOException {
+<span class="nc bnc" id="L240" title="All 4 branches missed.">        if (value.isBlank() || value.getBytes(StandardCharsets.UTF_8).length &gt; MAX_ID_BYTES) {</span>
+<span class="nc" id="L241">            throw new IOException(</span>
+                    &quot;cannot save local final response: expected nonempty identity metadata within the size limit&quot;);
+        }
+<span class="nc" id="L244">        return value;</span>
+    }
+
+    private static void prepareDirectories(Path workspaceRoot, Path namespace) throws IOException {
+<span class="nc" id="L248">        Path root = workspaceRoot.toAbsolutePath().normalize();</span>
+<span class="nc" id="L249">        Path current = Objects.requireNonNull(</span>
+<span class="nc" id="L250">                root.getRoot(), &quot;cannot prepare local final response: expected an absolute workspace root&quot;);</span>
+<span class="nc" id="L251">        validateDirectory(current);</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        for (Path component : namespace) {</span>
+<span class="nc" id="L253">            Path parent = current;</span>
+<span class="nc" id="L254">            current = current.resolve(component);</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">            if (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                if (Files.getFileStore(parent).supportsFileAttributeView(&quot;posix&quot;)) {</span>
+<span class="nc" id="L257">                    Files.createDirectory(</span>
+                            current,
+<span class="nc" id="L259">                            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(&quot;rwx------&quot;)));</span>
+                } else {
+<span class="nc" id="L261">                    Files.createDirectory(current);</span>
+                }
+            }
+<span class="nc" id="L264">            validateDirectory(current);</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">            if (current.startsWith(root.resolve(DIRECTORY))</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                    &amp;&amp; Files.getFileStore(current).supportsFileAttributeView(&quot;posix&quot;)) {</span>
+<span class="nc" id="L267">                Files.setPosixFilePermissions(current, PosixFilePermissions.fromString(&quot;rwx------&quot;));</span>
+            }
+<span class="nc" id="L269">        }</span>
+<span class="nc" id="L270">    }</span>
+
+    private static void validateDirectory(Path directory) throws IOException {
+<span class="nc bnc" id="L273" title="All 4 branches missed.">        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(directory)) {</span>
+<span class="nc" id="L274">            throw new IOException(&quot;cannot prepare local final response: expected directories without symbolic links&quot;);</span>
+        }
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        if (!Files.getFileStore(directory).supportsFileAttributeView(&quot;posix&quot;)) {</span>
+<span class="nc" id="L277">            return;</span>
+        }
+<span class="nc" id="L279">        var attributes = Files.readAttributes(directory, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);</span>
+<span class="nc" id="L280">        String processUser = ProcessHandle.current()</span>
+<span class="nc" id="L281">                .info()</span>
+<span class="nc" id="L282">                .user()</span>
+<span class="nc" id="L283">                .orElseThrow(() -&gt; new IOException(</span>
+                        &quot;cannot prepare local final response: expected the process owner for POSIX ancestry checks&quot;));
+<span class="nc" id="L285">        var processOwner =</span>
+<span class="nc" id="L286">                directory.getFileSystem().getUserPrincipalLookupService().lookupPrincipalByName(processUser);</span>
+<span class="nc" id="L287">        boolean processOwned = attributes.owner().equals(processOwner);</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        boolean sharedWritable = attributes.permissions().contains(PosixFilePermission.GROUP_WRITE)</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                || attributes.permissions().contains(PosixFilePermission.OTHERS_WRITE);</span>
+<span class="nc bnc" id="L290" title="All 4 branches missed.">        if (processOwned &amp;&amp; !sharedWritable) {</span>
+<span class="nc" id="L291">            return;</span>
+        }
+        // The public named attribute API exposes UID and sticky mode on Unix providers. Without
+        // these attributes, accept neither an unknown owner nor an unverifiable shared directory.
+        Map&lt;String, Object&gt; unix =
+<span class="nc bnc" id="L296" title="All 2 branches missed.">                directory.getFileSystem().supportedFileAttributeViews().contains(&quot;unix&quot;)</span>
+<span class="nc" id="L297">                        ? unixAttributes(directory)</span>
+<span class="nc" id="L298">                        : Map.of();</span>
+<span class="nc bnc" id="L299" title="All 4 branches missed.">        if (!processOwned &amp;&amp; !Integer.valueOf(0).equals(unix.get(&quot;uid&quot;))) {</span>
+<span class="nc" id="L300">            throw new IOException(</span>
+                    &quot;cannot prepare local final response: POSIX ancestors must be owned by the process user or system root&quot;);
+        }
+        // A trusted sticky parent, such as /tmp, prevents other users from replacing our children.
+        // Every child is checked in turn, so an existing child owned by another user is rejected.
+<span class="nc bnc" id="L305" title="All 6 branches missed.">        if (sharedWritable &amp;&amp; (!(unix.get(&quot;mode&quot;) instanceof Integer mode) || (mode &amp; STICKY_BIT) == 0)) {</span>
+<span class="nc" id="L306">            throw new IOException(</span>
+                    &quot;cannot prepare local final response: writable POSIX ancestors require sticky protection&quot;);
+        }
+<span class="nc" id="L309">    }</span>
+
+    private static Map&lt;String, Object&gt; unixAttributes(Path directory) throws IOException {
+        try {
+<span class="nc" id="L313">            return Files.readAttributes(directory, &quot;unix:uid,mode&quot;, LinkOption.NOFOLLOW_LINKS);</span>
+<span class="nc" id="L314">        } catch (UnsupportedOperationException | IllegalArgumentException e) {</span>
+<span class="nc" id="L315">            throw new IOException(</span>
+                    &quot;cannot prepare local final response: expected Unix ownership and mode metadata for POSIX ancestry checks&quot;,
+                    e);
+        }
+    }
+
+    private static void requireRegularFile(Path path) throws IOException {
+<span class="nc bnc" id="L322" title="All 4 branches missed.">        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) {</span>
+<span class="nc" id="L323">            throw new IOException(&quot;cannot access local final response: expected a regular file without symbolic links&quot;);</span>
+        }
+<span class="nc" id="L325">    }</span>
+
+    private void replace(Path target, ObjectNode record) throws IOException {
+<span class="nc" id="L328">        Path namespace = requiredParent(target);</span>
+<span class="nc" id="L329">        prepareDirectories(requiredParent(requiredParent(namespace)), namespace);</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {</span>
+<span class="nc" id="L331">            requireRegularFile(target);</span>
+        }
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        Path temporary = Files.getFileStore(namespace).supportsFileAttributeView(&quot;posix&quot;)</span>
+<span class="nc" id="L334">                ? Files.createTempFile(</span>
+                        namespace,
+                        &quot;.response-&quot;,
+                        &quot;.tmp&quot;,
+<span class="nc" id="L338">                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(&quot;rw-------&quot;)))</span>
+<span class="nc" id="L339">                : Files.createTempFile(namespace, &quot;.response-&quot;, &quot;.tmp&quot;);</span>
+        try {
+<span class="nc" id="L341">            Files.write(temporary, json.writerWithDefaultPrettyPrinter().writeValueAsBytes(record));</span>
+<span class="nc" id="L342">            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);</span>
+        } finally {
+<span class="nc" id="L344">            Files.deleteIfExists(temporary);</span>
+        }
+<span class="nc" id="L346">    }</span>
+
+    private static Path requiredParent(Path path) {
+        // Records have three components below the absolute workspace root: store, namespace,
+        // and filename. Their ancestors through the workspace root therefore always exist as paths.
+<span class="nc" id="L351">        return Objects.requireNonNull(</span>
+<span class="nc" id="L352">                path.getParent(), &quot;cannot access local final response: expected the internal record path parent&quot;);</span>
+    }
+
+    static void reportFailure(String worker, String message) {
+        // The worker may already be inactive, so its exit callback does not necessarily log failures.
+        // Correlate the attempt without exposing response text, raw identities or exception details.
+<span class="nc" id="L358">        LOG.error(message + &quot; attempt=&quot; + Sha3.sha3_256(worker));</span>
+<span class="nc" id="L359">    }</span>
+
+    private static IllegalStateException failure(String operation, String worker, IOException cause) {
+<span class="nc" id="L362">        String message =</span>
+                &quot;cannot &quot; + operation + &quot; local final response: check private output storage permissions and capacity&quot;;
+<span class="nc" id="L364">        reportFailure(worker, message);</span>
+<span class="nc" id="L365">        return new IllegalStateException(message, cause);</span>
+    }
+
+<span class="nc" id="L368">    private record StoredRecord(Path path, Instant updatedAt) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

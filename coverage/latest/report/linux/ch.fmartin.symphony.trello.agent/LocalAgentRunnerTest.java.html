@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -13,6 +16,7 @@ import ch.fmartin.symphony.trello.TestCards;
 import ch.fmartin.symphony.trello.config.ConfigResolver;
 import ch.fmartin.symphony.trello.config.EffectiveConfig;
 import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.process.RuntimeProcessShutdown;
 import ch.fmartin.symphony.trello.prompt.PromptRenderer;
 import ch.fmartin.symphony.trello.tracker.CardLookupResult;
 import ch.fmartin.symphony.trello.tracker.TrackerClient;
@@ -20,7 +24,10 @@ import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
 import ch.fmartin.symphony.trello.workspace.CodexSkillInstaller;
 import ch.fmartin.symphony.trello.workspace.HookRunner;
 import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryIteratorException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -36,235 +43,302 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-<span class="nc" id="L41">final class LocalAgentRunnerTest {</span>
+<span class="nc" id="L49">final class LocalAgentRunnerTest {</span>
     @TempDir
     Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;app_server&quot;, &quot;before_run&quot;, &quot;successful_run&quot;})
+    void finalResponseCleanupFailurePreservesUnconfirmedShutdown(String failurePoint) {
+        // given
+<span class="nc" id="L57">        var hooks = mock(HookRunner.class);</span>
+<span class="nc" id="L58">        var codex = mock(CodexAppServerClient.class);</span>
+<span class="nc" id="L59">        var unconfirmed = AgentRunResult.shutdownIncomplete(&quot;cannot release test workspace: exit is unconfirmed&quot;);</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">        if (&quot;before_run&quot;.equals(failurePoint)) {</span>
+<span class="nc" id="L61">            doThrow(new RuntimeProcessShutdown.UnconfirmedExitException())</span>
+<span class="nc" id="L62">                    .when(hooks)</span>
+<span class="nc" id="L63">                    .runRequired(eq(&quot;before_run&quot;), any(), any(), any());</span>
+        } else {
+<span class="nc" id="L65">            when(codex.runSession(any(), any(), any(), any(), any(), any(), any()))</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                    .thenReturn(&quot;successful_run&quot;.equals(failurePoint) ? AgentRunResult.ok() : unconfirmed);</span>
+        }
+<span class="nc" id="L68">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-local&quot;, &quot;Ready for Codex&quot;);</span>
+<span class="nc" id="L69">        var request = new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L70">                card, null, &quot;Task&quot;, config(Map.of(&quot;before_run&quot;, &quot;true&quot;)), &quot;worker-finalization&quot;, event -&gt; {});</span>
+<span class="nc" id="L71">        var storageFailure = new DirectoryIteratorException(new IOException(&quot;controlled abandonment failure&quot;));</span>
+<span class="nc" id="L72">        try (var stores = mockConstruction(FinalResponseStore.class, (store, ignored) -&gt; {</span>
+<span class="nc" id="L73">            when(store.begin(any()))</span>
+<span class="nc" id="L74">                    .thenAnswer(invocation -&gt; Optional.of(new FinalResponseRecording(</span>
+                            store,
+<span class="nc" id="L76">                            tempDir.resolve(&quot;record.json&quot;),</span>
+<span class="nc" id="L77">                            invocation.getArgument(0),</span>
+<span class="nc" id="L78">                            new ObjectMapper().createObjectNode())));</span>
+<span class="nc" id="L79">            doThrow(storageFailure).when(store).abandon(any(), any(), any());</span>
+<span class="nc" id="L80">        })) {</span>
+<span class="nc" id="L81">            var runner = new LocalAgentRunner(</span>
+<span class="nc" id="L82">                    new WorkspaceManager(hooks), hooks, codex, mock(TrackerClient.class), new PromptRenderer());</span>
+
+            // when
+<span class="nc" id="L85">            AgentRunResult result = runner.run(request);</span>
+
+            // then
+<span class="nc" id="L88">            assertThat(stores.constructed()).hasSize(1);</span>
+<span class="nc" id="L89">            assertThat(result.failureCategory())</span>
+<span class="nc" id="L90">                    .isEqualTo(</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                            &quot;successful_run&quot;.equals(failurePoint)</span>
+<span class="nc" id="L92">                                    ? AgentRunResult.FailureCategory.GENERIC</span>
+<span class="nc" id="L93">                                    : AgentRunResult.FailureCategory.SHUTDOWN_INCOMPLETE);</span>
+<span class="nc" id="L94">            verify(hooks, never()).runBestEffort(eq(&quot;after_run&quot;), any(), any(), any());</span>
+        }
+<span class="nc" id="L96">    }</span>
+
+    @Test
+    void unconfirmedAppServerExitSkipsAfterRunInRetainedWorkspace() {
+        // given
+<span class="nc" id="L101">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L102">        var failure = AgentRunResult.shutdownIncomplete(&quot;cannot release test workspace: process exit is unconfirmed&quot;);</span>
+<span class="nc" id="L103">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenReturn(failure);</span>
+<span class="nc" id="L104">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L105">        EffectiveConfig config = config(Map.of(&quot;after_run&quot;, &quot;echo after &gt; after.txt&quot;));</span>
+<span class="nc" id="L106">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-local&quot;, &quot;Ready for Codex&quot;);</span>
+
+        // when
+<span class="nc" id="L109">        AgentRunResult result =</span>
+<span class="nc" id="L110">                runner.run(new AgentRunner.AgentRunRequest(card, null, &quot;Task&quot;, config, &quot;worker-retained&quot;, event -&gt; {}));</span>
+
+        // then
+<span class="nc" id="L113">        assertThat(result).isEqualTo(failure);</span>
+<span class="nc" id="L114">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-local&quot;);</span>
+<span class="nc" id="L115">        assertThat(workspace).isDirectory();</span>
+<span class="nc" id="L116">        assertThat(workspace.resolve(&quot;after.txt&quot;)).doesNotExist();</span>
+<span class="nc" id="L117">    }</span>
 
     @Test
     void createsWorkspaceRunsHooksAndPassesPromptToCodexClient() throws Exception {
         // given
-<span class="nc" id="L48">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L49">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenReturn(AgentRunResult.ok());</span>
-<span class="nc" id="L50">        var runner = runner(codex, CardLookupResult.Found::new);</span>
-<span class="nc" id="L51">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L122">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L123">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenReturn(AgentRunResult.ok());</span>
+<span class="nc" id="L124">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L125">        EffectiveConfig config = config(Map.of(</span>
                 &quot;before_run&quot;, &quot;rm -rf .codex &amp;&amp; echo before &gt; before.txt&quot;, &quot;after_run&quot;, &quot;echo after &gt; after.txt&quot;));
-<span class="nc" id="L53">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-local&quot;, &quot;Ready for Codex&quot;);</span>
-<span class="nc" id="L54">        String renderedPrompt = &quot;Use &quot; + CodexSkillInstaller.installedSkillPath(&quot;commit&quot;);</span>
+<span class="nc" id="L127">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-local&quot;, &quot;Ready for Codex&quot;);</span>
+<span class="nc" id="L128">        String renderedPrompt = &quot;Use &quot; + CodexSkillInstaller.installedSkillPath(&quot;commit&quot;);</span>
 
         // when
-<span class="nc" id="L57">        AgentRunResult result = runner.run(</span>
-<span class="nc" id="L58">                new AgentRunner.AgentRunRequest(card, null, renderedPrompt, config, &quot;worker-success&quot;, event -&gt; {}));</span>
+<span class="nc" id="L131">        AgentRunResult result = runner.run(</span>
+<span class="nc" id="L132">                new AgentRunner.AgentRunRequest(card, null, renderedPrompt, config, &quot;worker-success&quot;, event -&gt; {}));</span>
 
         // then
-<span class="nc" id="L61">        ArgumentCaptor&lt;Path&gt; workspace = ArgumentCaptor.forClass(Path.class);</span>
-<span class="nc" id="L62">        ArgumentCaptor&lt;String&gt; prompt = ArgumentCaptor.forClass(String.class);</span>
-<span class="nc" id="L63">        Path expectedWorkspace = config.workspace().root().resolve(&quot;TRELLO-local&quot;);</span>
-<span class="nc" id="L64">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L65">        verify(codex)</span>
-<span class="nc" id="L66">                .runSession(</span>
-<span class="nc" id="L67">                        eq(config),</span>
-<span class="nc" id="L68">                        eq(card),</span>
-<span class="nc" id="L69">                        workspace.capture(),</span>
-<span class="nc" id="L70">                        prompt.capture(),</span>
-<span class="nc" id="L71">                        eq(&quot;worker-success&quot;),</span>
-<span class="nc" id="L72">                        any(),</span>
-<span class="nc" id="L73">                        any());</span>
-<span class="nc" id="L74">        assertThat(prompt.getValue())</span>
-<span class="nc" id="L75">                .startsWith(renderedPrompt)</span>
-<span class="nc" id="L76">                .contains(&quot;## Repository Source Context&quot;)</span>
-<span class="nc" id="L77">                .contains(&quot;No workflow repository default is configured&quot;);</span>
-<span class="nc" id="L78">        assertThat(workspace.getValue())</span>
-<span class="nc" id="L79">                .isEqualTo(expectedWorkspace.toAbsolutePath().normalize());</span>
-<span class="nc" id="L80">        assertThat(expectedWorkspace.resolve(&quot;before.txt&quot;))</span>
-<span class="nc" id="L81">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L82">                .contains(&quot;before&quot;);</span>
-<span class="nc" id="L83">        assertThat(expectedWorkspace.resolve(&quot;after.txt&quot;))</span>
-<span class="nc" id="L84">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L85">                .contains(&quot;after&quot;);</span>
-<span class="nc" id="L86">        assertThat(expectedWorkspace.resolve(CodexSkillInstaller.installedSkillPath(&quot;commit&quot;)))</span>
-<span class="nc" id="L87">                .content()</span>
-<span class="nc" id="L88">                .contains(&quot;configure it from the authenticated GitHub login&quot;);</span>
-<span class="nc" id="L89">    }</span>
+<span class="nc" id="L135">        ArgumentCaptor&lt;Path&gt; workspace = ArgumentCaptor.forClass(Path.class);</span>
+<span class="nc" id="L136">        ArgumentCaptor&lt;String&gt; prompt = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L137">        Path expectedWorkspace = config.workspace().root().resolve(&quot;TRELLO-local&quot;);</span>
+<span class="nc" id="L138">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L139">        verify(codex)</span>
+<span class="nc" id="L140">                .runSession(</span>
+<span class="nc" id="L141">                        eq(config),</span>
+<span class="nc" id="L142">                        eq(card),</span>
+<span class="nc" id="L143">                        workspace.capture(),</span>
+<span class="nc" id="L144">                        prompt.capture(),</span>
+<span class="nc" id="L145">                        eq(&quot;worker-success&quot;),</span>
+<span class="nc" id="L146">                        any(),</span>
+<span class="nc" id="L147">                        any());</span>
+<span class="nc" id="L148">        assertThat(prompt.getValue())</span>
+<span class="nc" id="L149">                .startsWith(renderedPrompt)</span>
+<span class="nc" id="L150">                .contains(&quot;## Repository Source Context&quot;)</span>
+<span class="nc" id="L151">                .contains(&quot;No workflow repository default is configured&quot;);</span>
+<span class="nc" id="L152">        assertThat(workspace.getValue())</span>
+<span class="nc" id="L153">                .isEqualTo(expectedWorkspace.toAbsolutePath().normalize());</span>
+<span class="nc" id="L154">        assertThat(expectedWorkspace.resolve(&quot;before.txt&quot;))</span>
+<span class="nc" id="L155">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L156">                .contains(&quot;before&quot;);</span>
+<span class="nc" id="L157">        assertThat(expectedWorkspace.resolve(&quot;after.txt&quot;))</span>
+<span class="nc" id="L158">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L159">                .contains(&quot;after&quot;);</span>
+<span class="nc" id="L160">        assertThat(expectedWorkspace.resolve(CodexSkillInstaller.installedSkillPath(&quot;commit&quot;)))</span>
+<span class="nc" id="L161">                .content()</span>
+<span class="nc" id="L162">                .contains(&quot;configure it from the authenticated GitHub login&quot;);</span>
+<span class="nc" id="L163">    }</span>
 
     @Test
     void passesResolvedLiteralUrlDefaultToCodexPrompt() {
         // given
-<span class="nc" id="L94">        String repositoryUrl = &quot;https://example.invalid/team/project.git&quot;;</span>
-<span class="nc" id="L95">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl));</span>
+<span class="nc" id="L168">        String repositoryUrl = &quot;https://example.invalid/team/project.git&quot;;</span>
+<span class="nc" id="L169">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl));</span>
 
         // when
-<span class="nc" id="L98">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L172">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L101">        assertThat(prompt)</span>
-<span class="nc" id="L102">                .contains(&quot;## Repository Source Context&quot;)</span>
-<span class="nc" id="L103">                .contains(&quot;- Selected by: workflow repository.default_url&quot;)</span>
-<span class="nc" id="L104">                .contains(&quot;- Type: URL&quot;)</span>
-<span class="nc" id="L105">                .contains(&quot;- Credential-free remote: &quot; + repositoryUrl)</span>
-<span class="nc" id="L106">                .contains(&quot;only when the current Trello card supplies no explicit source&quot;)</span>
-<span class="nc" id="L107">                .contains(&quot;no unambiguous repository identity in ordinary task context&quot;);</span>
-<span class="nc" id="L108">    }</span>
+<span class="nc" id="L175">        assertThat(prompt)</span>
+<span class="nc" id="L176">                .contains(&quot;## Repository Source Context&quot;)</span>
+<span class="nc" id="L177">                .contains(&quot;- Selected by: workflow repository.default_url&quot;)</span>
+<span class="nc" id="L178">                .contains(&quot;- Type: URL&quot;)</span>
+<span class="nc" id="L179">                .contains(&quot;- Credential-free remote: &quot; + repositoryUrl)</span>
+<span class="nc" id="L180">                .contains(&quot;only when the current Trello card supplies no explicit source&quot;)</span>
+<span class="nc" id="L181">                .contains(&quot;no unambiguous repository identity in ordinary task context&quot;);</span>
+<span class="nc" id="L182">    }</span>
 
     @Test
     void passesResolvedEnvironmentUrlDefaultToCodexPrompt() {
         // given
-<span class="nc" id="L113">        String repositoryUrl = &quot;ssh://git@example.invalid/team/project.git&quot;;</span>
-<span class="nc" id="L114">        EffectiveConfig config =</span>
-<span class="nc" id="L115">                configWithRepository(Map.of(&quot;default_url&quot;, &quot;$REPOSITORY_URL&quot;), Map.of(&quot;REPOSITORY_URL&quot;, repositoryUrl));</span>
+<span class="nc" id="L187">        String repositoryUrl = &quot;ssh://git@example.invalid/team/project.git&quot;;</span>
+<span class="nc" id="L188">        EffectiveConfig config =</span>
+<span class="nc" id="L189">                configWithRepository(Map.of(&quot;default_url&quot;, &quot;$REPOSITORY_URL&quot;), Map.of(&quot;REPOSITORY_URL&quot;, repositoryUrl));</span>
 
         // when
-<span class="nc" id="L118">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L192">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L121">        assertThat(prompt).contains(&quot;- Type: URL&quot;).contains(&quot;- Credential-free remote: &quot; + repositoryUrl);</span>
-<span class="nc" id="L122">    }</span>
+<span class="nc" id="L195">        assertThat(prompt).contains(&quot;- Type: URL&quot;).contains(&quot;- Credential-free remote: &quot; + repositoryUrl);</span>
+<span class="nc" id="L196">    }</span>
 
     @Test
     void passesResolvedRelativePathDefaultToCodexPrompt() {
         // given
-<span class="nc" id="L127">        Path workflow = tempDir.resolve(&quot;configs/WORKFLOW.md&quot;);</span>
-<span class="nc" id="L128">        Path expectedPath = workflow.getParent()</span>
-<span class="nc" id="L129">                .resolve(&quot;checkouts/project&quot;)</span>
-<span class="nc" id="L130">                .toAbsolutePath()</span>
-<span class="nc" id="L131">                .normalize();</span>
-<span class="nc" id="L132">        EffectiveConfig config = configWithRepository(workflow, Map.of(&quot;default_path&quot;, &quot;checkouts/project&quot;), Map.of());</span>
+<span class="nc" id="L201">        Path workflow = tempDir.resolve(&quot;configs/WORKFLOW.md&quot;);</span>
+<span class="nc" id="L202">        Path expectedPath = workflow.getParent()</span>
+<span class="nc" id="L203">                .resolve(&quot;checkouts/project&quot;)</span>
+<span class="nc" id="L204">                .toAbsolutePath()</span>
+<span class="nc" id="L205">                .normalize();</span>
+<span class="nc" id="L206">        EffectiveConfig config = configWithRepository(workflow, Map.of(&quot;default_path&quot;, &quot;checkouts/project&quot;), Map.of());</span>
 
         // when
-<span class="nc" id="L135">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L209">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L138">        assertThat(prompt).contains(&quot;- Type: local path&quot;).contains(&quot;- Resolved local path: &quot; + expectedPath);</span>
-<span class="nc" id="L139">    }</span>
+<span class="nc" id="L212">        assertThat(prompt).contains(&quot;- Type: local path&quot;).contains(&quot;- Resolved local path: &quot; + expectedPath);</span>
+<span class="nc" id="L213">    }</span>
 
     @Test
     void passesResolvedAbsolutePathDefaultToCodexPrompt() {
         // given
-<span class="nc" id="L144">        Path repositoryPath =</span>
-<span class="nc" id="L145">                tempDir.resolve(&quot;absolute-repository&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L146">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
+<span class="nc" id="L218">        Path repositoryPath =</span>
+<span class="nc" id="L219">                tempDir.resolve(&quot;absolute-repository&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L220">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
 
         // when
-<span class="nc" id="L149">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L223">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L152">        assertThat(prompt).contains(&quot;- Type: local path&quot;).contains(&quot;- Resolved local path: &quot; + repositoryPath);</span>
-<span class="nc" id="L153">    }</span>
+<span class="nc" id="L226">        assertThat(prompt).contains(&quot;- Type: local path&quot;).contains(&quot;- Resolved local path: &quot; + repositoryPath);</span>
+<span class="nc" id="L227">    }</span>
 
     @Test
     void passesResolvedEnvironmentPathDefaultToCodexPrompt() {
         // given
-<span class="nc" id="L158">        Path repositoryPath =</span>
-<span class="nc" id="L159">                tempDir.resolve(&quot;environment-repository&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L160">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L161">                Map.of(&quot;default_path&quot;, &quot;$REPOSITORY_PATH&quot;), Map.of(&quot;REPOSITORY_PATH&quot;, repositoryPath.toString()));</span>
+<span class="nc" id="L232">        Path repositoryPath =</span>
+<span class="nc" id="L233">                tempDir.resolve(&quot;environment-repository&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L234">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L235">                Map.of(&quot;default_path&quot;, &quot;$REPOSITORY_PATH&quot;), Map.of(&quot;REPOSITORY_PATH&quot;, repositoryPath.toString()));</span>
 
         // when
-<span class="nc" id="L164">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L238">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L167">        assertThat(prompt).contains(&quot;- Type: local path&quot;).contains(&quot;- Resolved local path: &quot; + repositoryPath);</span>
-<span class="nc" id="L168">    }</span>
+<span class="nc" id="L241">        assertThat(prompt).contains(&quot;- Type: local path&quot;).contains(&quot;- Resolved local path: &quot; + repositoryPath);</span>
+<span class="nc" id="L242">    }</span>
 
     @Test
     void includesUrlIdentityAndConfiguredPathCheckoutCandidateWhenBothAreConfigured() {
         // given
-<span class="nc" id="L173">        String repositoryUrl = &quot;https://example.invalid/team/project.git&quot;;</span>
-<span class="nc" id="L174">        Path lowerPriorityPath =</span>
-<span class="nc" id="L175">                tempDir.resolve(&quot;lower-priority-repository&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L176">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L177">                Map.of(&quot;default_url&quot;, repositoryUrl, &quot;default_path&quot;, lowerPriorityPath.toString()));</span>
+<span class="nc" id="L247">        String repositoryUrl = &quot;https://example.invalid/team/project.git&quot;;</span>
+<span class="nc" id="L248">        Path lowerPriorityPath =</span>
+<span class="nc" id="L249">                tempDir.resolve(&quot;lower-priority-repository&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L250">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L251">                Map.of(&quot;default_url&quot;, repositoryUrl, &quot;default_path&quot;, lowerPriorityPath.toString()));</span>
 
         // when
-<span class="nc" id="L180">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L254">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L183">        assertThat(prompt)</span>
-<span class="nc" id="L184">                .contains(&quot;- Type: URL&quot;)</span>
-<span class="nc" id="L185">                .contains(&quot;- Credential-free remote: &quot; + repositoryUrl)</span>
-<span class="nc" id="L186">                .doesNotContain(&quot;- Type: local path&quot;)</span>
-<span class="nc" id="L187">                .contains(&quot;- Configured checkout path candidate: &quot; + lowerPriorityPath)</span>
-<span class="nc" id="L188">                .contains(&quot;use that configured path before\n   searching for another local checkout&quot;)</span>
-<span class="nc" id="L189">                .contains(</span>
+<span class="nc" id="L257">        assertThat(prompt)</span>
+<span class="nc" id="L258">                .contains(&quot;- Type: URL&quot;)</span>
+<span class="nc" id="L259">                .contains(&quot;- Credential-free remote: &quot; + repositoryUrl)</span>
+<span class="nc" id="L260">                .doesNotContain(&quot;- Type: local path&quot;)</span>
+<span class="nc" id="L261">                .contains(&quot;- Configured checkout path candidate: &quot; + lowerPriorityPath)</span>
+<span class="nc" id="L262">                .contains(&quot;use that configured path before\n   searching for another local checkout&quot;)</span>
+<span class="nc" id="L263">                .contains(</span>
                         &quot;only when read-only remote inspection confirms that it\n   matches the selected repository identity&quot;);
-<span class="nc" id="L191">        assertThat(config.repository().defaultPath()).isEqualTo(lowerPriorityPath);</span>
-<span class="nc" id="L192">    }</span>
+<span class="nc" id="L265">        assertThat(config.repository().defaultPath()).isEqualTo(lowerPriorityPath);</span>
+<span class="nc" id="L266">    }</span>
 
     @MethodSource(&quot;missingOrBlankUrlDefaults&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
     void usesPathWhenEnvironmentUrlDefaultIsMissingOrBlank(String name, Map&lt;String, String&gt; environment) {
         // given
-<span class="nc" id="L198">        Path repositoryPath = tempDir.resolve(name).toAbsolutePath().normalize();</span>
-<span class="nc" id="L199">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L200">                Map.of(&quot;default_url&quot;, &quot;$REPOSITORY_URL&quot;, &quot;default_path&quot;, repositoryPath.toString()), environment);</span>
+<span class="nc" id="L272">        Path repositoryPath = tempDir.resolve(name).toAbsolutePath().normalize();</span>
+<span class="nc" id="L273">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L274">                Map.of(&quot;default_url&quot;, &quot;$REPOSITORY_URL&quot;, &quot;default_path&quot;, repositoryPath.toString()), environment);</span>
 
         // when
-<span class="nc" id="L203">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L277">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L206">        assertThat(prompt)</span>
-<span class="nc" id="L207">                .contains(&quot;- Type: local path&quot;)</span>
-<span class="nc" id="L208">                .contains(&quot;- Resolved local path: &quot; + repositoryPath)</span>
-<span class="nc" id="L209">                .doesNotContain(&quot;- Type: URL&quot;);</span>
-<span class="nc" id="L210">    }</span>
+<span class="nc" id="L280">        assertThat(prompt)</span>
+<span class="nc" id="L281">                .contains(&quot;- Type: local path&quot;)</span>
+<span class="nc" id="L282">                .contains(&quot;- Resolved local path: &quot; + repositoryPath)</span>
+<span class="nc" id="L283">                .doesNotContain(&quot;- Type: URL&quot;);</span>
+<span class="nc" id="L284">    }</span>
 
     @MethodSource(&quot;missingOrBlankRepositoryDefaults&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
     void reportsNoDefaultWhenEnvironmentUrlAndPathDefaultsAreMissingOrBlank(
             String ignored, Map&lt;String, String&gt; environment) {
         // given
-<span class="nc" id="L217">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L218">                Map.of(&quot;default_url&quot;, &quot;$REPOSITORY_URL&quot;, &quot;default_path&quot;, &quot;$REPOSITORY_PATH&quot;), environment);</span>
+<span class="nc" id="L291">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L292">                Map.of(&quot;default_url&quot;, &quot;$REPOSITORY_URL&quot;, &quot;default_path&quot;, &quot;$REPOSITORY_PATH&quot;), environment);</span>
 
         // when
-<span class="nc" id="L221">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L295">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L224">        assertThat(prompt)</span>
-<span class="nc" id="L225">                .contains(&quot;No workflow repository default is configured&quot;)</span>
-<span class="nc" id="L226">                .doesNotContain(&quot;Resolved URL:&quot;)</span>
-<span class="nc" id="L227">                .doesNotContain(&quot;Resolved local path:&quot;);</span>
-<span class="nc" id="L228">    }</span>
+<span class="nc" id="L298">        assertThat(prompt)</span>
+<span class="nc" id="L299">                .contains(&quot;No workflow repository default is configured&quot;)</span>
+<span class="nc" id="L300">                .doesNotContain(&quot;Resolved URL:&quot;)</span>
+<span class="nc" id="L301">                .doesNotContain(&quot;Resolved local path:&quot;);</span>
+<span class="nc" id="L302">    }</span>
 
     @Test
     void fullyQualifiedIssueTargetWithoutRepositoryDefaultIsNotARepositorySourceBlocker() {
         // given
-<span class="nc" id="L233">        String issueTarget = &quot;https://github.example/team/project/issues/123&quot;;</span>
-<span class="nc" id="L234">        EffectiveConfig config = configWithRepository(Map.of());</span>
-<span class="nc" id="L235">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L307">        String issueTarget = &quot;https://github.example/team/project/issues/123&quot;;</span>
+<span class="nc" id="L308">        EffectiveConfig config = configWithRepository(Map.of());</span>
+<span class="nc" id="L309">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-direct-issue-target&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Update the linked issue&quot;,
                 &quot;Add a status note to &quot; + issueTarget + &quot;. Do not change repository files.&quot;,
-<span class="nc" id="L241">                List.of());</span>
+<span class="nc" id="L315">                List.of());</span>
 
         // when
-<span class="nc" id="L244">        String prompt = promptPassedToCodex(config, &quot;Task target: &quot; + issueTarget, card);</span>
+<span class="nc" id="L318">        String prompt = promptPassedToCodex(config, &quot;Task target: &quot; + issueTarget, card);</span>
 
         // then
-<span class="nc" id="L247">        assertThat(prompt)</span>
-<span class="nc" id="L248">                .contains(&quot;Task target: &quot; + issueTarget)</span>
-<span class="nc" id="L249">                .contains(&quot;- Status: no selected source&quot;)</span>
-<span class="nc" id="L250">                .contains(&quot;A fully qualified GitHub issue or pull request URL is a direct external target&quot;)</span>
-<span class="nc" id="L251">                .contains(&quot;do not require a repository checkout for that API action&quot;)</span>
-<span class="nc" id="L252">                .contains(&quot;The absence of a selected repository is not a blocker by itself&quot;);</span>
-<span class="nc" id="L253">    }</span>
+<span class="nc" id="L321">        assertThat(prompt)</span>
+<span class="nc" id="L322">                .contains(&quot;Task target: &quot; + issueTarget)</span>
+<span class="nc" id="L323">                .contains(&quot;- Status: no selected source&quot;)</span>
+<span class="nc" id="L324">                .contains(&quot;A fully qualified GitHub issue or pull request URL is a direct external target&quot;)</span>
+<span class="nc" id="L325">                .contains(&quot;do not require a repository checkout for that API action&quot;)</span>
+<span class="nc" id="L326">                .contains(&quot;The absence of a selected repository is not a blocker by itself&quot;);</span>
+<span class="nc" id="L327">    }</span>
 
     @Test
     void repositoryChangingCardReceivesCompleteCheckoutPreparationOrder() {
         // given
-<span class="nc" id="L258">        EffectiveConfig config = configWithRepository(Map.of());</span>
-<span class="nc" id="L259">        String cardTask = &quot;Change README.md in https://github.example/target/project and prepare a pull request.&quot;;</span>
+<span class="nc" id="L332">        EffectiveConfig config = configWithRepository(Map.of());</span>
+<span class="nc" id="L333">        String cardTask = &quot;Change README.md in https://github.example/target/project and prepare a pull request.&quot;;</span>
 
         // when
-<span class="nc" id="L262">        String prompt = promptPassedToCodex(config, cardTask);</span>
+<span class="nc" id="L336">        String prompt = promptPassedToCodex(config, cardTask);</span>
 
         // then
-<span class="nc" id="L265">        String normalizedPrompt = prompt.replaceAll(&quot;\\s+&quot;, &quot; &quot;);</span>
-<span class="nc" id="L266">        assertThat(normalizedPrompt)</span>
-<span class="nc" id="L267">                .containsSubsequence(</span>
+<span class="nc" id="L339">        String normalizedPrompt = prompt.replaceAll(&quot;\\s+&quot;, &quot; &quot;);</span>
+<span class="nc" id="L340">        assertThat(normalizedPrompt)</span>
+<span class="nc" id="L341">                .containsSubsequence(</span>
                         &quot;## Repository Checkout Preparation&quot;,
                         &quot;If a configured checkout path candidate is shown above&quot;,
                         &quot;Otherwise, search the local checkouts that this run can access&quot;,
@@ -273,17 +347,17 @@ import org.mockito.ArgumentCaptor;
                         &quot;fetch the remote default branch before creating the task worktree&quot;,
                         &quot;Create a separate task worktree&quot;,
                         &quot;freshly fetched remote default branch&quot;)
-<span class="nc" id="L276">                .contains(&quot;Match a local checkout by repository identity from its configured Git remotes&quot;)</span>
-<span class="nc" id="L277">                .contains(</span>
+<span class="nc" id="L350">                .contains(&quot;Match a local checkout by repository identity from its configured Git remotes&quot;)</span>
+<span class="nc" id="L351">                .contains(</span>
                         &quot;Do not match by directory name, current branch, proximity, prior cards, or workspace residue&quot;)
-<span class="nc" id="L279">                .contains(&quot;If the card explicitly requests another branch, ref, base, or checkout arrangement&quot;)</span>
-<span class="nc" id="L280">                .contains(&quot;follow that instruction instead of the default-branch worktree behavior&quot;);</span>
-<span class="nc" id="L281">    }</span>
+<span class="nc" id="L353">                .contains(&quot;If the card explicitly requests another branch, ref, base, or checkout arrangement&quot;)</span>
+<span class="nc" id="L354">                .contains(&quot;follow that instruction instead of the default-branch worktree behavior&quot;);</span>
+<span class="nc" id="L355">    }</span>
 
     @Test
     void runtimeNoSourceContextSupersedesLegacyUnconditionalMissingSourceBlocker() {
         // given
-<span class="nc" id="L286">        String persistedLegacyPrompt =</span>
+<span class="nc" id="L360">        String persistedLegacyPrompt =</span>
                 &quot;&quot;&quot;
                 If no source is selected or the selected source is missing, unreadable, unclonable, or lacks required
                 repository/auth context, move the Trello card to `Blocked` with path-safe guidance instead of
@@ -291,24 +365,24 @@ import org.mockito.ArgumentCaptor;
 
                 Summarize the supplied release schedule. No repository action.
                 &quot;&quot;&quot;
-<span class="nc" id="L294">                        .strip();</span>
-<span class="nc" id="L295">        EffectiveConfig config = configWithRepository(Map.of());</span>
+<span class="nc" id="L368">                        .strip();</span>
+<span class="nc" id="L369">        EffectiveConfig config = configWithRepository(Map.of());</span>
 
         // when
-<span class="nc" id="L298">        String prompt = promptPassedToCodex(config, persistedLegacyPrompt);</span>
+<span class="nc" id="L372">        String prompt = promptPassedToCodex(config, persistedLegacyPrompt);</span>
 
         // then
-<span class="nc" id="L301">        assertThat(prompt)</span>
-<span class="nc" id="L302">                .startsWith(persistedLegacyPrompt)</span>
-<span class="nc" id="L303">                .containsSubsequence(</span>
+<span class="nc" id="L375">        assertThat(prompt)</span>
+<span class="nc" id="L376">                .startsWith(persistedLegacyPrompt)</span>
+<span class="nc" id="L377">                .containsSubsequence(</span>
                         &quot;If no source is selected or the selected source is missing&quot;,
                         &quot;## Repository Source Context&quot;,
                         &quot;- Status: no selected source&quot;,
                         &quot;This final runtime repository-source context is authoritative&quot;,
                         &quot;Ignore any earlier unconditional instruction to block solely because no repository source is selected&quot;,
                         &quot;Classify the current task before deciding whether the missing source is a blocker&quot;)
-<span class="nc" id="L310">                .contains(&quot;Repository-independent work without repository-relative references can run&quot;);</span>
-<span class="nc" id="L311">    }</span>
+<span class="nc" id="L384">                .contains(&quot;Repository-independent work without repository-relative references can run&quot;);</span>
+<span class="nc" id="L385">    }</span>
 
     @MethodSource(&quot;repositoryNeedDecisionScenarios&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
@@ -319,717 +393,717 @@ import org.mockito.ArgumentCaptor;
             String expectedStatus,
             List&lt;String&gt; expectedInstructions) {
         // given
-<span class="nc" id="L322">        EffectiveConfig config = configWithRepository(repository);</span>
+<span class="nc" id="L396">        EffectiveConfig config = configWithRepository(repository);</span>
 
         // when
-<span class="nc" id="L325">        String prompt = promptPassedToCodex(config, cardTask);</span>
+<span class="nc" id="L399">        String prompt = promptPassedToCodex(config, cardTask);</span>
 
         // then
-<span class="nc" id="L328">        assertThat(prompt)</span>
-<span class="nc" id="L329">                .as(scenario)</span>
-<span class="nc" id="L330">                .contains(cardTask)</span>
-<span class="nc" id="L331">                .contains(expectedStatus)</span>
-<span class="nc" id="L332">                .contains(expectedInstructions.toArray(String[]::new));</span>
-<span class="nc" id="L333">    }</span>
+<span class="nc" id="L402">        assertThat(prompt)</span>
+<span class="nc" id="L403">                .as(scenario)</span>
+<span class="nc" id="L404">                .contains(cardTask)</span>
+<span class="nc" id="L405">                .contains(expectedStatus)</span>
+<span class="nc" id="L406">                .contains(expectedInstructions.toArray(String[]::new));</span>
+<span class="nc" id="L407">    }</span>
 
     @MethodSource(&quot;directTargetsWithMalformedFallback&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
     void directApiTargetOverridesMalformedWorkflowFallbackWithoutCheckout(String scenario, String cardTask) {
         // given
-<span class="nc" id="L339">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;));</span>
+<span class="nc" id="L413">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;));</span>
 
         // when
-<span class="nc" id="L342">        String prompt = promptPassedToCodex(config, cardTask);</span>
+<span class="nc" id="L416">        String prompt = promptPassedToCodex(config, cardTask);</span>
 
         // then
-<span class="nc" id="L345">        assertThat(prompt)</span>
-<span class="nc" id="L346">                .as(scenario)</span>
-<span class="nc" id="L347">                .contains(cardTask)</span>
-<span class="nc" id="L348">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
-<span class="nc" id="L349">                .contains(&quot;exactly one unambiguous repository identity&quot;)</span>
-<span class="nc" id="L350">                .contains(&quot;ignore this unused workflow fallback&quot;)</span>
-<span class="nc" id="L351">                .contains(&quot;A fully qualified GitHub issue or pull request URL is a direct external target&quot;)</span>
-<span class="nc" id="L352">                .contains(&quot;For an API-only action, act directly on that target and do not create a checkout&quot;)</span>
-<span class="nc" id="L353">                .doesNotContain(&quot;ftp://source.example/team/default.git&quot;);</span>
-<span class="nc" id="L354">    }</span>
+<span class="nc" id="L419">        assertThat(prompt)</span>
+<span class="nc" id="L420">                .as(scenario)</span>
+<span class="nc" id="L421">                .contains(cardTask)</span>
+<span class="nc" id="L422">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
+<span class="nc" id="L423">                .contains(&quot;exactly one unambiguous repository identity&quot;)</span>
+<span class="nc" id="L424">                .contains(&quot;ignore this unused workflow fallback&quot;)</span>
+<span class="nc" id="L425">                .contains(&quot;A fully qualified GitHub issue or pull request URL is a direct external target&quot;)</span>
+<span class="nc" id="L426">                .contains(&quot;For an API-only action, act directly on that target and do not create a checkout&quot;)</span>
+<span class="nc" id="L427">                .doesNotContain(&quot;ftp://source.example/team/default.git&quot;);</span>
+<span class="nc" id="L428">    }</span>
 
     @MethodSource(&quot;repositoryChangingIdentityFormsWithMalformedFallback&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
     void repositoryChangingCardIdentityOverridesMalformedWorkflowFallback(String scenario, String cardTask) {
         // given
-<span class="nc" id="L360">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;));</span>
+<span class="nc" id="L434">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;));</span>
 
         // when
-<span class="nc" id="L363">        String prompt = promptPassedToCodex(config, cardTask);</span>
+<span class="nc" id="L437">        String prompt = promptPassedToCodex(config, cardTask);</span>
 
         // then
-<span class="nc" id="L366">        assertThat(prompt)</span>
-<span class="nc" id="L367">                .as(scenario)</span>
-<span class="nc" id="L368">                .contains(cardTask)</span>
-<span class="nc" id="L369">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
-<span class="nc" id="L370">                .contains(&quot;ignore this unused workflow fallback and use the card repository identity&quot;)</span>
-<span class="nc" id="L371">                .contains(&quot;full repository, issue, pull request, or file URL; owner/repository notation&quot;)</span>
-<span class="nc" id="L372">                .contains(&quot;prepare a checkout only because the requested work needs repository files&quot;)</span>
-<span class="nc" id="L373">                .doesNotContain(&quot;ftp://source.example/team/default.git&quot;);</span>
-<span class="nc" id="L374">    }</span>
+<span class="nc" id="L440">        assertThat(prompt)</span>
+<span class="nc" id="L441">                .as(scenario)</span>
+<span class="nc" id="L442">                .contains(cardTask)</span>
+<span class="nc" id="L443">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
+<span class="nc" id="L444">                .contains(&quot;ignore this unused workflow fallback and use the card repository identity&quot;)</span>
+<span class="nc" id="L445">                .contains(&quot;full repository, issue, pull request, or file URL; owner/repository notation&quot;)</span>
+<span class="nc" id="L446">                .contains(&quot;prepare a checkout only because the requested work needs repository files&quot;)</span>
+<span class="nc" id="L447">                .doesNotContain(&quot;ftp://source.example/team/default.git&quot;);</span>
+<span class="nc" id="L448">    }</span>
 
     @Test
     void malformedWorkflowUrlWithNoCardIdentityBlocksAndDoesNotPromoteConfiguredPath() {
         // given
-<span class="nc" id="L379">        Path defaultPath =</span>
-<span class="nc" id="L380">                tempDir.resolve(&quot;lower-priority-checkout&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L381">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L382">                Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;, &quot;default_path&quot;, defaultPath.toString()));</span>
-<span class="nc" id="L383">        String cardTask = &quot;Add a status note to #123. Do not change files.&quot;;</span>
+<span class="nc" id="L453">        Path defaultPath =</span>
+<span class="nc" id="L454">                tempDir.resolve(&quot;lower-priority-checkout&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L455">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L456">                Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;, &quot;default_path&quot;, defaultPath.toString()));</span>
+<span class="nc" id="L457">        String cardTask = &quot;Add a status note to #123. Do not change files.&quot;;</span>
 
         // when
-<span class="nc" id="L386">        String prompt = promptPassedToCodex(config, cardTask);</span>
+<span class="nc" id="L460">        String prompt = promptPassedToCodex(config, cardTask);</span>
 
         // then
-<span class="nc" id="L389">        assertThat(prompt)</span>
-<span class="nc" id="L390">                .contains(cardTask)</span>
-<span class="nc" id="L391">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
-<span class="nc" id="L392">                .contains(&quot;If the card supplies no repository identity, block unconditionally&quot;)</span>
-<span class="nc" id="L393">                .contains(&quot;even when the task would otherwise be repository-independent&quot;)</span>
-<span class="nc" id="L394">                .contains(&quot;A lower-priority configured path never establishes repository identity&quot;)</span>
-<span class="nc" id="L395">                .contains(&quot;Do not promote it over this invalid selected workflow URL&quot;)</span>
-<span class="nc" id="L396">                .contains(&quot;- Configured checkout path candidate: &quot; + defaultPath)</span>
-<span class="nc" id="L397">                .contains(&quot;only after card context supplies exactly one repository identity&quot;)</span>
-<span class="nc" id="L398">                .doesNotContain(&quot;if this fallback is required&quot;);</span>
-<span class="nc" id="L399">    }</span>
+<span class="nc" id="L463">        assertThat(prompt)</span>
+<span class="nc" id="L464">                .contains(cardTask)</span>
+<span class="nc" id="L465">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
+<span class="nc" id="L466">                .contains(&quot;If the card supplies no repository identity, block unconditionally&quot;)</span>
+<span class="nc" id="L467">                .contains(&quot;even when the task would otherwise be repository-independent&quot;)</span>
+<span class="nc" id="L468">                .contains(&quot;A lower-priority configured path never establishes repository identity&quot;)</span>
+<span class="nc" id="L469">                .contains(&quot;Do not promote it over this invalid selected workflow URL&quot;)</span>
+<span class="nc" id="L470">                .contains(&quot;- Configured checkout path candidate: &quot; + defaultPath)</span>
+<span class="nc" id="L471">                .contains(&quot;only after card context supplies exactly one repository identity&quot;)</span>
+<span class="nc" id="L472">                .doesNotContain(&quot;if this fallback is required&quot;);</span>
+<span class="nc" id="L473">    }</span>
 
     @Test
     void conflictingCardIdentitiesBlockInsteadOfOverridingMalformedWorkflowFallback() {
         // given
-<span class="nc" id="L404">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;));</span>
-<span class="nc" id="L405">        String cardTask = &quot;Change files in https://github.example/team/one and https://github.example/team/two.&quot;;</span>
+<span class="nc" id="L478">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;));</span>
+<span class="nc" id="L479">        String cardTask = &quot;Change files in https://github.example/team/one and https://github.example/team/two.&quot;;</span>
 
         // when
-<span class="nc" id="L408">        String prompt = promptPassedToCodex(config, cardTask);</span>
+<span class="nc" id="L482">        String prompt = promptPassedToCodex(config, cardTask);</span>
 
         // then
-<span class="nc" id="L411">        assertThat(prompt)</span>
-<span class="nc" id="L412">                .contains(cardTask)</span>
-<span class="nc" id="L413">                .contains(&quot;If card context supplies conflicting repository identities, block&quot;)</span>
-<span class="nc" id="L414">                .contains(&quot;Do not select one arbitrarily&quot;)</span>
-<span class="nc" id="L415">                .doesNotContain(&quot;if this fallback is required&quot;);</span>
-<span class="nc" id="L416">    }</span>
+<span class="nc" id="L485">        assertThat(prompt)</span>
+<span class="nc" id="L486">                .contains(cardTask)</span>
+<span class="nc" id="L487">                .contains(&quot;If card context supplies conflicting repository identities, block&quot;)</span>
+<span class="nc" id="L488">                .contains(&quot;Do not select one arbitrarily&quot;)</span>
+<span class="nc" id="L489">                .doesNotContain(&quot;if this fallback is required&quot;);</span>
+<span class="nc" id="L490">    }</span>
 
     @Test
     void fullyQualifiedIssueTargetRemainsDirectWhenDefaultNamesAnotherRepository() {
         // given
-<span class="nc" id="L421">        String issueTarget = &quot;https://github.example/target/project/issues/123&quot;;</span>
-<span class="nc" id="L422">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;https://source.example/team/default.git&quot;));</span>
+<span class="nc" id="L495">        String issueTarget = &quot;https://github.example/target/project/issues/123&quot;;</span>
+<span class="nc" id="L496">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, &quot;https://source.example/team/default.git&quot;));</span>
 
         // when
-<span class="nc" id="L425">        String prompt = promptPassedToCodex(config, &quot;Add a status note to &quot; + issueTarget + &quot;. No file changes.&quot;);</span>
+<span class="nc" id="L499">        String prompt = promptPassedToCodex(config, &quot;Add a status note to &quot; + issueTarget + &quot;. No file changes.&quot;);</span>
 
         // then
-<span class="nc" id="L428">        assertThat(prompt)</span>
-<span class="nc" id="L429">                .contains(&quot;Add a status note to &quot; + issueTarget)</span>
-<span class="nc" id="L430">                .contains(&quot;- Repository identity: source.example/team/default&quot;)</span>
-<span class="nc" id="L431">                .contains(&quot;A fully qualified GitHub issue or pull request URL remains its own direct target&quot;)</span>
-<span class="nc" id="L432">                .contains(&quot;even when it names a repository other than the selected source&quot;)</span>
-<span class="nc" id="L433">                .contains(</span>
+<span class="nc" id="L502">        assertThat(prompt)</span>
+<span class="nc" id="L503">                .contains(&quot;Add a status note to &quot; + issueTarget)</span>
+<span class="nc" id="L504">                .contains(&quot;- Repository identity: source.example/team/default&quot;)</span>
+<span class="nc" id="L505">                .contains(&quot;A fully qualified GitHub issue or pull request URL remains its own direct target&quot;)</span>
+<span class="nc" id="L506">                .contains(&quot;even when it names a repository other than the selected source&quot;)</span>
+<span class="nc" id="L507">                .contains(</span>
                         &quot;Do not create or reuse a task checkout unless the classified task requires repository files&quot;);
-<span class="nc" id="L435">    }</span>
+<span class="nc" id="L509">    }</span>
 
     @Test
     void defaultPathRequiresAnExplicitUnambiguousCompatibleRemoteBeforeResolvingShorthand() {
         // given
-<span class="nc" id="L440">        Path repositoryPath = tempDir.resolve(&quot;local-default&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L441">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
+<span class="nc" id="L514">        Path repositoryPath = tempDir.resolve(&quot;local-default&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L515">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
 
         // when
-<span class="nc" id="L444">        String prompt = promptPassedToCodex(config, &quot;Add a status note to #123. Do not change files.&quot;);</span>
+<span class="nc" id="L518">        String prompt = promptPassedToCodex(config, &quot;Add a status note to #123. Do not change files.&quot;);</span>
 
         // then
-<span class="nc" id="L447">        assertLocalSourceIdentityPolicy(prompt);</span>
-<span class="nc" id="L448">    }</span>
+<span class="nc" id="L521">        assertLocalSourceIdentityPolicy(prompt);</span>
+<span class="nc" id="L522">    }</span>
 
     @Test
     void fileUrlRequiresAnExplicitUnambiguousCompatibleRemoteBeforeResolvingShorthand() {
         // given
-<span class="nc" id="L453">        String repositoryUrl = tempDir.resolve(&quot;file-url-default&quot;)</span>
-<span class="nc" id="L454">                .toAbsolutePath()</span>
-<span class="nc" id="L455">                .normalize()</span>
-<span class="nc" id="L456">                .toUri()</span>
-<span class="nc" id="L457">                .toString();</span>
-<span class="nc" id="L458">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl));</span>
+<span class="nc" id="L527">        String repositoryUrl = tempDir.resolve(&quot;file-url-default&quot;)</span>
+<span class="nc" id="L528">                .toAbsolutePath()</span>
+<span class="nc" id="L529">                .normalize()</span>
+<span class="nc" id="L530">                .toUri()</span>
+<span class="nc" id="L531">                .toString();</span>
+<span class="nc" id="L532">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl));</span>
 
         // when
-<span class="nc" id="L461">        String prompt = promptPassedToCodex(config, &quot;Add a status note to #123. Do not change files.&quot;);</span>
+<span class="nc" id="L535">        String prompt = promptPassedToCodex(config, &quot;Add a status note to #123. Do not change files.&quot;);</span>
 
         // then
-<span class="nc" id="L464">        assertLocalSourceIdentityPolicy(prompt);</span>
-<span class="nc" id="L465">    }</span>
+<span class="nc" id="L538">        assertLocalSourceIdentityPolicy(prompt);</span>
+<span class="nc" id="L539">    }</span>
 
     @Test
     void explicitRemoteKeepsConfiguredPathCandidateButSuppressesDifferentWorkflowUrl() {
         // given
-<span class="nc" id="L470">        String cardRepository = &quot;https://example.invalid/card-specific.git&quot;;</span>
-<span class="nc" id="L471">        Path defaultPath = tempDir.resolve(&quot;default-checkout&quot;);</span>
-<span class="nc" id="L472">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L473">                Map.of(&quot;default_url&quot;, &quot;https://example.invalid/default.git&quot;, &quot;default_path&quot;, defaultPath.toString()));</span>
-<span class="nc" id="L474">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L544">        String cardRepository = &quot;https://example.invalid/card-specific.git&quot;;</span>
+<span class="nc" id="L545">        Path defaultPath = tempDir.resolve(&quot;default-checkout&quot;);</span>
+<span class="nc" id="L546">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L547">                Map.of(&quot;default_url&quot;, &quot;https://example.invalid/default.git&quot;, &quot;default_path&quot;, defaultPath.toString()));</span>
+<span class="nc" id="L548">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-explicit-source&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Implement feature&quot;,
                 &quot;Repository URL: &quot; + cardRepository,
-<span class="nc" id="L480">                List.of());</span>
+<span class="nc" id="L554">                List.of());</span>
 
         // when
-<span class="nc" id="L483">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
+<span class="nc" id="L557">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
 
         // then
-<span class="nc" id="L486">        assertThat(prompt)</span>
-<span class="nc" id="L487">                .startsWith(&quot;Card task&quot;)</span>
-<span class="nc" id="L488">                .contains(&quot;- Selected by: explicit Trello card source&quot;)</span>
-<span class="nc" id="L489">                .contains(&quot;- Credential-free remote: &quot; + cardRepository)</span>
-<span class="nc" id="L490">                .contains(&quot;Explicit Trello card repository sources are authoritative and suppress workflow defaults&quot;)</span>
-<span class="nc" id="L491">                .doesNotContain(&quot;https://example.invalid/default.git&quot;)</span>
-<span class="nc" id="L492">                .contains(&quot;- Configured checkout path candidate: &quot;</span>
-<span class="nc" id="L493">                        + defaultPath.toAbsolutePath().normalize())</span>
-<span class="nc" id="L494">                .contains(&quot;never establishes or replaces repository identity&quot;)</span>
-<span class="nc" id="L495">                .contains(&quot;only when read-only inspection of its Git remotes confirms&quot;)</span>
-<span class="nc" id="L496">                .contains(&quot;matches the repository identity already selected from the card&quot;)</span>
-<span class="nc" id="L497">                .contains(</span>
+<span class="nc" id="L560">        assertThat(prompt)</span>
+<span class="nc" id="L561">                .startsWith(&quot;Card task&quot;)</span>
+<span class="nc" id="L562">                .contains(&quot;- Selected by: explicit Trello card source&quot;)</span>
+<span class="nc" id="L563">                .contains(&quot;- Credential-free remote: &quot; + cardRepository)</span>
+<span class="nc" id="L564">                .contains(&quot;Explicit Trello card repository sources are authoritative and suppress workflow defaults&quot;)</span>
+<span class="nc" id="L565">                .doesNotContain(&quot;https://example.invalid/default.git&quot;)</span>
+<span class="nc" id="L566">                .contains(&quot;- Configured checkout path candidate: &quot;</span>
+<span class="nc" id="L567">                        + defaultPath.toAbsolutePath().normalize())</span>
+<span class="nc" id="L568">                .contains(&quot;never establishes or replaces repository identity&quot;)</span>
+<span class="nc" id="L569">                .contains(&quot;only when read-only inspection of its Git remotes confirms&quot;)</span>
+<span class="nc" id="L570">                .contains(&quot;matches the repository identity already selected from the card&quot;)</span>
+<span class="nc" id="L571">                .contains(</span>
                         &quot;Do not assume that it matches merely because the path and a workflow URL were configured together&quot;);
-<span class="nc" id="L499">    }</span>
+<span class="nc" id="L573">    }</span>
 
     @Test
     void explicitRemoteKeepsMatchingConfiguredPathCandidateAtFinalPromptBoundary() {
         // given
-<span class="nc" id="L504">        String cardRepository = &quot;https://example.invalid/team/project.git&quot;;</span>
-<span class="nc" id="L505">        Path defaultPath = tempDir.resolve(&quot;matching-checkout&quot;);</span>
-<span class="nc" id="L506">        EffectiveConfig config =</span>
-<span class="nc" id="L507">                configWithRepository(Map.of(&quot;default_url&quot;, cardRepository, &quot;default_path&quot;, defaultPath.toString()));</span>
-<span class="nc" id="L508">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L578">        String cardRepository = &quot;https://example.invalid/team/project.git&quot;;</span>
+<span class="nc" id="L579">        Path defaultPath = tempDir.resolve(&quot;matching-checkout&quot;);</span>
+<span class="nc" id="L580">        EffectiveConfig config =</span>
+<span class="nc" id="L581">                configWithRepository(Map.of(&quot;default_url&quot;, cardRepository, &quot;default_path&quot;, defaultPath.toString()));</span>
+<span class="nc" id="L582">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-explicit-matching-source&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Implement feature&quot;,
                 &quot;Repository URL: &quot; + cardRepository,
-<span class="nc" id="L514">                List.of());</span>
+<span class="nc" id="L588">                List.of());</span>
 
         // when
-<span class="nc" id="L517">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
+<span class="nc" id="L591">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
 
         // then
-<span class="nc" id="L520">        assertThat(prompt)</span>
-<span class="nc" id="L521">                .contains(&quot;- Selected by: explicit Trello card source&quot;)</span>
-<span class="nc" id="L522">                .contains(&quot;- Credential-free remote: &quot; + cardRepository)</span>
-<span class="nc" id="L523">                .contains(&quot;- Configured checkout path candidate: &quot;</span>
-<span class="nc" id="L524">                        + defaultPath.toAbsolutePath().normalize())</span>
-<span class="nc" id="L525">                .containsSubsequence(</span>
+<span class="nc" id="L594">        assertThat(prompt)</span>
+<span class="nc" id="L595">                .contains(&quot;- Selected by: explicit Trello card source&quot;)</span>
+<span class="nc" id="L596">                .contains(&quot;- Credential-free remote: &quot; + cardRepository)</span>
+<span class="nc" id="L597">                .contains(&quot;- Configured checkout path candidate: &quot;</span>
+<span class="nc" id="L598">                        + defaultPath.toAbsolutePath().normalize())</span>
+<span class="nc" id="L599">                .containsSubsequence(</span>
                         &quot;Configured checkout path candidate&quot;,
                         &quot;use that configured path before&quot;,
                         &quot;searching for another local checkout&quot;)
-<span class="nc" id="L529">                .contains(&quot;Never use a configured path for a different repository&quot;);</span>
-<span class="nc" id="L530">    }</span>
+<span class="nc" id="L603">                .contains(&quot;Never use a configured path for a different repository&quot;);</span>
+<span class="nc" id="L604">    }</span>
 
     @Test
     void explicitLocalSourceDoesNotReceiveASecondPathCandidateAtFinalPromptBoundary() {
         // given
-<span class="nc" id="L535">        Path selectedPath =</span>
-<span class="nc" id="L536">                tempDir.resolve(&quot;selected-checkout&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L537">        Path defaultPath =</span>
-<span class="nc" id="L538">                tempDir.resolve(&quot;configured-checkout&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L539">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, defaultPath.toString()));</span>
-<span class="nc" id="L540">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L609">        Path selectedPath =</span>
+<span class="nc" id="L610">                tempDir.resolve(&quot;selected-checkout&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L611">        Path defaultPath =</span>
+<span class="nc" id="L612">                tempDir.resolve(&quot;configured-checkout&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L613">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, defaultPath.toString()));</span>
+<span class="nc" id="L614">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-explicit-local-source&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Implement feature&quot;,
                 &quot;Repository path: &quot; + selectedPath,
-<span class="nc" id="L546">                List.of());</span>
+<span class="nc" id="L620">                List.of());</span>
 
         // when
-<span class="nc" id="L549">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
+<span class="nc" id="L623">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
 
         // then
-<span class="nc" id="L552">        assertThat(prompt)</span>
-<span class="nc" id="L553">                .contains(&quot;- Selected by: explicit Trello card source&quot;)</span>
-<span class="nc" id="L554">                .contains(&quot;- Resolved local path: &quot; + selectedPath)</span>
-<span class="nc" id="L555">                .doesNotContain(&quot;Configured checkout path candidate&quot;)</span>
-<span class="nc" id="L556">                .doesNotContain(defaultPath.toString());</span>
-<span class="nc" id="L557">    }</span>
+<span class="nc" id="L626">        assertThat(prompt)</span>
+<span class="nc" id="L627">                .contains(&quot;- Selected by: explicit Trello card source&quot;)</span>
+<span class="nc" id="L628">                .contains(&quot;- Resolved local path: &quot; + selectedPath)</span>
+<span class="nc" id="L629">                .doesNotContain(&quot;Configured checkout path candidate&quot;)</span>
+<span class="nc" id="L630">                .doesNotContain(defaultPath.toString());</span>
+<span class="nc" id="L631">    }</span>
 
     @Test
     void invalidExplicitCardSourceDoesNotFallBackToWorkflowDefaultInPrompt() {
         // given
-<span class="nc" id="L562">        Path defaultPath =</span>
-<span class="nc" id="L563">                tempDir.resolve(&quot;configured-checkout&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L564">        EffectiveConfig config = configWithRepository(</span>
-<span class="nc" id="L565">                Map.of(&quot;default_url&quot;, &quot;https://example.invalid/default.git&quot;, &quot;default_path&quot;, defaultPath.toString()));</span>
-<span class="nc" id="L566">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L636">        Path defaultPath =</span>
+<span class="nc" id="L637">                tempDir.resolve(&quot;configured-checkout&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L638">        EffectiveConfig config = configWithRepository(</span>
+<span class="nc" id="L639">                Map.of(&quot;default_url&quot;, &quot;https://example.invalid/default.git&quot;, &quot;default_path&quot;, defaultPath.toString()));</span>
+<span class="nc" id="L640">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-invalid-source&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Implement feature&quot;,
                 &quot;Repository URL: ftp://example.invalid/team/project.git&quot;,
-<span class="nc" id="L572">                List.of());</span>
+<span class="nc" id="L646">                List.of());</span>
 
         // when
-<span class="nc" id="L575">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
+<span class="nc" id="L649">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
 
         // then
-<span class="nc" id="L578">        assertThat(prompt)</span>
-<span class="nc" id="L579">                .contains(&quot;- Status: invalid selected source&quot;)</span>
-<span class="nc" id="L580">                .contains(&quot;- Code: repository_remote_unsupported&quot;)</span>
-<span class="nc" id="L581">                .contains(&quot;Do not use workflow defaults or other lower-priority fallbacks&quot;)</span>
-<span class="nc" id="L582">                .doesNotContain(&quot;https://example.invalid/default.git&quot;)</span>
-<span class="nc" id="L583">                .doesNotContain(defaultPath.toString())</span>
-<span class="nc" id="L584">                .doesNotContain(&quot;Configured checkout path candidate&quot;)</span>
-<span class="nc" id="L585">                .doesNotContain(&quot;## Repository Checkout Preparation&quot;);</span>
-<span class="nc" id="L586">    }</span>
+<span class="nc" id="L652">        assertThat(prompt)</span>
+<span class="nc" id="L653">                .contains(&quot;- Status: invalid selected source&quot;)</span>
+<span class="nc" id="L654">                .contains(&quot;- Code: repository_remote_unsupported&quot;)</span>
+<span class="nc" id="L655">                .contains(&quot;Do not use workflow defaults or other lower-priority fallbacks&quot;)</span>
+<span class="nc" id="L656">                .doesNotContain(&quot;https://example.invalid/default.git&quot;)</span>
+<span class="nc" id="L657">                .doesNotContain(defaultPath.toString())</span>
+<span class="nc" id="L658">                .doesNotContain(&quot;Configured checkout path candidate&quot;)</span>
+<span class="nc" id="L659">                .doesNotContain(&quot;## Repository Checkout Preparation&quot;);</span>
+<span class="nc" id="L660">    }</span>
 
     @Test
     void explicitCardSourceSuppressesCredentialBearingWorkflowDefaultInPrompt() {
         // given
-<span class="nc" id="L591">        String secretDefault = &quot;https://token@example.invalid/team/default.git?access_token=secret&quot;;</span>
-<span class="nc" id="L592">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, secretDefault));</span>
-<span class="nc" id="L593">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L665">        String secretDefault = &quot;https://token@example.invalid/team/default.git?access_token=secret&quot;;</span>
+<span class="nc" id="L666">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, secretDefault));</span>
+<span class="nc" id="L667">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-secret-default&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Implement feature&quot;,
                 &quot;Repository URL: https://example.invalid/card.git&quot;,
-<span class="nc" id="L599">                List.of());</span>
+<span class="nc" id="L673">                List.of());</span>
 
         // when
-<span class="nc" id="L602">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
+<span class="nc" id="L676">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;, card);</span>
 
         // then
-<span class="nc" id="L605">        assertThat(prompt)</span>
-<span class="nc" id="L606">                .contains(&quot;- Credential-free remote: https://example.invalid/card.git&quot;)</span>
-<span class="nc" id="L607">                .doesNotContain(&quot;token&quot;)</span>
-<span class="nc" id="L608">                .doesNotContain(&quot;access_token&quot;)</span>
-<span class="nc" id="L609">                .doesNotContain(&quot;secret&quot;);</span>
-<span class="nc" id="L610">    }</span>
+<span class="nc" id="L679">        assertThat(prompt)</span>
+<span class="nc" id="L680">                .contains(&quot;- Credential-free remote: https://example.invalid/card.git&quot;)</span>
+<span class="nc" id="L681">                .doesNotContain(&quot;token&quot;)</span>
+<span class="nc" id="L682">                .doesNotContain(&quot;access_token&quot;)</span>
+<span class="nc" id="L683">                .doesNotContain(&quot;secret&quot;);</span>
+<span class="nc" id="L684">    }</span>
 
     @Test
     void doesNotCreateOrInspectRepositoryPathWhileAddingRuntimePromptContext() {
         // given
-<span class="nc" id="L615">        Path missingParent = tempDir.resolve(&quot;missing-parent&quot;);</span>
-<span class="nc" id="L616">        Path repositoryPath = missingParent.resolve(&quot;repository&quot;);</span>
-<span class="nc" id="L617">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
-<span class="nc" id="L618">        assertThat(missingParent).doesNotExist();</span>
+<span class="nc" id="L689">        Path missingParent = tempDir.resolve(&quot;missing-parent&quot;);</span>
+<span class="nc" id="L690">        Path repositoryPath = missingParent.resolve(&quot;repository&quot;);</span>
+<span class="nc" id="L691">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
+<span class="nc" id="L692">        assertThat(missingParent).doesNotExist();</span>
 
         // when
-<span class="nc" id="L621">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L695">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L624">        assertThat(prompt)</span>
-<span class="nc" id="L625">                .contains(&quot;- Resolved local path: &quot;</span>
-<span class="nc" id="L626">                        + repositoryPath.toAbsolutePath().normalize());</span>
-<span class="nc" id="L627">        assertThat(missingParent).doesNotExist();</span>
-<span class="nc" id="L628">    }</span>
+<span class="nc" id="L698">        assertThat(prompt)</span>
+<span class="nc" id="L699">                .contains(&quot;- Resolved local path: &quot;</span>
+<span class="nc" id="L700">                        + repositoryPath.toAbsolutePath().normalize());</span>
+<span class="nc" id="L701">        assertThat(missingParent).doesNotExist();</span>
+<span class="nc" id="L702">    }</span>
 
     @Test
     void runtimePromptWarnsAgainstEchoingResolvedPrivateDefaultsToTrello() {
         // given
-<span class="nc" id="L633">        String privateRepositoryUrl = &quot;https://private.example.invalid/team/project.git&quot;;</span>
-<span class="nc" id="L634">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, privateRepositoryUrl));</span>
+<span class="nc" id="L707">        String privateRepositoryUrl = &quot;https://private.example.invalid/team/project.git&quot;;</span>
+<span class="nc" id="L708">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, privateRepositoryUrl));</span>
 
         // when
-<span class="nc" id="L637">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L711">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L640">        assertThat(prompt)</span>
-<span class="nc" id="L641">                .contains(&quot;- Credential-free remote: &quot; + privateRepositoryUrl)</span>
-<span class="nc" id="L642">                .contains(</span>
+<span class="nc" id="L714">        assertThat(prompt)</span>
+<span class="nc" id="L715">                .contains(&quot;- Credential-free remote: &quot; + privateRepositoryUrl)</span>
+<span class="nc" id="L716">                .contains(</span>
                         &quot;Do not copy private repository URLs, local host paths, credentials, or source details from this context into Trello-visible comments or status text.&quot;);
-<span class="nc" id="L644">    }</span>
+<span class="nc" id="L718">    }</span>
 
     @Test
     void runtimePromptWarnsAgainstEchoingResolvedPrivatePathsToTrello() {
         // given
-<span class="nc" id="L649">        Path privateRepositoryPath =</span>
-<span class="nc" id="L650">                tempDir.resolve(&quot;private/project&quot;).toAbsolutePath().normalize();</span>
-<span class="nc" id="L651">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, privateRepositoryPath.toString()));</span>
+<span class="nc" id="L723">        Path privateRepositoryPath =</span>
+<span class="nc" id="L724">                tempDir.resolve(&quot;private/project&quot;).toAbsolutePath().normalize();</span>
+<span class="nc" id="L725">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, privateRepositoryPath.toString()));</span>
 
         // when
-<span class="nc" id="L654">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L728">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L657">        assertThat(prompt)</span>
-<span class="nc" id="L658">                .contains(&quot;- Resolved local path: &quot; + privateRepositoryPath)</span>
-<span class="nc" id="L659">                .contains(</span>
+<span class="nc" id="L731">        assertThat(prompt)</span>
+<span class="nc" id="L732">                .contains(&quot;- Resolved local path: &quot; + privateRepositoryPath)</span>
+<span class="nc" id="L733">                .contains(</span>
                         &quot;Do not copy private repository URLs, local host paths, credentials, or source details from this context into Trello-visible comments or status text.&quot;);
-<span class="nc" id="L661">    }</span>
+<span class="nc" id="L735">    }</span>
 
     @Test
     void credentialBearingWorkflowDefaultIsSanitizedInCodexPrompt() {
         // given
-<span class="nc" id="L666">        String secretDefault = &quot;https://token@example.invalid/team/project.git?access_token=secret&quot;;</span>
-<span class="nc" id="L667">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, secretDefault));</span>
+<span class="nc" id="L740">        String secretDefault = &quot;https://token@example.invalid/team/project.git?access_token=secret&quot;;</span>
+<span class="nc" id="L741">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, secretDefault));</span>
 
         // when
-<span class="nc" id="L670">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
+<span class="nc" id="L744">        String prompt = promptPassedToCodex(config, &quot;Card task&quot;);</span>
 
         // then
-<span class="nc" id="L673">        assertThat(prompt)</span>
-<span class="nc" id="L674">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
-<span class="nc" id="L675">                .contains(&quot;- Code: repository_remote_credentials_unsupported&quot;)</span>
-<span class="nc" id="L676">                .contains(&quot;Use a credential helper or SSH&quot;)</span>
-<span class="nc" id="L677">                .doesNotContain(&quot;token&quot;)</span>
-<span class="nc" id="L678">                .doesNotContain(&quot;access_token&quot;)</span>
-<span class="nc" id="L679">                .doesNotContain(&quot;secret&quot;);</span>
-<span class="nc" id="L680">    }</span>
+<span class="nc" id="L747">        assertThat(prompt)</span>
+<span class="nc" id="L748">                .contains(&quot;- Status: invalid workflow fallback&quot;)</span>
+<span class="nc" id="L749">                .contains(&quot;- Code: repository_remote_credentials_unsupported&quot;)</span>
+<span class="nc" id="L750">                .contains(&quot;Use a credential helper or SSH&quot;)</span>
+<span class="nc" id="L751">                .doesNotContain(&quot;token&quot;)</span>
+<span class="nc" id="L752">                .doesNotContain(&quot;access_token&quot;)</span>
+<span class="nc" id="L753">                .doesNotContain(&quot;secret&quot;);</span>
+<span class="nc" id="L754">    }</span>
 
     @Test
     void leavesWorkspaceEmptyWhenPromptDoesNotReferenceBundledSkills() throws Exception {
         // given
-<span class="nc" id="L685">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L686">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenReturn(AgentRunResult.ok());</span>
-<span class="nc" id="L687">        var runner = runner(codex, CardLookupResult.Found::new);</span>
-<span class="nc" id="L688">        EffectiveConfig config = config(Map.of());</span>
-<span class="nc" id="L689">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-plain&quot;, &quot;Ready for Codex&quot;);</span>
+<span class="nc" id="L759">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L760">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenReturn(AgentRunResult.ok());</span>
+<span class="nc" id="L761">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L762">        EffectiveConfig config = config(Map.of());</span>
+<span class="nc" id="L763">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-plain&quot;, &quot;Ready for Codex&quot;);</span>
 
         // when
-<span class="nc" id="L692">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L693">                card, null, &quot;prompt without shipped skill paths&quot;, config, &quot;worker-plain&quot;, event -&gt; {}));</span>
+<span class="nc" id="L766">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L767">                card, null, &quot;prompt without shipped skill paths&quot;, config, &quot;worker-plain&quot;, event -&gt; {}));</span>
 
         // then
-<span class="nc" id="L696">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L697">        assertThat(config.workspace().root().resolve(&quot;TRELLO-plain&quot;).resolve(&quot;.codex&quot;))</span>
-<span class="nc" id="L698">                .doesNotExist();</span>
-<span class="nc" id="L699">    }</span>
+<span class="nc" id="L770">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L771">        assertThat(config.workspace().root().resolve(&quot;TRELLO-plain&quot;).resolve(&quot;.codex&quot;))</span>
+<span class="nc" id="L772">                .doesNotExist();</span>
+<span class="nc" id="L773">    }</span>
 
     @Test
     void repositoryDefaultUrlSkillPathDoesNotTriggerBundledSkillInstallation() {
         // given
-<span class="nc" id="L704">        String repositoryUrl = &quot;https://example.invalid/.codex/skills/symphony-trello-commit.git&quot;;</span>
-<span class="nc" id="L705">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl));</span>
+<span class="nc" id="L778">        String repositoryUrl = &quot;https://example.invalid/.codex/skills/symphony-trello-commit.git&quot;;</span>
+<span class="nc" id="L779">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl));</span>
 
         // when
-<span class="nc" id="L708">        String prompt = promptPassedToCodex(config, &quot;hand-authored prompt&quot;, &quot;TRELLO-url-skill-default&quot;);</span>
+<span class="nc" id="L782">        String prompt = promptPassedToCodex(config, &quot;hand-authored prompt&quot;, &quot;TRELLO-url-skill-default&quot;);</span>
 
         // then
-<span class="nc" id="L711">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-url-skill-default&quot;);</span>
-<span class="nc" id="L712">        assertThat(prompt).contains(&quot;hand-authored prompt&quot;).contains(&quot;- Credential-free remote: &quot; + repositoryUrl);</span>
-<span class="nc" id="L713">        assertThat(workspace.resolve(&quot;.codex&quot;)).doesNotExist();</span>
-<span class="nc" id="L714">        assertThat(workspace.resolve(&quot;.git/info/exclude&quot;)).doesNotExist();</span>
-<span class="nc" id="L715">    }</span>
+<span class="nc" id="L785">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-url-skill-default&quot;);</span>
+<span class="nc" id="L786">        assertThat(prompt).contains(&quot;hand-authored prompt&quot;).contains(&quot;- Credential-free remote: &quot; + repositoryUrl);</span>
+<span class="nc" id="L787">        assertThat(workspace.resolve(&quot;.codex&quot;)).doesNotExist();</span>
+<span class="nc" id="L788">        assertThat(workspace.resolve(&quot;.git/info/exclude&quot;)).doesNotExist();</span>
+<span class="nc" id="L789">    }</span>
 
     @Test
     void repositoryDefaultPathSkillPathDoesNotTriggerBundledSkillInstallation() {
         // given
-<span class="nc" id="L720">        Path repositoryPath = tempDir.resolve(&quot;.codex/skills/symphony-trello-source&quot;)</span>
-<span class="nc" id="L721">                .toAbsolutePath()</span>
-<span class="nc" id="L722">                .normalize();</span>
-<span class="nc" id="L723">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
+<span class="nc" id="L794">        Path repositoryPath = tempDir.resolve(&quot;.codex/skills/symphony-trello-source&quot;)</span>
+<span class="nc" id="L795">                .toAbsolutePath()</span>
+<span class="nc" id="L796">                .normalize();</span>
+<span class="nc" id="L797">        EffectiveConfig config = configWithRepository(Map.of(&quot;default_path&quot;, repositoryPath.toString()));</span>
 
         // when
-<span class="nc" id="L726">        String prompt = promptPassedToCodex(config, &quot;hand-authored prompt&quot;, &quot;TRELLO-path-skill-default&quot;);</span>
+<span class="nc" id="L800">        String prompt = promptPassedToCodex(config, &quot;hand-authored prompt&quot;, &quot;TRELLO-path-skill-default&quot;);</span>
 
         // then
-<span class="nc" id="L729">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-path-skill-default&quot;);</span>
-<span class="nc" id="L730">        assertThat(prompt).contains(&quot;hand-authored prompt&quot;).contains(&quot;- Resolved local path: &quot; + repositoryPath);</span>
-<span class="nc" id="L731">        assertThat(workspace.resolve(&quot;.codex&quot;)).doesNotExist();</span>
-<span class="nc" id="L732">        assertThat(workspace.resolve(&quot;.git/info/exclude&quot;)).doesNotExist();</span>
-<span class="nc" id="L733">    }</span>
+<span class="nc" id="L803">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-path-skill-default&quot;);</span>
+<span class="nc" id="L804">        assertThat(prompt).contains(&quot;hand-authored prompt&quot;).contains(&quot;- Resolved local path: &quot; + repositoryPath);</span>
+<span class="nc" id="L805">        assertThat(workspace.resolve(&quot;.codex&quot;)).doesNotExist();</span>
+<span class="nc" id="L806">        assertThat(workspace.resolve(&quot;.git/info/exclude&quot;)).doesNotExist();</span>
+<span class="nc" id="L807">    }</span>
 
     @Test
     void explicitRemoteCandidateSkillPathDoesNotTriggerBundledSkillInstallation() {
         // given
-<span class="nc" id="L738">        String repositoryUrl = &quot;https://example.invalid/team/project.git&quot;;</span>
-<span class="nc" id="L739">        Path repositoryPath = tempDir.resolve(&quot;.codex/skills/symphony-trello-candidate&quot;)</span>
-<span class="nc" id="L740">                .toAbsolutePath()</span>
-<span class="nc" id="L741">                .normalize();</span>
-<span class="nc" id="L742">        EffectiveConfig config =</span>
-<span class="nc" id="L743">                configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl, &quot;default_path&quot;, repositoryPath.toString()));</span>
-<span class="nc" id="L744">        Card card = TestCards.cardWithText(</span>
+<span class="nc" id="L812">        String repositoryUrl = &quot;https://example.invalid/team/project.git&quot;;</span>
+<span class="nc" id="L813">        Path repositoryPath = tempDir.resolve(&quot;.codex/skills/symphony-trello-candidate&quot;)</span>
+<span class="nc" id="L814">                .toAbsolutePath()</span>
+<span class="nc" id="L815">                .normalize();</span>
+<span class="nc" id="L816">        EffectiveConfig config =</span>
+<span class="nc" id="L817">                configWithRepository(Map.of(&quot;default_url&quot;, repositoryUrl, &quot;default_path&quot;, repositoryPath.toString()));</span>
+<span class="nc" id="L818">        Card card = TestCards.cardWithText(</span>
                 &quot;card-1&quot;,
                 &quot;TRELLO-candidate-skill-path&quot;,
                 &quot;Ready for Codex&quot;,
                 &quot;Implement feature&quot;,
                 &quot;Repository URL: &quot; + repositoryUrl,
-<span class="nc" id="L750">                List.of());</span>
+<span class="nc" id="L824">                List.of());</span>
 
         // when
-<span class="nc" id="L753">        String prompt = promptPassedToCodex(config, &quot;hand-authored prompt&quot;, card);</span>
+<span class="nc" id="L827">        String prompt = promptPassedToCodex(config, &quot;hand-authored prompt&quot;, card);</span>
 
         // then
-<span class="nc" id="L756">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-candidate-skill-path&quot;);</span>
-<span class="nc" id="L757">        assertThat(prompt)</span>
-<span class="nc" id="L758">                .contains(&quot;hand-authored prompt&quot;)</span>
-<span class="nc" id="L759">                .contains(&quot;- Configured checkout path candidate: &quot; + repositoryPath);</span>
-<span class="nc" id="L760">        assertThat(workspace.resolve(&quot;.codex&quot;)).doesNotExist();</span>
-<span class="nc" id="L761">        assertThat(workspace.resolve(&quot;.git/info/exclude&quot;)).doesNotExist();</span>
-<span class="nc" id="L762">    }</span>
+<span class="nc" id="L830">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-candidate-skill-path&quot;);</span>
+<span class="nc" id="L831">        assertThat(prompt)</span>
+<span class="nc" id="L832">                .contains(&quot;hand-authored prompt&quot;)</span>
+<span class="nc" id="L833">                .contains(&quot;- Configured checkout path candidate: &quot; + repositoryPath);</span>
+<span class="nc" id="L834">        assertThat(workspace.resolve(&quot;.codex&quot;)).doesNotExist();</span>
+<span class="nc" id="L835">        assertThat(workspace.resolve(&quot;.git/info/exclude&quot;)).doesNotExist();</span>
+<span class="nc" id="L836">    }</span>
 
     @Test
     void returnsFailureWhenRequiredHookFailsAndStillRemovesWorkerFromActiveSet() throws Exception {
         // given
-<span class="nc" id="L767">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L768">        var runner = runner(codex, CardLookupResult.Found::new);</span>
-<span class="nc" id="L769">        EffectiveConfig config = config(Map.of(&quot;before_run&quot;, &quot;echo broken &amp;&amp; exit 9&quot;));</span>
+<span class="nc" id="L841">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L842">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L843">        EffectiveConfig config = config(Map.of(&quot;before_run&quot;, &quot;echo broken &amp;&amp; exit 9&quot;));</span>
 
         // when
-<span class="nc" id="L772">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L773">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-hook&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L846">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L847">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-hook&quot;, &quot;Ready for Codex&quot;),</span>
                 null,
                 &quot;prompt&quot;,
                 config,
                 &quot;worker-failed-hook&quot;,
-<span class="nc" id="L778">                event -&gt; {}));</span>
-<span class="nc" id="L779">        runner.cancel(&quot;worker-failed-hook&quot;);</span>
+<span class="nc" id="L852">                event -&gt; {}));</span>
+<span class="nc" id="L853">        runner.cancel(&quot;worker-failed-hook&quot;);</span>
 
         // then
-<span class="nc" id="L782">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;Hook before_run failed: exit_code=9 output=broken\n&quot;));</span>
-<span class="nc" id="L783">        verifyNoInteractions(codex);</span>
-<span class="nc" id="L784">    }</span>
+<span class="nc" id="L856">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;Hook before_run failed: exit_code=9 output=broken\n&quot;));</span>
+<span class="nc" id="L857">        verifyNoInteractions(codex);</span>
+<span class="nc" id="L858">    }</span>
 
     @Test
     void cancelInterruptsActiveWorkerThread() throws Exception {
         // given
-<span class="nc" id="L789">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L790">        var entered = new CountDownLatch(1);</span>
-<span class="nc" id="L791">        var interrupted = new AtomicReference&lt;Boolean&gt;(false);</span>
-<span class="nc" id="L792">        doAnswer(invocation -&gt; {</span>
-<span class="nc" id="L793">                    entered.countDown();</span>
+<span class="nc" id="L863">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L864">        var entered = new CountDownLatch(1);</span>
+<span class="nc" id="L865">        var interrupted = new AtomicReference&lt;Boolean&gt;(false);</span>
+<span class="nc" id="L866">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L867">                    entered.countDown();</span>
                     try {
-<span class="nc" id="L795">                        blockUntilInterruptedOrTimedOut();</span>
-<span class="nc" id="L796">                        return AgentRunResult.ok();</span>
-<span class="nc" id="L797">                    } catch (InterruptedException e) {</span>
-<span class="nc" id="L798">                        Thread.currentThread().interrupt();</span>
-<span class="nc" id="L799">                        interrupted.set(true);</span>
-<span class="nc" id="L800">                        return AgentRunResult.fail(&quot;interrupted&quot;);</span>
+<span class="nc" id="L869">                        blockUntilInterruptedOrTimedOut();</span>
+<span class="nc" id="L870">                        return AgentRunResult.ok();</span>
+<span class="nc" id="L871">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L872">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L873">                        interrupted.set(true);</span>
+<span class="nc" id="L874">                        return AgentRunResult.fail(&quot;interrupted&quot;);</span>
                     }
                 })
-<span class="nc" id="L803">                .when(codex)</span>
-<span class="nc" id="L804">                .runSession(any(), any(), any(), any(), any(), any(), any());</span>
-<span class="nc" id="L805">        var runner = runner(codex, CardLookupResult.Found::new);</span>
-<span class="nc" id="L806">        EffectiveConfig config = config(Map.of());</span>
-<span class="nc" id="L807">        var result = new AtomicReference&lt;AgentRunResult&gt;();</span>
-<span class="nc" id="L808">        Thread worker = Thread.ofVirtual()</span>
-<span class="nc" id="L809">                .start(() -&gt; result.set(runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L810">                        TestCards.card(&quot;card-1&quot;, &quot;TRELLO-cancel&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L877">                .when(codex)</span>
+<span class="nc" id="L878">                .runSession(any(), any(), any(), any(), any(), any(), any());</span>
+<span class="nc" id="L879">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L880">        EffectiveConfig config = config(Map.of());</span>
+<span class="nc" id="L881">        var result = new AtomicReference&lt;AgentRunResult&gt;();</span>
+<span class="nc" id="L882">        Thread worker = Thread.ofVirtual()</span>
+<span class="nc" id="L883">                .start(() -&gt; result.set(runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L884">                        TestCards.card(&quot;card-1&quot;, &quot;TRELLO-cancel&quot;, &quot;Ready for Codex&quot;),</span>
                         null,
                         &quot;prompt&quot;,
                         config,
                         &quot;worker-cancel&quot;,
-<span class="nc" id="L815">                        event -&gt; {}))));</span>
-<span class="nc" id="L816">        assertThat(entered.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L817">                .as(&quot;the active worker enters its Codex session within 5 seconds&quot;)</span>
-<span class="nc" id="L818">                .isTrue();</span>
+<span class="nc" id="L889">                        event -&gt; {}))));</span>
+<span class="nc" id="L890">        assertThat(entered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L891">                .as(&quot;the active worker enters its Codex session within 5 seconds&quot;)</span>
+<span class="nc" id="L892">                .isTrue();</span>
 
         // when
-<span class="nc" id="L821">        runner.cancel(&quot;worker-cancel&quot;);</span>
-<span class="nc" id="L822">        assertThat(worker.join(Duration.ofSeconds(5)))</span>
-<span class="nc" id="L823">                .as(&quot;the cancelled worker terminates within 5 seconds&quot;)</span>
-<span class="nc" id="L824">                .isTrue();</span>
+<span class="nc" id="L895">        runner.cancel(&quot;worker-cancel&quot;);</span>
+<span class="nc" id="L896">        assertThat(worker.join(Duration.ofSeconds(5)))</span>
+<span class="nc" id="L897">                .as(&quot;the cancelled worker terminates within 5 seconds&quot;)</span>
+<span class="nc" id="L898">                .isTrue();</span>
 
         // then
-<span class="nc" id="L827">        assertThat(interrupted).hasValue(true);</span>
-<span class="nc" id="L828">        assertThat(result).hasValue(AgentRunResult.fail(&quot;interrupted&quot;));</span>
-<span class="nc" id="L829">    }</span>
+<span class="nc" id="L901">        assertThat(interrupted).hasValue(true);</span>
+<span class="nc" id="L902">        assertThat(result).hasValue(AgentRunResult.fail(&quot;interrupted&quot;));</span>
+<span class="nc" id="L903">    }</span>
 
     @Test
     void completedDuplicateIdentityCannotUnregisterNewerActiveWorker() throws Exception {
         // given
-<span class="nc" id="L834">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L835">        var firstEntered = new CountDownLatch(1);</span>
-<span class="nc" id="L836">        var secondEntered = new CountDownLatch(1);</span>
-<span class="nc" id="L837">        var releaseFirst = new CountDownLatch(1);</span>
-<span class="nc" id="L838">        var secondInterrupted = new AtomicBoolean();</span>
-<span class="nc" id="L839">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L840">            Card card = invocation.getArgument(1);</span>
-<span class="nc bnc" id="L841" title="All 2 branches missed.">            if (card.id().equals(&quot;card-first&quot;)) {</span>
-<span class="nc" id="L842">                firstEntered.countDown();</span>
-<span class="nc" id="L843">                assertThat(releaseFirst.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L844">                        .as(&quot;the test releases the first duplicate-identity worker within 5 seconds&quot;)</span>
-<span class="nc" id="L845">                        .isTrue();</span>
-<span class="nc" id="L846">                return AgentRunResult.ok();</span>
+<span class="nc" id="L908">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L909">        var firstEntered = new CountDownLatch(1);</span>
+<span class="nc" id="L910">        var secondEntered = new CountDownLatch(1);</span>
+<span class="nc" id="L911">        var releaseFirst = new CountDownLatch(1);</span>
+<span class="nc" id="L912">        var secondInterrupted = new AtomicBoolean();</span>
+<span class="nc" id="L913">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L914">            Card card = invocation.getArgument(1);</span>
+<span class="nc bnc" id="L915" title="All 2 branches missed.">            if (card.id().equals(&quot;card-first&quot;)) {</span>
+<span class="nc" id="L916">                firstEntered.countDown();</span>
+<span class="nc" id="L917">                assertThat(releaseFirst.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L918">                        .as(&quot;the test releases the first duplicate-identity worker within 5 seconds&quot;)</span>
+<span class="nc" id="L919">                        .isTrue();</span>
+<span class="nc" id="L920">                return AgentRunResult.ok();</span>
             }
-<span class="nc" id="L848">            secondEntered.countDown();</span>
+<span class="nc" id="L922">            secondEntered.countDown();</span>
             try {
-<span class="nc" id="L850">                blockUntilInterruptedOrTimedOut();</span>
-<span class="nc" id="L851">                return AgentRunResult.ok();</span>
-<span class="nc" id="L852">            } catch (InterruptedException e) {</span>
-<span class="nc" id="L853">                Thread.currentThread().interrupt();</span>
-<span class="nc" id="L854">                secondInterrupted.set(true);</span>
-<span class="nc" id="L855">                return AgentRunResult.fail(&quot;interrupted&quot;);</span>
+<span class="nc" id="L924">                blockUntilInterruptedOrTimedOut();</span>
+<span class="nc" id="L925">                return AgentRunResult.ok();</span>
+<span class="nc" id="L926">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L927">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L928">                secondInterrupted.set(true);</span>
+<span class="nc" id="L929">                return AgentRunResult.fail(&quot;interrupted&quot;);</span>
             }
         });
-<span class="nc" id="L858">        var runner = runner(codex, CardLookupResult.Found::new);</span>
-<span class="nc" id="L859">        EffectiveConfig config = config(Map.of());</span>
-<span class="nc" id="L860">        var firstResult = new AtomicReference&lt;AgentRunResult&gt;();</span>
-<span class="nc" id="L861">        var secondResult = new AtomicReference&lt;AgentRunResult&gt;();</span>
-<span class="nc" id="L862">        Thread first = Thread.ofVirtual()</span>
-<span class="nc" id="L863">                .start(() -&gt; firstResult.set(runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L864">                        TestCards.card(&quot;card-first&quot;, &quot;TRELLO-duplicate-first&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L932">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L933">        EffectiveConfig config = config(Map.of());</span>
+<span class="nc" id="L934">        var firstResult = new AtomicReference&lt;AgentRunResult&gt;();</span>
+<span class="nc" id="L935">        var secondResult = new AtomicReference&lt;AgentRunResult&gt;();</span>
+<span class="nc" id="L936">        Thread first = Thread.ofVirtual()</span>
+<span class="nc" id="L937">                .start(() -&gt; firstResult.set(runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L938">                        TestCards.card(&quot;card-first&quot;, &quot;TRELLO-duplicate-first&quot;, &quot;Ready for Codex&quot;),</span>
                         null,
                         &quot;prompt&quot;,
                         config,
                         &quot;worker-duplicate&quot;,
-<span class="nc" id="L869">                        event -&gt; {}))));</span>
-<span class="nc" id="L870">        assertThat(firstEntered.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L871">                .as(&quot;the first duplicate-identity worker starts within 5 seconds&quot;)</span>
-<span class="nc" id="L872">                .isTrue();</span>
-<span class="nc" id="L873">        Thread second = Thread.ofVirtual()</span>
-<span class="nc" id="L874">                .start(() -&gt; secondResult.set(runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L875">                        TestCards.card(&quot;card-second&quot;, &quot;TRELLO-duplicate-second&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L943">                        event -&gt; {}))));</span>
+<span class="nc" id="L944">        assertThat(firstEntered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L945">                .as(&quot;the first duplicate-identity worker starts within 5 seconds&quot;)</span>
+<span class="nc" id="L946">                .isTrue();</span>
+<span class="nc" id="L947">        Thread second = Thread.ofVirtual()</span>
+<span class="nc" id="L948">                .start(() -&gt; secondResult.set(runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L949">                        TestCards.card(&quot;card-second&quot;, &quot;TRELLO-duplicate-second&quot;, &quot;Ready for Codex&quot;),</span>
                         null,
                         &quot;prompt&quot;,
                         config,
                         &quot;worker-duplicate&quot;,
-<span class="nc" id="L880">                        event -&gt; {}))));</span>
-<span class="nc" id="L881">        assertThat(secondEntered.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L882">                .as(&quot;the replacement duplicate-identity worker starts within 5 seconds&quot;)</span>
-<span class="nc" id="L883">                .isTrue();</span>
-<span class="nc" id="L884">        releaseFirst.countDown();</span>
-<span class="nc" id="L885">        assertThat(first.join(Duration.ofSeconds(5)))</span>
-<span class="nc" id="L886">                .as(&quot;the superseded duplicate-identity worker terminates within 5 seconds&quot;)</span>
-<span class="nc" id="L887">                .isTrue();</span>
+<span class="nc" id="L954">                        event -&gt; {}))));</span>
+<span class="nc" id="L955">        assertThat(secondEntered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L956">                .as(&quot;the replacement duplicate-identity worker starts within 5 seconds&quot;)</span>
+<span class="nc" id="L957">                .isTrue();</span>
+<span class="nc" id="L958">        releaseFirst.countDown();</span>
+<span class="nc" id="L959">        assertThat(first.join(Duration.ofSeconds(5)))</span>
+<span class="nc" id="L960">                .as(&quot;the superseded duplicate-identity worker terminates within 5 seconds&quot;)</span>
+<span class="nc" id="L961">                .isTrue();</span>
 
         // when
-<span class="nc" id="L890">        runner.cancel(&quot;worker-duplicate&quot;);</span>
-<span class="nc" id="L891">        assertThat(second.join(Duration.ofSeconds(5)))</span>
-<span class="nc" id="L892">                .as(&quot;the cancelled replacement worker terminates within 5 seconds&quot;)</span>
-<span class="nc" id="L893">                .isTrue();</span>
+<span class="nc" id="L964">        runner.cancel(&quot;worker-duplicate&quot;);</span>
+<span class="nc" id="L965">        assertThat(second.join(Duration.ofSeconds(5)))</span>
+<span class="nc" id="L966">                .as(&quot;the cancelled replacement worker terminates within 5 seconds&quot;)</span>
+<span class="nc" id="L967">                .isTrue();</span>
 
         // then
-<span class="nc" id="L896">        assertThat(firstResult).hasValue(AgentRunResult.ok());</span>
-<span class="nc" id="L897">        assertThat(secondInterrupted)</span>
-<span class="nc" id="L898">                .as(&quot;cancelling a duplicate identity interrupts the currently registered worker&quot;)</span>
-<span class="nc" id="L899">                .isTrue();</span>
-<span class="nc" id="L900">        assertThat(secondResult).hasValue(AgentRunResult.fail(&quot;interrupted&quot;));</span>
-<span class="nc" id="L901">    }</span>
+<span class="nc" id="L970">        assertThat(firstResult).hasValue(AgentRunResult.ok());</span>
+<span class="nc" id="L971">        assertThat(secondInterrupted)</span>
+<span class="nc" id="L972">                .as(&quot;cancelling a duplicate identity interrupts the currently registered worker&quot;)</span>
+<span class="nc" id="L973">                .isTrue();</span>
+<span class="nc" id="L974">        assertThat(secondResult).hasValue(AgentRunResult.fail(&quot;interrupted&quot;));</span>
+<span class="nc" id="L975">    }</span>
 
     @Test
     void continuesSameSessionWhileCardRemainsActiveAndMaxTurnsAllowsIt() throws Exception {
         // given
-<span class="nc" id="L906">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L907">        var controller = new AtomicReference&lt;CodexAppServerClient.TurnController&gt;();</span>
-<span class="nc" id="L908">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L909">            controller.set(invocation.getArgument(6));</span>
-<span class="nc" id="L910">            return AgentRunResult.ok();</span>
+<span class="nc" id="L980">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L981">        var controller = new AtomicReference&lt;CodexAppServerClient.TurnController&gt;();</span>
+<span class="nc" id="L982">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L983">            controller.set(invocation.getArgument(6));</span>
+<span class="nc" id="L984">            return AgentRunResult.ok();</span>
         });
-<span class="nc" id="L912">        var runner = runner(codex, CardLookupResult.Found::new);</span>
-<span class="nc" id="L913">        EffectiveConfig config = config(Map.of(), Map.of(&quot;max_turns&quot;, 2));</span>
+<span class="nc" id="L986">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L987">        EffectiveConfig config = config(Map.of(), Map.of(&quot;max_turns&quot;, 2));</span>
 
         // when
-<span class="nc" id="L916">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L917">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-active&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L990">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L991">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-active&quot;, &quot;Ready for Codex&quot;),</span>
                 null,
                 &quot;prompt&quot;,
                 config,
                 &quot;worker-multiturn&quot;,
-<span class="nc" id="L922">                event -&gt; {}));</span>
+<span class="nc" id="L996">                event -&gt; {}));</span>
 
         // then
-<span class="nc" id="L925">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L926">        assertThat(controller.get().afterSuccessfulTurn(1).nextPrompt()).contains(&quot;continuation turn 2 of at most 2&quot;);</span>
-<span class="nc" id="L927">        assertThat(controller.get().afterSuccessfulTurn(2)).isEqualTo(CodexAppServerClient.TurnDecision.stop());</span>
-<span class="nc" id="L928">    }</span>
+<span class="nc" id="L999">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1000">        assertThat(controller.get().afterSuccessfulTurn(1).nextPrompt()).contains(&quot;continuation turn 2 of at most 2&quot;);</span>
+<span class="nc" id="L1001">        assertThat(controller.get().afterSuccessfulTurn(2)).isEqualTo(CodexAppServerClient.TurnDecision.stop());</span>
+<span class="nc" id="L1002">    }</span>
 
     @Test
     void stopsSameSessionWhenCardLeavesActiveStates() throws Exception {
         // given
-<span class="nc" id="L933">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L934">        var controller = new AtomicReference&lt;CodexAppServerClient.TurnController&gt;();</span>
-<span class="nc" id="L935">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L936">            controller.set(invocation.getArgument(6));</span>
-<span class="nc" id="L937">            return AgentRunResult.ok();</span>
+<span class="nc" id="L1007">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L1008">        var controller = new AtomicReference&lt;CodexAppServerClient.TurnController&gt;();</span>
+<span class="nc" id="L1009">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1010">            controller.set(invocation.getArgument(6));</span>
+<span class="nc" id="L1011">            return AgentRunResult.ok();</span>
         });
-<span class="nc" id="L939">        var runner = runner(</span>
+<span class="nc" id="L1013">        var runner = runner(</span>
                 codex,
-<span class="nc" id="L941">                ignored -&gt; new CardLookupResult.Found(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-review&quot;, &quot;Human Review&quot;)));</span>
-<span class="nc" id="L942">        EffectiveConfig config = config(Map.of(), Map.of(&quot;max_turns&quot;, 2));</span>
+<span class="nc" id="L1015">                ignored -&gt; new CardLookupResult.Found(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-review&quot;, &quot;Human Review&quot;)));</span>
+<span class="nc" id="L1016">        EffectiveConfig config = config(Map.of(), Map.of(&quot;max_turns&quot;, 2));</span>
 
         // when
-<span class="nc" id="L945">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L946">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-review&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1019">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L1020">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-review&quot;, &quot;Ready for Codex&quot;),</span>
                 null,
                 &quot;prompt&quot;,
                 config,
                 &quot;worker-stop&quot;,
-<span class="nc" id="L951">                event -&gt; {}));</span>
+<span class="nc" id="L1025">                event -&gt; {}));</span>
 
         // then
-<span class="nc" id="L954">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L955">        assertThat(controller.get().afterSuccessfulTurn(1)).isEqualTo(CodexAppServerClient.TurnDecision.stop());</span>
-<span class="nc" id="L956">    }</span>
+<span class="nc" id="L1028">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1029">        assertThat(controller.get().afterSuccessfulTurn(1)).isEqualTo(CodexAppServerClient.TurnDecision.stop());</span>
+<span class="nc" id="L1030">    }</span>
 
     private LocalAgentRunner runner(CodexAppServerClient codex, CardLookup lookup) {
-<span class="nc" id="L959">        return new LocalAgentRunner(</span>
-<span class="nc" id="L960">                new WorkspaceManager(new HookRunner()), new HookRunner(), codex, tracker(lookup), new PromptRenderer());</span>
+<span class="nc" id="L1033">        return new LocalAgentRunner(</span>
+<span class="nc" id="L1034">                new WorkspaceManager(new HookRunner()), new HookRunner(), codex, tracker(lookup), new PromptRenderer());</span>
     }
 
     private String promptPassedToCodex(EffectiveConfig config, String renderedPrompt) {
-<span class="nc" id="L964">        return promptPassedToCodex(config, renderedPrompt, &quot;TRELLO-runtime-prompt&quot;);</span>
+<span class="nc" id="L1038">        return promptPassedToCodex(config, renderedPrompt, &quot;TRELLO-runtime-prompt&quot;);</span>
     }
 
     private String promptPassedToCodex(EffectiveConfig config, String renderedPrompt, String cardIdentifier) {
-<span class="nc" id="L968">        return promptPassedToCodex(config, renderedPrompt, TestCards.card(&quot;card-1&quot;, cardIdentifier, &quot;Ready for Codex&quot;));</span>
+<span class="nc" id="L1042">        return promptPassedToCodex(config, renderedPrompt, TestCards.card(&quot;card-1&quot;, cardIdentifier, &quot;Ready for Codex&quot;));</span>
     }
 
     private String promptPassedToCodex(EffectiveConfig config, String renderedPrompt, Card card) {
-<span class="nc" id="L972">        CodexAppServerClient codex = mock();</span>
-<span class="nc" id="L973">        var prompt = new AtomicReference&lt;String&gt;();</span>
-<span class="nc" id="L974">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
-<span class="nc" id="L975">            prompt.set(invocation.getArgument(3));</span>
-<span class="nc" id="L976">            return AgentRunResult.ok();</span>
+<span class="nc" id="L1046">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L1047">        var prompt = new AtomicReference&lt;String&gt;();</span>
+<span class="nc" id="L1048">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L1049">            prompt.set(invocation.getArgument(3));</span>
+<span class="nc" id="L1050">            return AgentRunResult.ok();</span>
         });
-<span class="nc" id="L978">        var runner = runner(codex, CardLookupResult.Found::new);</span>
+<span class="nc" id="L1052">        var runner = runner(codex, CardLookupResult.Found::new);</span>
 
-<span class="nc" id="L980">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
-<span class="nc" id="L981">                card, null, renderedPrompt, config, &quot;worker-runtime-prompt&quot;, event -&gt; {}));</span>
+<span class="nc" id="L1054">        AgentRunResult result = runner.run(new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L1055">                card, null, renderedPrompt, config, &quot;worker-runtime-prompt&quot;, event -&gt; {}));</span>
 
-<span class="nc" id="L983">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L984">        assertThat(prompt).hasValueSatisfying(value -&gt; assertThat(value).isNotBlank());</span>
-<span class="nc" id="L985">        return prompt.get();</span>
+<span class="nc" id="L1057">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1058">        assertThat(prompt).hasValueSatisfying(value -&gt; assertThat(value).isNotBlank());</span>
+<span class="nc" id="L1059">        return prompt.get();</span>
     }
 
     private TrackerClient tracker(CardLookup lookup) {
-<span class="nc" id="L989">        return new TrackerClient() {</span>
+<span class="nc" id="L1063">        return new TrackerClient() {</span>
             @Override
             public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L992">                return config.tracker().boardId();</span>
+<span class="nc" id="L1066">                return config.tracker().boardId();</span>
             }
 
             @Override
             public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L997">                return List.of();</span>
+<span class="nc" id="L1071">                return List.of();</span>
             }
 
             @Override
             public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L1002">                return List.of();</span>
+<span class="nc" id="L1076">                return List.of();</span>
             }
 
             @Override
             public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L1007">                return Map.of(</span>
-<span class="nc" id="L1008">                        cardIds.getFirst(),</span>
-<span class="nc" id="L1009">                        lookup.lookup(TestCards.card(cardIds.getFirst(), &quot;TRELLO-card&quot;, &quot;Ready for Codex&quot;)));</span>
+<span class="nc" id="L1081">                return Map.of(</span>
+<span class="nc" id="L1082">                        cardIds.getFirst(),</span>
+<span class="nc" id="L1083">                        lookup.lookup(TestCards.card(cardIds.getFirst(), &quot;TRELLO-card&quot;, &quot;Ready for Codex&quot;)));</span>
             }
         };
     }
 
     private EffectiveConfig config(Map&lt;String, String&gt; hooks) {
-<span class="nc" id="L1015">        return config(hooks, Map.of());</span>
+<span class="nc" id="L1089">        return config(hooks, Map.of());</span>
     }
 
     private EffectiveConfig config(Map&lt;String, String&gt; hooks, Map&lt;String, Object&gt; agent) {
-<span class="nc" id="L1019">        return config(hooks, agent, Map.of(), Map.of(), tempDir.resolve(&quot;WORKFLOW.md&quot;));</span>
+<span class="nc" id="L1093">        return config(hooks, agent, Map.of(), Map.of(), tempDir.resolve(&quot;WORKFLOW.md&quot;));</span>
     }
 
     private EffectiveConfig configWithRepository(Map&lt;String, Object&gt; repository) {
-<span class="nc" id="L1023">        return configWithRepository(repository, Map.of());</span>
+<span class="nc" id="L1097">        return configWithRepository(repository, Map.of());</span>
     }
 
     private EffectiveConfig configWithRepository(Map&lt;String, Object&gt; repository, Map&lt;String, String&gt; environment) {
-<span class="nc" id="L1027">        return configWithRepository(tempDir.resolve(&quot;WORKFLOW.md&quot;), repository, environment);</span>
+<span class="nc" id="L1101">        return configWithRepository(tempDir.resolve(&quot;WORKFLOW.md&quot;), repository, environment);</span>
     }
 
     private EffectiveConfig configWithRepository(
             Path workflow, Map&lt;String, Object&gt; repository, Map&lt;String, String&gt; environment) {
-<span class="nc" id="L1032">        return config(Map.of(), Map.of(), repository, environment, workflow);</span>
+<span class="nc" id="L1106">        return config(Map.of(), Map.of(), repository, environment, workflow);</span>
     }
 
     private EffectiveConfig config(
@@ -1038,15 +1112,15 @@ import org.mockito.ArgumentCaptor;
             Map&lt;String, Object&gt; repository,
             Map&lt;String, String&gt; environment,
             Path workflowPath) {
-<span class="nc" id="L1041">        return new ConfigResolver(name -&gt; Optional.ofNullable(environment.get(name)))</span>
-<span class="nc" id="L1042">                .resolve(new WorkflowDefinition(workflowPath, workflowConfig(hooks, agent, repository), &quot;&quot;));</span>
+<span class="nc" id="L1115">        return new ConfigResolver(name -&gt; Optional.ofNullable(environment.get(name)))</span>
+<span class="nc" id="L1116">                .resolve(new WorkflowDefinition(workflowPath, workflowConfig(hooks, agent, repository), &quot;&quot;));</span>
     }
 
     private Map&lt;String, Object&gt; workflowConfig(
             Map&lt;String, String&gt; hooks, Map&lt;String, Object&gt; agent, Map&lt;String, Object&gt; repository) {
-<span class="nc" id="L1047">        return Map.of(</span>
+<span class="nc" id="L1121">        return Map.of(</span>
                 &quot;tracker&quot;,
-<span class="nc" id="L1049">                Map.of(</span>
+<span class="nc" id="L1123">                Map.of(</span>
                         &quot;kind&quot;,
                         &quot;trello&quot;,
                         &quot;api_key&quot;,
@@ -1056,11 +1130,11 @@ import org.mockito.ArgumentCaptor;
                         &quot;board_id&quot;,
                         &quot;board-1&quot;,
                         &quot;active_states&quot;,
-<span class="nc" id="L1059">                        List.of(&quot;Ready for Codex&quot;, &quot;In Progress&quot;),</span>
+<span class="nc" id="L1133">                        List.of(&quot;Ready for Codex&quot;, &quot;In Progress&quot;),</span>
                         &quot;terminal_states&quot;,
-<span class="nc" id="L1061">                        List.of(&quot;Done&quot;)),</span>
+<span class="nc" id="L1135">                        List.of(&quot;Done&quot;)),</span>
                 &quot;workspace&quot;,
-<span class="nc" id="L1063">                Map.of(&quot;root&quot;, tempDir.resolve(&quot;workspaces&quot;).toString()),</span>
+<span class="nc" id="L1137">                Map.of(&quot;root&quot;, tempDir.resolve(&quot;workspaces&quot;).toString()),</span>
                 &quot;agent&quot;,
                 agent,
                 &quot;hooks&quot;,
@@ -1070,107 +1144,107 @@ import org.mockito.ArgumentCaptor;
     }
 
     private static Stream&lt;Arguments&gt; missingOrBlankUrlDefaults() {
-<span class="nc" id="L1073">        return Stream.of(</span>
-<span class="nc" id="L1074">                Arguments.of(&quot;missing-url-default&quot;, Map.of()),</span>
-<span class="nc" id="L1075">                Arguments.of(&quot;blank-url-default&quot;, Map.of(&quot;REPOSITORY_URL&quot;, &quot;   &quot;)));</span>
+<span class="nc" id="L1147">        return Stream.of(</span>
+<span class="nc" id="L1148">                Arguments.of(&quot;missing-url-default&quot;, Map.of()),</span>
+<span class="nc" id="L1149">                Arguments.of(&quot;blank-url-default&quot;, Map.of(&quot;REPOSITORY_URL&quot;, &quot;   &quot;)));</span>
     }
 
     private static Stream&lt;Arguments&gt; missingOrBlankRepositoryDefaults() {
-<span class="nc" id="L1079">        return Stream.of(</span>
-<span class="nc" id="L1080">                Arguments.of(&quot;missing-defaults&quot;, Map.of()),</span>
-<span class="nc" id="L1081">                Arguments.of(&quot;blank-defaults&quot;, Map.of(&quot;REPOSITORY_URL&quot;, &quot; &quot;, &quot;REPOSITORY_PATH&quot;, &quot;\t&quot;)));</span>
+<span class="nc" id="L1153">        return Stream.of(</span>
+<span class="nc" id="L1154">                Arguments.of(&quot;missing-defaults&quot;, Map.of()),</span>
+<span class="nc" id="L1155">                Arguments.of(&quot;blank-defaults&quot;, Map.of(&quot;REPOSITORY_URL&quot;, &quot; &quot;, &quot;REPOSITORY_PATH&quot;, &quot;\t&quot;)));</span>
     }
 
     private static void assertLocalSourceIdentityPolicy(String prompt) {
-<span class="nc" id="L1085">        assertThat(prompt)</span>
-<span class="nc" id="L1086">                .contains(&quot;Add a status note to #123. Do not change files.&quot;)</span>
-<span class="nc" id="L1087">                .contains(&quot;- Status: selected&quot;)</span>
-<span class="nc" id="L1088">                .contains(&quot;- Type: local path&quot;)</span>
-<span class="nc" id="L1089">                .contains(</span>
+<span class="nc" id="L1159">        assertThat(prompt)</span>
+<span class="nc" id="L1160">                .contains(&quot;Add a status note to #123. Do not change files.&quot;)</span>
+<span class="nc" id="L1161">                .contains(&quot;- Status: selected&quot;)</span>
+<span class="nc" id="L1162">                .contains(&quot;- Type: local path&quot;)</span>
+<span class="nc" id="L1163">                .contains(</span>
                         &quot;use this local source only when read-only inspection finds exactly one explicit, unambiguous compatible remote&quot;)
-<span class="nc" id="L1091">                .contains(&quot;If no such remote supplies identity, block&quot;)</span>
-<span class="nc" id="L1092">                .contains(&quot;Request a fully qualified repository URL together with the issue or pull request number&quot;)</span>
-<span class="nc" id="L1093">                .doesNotContain(&quot;A selected source supplies repository identity for repository-relative references&quot;);</span>
-<span class="nc" id="L1094">    }</span>
+<span class="nc" id="L1165">                .contains(&quot;If no such remote supplies identity, block&quot;)</span>
+<span class="nc" id="L1166">                .contains(&quot;Request a fully qualified repository URL together with the issue or pull request number&quot;)</span>
+<span class="nc" id="L1167">                .doesNotContain(&quot;A selected source supplies repository identity for repository-relative references&quot;);</span>
+<span class="nc" id="L1168">    }</span>
 
     private static Stream&lt;Arguments&gt; repositoryNeedDecisionScenarios() {
-<span class="nc" id="L1097">        Map&lt;String, Object&gt; noDefault = Map.of();</span>
-<span class="nc" id="L1098">        Map&lt;String, Object&gt; validDefault = Map.of(&quot;default_url&quot;, &quot;https://source.example/team/default.git&quot;);</span>
-<span class="nc" id="L1099">        return Stream.of(</span>
-<span class="nc" id="L1100">                Arguments.of(</span>
+<span class="nc" id="L1171">        Map&lt;String, Object&gt; noDefault = Map.of();</span>
+<span class="nc" id="L1172">        Map&lt;String, Object&gt; validDefault = Map.of(&quot;default_url&quot;, &quot;https://source.example/team/default.git&quot;);</span>
+<span class="nc" id="L1173">        return Stream.of(</span>
+<span class="nc" id="L1174">                Arguments.of(</span>
                         &quot;repository-independent task without a default runs&quot;,
                         &quot;Summarize the supplied release schedule. No repository action.&quot;,
                         noDefault,
                         &quot;- Status: no selected source&quot;,
-<span class="nc" id="L1105">                        List.of(</span>
+<span class="nc" id="L1179">                        List.of(</span>
                                 &quot;The absence of a selected repository is not a blocker by itself&quot;,
                                 &quot;Repository-independent work without repository-relative references can run&quot;)),
-<span class="nc" id="L1108">                Arguments.of(</span>
+<span class="nc" id="L1182">                Arguments.of(</span>
                         &quot;fully qualified issue URL without a default stays direct&quot;,
                         &quot;Add a status note to https://github.example/target/project/issues/123. No file changes.&quot;,
                         noDefault,
                         &quot;- Status: no selected source&quot;,
-<span class="nc" id="L1113">                        List.of(</span>
+<span class="nc" id="L1187">                        List.of(</span>
                                 &quot;A fully qualified GitHub issue or pull request URL is a direct external target&quot;,
                                 &quot;do not require a repository checkout for that API action&quot;)),
-<span class="nc" id="L1116">                Arguments.of(</span>
+<span class="nc" id="L1190">                Arguments.of(</span>
                         &quot;bare issue reference without identity blocks&quot;,
                         &quot;Add a status note to #123. Do not change files.&quot;,
                         noDefault,
                         &quot;- Status: no selected source&quot;,
-<span class="nc" id="L1121">                        List.of(</span>
+<span class="nc" id="L1195">                        List.of(</span>
                                 &quot;Block only when the required repository identity is absent&quot;,
                                 &quot;Do not infer repository identity from unrelated checkouts&quot;)),
-<span class="nc" id="L1124">                Arguments.of(</span>
+<span class="nc" id="L1198">                Arguments.of(</span>
                         &quot;bare issue reference uses valid selected identity without checkout&quot;,
                         &quot;Add a status note to #123. Do not change files.&quot;,
                         validDefault,
                         &quot;- Status: selected&quot;,
-<span class="nc" id="L1129">                        List.of(</span>
+<span class="nc" id="L1203">                        List.of(</span>
                                 &quot;- Repository identity: source.example/team/default&quot;,
                                 &quot;This selected remote source supplies repository identity for repository-relative references&quot;,
                                 &quot;Do not create or reuse a task checkout unless the classified task requires repository files&quot;)),
-<span class="nc" id="L1133">                Arguments.of(</span>
+<span class="nc" id="L1207">                Arguments.of(</span>
                         &quot;repository-changing task without an identity blocks&quot;,
                         &quot;Change the requested source file and prepare a pull request.&quot;,
                         noDefault,
                         &quot;- Status: no selected source&quot;,
-<span class="nc" id="L1138">                        List.of(</span>
+<span class="nc" id="L1212">                        List.of(</span>
                                 &quot;Block only when the required repository identity is absent&quot;,
                                 &quot;when the required checkout cannot be prepared&quot;)),
-<span class="nc" id="L1141">                Arguments.of(</span>
+<span class="nc" id="L1215">                Arguments.of(</span>
                         &quot;repository-changing task with an unlabelled full repository URL runs&quot;,
                         &quot;Change README.md in https://github.example/target/project and prepare a pull request.&quot;,
                         noDefault,
                         &quot;- Status: no selected source&quot;,
-<span class="nc" id="L1146">                        List.of(</span>
+<span class="nc" id="L1220">                        List.of(</span>
                                 &quot;A single unambiguous repository identity in the Trello card is sufficient&quot;,
                                 &quot;derive its normal credential-free clone URL&quot;,
                                 &quot;prepare a writable checkout when the requested work needs repository files&quot;)),
-<span class="nc" id="L1150">                Arguments.of(</span>
+<span class="nc" id="L1224">                Arguments.of(</span>
                         &quot;malformed configured default blocks an independent task&quot;,
                         &quot;Summarize the supplied release schedule. No repository action.&quot;,
-<span class="nc" id="L1153">                        Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;),</span>
+<span class="nc" id="L1227">                        Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;),</span>
                         &quot;- Status: invalid workflow fallback&quot;,
-<span class="nc" id="L1155">                        List.of(</span>
+<span class="nc" id="L1229">                        List.of(</span>
                                 &quot;If the card supplies no repository identity, block unconditionally&quot;,
                                 &quot;even when the task would otherwise be repository-independent&quot;,
                                 &quot;Do not treat it as absent or use a lower-priority fallback&quot;)),
-<span class="nc" id="L1159">                Arguments.of(</span>
+<span class="nc" id="L1233">                Arguments.of(</span>
                         &quot;unambiguous card repository overrides a malformed workflow fallback&quot;,
                         &quot;Change README.md in https://github.example/target/project and prepare a pull request.&quot;,
-<span class="nc" id="L1162">                        Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;),</span>
+<span class="nc" id="L1236">                        Map.of(&quot;default_url&quot;, &quot;ftp://source.example/team/default.git&quot;),</span>
                         &quot;- Status: invalid workflow fallback&quot;,
-<span class="nc" id="L1164">                        List.of(</span>
+<span class="nc" id="L1238">                        List.of(</span>
                                 &quot;If card context supplies exactly one repository identity&quot;,
                                 &quot;ignore this unused workflow fallback and use the card repository identity&quot;,
                                 &quot;derive the card repository's normal credential-free clone URL&quot;)),
-<span class="nc" id="L1168">                Arguments.of(</span>
+<span class="nc" id="L1242">                Arguments.of(</span>
                         &quot;valid default keeps independent task independent and guards later unusability&quot;,
                         &quot;Summarize the supplied release schedule. No repository action.&quot;,
                         validDefault,
                         &quot;- Status: selected&quot;,
-<span class="nc" id="L1173">                        List.of(</span>
+<span class="nc" id="L1247">                        List.of(</span>
                                 &quot;does not by itself make the task repository-changing&quot;,
                                 &quot;Do not create or reuse a task checkout unless the classified task requires repository files&quot;,
                                 &quot;If this workflow fallback is actually needed&quot;,
@@ -1178,33 +1252,33 @@ import org.mockito.ArgumentCaptor;
     }
 
     private static Stream&lt;Arguments&gt; directTargetsWithMalformedFallback() {
-<span class="nc" id="L1181">        return Stream.of(</span>
-<span class="nc" id="L1182">                Arguments.of(</span>
+<span class="nc" id="L1255">        return Stream.of(</span>
+<span class="nc" id="L1256">                Arguments.of(</span>
                         &quot;full issue URL remains checkout-free&quot;,
                         &quot;Comment on https://github.example/target/project/issues/123. Do not change files.&quot;),
-<span class="nc" id="L1185">                Arguments.of(</span>
+<span class="nc" id="L1259">                Arguments.of(</span>
                         &quot;full pull-request URL remains checkout-free&quot;,
                         &quot;Comment on https://github.example/target/project/pull/456. Do not change files.&quot;));
     }
 
     private static Stream&lt;Arguments&gt; repositoryChangingIdentityFormsWithMalformedFallback() {
-<span class="nc" id="L1191">        return Stream.of(</span>
-<span class="nc" id="L1192">                Arguments.of(</span>
+<span class="nc" id="L1265">        return Stream.of(</span>
+<span class="nc" id="L1266">                Arguments.of(</span>
                         &quot;full repository URL&quot;,
                         &quot;Change README.md in https://github.example/target/project and prepare a pull request.&quot;),
-<span class="nc" id="L1195">                Arguments.of(</span>
+<span class="nc" id="L1269">                Arguments.of(</span>
                         &quot;full issue URL&quot;,
                         &quot;Fix the code requested by https://github.example/target/project/issues/123.&quot;),
-<span class="nc" id="L1198">                Arguments.of(</span>
+<span class="nc" id="L1272">                Arguments.of(</span>
                         &quot;full pull-request URL&quot;, &quot;Update files for https://github.example/target/project/pull/456.&quot;),
-<span class="nc" id="L1200">                Arguments.of(</span>
+<span class="nc" id="L1274">                Arguments.of(</span>
                         &quot;full repository file URL&quot;, &quot;Edit https://github.example/target/project/blob/main/README.md.&quot;),
-<span class="nc" id="L1202">                Arguments.of(&quot;owner/repository&quot;, &quot;Change README.md in target/project and prepare a pull request.&quot;));</span>
+<span class="nc" id="L1276">                Arguments.of(&quot;owner/repository&quot;, &quot;Change README.md in target/project and prepare a pull request.&quot;));</span>
     }
 
     private static void blockUntilInterruptedOrTimedOut() throws InterruptedException {
-<span class="nc" id="L1206">        new CountDownLatch(1).await(30, TimeUnit.SECONDS);</span>
-<span class="nc" id="L1207">    }</span>
+<span class="nc" id="L1280">        new CountDownLatch(1).await(30, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1281">    }</span>
 
     @FunctionalInterface
     private interface CardLookup {

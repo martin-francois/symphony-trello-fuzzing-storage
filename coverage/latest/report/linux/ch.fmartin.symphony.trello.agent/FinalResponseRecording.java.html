@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FinalResponseRecording.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">FinalResponseRecording.java</span></div><h1>FinalResponseRecording.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.Objects;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/// Keeps only the completed final answer of the latest accepted turn, never protocol or reasoning.
+@NullMarked
+final class FinalResponseRecording implements AutoCloseable {
+    private final FinalResponseStore store;
+    private final Path path;
+    private final String worker;
+    private final ObjectNode record;
+    private @Nullable TurnIdentity current;
+    private @Nullable Answer pending;
+    private @Nullable Answer sealed;
+    private boolean acceptedCompletion;
+    private boolean oversized;
+    private boolean finished;
+
+    FinalResponseRecording(
+<span class="nc" id="L26">            FinalResponseStore store, Path path, AgentRunner.AgentRunRequest request, ObjectNode record) {</span>
+<span class="nc" id="L27">        this.store = store;</span>
+<span class="nc" id="L28">        this.path = path;</span>
+<span class="nc" id="L29">        this.worker = request.workerIdentity();</span>
+<span class="nc" id="L30">        this.record = record;</span>
+<span class="nc" id="L31">    }</span>
+
+    AgentEventListener listener(AgentEventListener delegate) {
+<span class="nc" id="L34">        return new AgentEventListener() {</span>
+            @Override
+            public void onEvent(AgentEvent event) {
+<span class="nc" id="L37">                onEventAndReportAccepted(event);</span>
+<span class="nc" id="L38">            }</span>
+
+            @Override
+            public boolean onEventAndReportAccepted(AgentEvent event) {
+<span class="nc" id="L42">                boolean accepted = delegate.onEventAndReportAccepted(event);</span>
+<span class="nc bnc" id="L43" title="All 2 branches missed.">                if (accepted) {</span>
+<span class="nc" id="L44">                    accept(event);</span>
+                }
+<span class="nc" id="L46">                return accepted;</span>
+            }
+
+            @Override
+            public boolean beforeHandoffMove(CardHandoffMove move) {
+<span class="nc" id="L51">                return delegate.beforeHandoffMove(move);</span>
+            }
+
+            @Override
+            public void afterHandoffMove(CardHandoffMove move, boolean succeeded) {
+<span class="nc" id="L56">                delegate.afterHandoffMove(move, succeeded);</span>
+<span class="nc" id="L57">            }</span>
+
+            @Override
+            public void onSuccessfulTurn(String threadId, String turnId) {
+<span class="nc" id="L61">                delegate.onSuccessfulTurn(threadId, turnId);</span>
+<span class="nc" id="L62">                seal(threadId, turnId);</span>
+<span class="nc" id="L63">            }</span>
+        };
+    }
+
+    private synchronized void accept(AgentEvent event) {
+<span class="nc bnc" id="L68" title="All 4 branches missed.">        if (!worker.equals(event.workerIdentity()) || finished) {</span>
+<span class="nc" id="L69">            return;</span>
+        }
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (&quot;turn/started&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                || &quot;session_started&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">                || &quot;session_continued&quot;.equals(event.event())) {</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">            if (event.threadId() != null</span>
+<span class="nc bnc" id="L75" title="All 4 branches missed.">                    &amp;&amp; event.turnId() != null</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">                    &amp;&amp; (current == null || !current.matches(event.threadId(), event.turnId()))) {</span>
+<span class="nc" id="L77">                current = new TurnIdentity(event.threadId(), event.turnId());</span>
+<span class="nc" id="L78">                pending = null;</span>
+<span class="nc" id="L79">                sealed = null;</span>
+<span class="nc" id="L80">                acceptedCompletion = false;</span>
+<span class="nc" id="L81">                oversized = false;</span>
+            }
+<span class="nc" id="L83">            return;</span>
+        }
+<span class="nc" id="L85">        JsonNode payload = event.payload();</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        if (payload == null) {</span>
+<span class="nc" id="L87">            return;</span>
+        }
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (&quot;item/completed&quot;.equals(event.event())) {</span>
+<span class="nc" id="L90">            JsonNode item = payload.path(&quot;item&quot;);</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            if (&quot;agentMessage&quot;.equals(item.path(&quot;type&quot;).asText())</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                    &amp;&amp; &quot;final_answer&quot;.equals(item.path(&quot;phase&quot;).asText())</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">                    &amp;&amp; item.path(&quot;text&quot;).isTextual()</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                    &amp;&amp; event.threadId() != null</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                    &amp;&amp; event.turnId() != null) {</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                if (current == null) {</span>
+<span class="nc" id="L97">                    current = new TurnIdentity(event.threadId(), event.turnId());</span>
+                }
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                if (!current.matches(event.threadId(), event.turnId())) {</span>
+<span class="nc" id="L100">                    return;</span>
+                }
+<span class="nc" id="L102">                String text = item.path(&quot;text&quot;).textValue();</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                oversized = text.getBytes(StandardCharsets.UTF_8).length &gt; FinalResponseStore.MAX_RESPONSE_BYTES;</span>
+<span class="nc bnc" id="L104" title="All 4 branches missed.">                pending = oversized || text.isBlank() ? null : new Answer(current, text);</span>
+<span class="nc" id="L105">                sealed = null;</span>
+<span class="nc" id="L106">                acceptedCompletion = false;</span>
+            }
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        } else if (&quot;turn/completed&quot;.equals(event.event())) {</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            acceptedCompletion = pending != null</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                    &amp;&amp; pending.identity().matches(event.threadId(), event.turnId())</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                    &amp;&amp; Objects.equals(</span>
+<span class="nc" id="L112">                            event.turnId(), payload.path(&quot;turn&quot;).path(&quot;id&quot;).asText(null))</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                    &amp;&amp; &quot;completed&quot;.equals(payload.path(&quot;turn&quot;).path(&quot;status&quot;).asText());</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        } else if (&quot;turn/failed&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                || &quot;turn/cancelled&quot;.equals(event.event())</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                || &quot;turn/interrupted&quot;.equals(event.event())) {</span>
+<span class="nc" id="L117">            pending = null;</span>
+<span class="nc" id="L118">            sealed = null;</span>
+<span class="nc" id="L119">            acceptedCompletion = false;</span>
+        }
+<span class="nc" id="L121">    }</span>
+
+    private synchronized void seal(String threadId, String turnId) {
+<span class="nc" id="L124">        sealed = null;</span>
+<span class="nc bnc" id="L125" title="All 6 branches missed.">        if (acceptedCompletion &amp;&amp; pending != null &amp;&amp; pending.identity().matches(threadId, turnId)) {</span>
+<span class="nc" id="L126">            sealed = pending;</span>
+        }
+<span class="nc" id="L128">    }</span>
+
+    synchronized AgentRunResult finish(AgentRunResult result) {
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (!result.success()) {</span>
+<span class="nc" id="L132">            close();</span>
+<span class="nc" id="L133">            return result;</span>
+        }
+<span class="nc bnc" id="L135" title="All 6 branches missed.">        if (Thread.currentThread().isInterrupted() || sealed == null || oversized) {</span>
+<span class="nc" id="L136">            close();</span>
+<span class="nc" id="L137">            String message =</span>
+                    &quot;cannot save local final response: expected an accepted complete final answer within the size limit and a matching successful turn&quot;;
+<span class="nc" id="L139">            FinalResponseStore.reportFailure(worker, message);</span>
+<span class="nc" id="L140">            return AgentRunResult.fail(message);</span>
+        }
+<span class="nc" id="L142">        store.complete(</span>
+                path,
+                worker,
+                record,
+<span class="nc" id="L146">                sealed.identity().thread(),</span>
+<span class="nc" id="L147">                sealed.identity().turn(),</span>
+<span class="nc" id="L148">                sealed.text());</span>
+<span class="nc" id="L149">        finished = true;</span>
+<span class="nc" id="L150">        return result;</span>
+    }
+
+    @Override
+    public synchronized void close() {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        if (!finished) {</span>
+<span class="nc" id="L156">            store.abandon(path, worker, record);</span>
+<span class="nc" id="L157">            finished = true;</span>
+        }
+<span class="nc" id="L159">    }</span>
+
+<span class="nc" id="L161">    private record TurnIdentity(String thread, String turn) {</span>
+        boolean matches(@Nullable String expectedThread, @Nullable String expectedTurn) {
+<span class="nc bnc" id="L163" title="All 4 branches missed.">            return thread.equals(expectedThread) &amp;&amp; turn.equals(expectedTurn);</span>
+        }
+    }
+
+<span class="nc" id="L167">    private record Answer(TurnIdentity identity, String text) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

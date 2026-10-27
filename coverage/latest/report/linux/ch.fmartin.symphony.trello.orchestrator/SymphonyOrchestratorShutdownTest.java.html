@@ -1,0 +1,446 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestratorShutdownTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestratorShutdownTest.java</span></div><h1>SymphonyOrchestratorShutdownTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.agent.CodexAppServerClient;
+import ch.fmartin.symphony.trello.agent.LocalAgentRunner;
+import ch.fmartin.symphony.trello.agent.TrelloHandoffToolHandler;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.testsupport.ShutdownAppServer;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.workspace.HookRunner;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L43">final class SymphonyOrchestratorShutdownTest {</span>
+    @TempDir
+    Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stalledUnconfirmedShutdownRetainsOwnershipAcrossRetryAndReload(boolean reloadTarget) throws Exception {
+        // given
+<span class="nc" id="L51">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L52">        writeWorkflowWithStallTimeout(workflow, 1000);</span>
+<span class="nc" id="L53">        var clock = new MutableClock(Instant.parse(&quot;2026-10-27T00:00:00Z&quot;));</span>
+<span class="nc" id="L54">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-lifetime&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L55">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L56">        tracker.resolveConfiguredBoardId = true;</span>
+<span class="nc" id="L57">        var started = new CountDownLatch(1);</span>
+<span class="nc" id="L58">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L59">        var exited = new CountDownLatch(1);</span>
+<span class="nc" id="L60">        Path sentinel = tempDir.resolve(&quot;work/TRELLO-lifetime/sentinel&quot;);</span>
+<span class="nc" id="L61">        AgentRunner runner = mock();</span>
+<span class="nc" id="L62">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L63">            Files.createDirectories(sentinel.getParent());</span>
+<span class="nc" id="L64">            Files.writeString(sentinel, &quot;shutdown remains unconfirmed&quot;);</span>
+<span class="nc" id="L65">            started.countDown();</span>
+            try {
+<span class="nc" id="L67">                release.await(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L68">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L69">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L70">            }</span>
+<span class="nc" id="L71">            return AgentRunResult.shutdownIncomplete(&quot;cannot release test workspace: exit is unconfirmed&quot;);</span>
+        });
+<span class="nc" id="L73">        var orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+<span class="nc" id="L74">        orchestrator.workerExitCompletionHookForTests = exited::countDown;</span>
+        try {
+<span class="nc" id="L76">            orchestrator.start();</span>
+<span class="nc" id="L77">            assertThat(started.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L78">                    .as(&quot;the worker starts before the stall&quot;)</span>
+<span class="nc" id="L79">                    .isTrue();</span>
+
+            // when
+<span class="nc" id="L82">            clock.advance(Duration.ofSeconds(2));</span>
+<span class="nc" id="L83">            orchestrator.tickNowForTests();</span>
+<span class="nc" id="L84">            assertThat(exited.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L85">                    .as(&quot;the canceled worker reports its shutdown result&quot;)</span>
+<span class="nc" id="L86">                    .isTrue();</span>
+<span class="nc" id="L87">            orchestrator.tickNowForTests();</span>
+
+            // then
+<span class="nc" id="L90">            assertThat(orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            if (reloadTarget) {</span>
+<span class="nc" id="L92">                var replacement = cardOnBoard(&quot;replacement&quot;, card.identifier(), &quot;Todo&quot;, &quot;board-2&quot;);</span>
+<span class="nc" id="L93">                tracker.setCardState(replacement);</span>
+<span class="nc" id="L94">                tracker.setCandidateList(List.of(replacement));</span>
+<span class="nc" id="L95">                rewriteWorkflowWithTarget(workflow, &quot;https://api.trello.com/1&quot;, &quot;board-2&quot;, &quot;token&quot;, &quot;fake&quot;, &quot;work&quot;);</span>
+            }
+<span class="nc" id="L97">            orchestrator.retryNowForTests(card.id());</span>
+<span class="nc" id="L98">            orchestrator.tickNowForTests();</span>
+<span class="nc" id="L99">            assertThat(sentinel).exists();</span>
+<span class="nc" id="L100">            verify(runner).run(any());</span>
+        } finally {
+<span class="nc" id="L102">            release.countDown();</span>
+<span class="nc" id="L103">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L105">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;Todo&quot;, &quot;Done&quot;, &quot;missing&quot;})
+    void retryWaitsForCanceledRunnerBeforeDispatchOrRemoval(String state) throws Exception {
+        // given
+<span class="nc" id="L111">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L112">        writeWorkflowWithStallTimeout(workflow, 1000);</span>
+<span class="nc" id="L113">        var clock = new MutableClock(Instant.parse(&quot;2026-10-27T00:00:00Z&quot;));</span>
+<span class="nc" id="L114">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-lifetime&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L115">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L116">        var started = new CountDownLatch(1);</span>
+<span class="nc" id="L117">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L118">        var exited = new CountDownLatch(1);</span>
+<span class="nc" id="L119">        var launches = new AtomicInteger();</span>
+<span class="nc" id="L120">        Path sentinel = tempDir.resolve(&quot;work/TRELLO-lifetime/sentinel&quot;);</span>
+<span class="nc" id="L121">        AgentRunner runner = mock();</span>
+<span class="nc" id="L122">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (launches.incrementAndGet() &gt; 1) {</span>
+<span class="nc" id="L124">                tracker.setCardState(TestCards.card(card.id(), card.identifier(), &quot;Human Review&quot;));</span>
+<span class="nc" id="L125">                return AgentRunResult.ok();</span>
+            }
+<span class="nc" id="L127">            Files.createDirectories(sentinel.getParent());</span>
+<span class="nc" id="L128">            Files.writeString(sentinel, &quot;worker is unwinding&quot;);</span>
+<span class="nc" id="L129">            started.countDown();</span>
+            try {
+<span class="nc" id="L131">                release.await(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L132">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L133">                assertThat(release.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L134">                        .as(&quot;the test releases the canceled runner&quot;)</span>
+<span class="nc" id="L135">                        .isTrue();</span>
+<span class="nc" id="L136">            }</span>
+<span class="nc" id="L137">            return AgentRunResult.fail(&quot;test worker stopped&quot;);</span>
+        });
+<span class="nc" id="L139">        var orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+<span class="nc" id="L140">        orchestrator.workerExitCompletionHookForTests = exited::countDown;</span>
+        try {
+<span class="nc" id="L142">            orchestrator.start();</span>
+<span class="nc" id="L143">            assertThat(started.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L144">                    .as(&quot;the worker owns its directory before cancellation&quot;)</span>
+<span class="nc" id="L145">                    .isTrue();</span>
+<span class="nc" id="L146">            clock.advance(Duration.ofSeconds(2));</span>
+<span class="nc" id="L147">            orchestrator.tickNowForTests();</span>
+<span class="nc" id="L148">            tracker.cardStates = Map.of(</span>
+<span class="nc" id="L149">                    card.id(),</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                    &quot;missing&quot;.equals(state)</span>
+<span class="nc" id="L151">                            ? new CardLookupResult.Missing(card.id())</span>
+<span class="nc" id="L152">                            : new CardLookupResult.Found(TestCards.card(card.id(), card.identifier(), state)));</span>
+
+            // when
+<span class="nc" id="L155">            orchestrator.retryNowForTests(card.id());</span>
+
+            // then
+<span class="nc" id="L158">            assertThat(sentinel).exists();</span>
+<span class="nc" id="L159">            assertThat(orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L160">            release.countDown();</span>
+<span class="nc" id="L161">            assertThat(exited.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L162">                    .as(&quot;the canceled runner returns before retry resumes&quot;)</span>
+<span class="nc" id="L163">                    .isTrue();</span>
+<span class="nc" id="L164">            orchestrator.tickNowForTests();</span>
+<span class="nc" id="L165">            orchestrator.retryNowForTests(card.id());</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            if (&quot;Todo&quot;.equals(state)) {</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">                waitUntil(() -&gt; launches.get() == 2);</span>
+<span class="nc" id="L168">                assertThat(sentinel).exists();</span>
+            } else {
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                waitUntil(() -&gt; !Files.exists(sentinel));</span>
+<span class="nc" id="L171">                assertThat(launches).hasValue(1);</span>
+            }
+        } finally {
+<span class="nc" id="L174">            release.countDown();</span>
+<span class="nc" id="L175">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L177">    }</span>
+
+    @Test
+    void unconfirmedUsageProbeReleasesUnrelatedCards() throws Exception {
+        // given
+<span class="nc" id="L182">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L183">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L184">        var clock = new MutableClock(Instant.parse(&quot;2026-10-27T00:00:00Z&quot;));</span>
+<span class="nc" id="L185">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-lifetime&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L186">        var next = TestCards.card(&quot;card-2&quot;, &quot;TRELLO-next&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L187">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L188">        List&lt;String&gt; launched = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L189">        AgentRunner runner = mock();</span>
+<span class="nc" id="L190">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L191">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L192">            launched.add(request.card().id());</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (launched.size() == 1) {</span>
+<span class="nc" id="L194">                return AgentRunResult.codexUsageLimit(&quot;test usage limit&quot;, Optional.empty());</span>
+            }
+<span class="nc bnc" id="L196" title="All 2 branches missed.">            if (request.card().id().equals(card.id())) {</span>
+<span class="nc" id="L197">                return AgentRunResult.shutdownIncomplete(&quot;cannot release test workspace: exit is unconfirmed&quot;);</span>
+            }
+<span class="nc" id="L199">            tracker.setCardState(TestCards.card(next.id(), next.identifier(), &quot;Human Review&quot;));</span>
+<span class="nc" id="L200">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L202">        var orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+        try {
+<span class="nc" id="L204">            orchestrator.start();</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">            waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L206">            Instant deadline = orchestrator.snapshot().dispatchPause().until();</span>
+<span class="nc" id="L207">            clock.advance(Duration.between(clock.instant(), deadline));</span>
+
+<span class="nc" id="L209">            tracker.setCandidates(List.of(card, next));</span>
+
+            // when
+<span class="nc" id="L212">            orchestrator.dispatchPauseDeadlineNowForTests(deadline);</span>
+
+            // then
+<span class="nc bnc" id="L215" title="All 2 branches missed.">            waitUntil(() -&gt; launched.size() == 3);</span>
+<span class="nc" id="L216">            assertThat(launched).containsExactly(card.id(), card.id(), next.id());</span>
+        } finally {
+<span class="nc" id="L218">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L220">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unconfirmedProcessExitRetainsWorkspaceAndClaimWithoutRetry(boolean reloadTarget) throws Exception {
+        // given
+<span class="nc" id="L226">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L227">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L228">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-lifetime&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L229">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L230">        tracker.resolveConfiguredBoardId = true;</span>
+<span class="nc" id="L231">        var exited = new CountDownLatch(1);</span>
+<span class="nc" id="L232">        Path sentinel = tempDir.resolve(&quot;work/TRELLO-lifetime/sentinel&quot;);</span>
+<span class="nc" id="L233">        AgentRunner runner = mock();</span>
+<span class="nc" id="L234">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L235">            Files.createDirectories(sentinel.getParent());</span>
+<span class="nc" id="L236">            Files.writeString(sentinel, &quot;process shutdown remains unconfirmed&quot;);</span>
+<span class="nc" id="L237">            return AgentRunResult.shutdownIncomplete(&quot;cannot release test workspace: process exit is unconfirmed&quot;);</span>
+        });
+<span class="nc" id="L239">        var orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L240">        orchestrator.workerExitCompletionHookForTests = exited::countDown;</span>
+        try {
+
+            // when
+<span class="nc" id="L244">            orchestrator.start();</span>
+<span class="nc" id="L245">            assertThat(exited.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L246">                    .as(&quot;the failed shutdown result reaches the orchestrator&quot;)</span>
+<span class="nc" id="L247">                    .isTrue();</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            if (reloadTarget) {</span>
+<span class="nc" id="L249">                var replacement = cardOnBoard(&quot;replacement&quot;, card.identifier(), &quot;Todo&quot;, &quot;board-2&quot;);</span>
+<span class="nc" id="L250">                tracker.setCardState(replacement);</span>
+<span class="nc" id="L251">                tracker.setCandidateList(List.of(replacement));</span>
+<span class="nc" id="L252">                rewriteWorkflowWithTarget(workflow, &quot;https://api.trello.com/1&quot;, &quot;board-2&quot;, &quot;token&quot;, &quot;fake&quot;, &quot;work&quot;);</span>
+            }
+<span class="nc" id="L254">            orchestrator.tickNowForTests();</span>
+<span class="nc" id="L255">            orchestrator.tickNowForTests();</span>
+
+            // then
+<span class="nc" id="L258">            assertThat(sentinel).exists();</span>
+<span class="nc" id="L259">            assertThat(orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L260">            assertThat(orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L261">            verify(runner).run(any());</span>
+        } finally {
+<span class="nc" id="L263">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L265">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void realAppServerAndChildExitBeforeAfterRunAndWorkspaceRemoval(boolean terminalCancellation) throws Exception {
+        // given
+<span class="nc" id="L271">        Path processFiles = Files.createDirectory(tempDir.resolve(&quot;process&quot;));</span>
+<span class="nc" id="L272">        Path script = tempDir.resolve(&quot;app-server.sh&quot;);</span>
+<span class="nc" id="L273">        Files.writeString(</span>
+                script,
+<span class="nc" id="L275">                &quot;exec '&quot; + System.getProperty(&quot;java.home&quot;) + &quot;/bin/java' -cp '&quot;</span>
+<span class="nc" id="L276">                        + System.getProperty(&quot;java.class.path&quot;).replace(&quot;'&quot;, &quot;'\\''&quot;) + &quot;' &quot;</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                        + ShutdownAppServer.class.getName() + &quot; '&quot; + processFiles + &quot;' &quot; + !terminalCancellation</span>
+                        + &quot; true\n&quot;);
+<span class="nc" id="L279">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L280">        writeWorkflowWithCommand(workflow, new ObjectMapper().writeValueAsString(&quot;bash &quot; + script), &quot;&quot;);</span>
+<span class="nc" id="L281">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-lifetime&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L282">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L283">        var hooks = mock(HookRunner.class);</span>
+<span class="nc" id="L284">        var workspaces = spy(new WorkspaceManager(hooks));</span>
+<span class="nc" id="L285">        var afterRun = new CountDownLatch(1);</span>
+<span class="nc" id="L286">        var releaseHook = new CountDownLatch(1);</span>
+<span class="nc" id="L287">        Path sentinel = tempDir.resolve(&quot;work/TRELLO-lifetime/sentinel&quot;);</span>
+<span class="nc" id="L288">        doAnswer(invocation -&gt; {</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                    if (&quot;before_run&quot;.equals(invocation.getArgument(0))) {</span>
+<span class="nc" id="L290">                        Files.writeString(sentinel, &quot;owned by the runtime&quot;);</span>
+                    }
+<span class="nc" id="L292">                    return null;</span>
+                })
+<span class="nc" id="L294">                .when(hooks)</span>
+<span class="nc" id="L295">                .runRequired(any(), any(), any(), any());</span>
+<span class="nc" id="L296">        doAnswer(invocation -&gt; {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">                    if (&quot;after_run&quot;.equals(invocation.getArgument(0))) {</span>
+<span class="nc" id="L298">                        afterRun.countDown();</span>
+<span class="nc" id="L299">                        assertThat(releaseHook.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L300">                                .as(&quot;the test releases after_run after observing process exit&quot;)</span>
+<span class="nc" id="L301">                                .isTrue();</span>
+                    }
+<span class="nc" id="L303">                    return null;</span>
+                })
+<span class="nc" id="L305">                .when(hooks)</span>
+<span class="nc" id="L306">                .runBestEffort(any(), any(), any(), any());</span>
+<span class="nc" id="L307">        var runner = new LocalAgentRunner(</span>
+                workspaces,
+                hooks,
+                new CodexAppServerClient(
+<span class="nc" id="L311">                        new ObjectMapper(), new TrelloHandoffToolHandler(new ObjectMapper(), mock(TrelloClient.class))),</span>
+                tracker,
+                new PromptRenderer());
+<span class="nc" id="L314">        var orchestrator = orchestrator(workflow, tracker, runner, workspaces);</span>
+        try {
+<span class="nc" id="L316">            orchestrator.start();</span>
+<span class="nc" id="L317">            waitUntil(() -&gt;</span>
+<span class="nc bnc" id="L318" title="All 4 branches missed.">                    Files.exists(processFiles.resolve(&quot;started&quot;)) &amp;&amp; Files.exists(processFiles.resolve(&quot;child/port&quot;)));</span>
+<span class="nc" id="L319">            tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L320">            tracker.setCardState(TestCards.card(card.id(), card.identifier(), &quot;Done&quot;));</span>
+
+            // when
+<span class="nc bnc" id="L323" title="All 2 branches missed.">            if (terminalCancellation) {</span>
+<span class="nc" id="L324">                orchestrator.requestRefresh();</span>
+            } else {
+<span class="nc" id="L326">                Files.writeString(processFiles.resolve(&quot;complete-turn&quot;), &quot;tracker is terminal&quot;);</span>
+            }
+<span class="nc bnc" id="L328" title="All 2 branches missed.">            waitUntil(() -&gt; Files.exists(processFiles.resolve(&quot;stopping&quot;))</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">                    &amp;&amp; Files.exists(processFiles.resolve(&quot;child/stopping&quot;)));</span>
+<span class="nc" id="L330">            releaseProcess(processFiles.resolve(&quot;child&quot;));</span>
+<span class="nc" id="L331">            releaseProcess(processFiles);</span>
+<span class="nc" id="L332">            assertThat(afterRun.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L333">                    .as(&quot;after_run starts after confirmed process shutdown&quot;)</span>
+<span class="nc" id="L334">                    .isTrue();</span>
+
+            // then
+<span class="nc" id="L337">            assertThat(ownedProcessAlive(processFiles))</span>
+<span class="nc" id="L338">                    .as(&quot;the direct app-server has exited&quot;)</span>
+<span class="nc" id="L339">                    .isFalse();</span>
+<span class="nc" id="L340">            assertThat(ownedProcessAlive(processFiles.resolve(&quot;child&quot;)))</span>
+<span class="nc" id="L341">                    .as(&quot;the attached child has exited independently of its parent's exit&quot;)</span>
+<span class="nc" id="L342">                    .isFalse();</span>
+<span class="nc" id="L343">            assertThat(sentinel).exists();</span>
+<span class="nc" id="L344">            releaseHook.countDown();</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">            waitUntil(() -&gt; !Files.exists(sentinel));</span>
+<span class="nc" id="L346">            verify(workspaces).removeForIdentifierIfPresent(any(), any());</span>
+        } finally {
+<span class="nc" id="L348">            releaseHook.countDown();</span>
+<span class="nc" id="L349">            stopOwnedProcess(processFiles.resolve(&quot;child&quot;));</span>
+<span class="nc" id="L350">            stopOwnedProcess(processFiles);</span>
+<span class="nc" id="L351">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L353">    }</span>
+
+    private static void releaseProcess(Path directory) throws Exception {
+<span class="nc" id="L356">        int port = Integer.parseInt(Files.readString(directory.resolve(&quot;port&quot;)));</span>
+<span class="nc" id="L357">        try (var socket = new Socket(InetAddress.getLoopbackAddress(), port)) {</span>
+<span class="nc" id="L358">            socket.getOutputStream().write(1);</span>
+        }
+<span class="nc" id="L360">    }</span>
+
+    private static boolean ownedProcessAlive(Path directory) throws Exception {
+<span class="nc" id="L363">        long pid = Long.parseLong(Files.readString(directory.resolve(&quot;process&quot;)));</span>
+<span class="nc" id="L364">        return ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);</span>
+    }
+
+    private static void stopOwnedProcess(Path directory) throws Exception {
+<span class="nc" id="L368">        Path identity = directory.resolve(&quot;process&quot;);</span>
+<span class="nc bnc" id="L369" title="All 2 branches missed.">        if (Files.exists(identity)) {</span>
+<span class="nc" id="L370">            long pid = Long.parseLong(Files.readString(identity));</span>
+<span class="nc" id="L371">            var process = ProcessHandle.of(pid);</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">            if (process.isEmpty()) {</span>
+<span class="nc" id="L373">                return;</span>
+            }
+<span class="nc" id="L375">            ProcessHandle owned = process.orElseThrow();</span>
+<span class="nc" id="L376">            owned.destroyForcibly();</span>
+<span class="nc" id="L377">            owned.onExit().get(5, TimeUnit.SECONDS);</span>
+        }
+<span class="nc" id="L379">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void terminalCleanupWaitsForRunnerToReturn(boolean missing) throws Exception {
+        // given
+<span class="nc" id="L385">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L386">        Path hookMarker = tempDir.resolve(&quot;before-remove-completed&quot;);</span>
+<span class="nc" id="L387">        writeWorkflow(workflow, &quot;60000&quot;, &quot;hooks:\n  before_remove: \&quot;sleep 0.2; touch &quot; + hookMarker + &quot;\&quot;\n&quot;);</span>
+<span class="nc" id="L388">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-lifetime&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L389">        var tracker = new FakeTracker(List.of(card));</span>
+<span class="nc" id="L390">        var started = new CountDownLatch(1);</span>
+<span class="nc" id="L391">        var interrupted = new CountDownLatch(1);</span>
+<span class="nc" id="L392">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L393">        var ticks = new AtomicInteger();</span>
+<span class="nc" id="L394">        Path sentinel = tempDir.resolve(&quot;work/TRELLO-lifetime/sentinel&quot;);</span>
+<span class="nc" id="L395">        AgentRunner runner = mock();</span>
+<span class="nc" id="L396">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L397">            Files.createDirectories(sentinel.getParent());</span>
+<span class="nc" id="L398">            Files.writeString(sentinel, &quot;owned by the running worker&quot;);</span>
+<span class="nc" id="L399">            started.countDown();</span>
+            try {
+<span class="nc" id="L401">                release.await(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L402">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L403">                interrupted.countDown();</span>
+<span class="nc" id="L404">                assertThat(release.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L405">                        .as(&quot;the test releases the worker after checking its workspace&quot;)</span>
+<span class="nc" id="L406">                        .isTrue();</span>
+<span class="nc" id="L407">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L408">            }</span>
+<span class="nc" id="L409">            return AgentRunResult.fail(&quot;cannot finish test worker: expected uninterrupted work&quot;);</span>
+        });
+<span class="nc" id="L411">        var orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L412">        orchestrator.tickCompletionHookForTests = ticks::incrementAndGet;</span>
+        try {
+<span class="nc" id="L414">            orchestrator.start();</span>
+<span class="nc" id="L415">            assertThat(started.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L416">                    .as(&quot;the worker must own a workspace before cancellation&quot;)</span>
+<span class="nc" id="L417">                    .isTrue();</span>
+<span class="nc" id="L418">            tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L419">            tracker.cardStates = Map.of(</span>
+<span class="nc" id="L420">                    card.id(),</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">                    missing</span>
+<span class="nc" id="L422">                            ? new CardLookupResult.Missing(card.id())</span>
+<span class="nc" id="L423">                            : new CardLookupResult.Found(TestCards.card(card.id(), card.identifier(), &quot;Done&quot;)));</span>
+<span class="nc" id="L424">            int before = ticks.get();</span>
+
+            // when
+<span class="nc" id="L427">            orchestrator.requestRefresh();</span>
+<span class="nc" id="L428">            assertThat(interrupted.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L429">                    .as(&quot;reconciliation requests cancellation while the worker remains alive&quot;)</span>
+<span class="nc" id="L430">                    .isTrue();</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">            waitUntil(() -&gt; ticks.get() &gt; before);</span>
+
+            // then
+<span class="nc" id="L434">            assertThat(sentinel).exists();</span>
+<span class="nc" id="L435">            assertThat(orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L436">            release.countDown();</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">            waitUntil(() -&gt; !Files.exists(sentinel));</span>
+<span class="nc" id="L438">            assertThat(hookMarker).exists();</span>
+<span class="nc" id="L439">            verify(runner).run(any());</span>
+        } finally {
+<span class="nc" id="L441">            release.countDown();</span>
+<span class="nc" id="L442">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L444">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

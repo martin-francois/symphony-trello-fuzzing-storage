@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestratorHandoffCleanupTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestratorHandoffCleanupTest.java</span></div><h1>SymphonyOrchestratorHandoffCleanupTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.agent.AgentEvent;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.agent.CardHandoffMove;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+<span class="nc" id="L43">final class SymphonyOrchestratorHandoffCleanupTest {</span>
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void backlogPausesNewDispatchUntilRecoveryWithoutCappingConfiguredConcurrency() throws Exception {
+        // given
+<span class="nc" id="L50">        List&lt;Card&gt; original = cards(&quot;pending&quot;, 129);</span>
+<span class="nc" id="L51">        var tracker = new FakeTracker(original);</span>
+<span class="nc" id="L52">        var clock = new MutableClock(Instant.parse(&quot;2026-01-01T00:00:00Z&quot;));</span>
+<span class="nc" id="L53">        var registered = new CountDownLatch(original.size());</span>
+<span class="nc" id="L54">        var exits = new CountDownLatch(original.size());</span>
+<span class="nc" id="L55">        var unrelatedStarts = new AtomicInteger();</span>
+<span class="nc" id="L56">        var tickCount = new AtomicInteger();</span>
+        // Worker registrations append deadlines while the test thread observes and fires them.
+<span class="nc" id="L58">        List&lt;Runnable&gt; deadlines = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L59">        try (ScheduledExecutorService deadlineScheduler = mock()) {</span>
+<span class="nc" id="L60">            when(deadlineScheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS)))</span>
+<span class="nc" id="L61">                    .thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L62">                        deadlines.add(invocation.getArgument(0));</span>
+<span class="nc" id="L63">                        return mock(ScheduledFuture.class);</span>
+                    });
+<span class="nc" id="L65">            AgentRunner runner = mock();</span>
+<span class="nc" id="L66">            when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L67">                AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">                if (request.card().id().startsWith(&quot;pending-&quot;)) {</span>
+<span class="nc" id="L69">                    String turn = &quot;turn-&quot; + request.card().id();</span>
+<span class="nc" id="L70">                    request.listener()</span>
+<span class="nc" id="L71">                            .onEvent(new AgentEvent(</span>
+                                    &quot;session_started&quot;,
+<span class="nc" id="L73">                                    clock.instant(),</span>
+<span class="nc" id="L74">                                    request.workerIdentity(),</span>
+                                    null,
+                                    &quot;thread&quot;,
+                                    turn,
+                                    null,
+<span class="nc" id="L79">                                    Map.of(),</span>
+                                    null));
+<span class="nc" id="L81">                    var move = new CardHandoffMove(</span>
+<span class="nc" id="L82">                            request.card().id(),</span>
+<span class="nc" id="L83">                            request.workerIdentity(),</span>
+                            &quot;thread&quot;,
+                            turn,
+<span class="nc" id="L86">                            request.card().id(),</span>
+                            &quot;board-1&quot;,
+                            &quot;list-done&quot;);
+<span class="nc" id="L89">                    assertThat(request.listener().beforeHandoffMove(move))</span>
+<span class="nc" id="L90">                            .as(&quot;each dispatched worker owns its pending handoff&quot;)</span>
+<span class="nc" id="L91">                            .isTrue();</span>
+<span class="nc" id="L92">                    request.listener().afterHandoffMove(move, true);</span>
+<span class="nc" id="L93">                    registered.countDown();</span>
+<span class="nc" id="L94">                } else {</span>
+<span class="nc" id="L95">                    unrelatedStarts.incrementAndGet();</span>
+                }
+                try {
+<span class="nc" id="L98">                    new CountDownLatch(1).await(30, TimeUnit.SECONDS);</span>
+<span class="nc" id="L99">                    return AgentRunResult.fail(&quot;cannot complete test worker: expected cancellation&quot;);</span>
+<span class="nc" id="L100">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L101">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L102">                    return AgentRunResult.fail(&quot;cannot continue test worker: expected an uninterrupted attempt&quot;);</span>
+                }
+            });
+<span class="nc" id="L105">            Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L106">            writeWorkflow(workflow, &quot;60000&quot;, &quot;agent:\n  max_concurrent_agents: 129&quot;);</span>
+<span class="nc" id="L107">            WorkspaceManager workspaces = mock();</span>
+<span class="nc" id="L108">            var orchestrator = new SymphonyOrchestrator(</span>
+                    new WorkflowLoader(),
+                    new ConfigResolver(),
+                    tracker,
+                    runner,
+                    new PromptRenderer(),
+                    workspaces,
+                    clock,
+<span class="nc" id="L116">                    Optional.of(successfulWorkpadHandler()),</span>
+                    NO_JITTER,
+<span class="nc" id="L118">                    Optional.of(deadlineScheduler));</span>
+<span class="nc" id="L119">            orchestrator.workflowPath = workflow;</span>
+<span class="nc" id="L120">            orchestrator.tickCompletionHookForTests = tickCount::incrementAndGet;</span>
+<span class="nc" id="L121">            orchestrator.workerExitCompletionHookForTests = exits::countDown;</span>
+            try {
+<span class="nc" id="L123">                orchestrator.start();</span>
+<span class="nc" id="L124">                assertThat(registered.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L125">                        .as(&quot;all in-flight workers register before expiry&quot;)</span>
+<span class="nc" id="L126">                        .isTrue();</span>
+<span class="nc" id="L127">                Map&lt;String, CardLookupResult&gt; failed = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                for (Card card : original) {</span>
+<span class="nc" id="L129">                    failed.put(</span>
+<span class="nc" id="L130">                            card.id(),</span>
+<span class="nc" id="L131">                            new CardLookupResult.Failed(card.id(), &quot;unavailable&quot;, &quot;Tracker is unavailable.&quot;));</span>
+<span class="nc" id="L132">                }</span>
+<span class="nc" id="L133">                tracker.cardStates = failed;</span>
+<span class="nc" id="L134">                tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L135">                clock.advance(Duration.ofSeconds(60));</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                for (Runnable deadline : deadlines) {</span>
+<span class="nc" id="L137">                    deadline.run();</span>
+<span class="nc" id="L138">                }</span>
+<span class="nc" id="L139">                assertThat(exits.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L140">                        .as(&quot;all cancelled workers exit before new dispatch&quot;)</span>
+<span class="nc" id="L141">                        .isTrue();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                waitUntil(() -&gt; orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L143">                List&lt;Card&gt; unrelated = cards(&quot;unrelated&quot;, 129);</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">                for (Card card : unrelated) {</span>
+<span class="nc" id="L145">                    tracker.setCardState(card);</span>
+<span class="nc" id="L146">                }</span>
+<span class="nc" id="L147">                List&lt;Card&gt; candidates = new ArrayList&lt;&gt;(unrelated);</span>
+<span class="nc" id="L148">                candidates.add(original.get(2));</span>
+<span class="nc" id="L149">                tracker.setPromptCardState(original.get(2));</span>
+<span class="nc" id="L150">                tracker.setCandidateList(candidates);</span>
+
+                // when
+<span class="nc" id="L153">                refresh(orchestrator, tickCount);</span>
+
+                // then
+<span class="nc" id="L156">                assertThat(unrelatedStarts)</span>
+<span class="nc" id="L157">                        .as(&quot;129 pending cleanups pause new dispatch&quot;)</span>
+<span class="nc" id="L158">                        .hasValue(0);</span>
+<span class="nc" id="L159">                tracker.setCardState(TestCards.card(&quot;pending-0&quot;, &quot;PENDING-0&quot;, &quot;Todo&quot;));</span>
+<span class="nc" id="L160">                refresh(orchestrator, tickCount);</span>
+<span class="nc" id="L161">                assertThat(unrelatedStarts)</span>
+<span class="nc" id="L162">                        .as(&quot;the threshold of 128 still pauses new dispatch&quot;)</span>
+<span class="nc" id="L163">                        .hasValue(0);</span>
+<span class="nc" id="L164">                tracker.setCardState(TestCards.card(&quot;pending-1&quot;, &quot;PENDING-1&quot;, &quot;Done&quot;));</span>
+<span class="nc" id="L165">                refresh(orchestrator, tickCount);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                waitUntil(() -&gt; unrelatedStarts.get() == 129);</span>
+<span class="nc" id="L167">                assertThat(orchestrator.snapshot().counts().running())</span>
+<span class="nc" id="L168">                        .as(&quot;127 pending cleanups leave the configured 129 worker slots available&quot;)</span>
+<span class="nc" id="L169">                        .isEqualTo(129);</span>
+<span class="nc" id="L170">                assertThat(orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L171">                verify(runner, times(258)).run(any());</span>
+<span class="nc" id="L172">                verify(runner, times(129)).cancel(any());</span>
+<span class="nc" id="L173">                verify(workspaces, never()).removeForIdentifierIfPresent(eq(&quot;PENDING-0&quot;), any());</span>
+<span class="nc" id="L174">                verify(workspaces).removeForIdentifierIfPresent(eq(&quot;PENDING-1&quot;), any());</span>
+            } finally {
+<span class="nc" id="L176">                orchestrator.stop();</span>
+            }
+        }
+<span class="nc" id="L179">    }</span>
+
+    private static List&lt;Card&gt; cards(String prefix, int count) {
+<span class="nc" id="L182">        List&lt;Card&gt; cards = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L183">        String identifierPrefix = prefix.toUpperCase(Locale.ROOT);</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">        for (int index = 0; index &lt; count; index++) {</span>
+<span class="nc" id="L185">            cards.add(TestCards.card(prefix + &quot;-&quot; + index, identifierPrefix + &quot;-&quot; + index, &quot;Todo&quot;));</span>
+        }
+<span class="nc" id="L187">        return List.copyOf(cards);</span>
+    }
+
+    private static void refresh(SymphonyOrchestrator orchestrator, AtomicInteger tickCount) throws Exception {
+<span class="nc" id="L191">        int before = tickCount.get();</span>
+<span class="nc" id="L192">        orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        waitUntil(() -&gt; tickCount.get() &gt; before);</span>
+<span class="nc" id="L194">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

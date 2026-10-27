@@ -1,0 +1,1046 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestratorHandoffTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestratorHandoffTest.java</span></div><h1>SymphonyOrchestratorHandoffTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.agent.AgentEvent;
+import ch.fmartin.symphony.trello.agent.AgentEventListener;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.agent.CardHandoffMove;
+import ch.fmartin.symphony.trello.agent.CodexAppServerClient;
+import ch.fmartin.symphony.trello.agent.TrelloHandoffToolHandler;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import ch.fmartin.symphony.trello.workspace.HookRunner;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+
+<span class="nc" id="L55">final class SymphonyOrchestratorHandoffTest {</span>
+    private static final String CARD_ID = &quot;card-1&quot;;
+    private static final String CARD_IDENTIFIER = &quot;TRELLO-handoff&quot;;
+    private static final String REVIEW_LIST = &quot;Human Review&quot;;
+    private static final String ACTIVE_STATE = &quot;Todo&quot;;
+    private static final int DEFAULT_TURN_TIMEOUT_MS = 15000;
+<span class="nc" id="L61">    private static final Duration HANDOFF_COMPLETION_WINDOW = Duration.ofSeconds(60);</span>
+<span class="nc" id="L62">    private static final Duration DEADLINE_BOUNDARY_OFFSET = Duration.ofSeconds(1);</span>
+<span class="nc" id="L63">    private static final Duration STALL_TIMEOUT_ADVANCE = Duration.ofMinutes(6);</span>
+
+    @TempDir
+    Path tempDir;
+
+<span class="nc" id="L68">    private final ObjectMapper json = new ObjectMapper();</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void ownHandoffFinishesCurrentTurnAcrossReconciliation(boolean refreshBeforeMoveResponse) throws Exception {
+        // given
+<span class="nc" id="L74">        try (var run = new HandoffRun(refreshBeforeMoveResponse, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L75">            run.start();</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (!refreshBeforeMoveResponse) {</span>
+<span class="nc" id="L77">                run.awaitFinalStarted();</span>
+            }
+
+            // when
+<span class="nc" id="L81">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L84">            assertThat(run.orchestrator.snapshot().counts().running())</span>
+<span class="nc" id="L85">                    .as(&quot;reconciliation must retain the current turn after its own handoff&quot;)</span>
+<span class="nc" id="L86">                    .isOne();</span>
+<span class="nc" id="L87">            run.releaseMove.countDown();</span>
+<span class="nc" id="L88">            run.finish();</span>
+<span class="nc" id="L89">            run.assertCompletedFinal();</span>
+<span class="nc" id="L90">            assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+        }
+<span class="nc" id="L92">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                &quot;missing&quot;,
+                &quot;archived&quot;,
+                &quot;list-archived&quot;,
+                &quot;board-archived&quot;,
+                &quot;other-board&quot;,
+                &quot;other-list&quot;,
+                &quot;unknown-list-open&quot;,
+                &quot;unknown-board-open&quot;
+            })
+    void externalStateChangesStillCancelCurrentTurn(String change) throws Exception {
+        // given
+<span class="nc" id="L108">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L109">            run.start();</span>
+<span class="nc" id="L110">            run.awaitFinalStarted();</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            if (&quot;missing&quot;.equals(change)) {</span>
+<span class="nc" id="L112">                run.tracker.cardStates = Map.of(CARD_ID, new CardLookupResult.Missing(CARD_ID));</span>
+            } else {
+<span class="nc" id="L114">                run.tracker.setCardState(destination(REVIEW_LIST, change));</span>
+            }
+
+            // when
+<span class="nc" id="L118">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L121">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L122">            String workerIdentity = run.move().workerIdentity();</span>
+<span class="nc" id="L123">            verify(run.runner).cancel(workerIdentity);</span>
+        }
+<span class="nc" id="L125">    }</span>
+
+    @Test
+    void failedMoveAndLateSuccessCallbackDoNotProtectInactiveCard() throws Exception {
+        // given
+<span class="nc" id="L130">        try (var run = new HandoffRun(false, true, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L131">            run.start();</span>
+<span class="nc" id="L132">            run.awaitFinalStarted();</span>
+<span class="nc" id="L133">            run.listener.get().afterHandoffMove(run.move(), true);</span>
+
+            // when
+<span class="nc" id="L136">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L139">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L140">            String workerIdentity = run.move().workerIdentity();</span>
+<span class="nc" id="L141">            verify(run.runner).cancel(workerIdentity);</span>
+        }
+<span class="nc" id="L143">    }</span>
+
+    @Test
+    void repeatedRegistrationAndEventsDoNotRenewCompletionDeadline() throws Exception {
+        // given
+<span class="nc" id="L148">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L149">            run.start();</span>
+<span class="nc" id="L150">            run.awaitFinalStarted();</span>
+<span class="nc" id="L151">            run.clock.advance(HANDOFF_COMPLETION_WINDOW.minus(DEADLINE_BOUNDARY_OFFSET));</span>
+<span class="nc" id="L152">            CardHandoffMove first = run.move();</span>
+<span class="nc" id="L153">            var repeated = new CardHandoffMove(</span>
+                    &quot;repeat&quot;,
+<span class="nc" id="L155">                    first.workerIdentity(),</span>
+<span class="nc" id="L156">                    first.threadId(),</span>
+<span class="nc" id="L157">                    first.turnId(),</span>
+<span class="nc" id="L158">                    first.cardId(),</span>
+<span class="nc" id="L159">                    first.boardId(),</span>
+<span class="nc" id="L160">                    first.listId());</span>
+<span class="nc" id="L161">            assertThat(run.listener.get().beforeHandoffMove(repeated))</span>
+<span class="nc" id="L162">                    .as(&quot;a repeated owned move shares the original completion deadline&quot;)</span>
+<span class="nc" id="L163">                    .isTrue();</span>
+<span class="nc" id="L164">            run.listener.get().afterHandoffMove(repeated, true);</span>
+<span class="nc" id="L165">            run.listener</span>
+<span class="nc" id="L166">                    .get()</span>
+<span class="nc" id="L167">                    .onEvent(new AgentEvent(</span>
+                            &quot;item/agentMessage/delta&quot;,
+<span class="nc" id="L169">                            run.clock.instant(),</span>
+<span class="nc" id="L170">                            first.workerIdentity(),</span>
+                            null,
+<span class="nc" id="L172">                            first.threadId(),</span>
+<span class="nc" id="L173">                            first.turnId(),</span>
+                            &quot;still finishing&quot;,
+<span class="nc" id="L175">                            Map.of(),</span>
+                            null));
+<span class="nc" id="L177">            run.refresh();</span>
+<span class="nc" id="L178">            assertThat(run.orchestrator.snapshot().counts().running()).isOne();</span>
+
+            // when
+<span class="nc" id="L181">            run.clock.advance(DEADLINE_BOUNDARY_OFFSET);</span>
+<span class="nc" id="L182">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L185">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L186">            verify(run.runner).cancel(first.workerIdentity());</span>
+<span class="nc" id="L187">            assertThat(run.listener.get().beforeHandoffMove(repeated))</span>
+<span class="nc" id="L188">                    .as(&quot;an expired worker cannot register another handoff&quot;)</span>
+<span class="nc" id="L189">                    .isFalse();</span>
+        }
+<span class="nc" id="L191">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;worker&quot;, &quot;thread&quot;, &quot;turn&quot;, &quot;board&quot;, &quot;card&quot;})
+    void registrationRejectsWrongOwner(String mismatch) throws Exception {
+        // given
+<span class="nc" id="L197">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L198">            run.start();</span>
+<span class="nc" id="L199">            run.awaitFinalStarted();</span>
+<span class="nc" id="L200">            CardHandoffMove first = run.move();</span>
+<span class="nc" id="L201">            var other = new CardHandoffMove(</span>
+                    &quot;other&quot;,
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                    &quot;worker&quot;.equals(mismatch) ? &quot;stale-worker&quot; : first.workerIdentity(),</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                    &quot;thread&quot;.equals(mismatch) ? &quot;stale-thread&quot; : first.threadId(),</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                    &quot;turn&quot;.equals(mismatch) ? &quot;stale-turn&quot; : first.turnId(),</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                    &quot;card&quot;.equals(mismatch) ? &quot;another-card&quot; : first.cardId(),</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">                    &quot;board&quot;.equals(mismatch) ? &quot;another-board&quot; : first.boardId(),</span>
+                    &quot;list-other&quot;);
+
+            // when
+<span class="nc" id="L211">            boolean accepted = run.listener.get().beforeHandoffMove(other);</span>
+<span class="nc" id="L212">            run.listener.get().afterHandoffMove(other, true);</span>
+<span class="nc" id="L213">            run.tracker.setCardState(destination(REVIEW_LIST, &quot;other-list&quot;));</span>
+<span class="nc" id="L214">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L217">            assertThat(accepted)</span>
+<span class="nc" id="L218">                    .as(&quot;only the current worker, turn, card and board own a handoff&quot;)</span>
+<span class="nc" id="L219">                    .isFalse();</span>
+<span class="nc" id="L220">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+        }
+<span class="nc" id="L222">    }</span>
+
+    @Test
+    void reactivationDoesNotStartAnotherTurnInTheHandoffSession() throws Exception {
+        // given
+<span class="nc" id="L227">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L228">            run.start();</span>
+<span class="nc" id="L229">            run.awaitFinalStarted();</span>
+<span class="nc" id="L230">            run.tracker.setCardState(TestCards.card(CARD_ID, CARD_IDENTIFIER, ACTIVE_STATE));</span>
+<span class="nc" id="L231">            run.refresh();</span>
+
+            // when
+<span class="nc" id="L234">            run.finish();</span>
+
+            // then
+<span class="nc" id="L237">            run.assertCompletedFinal();</span>
+        }
+<span class="nc" id="L239">    }</span>
+
+    @Test
+    void terminalHandoffKeepsWorkspaceUntilTheFinalResponseCompletes() throws Exception {
+        // given
+<span class="nc" id="L244">        try (var run = new HandoffRun(false, false, &quot;Done&quot;, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L245">            run.start();</span>
+<span class="nc" id="L246">            run.awaitFinalStarted();</span>
+
+            // when
+<span class="nc" id="L249">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L252">            assertThat(run.workspace.get()).isDirectory();</span>
+<span class="nc" id="L253">            assertThat(run.orchestrator.snapshot().counts().running()).isOne();</span>
+<span class="nc" id="L254">            run.finish();</span>
+<span class="nc" id="L255">            run.assertCompletedFinal();</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">            waitUntil(() -&gt; !Files.exists(run.workspace.get()));</span>
+        }
+<span class="nc" id="L258">    }</span>
+
+    @Test
+    void ownedHandoffDoesNotExtendTurnTimeout() throws Exception {
+        // given
+<span class="nc" id="L263">        try (var run = new HandoffRun(false, false, REVIEW_LIST, 2000)) {</span>
+<span class="nc" id="L264">            run.start();</span>
+<span class="nc" id="L265">            run.awaitFinalStarted();</span>
+
+            // when
+<span class="nc bnc" id="L268" title="All 2 branches missed.">            waitUntil(() -&gt; run.result.get() != null);</span>
+
+            // then
+<span class="nc" id="L271">            assertThat(run.result.get().success())</span>
+<span class="nc" id="L272">                    .as(&quot;the existing turn timeout remains in force&quot;)</span>
+<span class="nc" id="L273">                    .isFalse();</span>
+<span class="nc" id="L274">            assertThat(run.result.get().reason()).startsWith(&quot;turn_timeout:&quot;);</span>
+<span class="nc" id="L275">            assertThat(run.continuationCalls).hasValue(0);</span>
+        }
+<span class="nc" id="L277">    }</span>
+
+    @Test
+    void lateCallbacksCannotProtectAReplacementWorker() throws Exception {
+        // given
+<span class="nc" id="L282">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L283">            run.start();</span>
+<span class="nc" id="L284">            run.awaitFinalStarted();</span>
+<span class="nc" id="L285">            CardHandoffMove oldMove = run.move();</span>
+<span class="nc" id="L286">            AgentEventListener oldListener = run.listener.get();</span>
+<span class="nc" id="L287">            run.replaceWorker();</span>
+
+            // when
+<span class="nc" id="L290">            boolean accepted = oldListener.beforeHandoffMove(oldMove);</span>
+<span class="nc" id="L291">            oldListener.afterHandoffMove(oldMove, true);</span>
+<span class="nc" id="L292">            run.tracker.setCardState(destination(REVIEW_LIST, &quot;other-list&quot;));</span>
+<span class="nc" id="L293">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L296">            assertThat(accepted)</span>
+<span class="nc" id="L297">                    .as(&quot;a replaced worker cannot register a move for its successor&quot;)</span>
+<span class="nc" id="L298">                    .isFalse();</span>
+<span class="nc" id="L299">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+        }
+<span class="nc" id="L301">    }</span>
+
+    @Test
+    void expiredHandoffWithUnconfirmedShutdownRetainsActiveWorkspace() throws Exception {
+        // given
+<span class="nc" id="L306">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L307">            run.unconfirmedShutdown = true;</span>
+<span class="nc" id="L308">            var exited = new CountDownLatch(1);</span>
+<span class="nc" id="L309">            run.orchestrator.workerExitCompletionHookForTests = exited::countDown;</span>
+<span class="nc" id="L310">            run.start();</span>
+<span class="nc" id="L311">            run.awaitFinalStarted();</span>
+<span class="nc" id="L312">            run.tracker.setCardState(TestCards.card(CARD_ID, CARD_IDENTIFIER, ACTIVE_STATE));</span>
+
+            // when
+<span class="nc" id="L315">            run.clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+<span class="nc" id="L316">            run.deadlineTasks.getFirst().run();</span>
+<span class="nc" id="L317">            assertThat(exited.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L318">                    .as(&quot;the expired handoff reports unconfirmed exit&quot;)</span>
+<span class="nc" id="L319">                    .isTrue();</span>
+<span class="nc" id="L320">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L323">            assertThat(run.workspace.get()).exists();</span>
+<span class="nc" id="L324">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L325">            assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L326">            verify(run.runner).run(any());</span>
+        }
+<span class="nc" id="L328">    }</span>
+
+    @Test
+    void ownedHandoffDoesNotExtendStallTimeout() throws Exception {
+        // given
+<span class="nc" id="L333">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS, &quot;stall_timeout_ms: 1000&quot;)) {</span>
+<span class="nc" id="L334">            run.start();</span>
+<span class="nc" id="L335">            run.awaitFinalStarted();</span>
+
+            // when
+<span class="nc" id="L338">            run.clock.advance(Duration.ofSeconds(2));</span>
+<span class="nc" id="L339">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L342">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L343">            String workerIdentity = run.move().workerIdentity();</span>
+<span class="nc" id="L344">            verify(run.runner).cancel(workerIdentity);</span>
+        }
+<span class="nc" id="L346">    }</span>
+
+    @Test
+    void completedTurnCannotRegisterAnotherHandoffMove() throws Exception {
+        // given
+<span class="nc" id="L351">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L352">            run.afterTurnMove = true;</span>
+<span class="nc" id="L353">            Path script = tempDir.resolve(&quot;handoff-app-server.sh&quot;);</span>
+<span class="nc" id="L354">            String toolRequest = &quot;echo '{\&quot;id\&quot;:100,\&quot;method\&quot;:\&quot;item/tool/call\&quot;&quot;;</span>
+<span class="nc" id="L355">            String completed = &quot;echo '{\&quot;method\&quot;:\&quot;turn/completed\&quot;,\&quot;params\&quot;:{\&quot;threadId\&quot;:\&quot;thread-handoff\&quot;,&quot;</span>
+                    + &quot;\&quot;turn\&quot;:{\&quot;id\&quot;:\&quot;turn-handoff\&quot;,\&quot;status\&quot;:\&quot;completed\&quot;,\&quot;error\&quot;:null}}}'&quot;;
+<span class="nc" id="L357">            Files.writeString(script, Files.readString(script).replace(toolRequest, completed + &quot;\n&quot; + toolRequest));</span>
+
+            // when
+<span class="nc" id="L360">            run.orchestrator.start();</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">            waitUntil(() -&gt; run.result.get() != null);</span>
+
+            // then
+<span class="nc" id="L364">            assertThat(run.result.get()).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L365">            verify(run.trello, never()).moveCardToList(any(), any(), any());</span>
+        }
+<span class="nc" id="L367">    }</span>
+
+    @Test
+    void deadlineAfterStallSelectionRetainsCleanupAndCardClaim() throws Exception {
+        // given
+<span class="nc" id="L372">        try (var run = new HandoffRun(false, false, &quot;Done&quot;, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L373">            run.start();</span>
+<span class="nc" id="L374">            run.awaitFinalStarted();</span>
+<span class="nc" id="L375">            String worker = run.move().workerIdentity();</span>
+<span class="nc" id="L376">            var selected = new CountDownLatch(1);</span>
+<span class="nc" id="L377">            var releaseStall = new CountDownLatch(1);</span>
+<span class="nc" id="L378">            run.orchestrator.stallSelectionHookForTests = () -&gt; {</span>
+<span class="nc" id="L379">                selected.countDown();</span>
+                try {
+<span class="nc" id="L381">                    assertThat(releaseStall.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L382">                            .as(&quot;the test resumes stall termination after the owned deadline fires&quot;)</span>
+<span class="nc" id="L383">                            .isTrue();</span>
+<span class="nc" id="L384">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L385">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L386">                    throw new IllegalStateException(</span>
+                            &quot;cannot finish stall test: expected release before interruption&quot;, e);
+<span class="nc" id="L388">                }</span>
+<span class="nc" id="L389">            };</span>
+<span class="nc" id="L390">            Card candidate = TestCards.card(CARD_ID, CARD_IDENTIFIER, ACTIVE_STATE);</span>
+<span class="nc" id="L391">            run.tracker.setCandidateList(List.of(candidate));</span>
+<span class="nc" id="L392">            run.tracker.setPromptCardState(candidate);</span>
+<span class="nc" id="L393">            run.tracker.cardStates = Map.of(</span>
+                    CARD_ID,
+                    new CardLookupResult.Failed(CARD_ID, &quot;test_unavailable&quot;, &quot;Tracker is unavailable in this test.&quot;));
+<span class="nc" id="L396">            run.clock.advance(STALL_TIMEOUT_ADVANCE);</span>
+<span class="nc" id="L397">            int beforeTick = run.completedTicks.get();</span>
+            try {
+<span class="nc" id="L399">                run.orchestrator.requestRefresh();</span>
+<span class="nc" id="L400">                assertThat(selected.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L401">                        .as(&quot;the stalled entry is selected before the deadline changes its cancellation state&quot;)</span>
+<span class="nc" id="L402">                        .isTrue();</span>
+
+                // when
+<span class="nc" id="L405">                run.deadlineTasks.getFirst().run();</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">                waitUntil(() -&gt; run.result.get() != null);</span>
+<span class="nc" id="L407">                run.orchestrator.stallSelectionHookForTests = () -&gt; {};</span>
+<span class="nc" id="L408">                releaseStall.countDown();</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">                waitUntil(() -&gt; run.completedTicks.get() &gt; beforeTick);</span>
+
+                // then
+<span class="nc" id="L412">                assertThat(run.orchestrator.snapshot().counts().running())</span>
+<span class="nc" id="L413">                        .as(&quot;unknown cleanup keeps the original claim instead of redispatching the card&quot;)</span>
+<span class="nc" id="L414">                        .isZero();</span>
+<span class="nc" id="L415">                assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L416">                assertThat(run.workspace.get()).isDirectory();</span>
+<span class="nc" id="L417">                run.refresh();</span>
+<span class="nc" id="L418">                assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L419">                run.tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L420">                run.tracker.setCardState(destination(&quot;Done&quot;, &quot;open&quot;));</span>
+<span class="nc" id="L421">                run.refresh();</span>
+<span class="nc" id="L422">                assertThat(run.workspace.get()).doesNotExist();</span>
+<span class="nc" id="L423">                verify(run.workspaces).removeForIdentifierIfPresent(eq(CARD_IDENTIFIER), any());</span>
+<span class="nc" id="L424">                verify(run.runner).run(any());</span>
+<span class="nc" id="L425">                verify(run.runner).cancel(worker);</span>
+            } finally {
+<span class="nc" id="L427">                run.orchestrator.stallSelectionHookForTests = () -&gt; {};</span>
+<span class="nc" id="L428">                releaseStall.countDown();</span>
+            }
+        }
+<span class="nc" id="L431">    }</span>
+
+    @Test
+    void deadlineCancelsWorkerBeforeBlockedTrackerReconciliationReturns() throws Exception {
+        // given
+<span class="nc" id="L436">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L437">            run.start();</span>
+<span class="nc" id="L438">            run.awaitFinalStarted();</span>
+<span class="nc" id="L439">            var trackerEntered = new CountDownLatch(1);</span>
+<span class="nc" id="L440">            var releaseTracker = new CountDownLatch(1);</span>
+<span class="nc" id="L441">            var cancelled = new CountDownLatch(1);</span>
+<span class="nc" id="L442">            String worker = run.move().workerIdentity();</span>
+<span class="nc" id="L443">            doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L444">                        cancelled.countDown();</span>
+<span class="nc" id="L445">                        return null;</span>
+                    })
+<span class="nc" id="L447">                    .when(run.runner)</span>
+<span class="nc" id="L448">                    .cancel(worker);</span>
+<span class="nc" id="L449">            run.tracker.stateFetchHook = () -&gt; {</span>
+<span class="nc" id="L450">                trackerEntered.countDown();</span>
+                try {
+<span class="nc" id="L452">                    assertThat(releaseTracker.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L453">                            .as(&quot;the test releases the blocked tracker after observing cancellation&quot;)</span>
+<span class="nc" id="L454">                            .isTrue();</span>
+<span class="nc" id="L455">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L456">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L457">                    throw new IllegalStateException(</span>
+                            &quot;cannot finish tracker test: expected release before interruption&quot;, e);
+<span class="nc" id="L459">                }</span>
+<span class="nc" id="L460">            };</span>
+            try {
+<span class="nc" id="L462">                run.orchestrator.requestRefresh();</span>
+<span class="nc" id="L463">                assertThat(trackerEntered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L464">                        .as(&quot;reconciliation entered the tracker&quot;)</span>
+<span class="nc" id="L465">                        .isTrue();</span>
+<span class="nc" id="L466">                int blockedTick = run.completedTicks.get();</span>
+<span class="nc" id="L467">                assertThat(run.deadlineTasks)</span>
+<span class="nc" id="L468">                        .as(&quot;the owned move schedules its independent deadline&quot;)</span>
+<span class="nc" id="L469">                        .hasSize(1);</span>
+<span class="nc" id="L470">                run.clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+
+                // when
+<span class="nc" id="L473">                Thread deadline = Thread.ofVirtual().start(run.deadlineTasks.getFirst());</span>
+
+                // then
+<span class="nc" id="L476">                assertThat(cancelled.await(2, TimeUnit.SECONDS))</span>
+<span class="nc" id="L477">                        .as(&quot;deadline cancellation must precede release of the blocked tracker&quot;)</span>
+<span class="nc" id="L478">                        .isTrue();</span>
+<span class="nc bnc" id="L479" title="All 2 branches missed.">                waitUntil(() -&gt; run.result.get() != null);</span>
+<span class="nc" id="L480">                assertThat(run.result.get().success())</span>
+<span class="nc" id="L481">                        .as(&quot;deadline stops the unfinished protocol turn&quot;)</span>
+<span class="nc" id="L482">                        .isFalse();</span>
+<span class="nc" id="L483">                assertThat(run.orchestrator.snapshot().counts().running())</span>
+<span class="nc" id="L484">                        .as(&quot;cancellation removes a worker from live counts before blocked reconciliation returns&quot;)</span>
+<span class="nc" id="L485">                        .isZero();</span>
+<span class="nc" id="L486">                assertThat(run.orchestrator.cardDetails(CARD_IDENTIFIER)).isEmpty();</span>
+<span class="nc" id="L487">                double stoppedRuntime =</span>
+<span class="nc" id="L488">                        run.orchestrator.snapshot().codexTotals().secondsRunning();</span>
+<span class="nc" id="L489">                run.clock.advance(Duration.ofSeconds(10));</span>
+<span class="nc" id="L490">                assertThat(run.orchestrator.snapshot().codexTotals().secondsRunning())</span>
+<span class="nc" id="L491">                        .isEqualTo(stoppedRuntime);</span>
+<span class="nc" id="L492">                assertThat(releaseTracker.getCount()).isOne();</span>
+<span class="nc" id="L493">                releaseTracker.countDown();</span>
+<span class="nc" id="L494">                deadline.join(Duration.ofSeconds(5));</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">                waitUntil(() -&gt; run.completedTicks.get() &gt; blockedTick</span>
+<span class="nc bnc" id="L496" title="All 2 branches missed.">                        &amp;&amp; run.orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L497">                assertThat(run.orchestrator.snapshot().codexTotals().secondsRunning())</span>
+<span class="nc" id="L498">                        .isEqualTo(stoppedRuntime);</span>
+<span class="nc" id="L499">                verify(run.runner).cancel(worker);</span>
+            } finally {
+<span class="nc" id="L501">                releaseTracker.countDown();</span>
+<span class="nc" id="L502">                run.tracker.stateFetchHook = () -&gt; {};</span>
+            }
+        }
+<span class="nc" id="L505">    }</span>
+
+    @Test
+    void deadlineTaskDoesNotWaitForRunnerCancellation() throws Exception {
+        // given
+<span class="nc" id="L510">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L511">            run.start();</span>
+<span class="nc" id="L512">            run.awaitFinalStarted();</span>
+<span class="nc" id="L513">            var cancelEntered = new CountDownLatch(1);</span>
+<span class="nc" id="L514">            var releaseCancel = new CountDownLatch(1);</span>
+<span class="nc" id="L515">            String worker = run.move().workerIdentity();</span>
+<span class="nc" id="L516">            doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L517">                        cancelEntered.countDown();</span>
+<span class="nc" id="L518">                        assertThat(releaseCancel.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L519">                                .as(&quot;the test releases runner cancellation after observing the deadline task&quot;)</span>
+<span class="nc" id="L520">                                .isTrue();</span>
+<span class="nc" id="L521">                        return null;</span>
+                    })
+<span class="nc" id="L523">                    .when(run.runner)</span>
+<span class="nc" id="L524">                    .cancel(worker);</span>
+<span class="nc" id="L525">            run.clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+            try {
+
+                // when
+<span class="nc" id="L529">                Thread deadline = Thread.ofVirtual().start(run.deadlineTasks.getFirst());</span>
+<span class="nc" id="L530">                assertThat(cancelEntered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L531">                        .as(&quot;runner cancellation begins&quot;)</span>
+<span class="nc" id="L532">                        .isTrue();</span>
+<span class="nc" id="L533">                deadline.join(Duration.ofSeconds(2));</span>
+
+                // then
+<span class="nc" id="L536">                assertThat(deadline.isAlive())</span>
+<span class="nc" id="L537">                        .as(&quot;one slow runner cannot occupy the deadline scheduler&quot;)</span>
+<span class="nc" id="L538">                        .isFalse();</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">                waitUntil(() -&gt; run.result.get() != null);</span>
+<span class="nc" id="L540">                assertThat(run.result.get().success())</span>
+<span class="nc" id="L541">                        .as(&quot;the worker is interrupted before runner cancellation returns&quot;)</span>
+<span class="nc" id="L542">                        .isFalse();</span>
+<span class="nc" id="L543">                assertThat(releaseCancel.getCount()).isOne();</span>
+            } finally {
+<span class="nc" id="L545">                releaseCancel.countDown();</span>
+            }
+        }
+<span class="nc" id="L548">    }</span>
+
+    @Test
+    void stopFinishesRunnerCancellationWhenDeadlineCallbackIsRejected() throws Exception {
+        // given
+<span class="nc" id="L553">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L554">            run.start();</span>
+<span class="nc" id="L555">            run.awaitFinalStarted();</span>
+<span class="nc" id="L556">            String worker = run.move().workerIdentity();</span>
+<span class="nc" id="L557">            var marked = new CountDownLatch(1);</span>
+<span class="nc" id="L558">            var releaseDeadline = new CountDownLatch(1);</span>
+<span class="nc" id="L559">            run.orchestrator.handoffCancellationMarkedHookForTests = () -&gt; {</span>
+<span class="nc" id="L560">                marked.countDown();</span>
+                try {
+<span class="nc" id="L562">                    assertThat(releaseDeadline.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L563">                            .as(&quot;the test resumes the deadline after stop closes its executor&quot;)</span>
+<span class="nc" id="L564">                            .isTrue();</span>
+<span class="nc" id="L565">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L566">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L567">                    throw new IllegalStateException(</span>
+                            &quot;cannot finish deadline test: expected release before interruption&quot;, e);
+<span class="nc" id="L569">                }</span>
+<span class="nc" id="L570">            };</span>
+<span class="nc" id="L571">            run.clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+<span class="nc" id="L572">            Thread deadline = Thread.ofVirtual().start(run.deadlineTasks.getFirst());</span>
+            try {
+<span class="nc" id="L574">                assertThat(marked.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L575">                        .as(&quot;deadline claims its current worker&quot;)</span>
+<span class="nc" id="L576">                        .isTrue();</span>
+
+                // when
+<span class="nc" id="L579">                run.orchestrator.stop();</span>
+<span class="nc" id="L580">                releaseDeadline.countDown();</span>
+<span class="nc" id="L581">                deadline.join(Duration.ofSeconds(5));</span>
+
+                // then
+<span class="nc" id="L584">                assertThat(deadline.isAlive())</span>
+<span class="nc" id="L585">                        .as(&quot;the rejected deadline callback finishes after shutdown&quot;)</span>
+<span class="nc" id="L586">                        .isFalse();</span>
+<span class="nc" id="L587">                verify(run.runner).cancel(worker);</span>
+<span class="nc" id="L588">                verify(run.deadlineScheduler).shutdownNow();</span>
+<span class="nc bnc" id="L589" title="All 2 branches missed.">                waitUntil(() -&gt; run.result.get() != null);</span>
+<span class="nc" id="L590">                assertThat(run.result.get().success())</span>
+<span class="nc" id="L591">                        .as(&quot;shutdown interrupts the unfinished worker&quot;)</span>
+<span class="nc" id="L592">                        .isFalse();</span>
+            } finally {
+<span class="nc" id="L594">                releaseDeadline.countDown();</span>
+            }
+        }
+<span class="nc" id="L597">    }</span>
+
+    @Test
+    void staleDeadlineTaskDoesNotCancelReplacementWorker() throws Exception {
+        // given
+<span class="nc" id="L602">        try (var run = new HandoffRun(false, false, REVIEW_LIST, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L603">            run.start();</span>
+<span class="nc" id="L604">            run.awaitFinalStarted();</span>
+<span class="nc" id="L605">            Runnable staleDeadline = run.deadlineTasks.getFirst();</span>
+<span class="nc" id="L606">            run.replaceWorker();</span>
+<span class="nc" id="L607">            String replacement = run.move().workerIdentity();</span>
+<span class="nc" id="L608">            run.clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+
+            // when
+<span class="nc" id="L611">            Thread deadline = Thread.ofVirtual().start(staleDeadline);</span>
+<span class="nc" id="L612">            deadline.join(Duration.ofSeconds(5));</span>
+
+            // then
+<span class="nc" id="L615">            assertThat(deadline.isAlive())</span>
+<span class="nc" id="L616">                    .as(&quot;a stale deadline task returns without touching its successor&quot;)</span>
+<span class="nc" id="L617">                    .isFalse();</span>
+<span class="nc" id="L618">            verify(run.runner, never()).cancel(replacement);</span>
+<span class="nc" id="L619">            assertThat(run.orchestrator.snapshot().counts().running()).isOne();</span>
+        }
+<span class="nc" id="L621">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;failed&quot;, &quot;absent&quot;, &quot;exception&quot;})
+    void terminalCleanupRemainsPendingUntilTrackerRecovers(String failure) throws Exception {
+        // given
+<span class="nc" id="L627">        try (var run = new HandoffRun(false, false, &quot;Done&quot;, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L628">            run.start();</span>
+<span class="nc" id="L629">            run.awaitFinalStarted();</span>
+<span class="nc" id="L630">            String worker = run.move().workerIdentity();</span>
+<span class="nc" id="L631">            run.expireThroughTrackerOutage(failure);</span>
+<span class="nc" id="L632">            assertThat(run.orchestrator.snapshot().counts().running())</span>
+<span class="nc" id="L633">                    .as(&quot;a cancelled worker does not consume running capacity during cleanup&quot;)</span>
+<span class="nc" id="L634">                    .isZero();</span>
+<span class="nc" id="L635">            assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L636">            assertThat(run.workspace.get()).isDirectory();</span>
+
+            // when
+<span class="nc" id="L639">            run.tracker.stateFetchHook = () -&gt; {};</span>
+<span class="nc" id="L640">            run.tracker.setCardState(destination(&quot;Done&quot;, &quot;open&quot;));</span>
+<span class="nc" id="L641">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L644">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L645">            assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L646">            assertThat(run.workspace.get()).doesNotExist();</span>
+<span class="nc" id="L647">            verify(run.workspaces).removeForIdentifierIfPresent(eq(CARD_IDENTIFIER), any());</span>
+<span class="nc" id="L648">            verify(run.runner).run(any());</span>
+<span class="nc" id="L649">            verify(run.runner).cancel(worker);</span>
+        }
+<span class="nc" id="L651">    }</span>
+
+    @Test
+    void activeRecoveryDiscardsCancelledEntryWithoutRemovingWorkspace() throws Exception {
+        // given
+<span class="nc" id="L656">        try (var run = new HandoffRun(false, false, &quot;Done&quot;, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L657">            run.start();</span>
+<span class="nc" id="L658">            run.awaitFinalStarted();</span>
+<span class="nc" id="L659">            run.expireThroughTrackerOutage(&quot;failed&quot;);</span>
+<span class="nc" id="L660">            assertThat(run.orchestrator.snapshot().counts().running())</span>
+<span class="nc" id="L661">                    .as(&quot;unknown cleanup state does not report a healthy running worker&quot;)</span>
+<span class="nc" id="L662">                    .isZero();</span>
+
+            // when
+<span class="nc" id="L665">            run.tracker.setCardState(TestCards.card(CARD_ID, CARD_IDENTIFIER, ACTIVE_STATE));</span>
+<span class="nc" id="L666">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L669">            assertThat(run.orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L670">            assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L671">            assertThat(run.workspace.get()).isDirectory();</span>
+<span class="nc" id="L672">            verify(run.workspaces, never()).removeForIdentifierIfPresent(any(), any());</span>
+<span class="nc" id="L673">            verify(run.runner).run(any());</span>
+        }
+<span class="nc" id="L675">    }</span>
+
+    @Test
+    void confirmedMissingCardStillCompletesDeadlineCleanup() throws Exception {
+        // given
+<span class="nc" id="L680">        try (var run = new HandoffRun(false, false, &quot;Done&quot;, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L681">            run.start();</span>
+<span class="nc" id="L682">            run.awaitFinalStarted();</span>
+<span class="nc" id="L683">            run.tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L684">            run.tracker.cardStates = Map.of(CARD_ID, new CardLookupResult.Missing(CARD_ID));</span>
+<span class="nc" id="L685">            run.clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+
+            // when
+<span class="nc" id="L688">            run.deadlineTasks.getFirst().run();</span>
+<span class="nc bnc" id="L689" title="All 4 branches missed.">            waitUntil(() -&gt; run.orchestrator.snapshot().counts().running() == 0 &amp;&amp; !Files.exists(run.workspace.get()));</span>
+
+            // then
+<span class="nc" id="L692">            assertThat(run.orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L693">            verify(run.workspaces).removeForIdentifierIfPresent(eq(CARD_IDENTIFIER), any());</span>
+<span class="nc" id="L694">            verify(run.runner).run(any());</span>
+        }
+<span class="nc" id="L696">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void pendingCleanupUsesMatchingTrackerCredentialsAndOriginalWorkspace(boolean equivalentTarget) throws Exception {
+        // given
+<span class="nc" id="L702">        try (var run = new HandoffRun(false, false, &quot;Done&quot;, DEFAULT_TURN_TIMEOUT_MS)) {</span>
+<span class="nc" id="L703">            run.tracker.resolveConfiguredBoardId = true;</span>
+<span class="nc" id="L704">            run.start();</span>
+<span class="nc" id="L705">            run.awaitFinalStarted();</span>
+<span class="nc" id="L706">            run.expireThroughTrackerOutage(&quot;failed&quot;);</span>
+<span class="nc" id="L707">            run.orchestrator.stopWorkflowWatcherForTests();</span>
+<span class="nc" id="L708">            Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L709">            long modified = Files.getLastModifiedTime(workflow).toMillis();</span>
+<span class="nc bnc" id="L710" title="All 2 branches missed.">            String selectedBoard = equivalentTarget ? &quot;board-1&quot; : &quot;board-2&quot;;</span>
+<span class="nc" id="L711">            Files.writeString(</span>
+                    workflow,
+<span class="nc" id="L713">                    Files.readString(workflow)</span>
+<span class="nc" id="L714">                            .replace(&quot;kind: trello&quot;, &quot;kind: trello\n  endpoint: https://api.trello.com/1/&quot;)</span>
+<span class="nc" id="L715">                            .replace(&quot;api_token: token&quot;, &quot;api_token: rotated-token&quot;)</span>
+<span class="nc" id="L716">                            .replace(&quot;board_id: board-1&quot;, &quot;board_id: &quot; + selectedBoard)</span>
+<span class="nc" id="L717">                            .replace(&quot;root: work&quot;, &quot;root: replacement-work&quot;));</span>
+<span class="nc" id="L718">            Files.setLastModifiedTime(workflow, FileTime.fromMillis(modified + 2000));</span>
+            // The polling thread records lookup configs while the test observes their completion.
+<span class="nc" id="L720">            List&lt;EffectiveConfig&gt; lookups = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L721">            doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L722">                        lookups.add(invocation.getArgument(0));</span>
+<span class="nc" id="L723">                        return Map.of(CARD_ID, new CardLookupResult.Found(destination(&quot;Done&quot;, &quot;open&quot;)));</span>
+                    })
+<span class="nc" id="L725">                    .when(run.tracker)</span>
+<span class="nc" id="L726">                    .fetchCardStatesByIds(any(), any());</span>
+
+            // when
+<span class="nc" id="L729">            run.refresh();</span>
+
+            // then
+<span class="nc" id="L732">            assertThat(run.orchestrator.selectedBoardId()).isEqualTo(selectedBoard);</span>
+<span class="nc" id="L733">            assertThat(lookups).isNotEmpty().allSatisfy(lookup -&gt; {</span>
+<span class="nc" id="L734">                assertThat(lookup.tracker().resolvedBoardId()).isEqualTo(&quot;board-1&quot;);</span>
+<span class="nc bnc" id="L735" title="All 2 branches missed.">                assertThat(lookup.tracker().apiToken()).isEqualTo(equivalentTarget ? &quot;rotated-token&quot; : &quot;token&quot;);</span>
+<span class="nc" id="L736">            });</span>
+<span class="nc" id="L737">            assertThat(run.workspace.get()).doesNotExist();</span>
+<span class="nc" id="L738">            ArgumentCaptor&lt;EffectiveConfig&gt; cleanupConfig = ArgumentCaptor.forClass(EffectiveConfig.class);</span>
+<span class="nc" id="L739">            verify(run.workspaces).removeForIdentifierIfPresent(eq(CARD_IDENTIFIER), cleanupConfig.capture());</span>
+<span class="nc" id="L740">            assertThat(cleanupConfig.getValue().workspace().root())</span>
+<span class="nc" id="L741">                    .isEqualTo(run.workspace.get().getParent());</span>
+<span class="nc" id="L742">            verify(run.runner).run(any());</span>
+        }
+<span class="nc" id="L744">    }</span>
+
+    private final class HandoffRun implements AutoCloseable {
+<span class="nc" id="L747">        final Path releaseFinal = tempDir.resolve(&quot;release-final&quot;);</span>
+<span class="nc" id="L748">        final Path finalStarted = tempDir.resolve(&quot;final-started&quot;);</span>
+<span class="nc" id="L749">        final MutableClock clock = new MutableClock(Instant.parse(&quot;2026-01-01T00:00:00Z&quot;));</span>
+<span class="nc" id="L750">        final FakeTracker tracker =</span>
+<span class="nc" id="L751">                spy(new FakeTracker(List.of(TestCards.card(CARD_ID, CARD_IDENTIFIER, ACTIVE_STATE))));</span>
+<span class="nc" id="L752">        final CountDownLatch moved = new CountDownLatch(1);</span>
+        final CountDownLatch releaseMove;
+<span class="nc" id="L754">        final AtomicReference&lt;AgentRunResult&gt; result = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L755">        final AtomicReference&lt;AgentEventListener&gt; listener = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L756">        final AtomicReference&lt;Path&gt; workspace = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L757">        final AtomicInteger continuationCalls = new AtomicInteger();</span>
+<span class="nc" id="L758">        final AtomicInteger completedTicks = new AtomicInteger();</span>
+<span class="nc" id="L759">        final ScheduledExecutorService deadlineScheduler = mock();</span>
+        // Worker registrations append deadlines while the test thread observes and fires them.
+<span class="nc" id="L761">        final List&lt;Runnable&gt; deadlineTasks = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L762">        final WorkspaceManager workspaces = spy(new WorkspaceManager(new HookRunner()));</span>
+<span class="nc" id="L763">        final AgentRunner runner = mock();</span>
+<span class="nc" id="L764">        final TrelloClient trello = mock();</span>
+        boolean afterTurnMove;
+        boolean unconfirmedShutdown;
+        final SymphonyOrchestrator orchestrator;
+
+        HandoffRun(boolean pauseMove, boolean failMove, String target, int timeoutMillis) throws Exception {
+<span class="nc" id="L770">            this(pauseMove, failMove, target, timeoutMillis, &quot;&quot;);</span>
+<span class="nc" id="L771">        }</span>
+
+        HandoffRun(boolean pauseMove, boolean failMove, String target, int timeoutMillis, String extraCodexConfig)
+<span class="nc" id="L774">                throws Exception {</span>
+<span class="nc bnc" id="L775" title="All 2 branches missed.">            releaseMove = new CountDownLatch(pauseMove ? 1 : 0);</span>
+<span class="nc" id="L776">            Path appServer = appServer(releaseFinal, finalStarted, target);</span>
+<span class="nc" id="L777">            Path workflow = workflow(appServer, target, timeoutMillis, extraCodexConfig);</span>
+<span class="nc" id="L778">            when(trello.fetchBoardLists(any()))</span>
+<span class="nc" id="L779">                    .thenReturn(List.of(new TrelloClient.BoardList(&quot;list-review&quot;, target, false)));</span>
+<span class="nc" id="L780">            when(trello.moveCardToList(any(), eq(CARD_ID), eq(&quot;list-review&quot;))).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L781">                tracker.setCardState(destination(target, &quot;open&quot;));</span>
+<span class="nc" id="L782">                moved.countDown();</span>
+<span class="nc" id="L783">                assertThat(releaseMove.await(10, TimeUnit.SECONDS))</span>
+<span class="nc" id="L784">                        .as(&quot;the move response must be released after the forced reconciliation&quot;)</span>
+<span class="nc" id="L785">                        .isTrue();</span>
+<span class="nc bnc" id="L786" title="All 2 branches missed.">                if (failMove) {</span>
+<span class="nc" id="L787">                    throw new IllegalStateException(&quot;cannot move current card: expected a successful test response&quot;);</span>
+                }
+<span class="nc" id="L789">                return Map.of(&quot;id&quot;, CARD_ID, &quot;idList&quot;, &quot;list-review&quot;);</span>
+            });
+<span class="nc" id="L791">            var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, trello), clock);</span>
+<span class="nc" id="L792">            when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L793">                AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L794">                workspace.set(request.config().workspace().root().resolve(CARD_IDENTIFIER));</span>
+<span class="nc" id="L795">                Files.createDirectories(workspace.get());</span>
+<span class="nc" id="L796">                listener.set(spy(request.listener()));</span>
+<span class="nc bnc" id="L797" title="All 2 branches missed.">                if (afterTurnMove) {</span>
+<span class="nc" id="L798">                    doAnswer(callback -&gt; {</span>
+<span class="nc" id="L799">                                waitUntil(() -&gt; Files.exists(finalStarted));</span>
+<span class="nc" id="L800">                                return null;</span>
+                            })
+<span class="nc" id="L802">                            .when(listener.get())</span>
+<span class="nc" id="L803">                            .onSuccessfulTurn(any(), any());</span>
+                }
+<span class="nc" id="L805">                AgentRunResult completed = client.runSession(</span>
+<span class="nc" id="L806">                        request.config(),</span>
+<span class="nc" id="L807">                        request.card(),</span>
+<span class="nc" id="L808">                        workspace.get(),</span>
+<span class="nc" id="L809">                        request.prompt(),</span>
+<span class="nc" id="L810">                        request.workerIdentity(),</span>
+<span class="nc" id="L811">                        listener.get(),</span>
+                        turns -&gt; {
+<span class="nc" id="L813">                            continuationCalls.incrementAndGet();</span>
+<span class="nc bnc" id="L814" title="All 2 branches missed.">                            if (afterTurnMove) {</span>
+<span class="nc" id="L815">                                return CodexAppServerClient.TurnDecision.stop();</span>
+                            }
+<span class="nc" id="L817">                            return CodexAppServerClient.TurnDecision.continueWith(&quot;This turn must not start.&quot;);</span>
+                        });
+<span class="nc bnc" id="L819" title="All 2 branches missed.">                if (unconfirmedShutdown) {</span>
+<span class="nc" id="L820">                    completed = AgentRunResult.shutdownIncomplete(&quot;cannot release test workspace: exit is unconfirmed&quot;);</span>
+                }
+<span class="nc" id="L822">                result.set(completed);</span>
+<span class="nc" id="L823">                return completed;</span>
+            });
+<span class="nc" id="L825">            when(deadlineScheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS)))</span>
+<span class="nc" id="L826">                    .thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L827">                        deadlineTasks.add(invocation.getArgument(0));</span>
+<span class="nc" id="L828">                        return mock(ScheduledFuture.class);</span>
+                    });
+<span class="nc" id="L830">            orchestrator = new SymphonyOrchestrator(</span>
+                    new WorkflowLoader(),
+                    new ConfigResolver(),
+                    tracker,
+                    runner,
+                    new PromptRenderer(),
+                    workspaces,
+                    clock,
+<span class="nc" id="L838">                    Optional.of(successfulWorkpadHandler()),</span>
+                    NO_JITTER,
+<span class="nc" id="L840">                    Optional.of(deadlineScheduler));</span>
+<span class="nc" id="L841">            orchestrator.workflowPath = workflow;</span>
+<span class="nc" id="L842">            orchestrator.tickCompletionHookForTests = completedTicks::incrementAndGet;</span>
+<span class="nc" id="L843">        }</span>
+
+        void replaceWorker() throws Exception {
+<span class="nc" id="L846">            AgentEventListener previous = listener.get();</span>
+<span class="nc" id="L847">            tracker.setCardState(destination(REVIEW_LIST, &quot;other-list&quot;));</span>
+<span class="nc" id="L848">            refresh();</span>
+<span class="nc bnc" id="L849" title="All 2 branches missed.">            waitUntil(() -&gt; result.get() != null);</span>
+<span class="nc" id="L850">            result.set(null);</span>
+<span class="nc" id="L851">            Files.delete(finalStarted);</span>
+<span class="nc" id="L852">            tracker.setCardState(TestCards.card(CARD_ID, CARD_IDENTIFIER, ACTIVE_STATE));</span>
+<span class="nc" id="L853">            refresh();</span>
+<span class="nc bnc" id="L854" title="All 4 branches missed.">            waitUntil(() -&gt; !previous.equals(listener.get()) &amp;&amp; Files.exists(finalStarted));</span>
+<span class="nc" id="L855">        }</span>
+
+        void expireThroughTrackerOutage(String failure) throws Exception {
+<span class="nc" id="L858">            var exitFinished = new CountDownLatch(1);</span>
+<span class="nc" id="L859">            orchestrator.workerExitCompletionHookForTests = exitFinished::countDown;</span>
+<span class="nc" id="L860">            tracker.setCandidateList(List.of());</span>
+<span class="nc bnc" id="L861" title="All 4 branches missed.">            switch (failure) {</span>
+                case &quot;failed&quot; -&gt; {
+<span class="nc" id="L863">                    tracker.cardStates = Map.of(</span>
+                            CARD_ID,
+                            new CardLookupResult.Failed(
+                                    CARD_ID, &quot;test_unavailable&quot;, &quot;Tracker is unavailable in this test.&quot;));
+<span class="nc" id="L867">                }</span>
+                case &quot;absent&quot; -&gt; {
+<span class="nc" id="L869">                    tracker.cardStates = Map.of();</span>
+<span class="nc" id="L870">                }</span>
+                case &quot;exception&quot; -&gt; {
+<span class="nc" id="L872">                    tracker.stateFetchHook = () -&gt; {</span>
+<span class="nc" id="L873">                        throw new IllegalStateException(&quot;cannot refresh test tracker: expected successful recovery&quot;);</span>
+                    };
+<span class="nc" id="L875">                }</span>
+                default -&gt;
+<span class="nc" id="L877">                    throw new IllegalArgumentException(&quot;cannot configure tracker outage: expected a known test mode&quot;);</span>
+            }
+<span class="nc" id="L879">            clock.advance(HANDOFF_COMPLETION_WINDOW);</span>
+<span class="nc" id="L880">            deadlineTasks.getFirst().run();</span>
+<span class="nc" id="L881">            assertThat(exitFinished.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L882">                    .as(&quot;the interrupted worker finishes its failed cleanup lookup before recovery&quot;)</span>
+<span class="nc" id="L883">                    .isTrue();</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">            waitUntil(() -&gt; result.get() != null);</span>
+<span class="nc" id="L885">            clock.advance(STALL_TIMEOUT_ADVANCE);</span>
+<span class="nc" id="L886">            refresh();</span>
+<span class="nc" id="L887">        }</span>
+
+        void start() throws Exception {
+<span class="nc" id="L890">            orchestrator.start();</span>
+<span class="nc" id="L891">            boolean moveObserved = moved.await(8, TimeUnit.SECONDS);</span>
+<span class="nc" id="L892">            assertThat(moveObserved)</span>
+<span class="nc" id="L893">                    .as(&quot;the owned move must reach Trello; worker result: %s&quot;, result.get())</span>
+<span class="nc" id="L894">                    .isTrue();</span>
+<span class="nc" id="L895">        }</span>
+
+        void awaitFinalStarted() throws Exception {
+<span class="nc" id="L898">            waitUntil(() -&gt; Files.exists(finalStarted));</span>
+<span class="nc" id="L899">        }</span>
+
+        void refresh() throws Exception {
+<span class="nc" id="L902">            int beforeRefresh = completedTicks.get();</span>
+<span class="nc" id="L903">            orchestrator.requestRefresh();</span>
+<span class="nc bnc" id="L904" title="All 2 branches missed.">            waitUntil(() -&gt; completedTicks.get() &gt; beforeRefresh);</span>
+<span class="nc" id="L905">        }</span>
+
+        void finish() throws Exception {
+<span class="nc" id="L908">            awaitFinalStarted();</span>
+<span class="nc" id="L909">            Files.writeString(releaseFinal, &quot;finish&quot;);</span>
+<span class="nc" id="L910">            waitUntil(() -&gt;</span>
+<span class="nc bnc" id="L911" title="All 4 branches missed.">                    result.get() != null &amp;&amp; orchestrator.snapshot().counts().running() == 0);</span>
+<span class="nc" id="L912">        }</span>
+
+        CardHandoffMove move() {
+<span class="nc" id="L915">            ArgumentCaptor&lt;CardHandoffMove&gt; moves = ArgumentCaptor.forClass(CardHandoffMove.class);</span>
+<span class="nc" id="L916">            verify(listener.get(), atLeastOnce()).beforeHandoffMove(moves.capture());</span>
+<span class="nc" id="L917">            return moves.getAllValues().getFirst();</span>
+        }
+
+        void assertCompletedFinal() {
+<span class="nc" id="L921">            assertThat(result.get()).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L922">            assertThat(continuationCalls).hasValue(0);</span>
+<span class="nc" id="L923">            ArgumentCaptor&lt;AgentEvent&gt; events = ArgumentCaptor.forClass(AgentEvent.class);</span>
+<span class="nc" id="L924">            verify(listener.get(), atLeastOnce()).onEvent(events.capture());</span>
+<span class="nc" id="L925">            assertThat(events.getAllValues())</span>
+<span class="nc" id="L926">                    .filteredOn(event -&gt; &quot;item/completed&quot;.equals(event.event()))</span>
+<span class="nc" id="L927">                    .singleElement()</span>
+<span class="nc" id="L928">                    .satisfies(</span>
+<span class="nc" id="L929">                            event -&gt; assertThat(event.payload().at(&quot;/item/text&quot;).asText())</span>
+<span class="nc" id="L930">                                    .isEqualTo(&quot;Complete handoff. Copy this evidence before merge approval.&quot;));</span>
+<span class="nc" id="L931">            verify(listener.get()).onSuccessfulTurn(&quot;thread-handoff&quot;, &quot;turn-handoff&quot;);</span>
+<span class="nc" id="L932">        }</span>
+
+        @Override
+        public void close() throws Exception {
+<span class="nc" id="L936">            releaseMove.countDown();</span>
+<span class="nc" id="L937">            Files.writeString(releaseFinal, &quot;finish&quot;);</span>
+<span class="nc" id="L938">            orchestrator.stop();</span>
+<span class="nc" id="L939">        }</span>
+    }
+
+    private Card destination(String state, String change) {
+<span class="nc" id="L943">        return new Card(</span>
+                CARD_ID,
+                CARD_IDENTIFIER,
+                &quot;Handoff&quot;,
+                &quot;Description&quot;,
+                null,
+                state,
+                &quot;list&quot;,
+<span class="nc bnc" id="L951" title="All 2 branches missed.">                &quot;other-list&quot;.equals(change) ? &quot;list-other&quot; : &quot;list-review&quot;,</span>
+                state,
+<span class="nc bnc" id="L953" title="All 2 branches missed.">                &quot;unknown-list-open&quot;.equals(change) ? null : &quot;list-archived&quot;.equals(change),</span>
+<span class="nc bnc" id="L954" title="All 2 branches missed.">                &quot;other-board&quot;.equals(change) ? &quot;board-other&quot; : &quot;board-1&quot;,</span>
+<span class="nc bnc" id="L955" title="All 2 branches missed.">                &quot;unknown-board-open&quot;.equals(change) ? null : &quot;board-archived&quot;.equals(change),</span>
+<span class="nc" id="L956">                &quot;archived&quot;.equals(change),</span>
+<span class="nc" id="L957">                1,</span>
+                &quot;SYNTH101&quot;,
+                &quot;https://trello.com/c/SYNTH101&quot;,
+                null,
+                &quot;https://trello.com/c/SYNTH101&quot;,
+<span class="nc" id="L962">                List.of(),</span>
+<span class="nc" id="L963">                List.of(),</span>
+<span class="nc" id="L964">                List.of(),</span>
+<span class="nc" id="L965">                List.of(),</span>
+<span class="nc" id="L966">                List.of(),</span>
+<span class="nc" id="L967">                List.of(),</span>
+<span class="nc" id="L968">                List.of(),</span>
+<span class="nc" id="L969">                List.of(),</span>
+<span class="nc" id="L970">                List.of(),</span>
+                null,
+                null,
+                null,
+<span class="nc" id="L974">                false,</span>
+                null);
+    }
+
+    private Path workflow(Path appServer, String target, int timeoutMillis, String extraCodexConfig) throws Exception {
+<span class="nc" id="L979">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L980">        Files.writeString(</span>
+                workflow,
+                &quot;&quot;&quot;
+                ---
+                tracker:
+                  kind: trello
+                  api_key: key
+                  api_token: token
+                  board_id: board-1
+                  active_states: [%s]
+                workspace:
+                  root: work
+                polling:
+                  interval_ms: 60000
+                trello_tools:
+                  enabled: true
+                  allow_writes: true
+                  allow_comments: false
+                  allowed_move_list_names: [%s]
+                codex:
+                  command: &quot;bash %s&quot;
+                  read_timeout_ms: 5000
+                  turn_timeout_ms: %d
+                %s---
+                Finish the handoff and its final response.
+                &quot;&quot;&quot;
+<span class="nc" id="L1006">                        .formatted(ACTIVE_STATE, target, appServer, timeoutMillis, extraCodexConfig.indent(2)));</span>
+<span class="nc" id="L1007">        return workflow;</span>
+    }
+
+    private Path appServer(Path releaseFinal, Path finalStarted, String target) throws Exception {
+<span class="nc" id="L1011">        Path script = tempDir.resolve(&quot;handoff-app-server.sh&quot;);</span>
+<span class="nc" id="L1012">        Files.writeString(</span>
+                script,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                set -eu
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;handoff-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-handoff&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-handoff&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/started&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-handoff&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-handoff&quot;}}}'
+                      echo '{&quot;id&quot;:100,&quot;method&quot;:&quot;item/tool/call&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-handoff&quot;,&quot;turnId&quot;:&quot;turn-handoff&quot;,&quot;tool&quot;:&quot;trello_move_current_card&quot;,&quot;arguments&quot;:{&quot;list_name&quot;:&quot;%s&quot;}}}'
+                      ;;
+                    *\\&quot;id\\&quot;:100*)
+                      echo '{&quot;method&quot;:&quot;item/started&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-handoff&quot;,&quot;turnId&quot;:&quot;turn-handoff&quot;,&quot;item&quot;:{&quot;id&quot;:&quot;final-handoff&quot;,&quot;type&quot;:&quot;agentMessage&quot;,&quot;phase&quot;:&quot;final_answer&quot;,&quot;text&quot;:&quot;Handoff:&quot;}}}'
+                      touch '__FINAL_STARTED__'
+                      for attempt in {1..1000}; do
+                        if test -e '__RELEASE_FINAL__'; then break; fi
+                        sleep 0.01
+                      done
+                      test -e '__RELEASE_FINAL__'
+                      echo '{&quot;method&quot;:&quot;item/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-handoff&quot;,&quot;turnId&quot;:&quot;turn-handoff&quot;,&quot;item&quot;:{&quot;id&quot;:&quot;final-handoff&quot;,&quot;type&quot;:&quot;agentMessage&quot;,&quot;phase&quot;:&quot;final_answer&quot;,&quot;text&quot;:&quot;Complete handoff. Copy this evidence before merge approval.&quot;}}}'
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-handoff&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-handoff&quot;,&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;
+<span class="nc" id="L1040">                        .formatted(target)</span>
+<span class="nc" id="L1041">                        .replace(&quot;__FINAL_STARTED__&quot;, finalStarted.toString())</span>
+<span class="nc" id="L1042">                        .replace(&quot;__RELEASE_FINAL__&quot;, releaseFinal.toString()));</span>
+<span class="nc" id="L1043">        return script;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -1,0 +1,925 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalFinalResponseTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">LocalFinalResponseTest.java</span></div><h1>LocalFinalResponseTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import static java.nio.file.Files.getPosixFilePermissions;
+import static java.nio.file.attribute.PosixFilePermissions.fromString;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.Sha3;
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.prompt.PromptRenderer;
+import ch.fmartin.symphony.trello.tracker.TrackerClient;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import ch.fmartin.symphony.trello.workspace.HookRunner;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L50">final class LocalFinalResponseTest {</span>
+    private static final int STICKY_SHARED_DIRECTORY_MODE = 1023;
+    private static final long WAIT_SECONDS = 10;
+    private static final String WORKER = &quot;synthetic-worker&quot;;
+    private static final String THREAD = &quot;synthetic-thread&quot;;
+    private static final String TURN = &quot;synthetic-turn&quot;;
+    private static final String RESPONSE =
+            &quot;Branch-only handoff, no pull request.\nCopy this complete handoff before Merging.\n&quot;;
+<span class="nc" id="L58">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void completedFinalResponseRemainsReadableAfterWorkerAndTaskWorkspaceEnd() throws Exception {
+        // given
+<span class="nc" id="L66">        EffectiveConfig config = config();</span>
+<span class="nc" id="L67">        Card card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-SYNTH001&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L68">        CodexAppServerClient codex = mock();</span>
+<span class="nc" id="L69">        when(codex.runSession(any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L70">            AgentEventListener listener = invocation.getArgument(5);</span>
+<span class="nc" id="L71">            successfulAnswer(listener, WORKER, RESPONSE);</span>
+<span class="nc" id="L72">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L74">        var workspaces = new WorkspaceManager(new HookRunner());</span>
+<span class="nc" id="L75">        var runner = new LocalAgentRunner(</span>
+<span class="nc" id="L76">                workspaces, new HookRunner(), codex, mock(TrackerClient.class), new PromptRenderer());</span>
+
+        // when
+<span class="nc" id="L79">        AgentRunResult result =</span>
+<span class="nc" id="L80">                runner.run(new AgentRunner.AgentRunRequest(card, null, &quot;Task&quot;, config, WORKER, event -&gt; {}));</span>
+<span class="nc" id="L81">        workspaces.removeForIdentifierIfPresent(card.identifier(), config);</span>
+
+        // then
+<span class="nc" id="L84">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L85">        Path outputs = config.workspace().root().resolve(&quot;.symphony+final-responses&quot;);</span>
+<span class="nc" id="L86">        assertThat(outputs).isDirectory();</span>
+<span class="nc" id="L87">        List&lt;Path&gt; records = records(config);</span>
+<span class="nc" id="L88">        assertThat(records).singleElement().satisfies(path -&gt; {</span>
+<span class="nc" id="L89">            var record = JSON.readTree(path.toFile());</span>
+<span class="nc" id="L90">            assertThat(record.path(&quot;status&quot;).asText()).isEqualTo(&quot;completed&quot;);</span>
+<span class="nc" id="L91">            assertThat(record.path(&quot;response&quot;).asText()).isEqualTo(RESPONSE);</span>
+<span class="nc" id="L92">            assertThat(record.path(&quot;worker_identity&quot;).asText()).isEqualTo(WORKER);</span>
+<span class="nc" id="L93">            assertThat(record.path(&quot;thread_id&quot;).asText()).isEqualTo(THREAD);</span>
+<span class="nc" id="L94">            assertThat(record.path(&quot;turn_id&quot;).asText()).isEqualTo(TURN);</span>
+<span class="nc" id="L95">            assertThat(record.path(&quot;card_id&quot;).asText()).isEqualTo(card.id());</span>
+<span class="nc" id="L96">        });</span>
+<span class="nc" id="L97">    }</span>
+
+    @EnumSource(IncompleteFinal.class)
+    @ParameterizedTest
+    void incompleteOrUntrustedTurnDoesNotPublishResponse(IncompleteFinal scenario) throws Exception {
+        // given
+<span class="nc" id="L103">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L104">        var request = request(config(), WORKER);</span>
+<span class="nc" id="L105">        try (var recording = store.begin(request).orElseThrow()) {</span>
+<span class="nc" id="L106">            AgentEventListener delegate = new AgentEventListener() {</span>
+                @Override
+<span class="nc" id="L108">                public void onEvent(AgentEvent event) {}</span>
+
+                @Override
+                public boolean onEventAndReportAccepted(AgentEvent event) {
+<span class="nc bnc" id="L112" title="All 6 branches missed.">                    return !(scenario == IncompleteFinal.REJECTED_FINAL &amp;&amp; &quot;item/completed&quot;.equals(event.event()))</span>
+                            &amp;&amp; !(scenario == IncompleteFinal.REJECTED_COMPLETION
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                                    &amp;&amp; &quot;turn/completed&quot;.equals(event.event()));</span>
+                }
+            };
+<span class="nc" id="L117">            AgentEventListener listener = recording.listener(delegate);</span>
+<span class="nc" id="L118">            String text =</span>
+<span class="nc bnc" id="L119" title="All 4 branches missed.">                    switch (scenario) {</span>
+<span class="nc" id="L120">                        case BLANK -&gt; &quot; \n\t&quot;;</span>
+<span class="nc" id="L121">                        case EMPTY -&gt; &quot;&quot;;</span>
+<span class="nc" id="L122">                        case OVERSIZED -&gt; &quot;x&quot;.repeat(FinalResponseStore.MAX_RESPONSE_BYTES + 1);</span>
+<span class="nc" id="L123">                        default -&gt; RESPONSE;</span>
+                    };
+
+            // when
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (scenario == IncompleteFinal.PARTIAL_FINAL) {</span>
+<span class="nc" id="L128">                var partial = JSON.createObjectNode();</span>
+<span class="nc" id="L129">                partial.putObject(&quot;item&quot;)</span>
+<span class="nc" id="L130">                        .put(&quot;type&quot;, &quot;agentMessage&quot;)</span>
+<span class="nc" id="L131">                        .put(&quot;phase&quot;, &quot;final_answer&quot;)</span>
+<span class="nc" id="L132">                        .put(&quot;text&quot;, &quot;Partial&quot;);</span>
+<span class="nc" id="L133">                listener.onEvent(event(&quot;item/started&quot;, WORKER, THREAD, TURN, partial));</span>
+<span class="nc" id="L134">                listener.onEvent(event(</span>
+                        &quot;item/agentMessage/delta&quot;,
+                        WORKER,
+                        THREAD,
+                        TURN,
+<span class="nc" id="L139">                        JSON.createObjectNode().put(&quot;delta&quot;, &quot;Partial&quot;)));</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">            } else if (scenario != IncompleteFinal.MISSING_FINAL) {</span>
+<span class="nc" id="L141">                finalAnswer(listener, WORKER, THREAD, TURN, text);</span>
+            }
+<span class="nc" id="L143">            completedTurn(</span>
+                    listener,
+                    WORKER,
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                    scenario == IncompleteFinal.WRONG_THREAD ? &quot;another-thread&quot; : THREAD,</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">                    scenario == IncompleteFinal.WRONG_TURN ? &quot;another-turn&quot; : TURN,</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                    scenario == IncompleteFinal.FAILED_STATUS ? &quot;failed&quot; : &quot;completed&quot;);</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            if (scenario != IncompleteFinal.NO_SUCCESS_CALLBACK) {</span>
+<span class="nc" id="L150">                listener.onSuccessfulTurn(THREAD, TURN);</span>
+            }
+<span class="nc" id="L152">            AgentRunResult result = recording.finish(</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                    scenario == IncompleteFinal.FAILED_RUN</span>
+<span class="nc" id="L154">                            ? AgentRunResult.fail(&quot;synthetic failure&quot;)</span>
+<span class="nc" id="L155">                            : AgentRunResult.ok());</span>
+
+            // then
+<span class="nc" id="L158">            assertThat(result.success())</span>
+<span class="nc" id="L159">                    .as(&quot;incomplete or rejected output must fail delivery&quot;)</span>
+<span class="nc" id="L160">                    .isFalse();</span>
+<span class="nc" id="L161">            JsonNode record = readOnlyRecord(config());</span>
+<span class="nc" id="L162">            assertThat(record.path(&quot;status&quot;).asText()).isEqualTo(&quot;failed&quot;);</span>
+<span class="nc" id="L163">            assertThat(record.has(&quot;response&quot;))</span>
+<span class="nc" id="L164">                    .as(&quot;failed output must not expose a current handoff&quot;)</span>
+<span class="nc" id="L165">                    .isFalse();</span>
+        }
+<span class="nc" id="L167">    }</span>
+
+    @Test
+    void lateDuplicateStartDoesNotEraseCompletedFinalForSameTurn() throws Exception {
+        // given
+<span class="nc" id="L172">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L173">        EffectiveConfig config = config();</span>
+<span class="nc" id="L174">        try (var recording = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+<span class="nc" id="L175">            AgentEventListener listener = recording.listener(event -&gt; {});</span>
+
+            // when
+<span class="nc" id="L178">            finalAnswer(listener, WORKER, THREAD, TURN, RESPONSE);</span>
+<span class="nc" id="L179">            completedTurn(listener, WORKER, THREAD, TURN, &quot;completed&quot;);</span>
+<span class="nc" id="L180">            listener.onEvent(event(&quot;session_started&quot;, WORKER, THREAD, TURN, JSON.createObjectNode()));</span>
+<span class="nc" id="L181">            listener.onSuccessfulTurn(THREAD, TURN);</span>
+<span class="nc" id="L182">            AgentRunResult result = recording.finish(AgentRunResult.ok());</span>
+
+            // then
+<span class="nc" id="L185">            assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L186">            assertThat(readOnlyRecord(config).path(&quot;response&quot;).asText()).isEqualTo(RESPONSE);</span>
+        }
+<span class="nc" id="L188">    }</span>
+
+    @Test
+    void anotherTurnCannotReuseEarlierCompletedAnswer() throws Exception {
+        // given
+<span class="nc" id="L193">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L194">        EffectiveConfig config = config();</span>
+<span class="nc" id="L195">        try (var recording = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+<span class="nc" id="L196">            AgentEventListener listener = recording.listener(event -&gt; {});</span>
+<span class="nc" id="L197">            successfulAnswer(listener, WORKER, RESPONSE);</span>
+
+            // when
+<span class="nc" id="L200">            listener.onEvent(event(&quot;session_continued&quot;, WORKER, THREAD, &quot;later-turn&quot;, JSON.createObjectNode()));</span>
+<span class="nc" id="L201">            listener.onSuccessfulTurn(THREAD, &quot;later-turn&quot;);</span>
+<span class="nc" id="L202">            AgentRunResult result = recording.finish(AgentRunResult.ok());</span>
+
+            // then
+<span class="nc" id="L205">            assertThat(result.success())</span>
+<span class="nc" id="L206">                    .as(&quot;a new turn needs its own final answer and accepted completion&quot;)</span>
+<span class="nc" id="L207">                    .isFalse();</span>
+<span class="nc" id="L208">            assertThat(readOnlyRecord(config).has(&quot;response&quot;))</span>
+<span class="nc" id="L209">                    .as(&quot;prior-turn response must be absent&quot;)</span>
+<span class="nc" id="L210">                    .isFalse();</span>
+        }
+<span class="nc" id="L212">    }</span>
+
+    @Test
+    void nextAttemptInvalidatesCompletedResponseBeforeWorkStarts() throws Exception {
+        // given
+<span class="nc" id="L217">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L218">        EffectiveConfig config = config();</span>
+<span class="nc" id="L219">        complete(store, request(config, WORKER), RESPONSE);</span>
+<span class="nc" id="L220">        var next = request(config, &quot;next-worker&quot;);</span>
+
+        // when
+<span class="nc" id="L223">        var recording = store.begin(next).orElseThrow();</span>
+<span class="nc" id="L224">        try (recording) {</span>
+
+            // then
+<span class="nc" id="L227">            JsonNode current = readOnlyRecord(config);</span>
+<span class="nc" id="L228">            assertThat(current.path(&quot;status&quot;).asText()).isEqualTo(&quot;running&quot;);</span>
+<span class="nc" id="L229">            assertThat(current.path(&quot;worker_identity&quot;).asText()).isEqualTo(next.workerIdentity());</span>
+<span class="nc" id="L230">            assertThat(current.has(&quot;response&quot;))</span>
+<span class="nc" id="L231">                    .as(&quot;accepted attempt must clear prior completed output before work&quot;)</span>
+<span class="nc" id="L232">                    .isFalse();</span>
+        }
+<span class="nc" id="L234">        assertThat(readOnlyRecord(config).path(&quot;status&quot;).asText()).isEqualTo(&quot;failed&quot;);</span>
+<span class="nc" id="L235">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void ineligibleNextAttemptRemovesPreviousResponseWithoutCreatingUnrelatedOutput(boolean enableEvidence)
+            throws Exception {
+        // given
+<span class="nc" id="L242">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L243">        EffectiveConfig previous = config();</span>
+<span class="nc" id="L244">        complete(store, request(previous, WORKER), RESPONSE);</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">        EffectiveConfig next = config(enableEvidence ? &quot;branch_only&quot; : &quot;create&quot;, enableEvidence);</span>
+
+        // when
+<span class="nc" id="L248">        var recording = store.begin(request(next, &quot;next-worker&quot;));</span>
+
+        // then
+<span class="nc" id="L251">        assertThat(recording).isEmpty();</span>
+<span class="nc" id="L252">        assertThat(records(next)).isEmpty();</span>
+<span class="nc" id="L253">        EffectiveConfig unrelated = configAt(tempDir.resolve(&quot;other&quot;), &quot;create&quot;, true);</span>
+<span class="nc" id="L254">        assertThat(store.begin(request(unrelated, &quot;unrelated-worker&quot;))).isEmpty();</span>
+<span class="nc" id="L255">        assertThat(unrelated.workspace().root()).doesNotExist();</span>
+<span class="nc" id="L256">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;https://api.trello.com/1///&quot;, &quot;HTTPS://API.TRELLO.COM.:443/1&quot;})
+    void equivalentEndpointNextAttemptInvalidatesPreviousResponse(String endpoint) throws Exception {
+        // given
+<span class="nc" id="L262">        var previous = completedResponse();</span>
+<span class="nc" id="L263">        EffectiveConfig next = configAt(tempDir, &quot;branch_only&quot;, false, endpoint);</span>
+
+        // when
+<span class="nc" id="L266">        var recording = previous.store().begin(request(next, &quot;next-worker&quot;)).orElseThrow();</span>
+<span class="nc" id="L267">        try (recording) {</span>
+
+            // then
+<span class="nc" id="L270">            assertThat(records(next)).containsExactly(previous.path());</span>
+<span class="nc" id="L271">            JsonNode current = JSON.readTree(previous.path().toFile());</span>
+<span class="nc" id="L272">            assertThat(current.path(&quot;status&quot;).asText()).isEqualTo(&quot;running&quot;);</span>
+<span class="nc" id="L273">            assertThat(current.path(&quot;worker_identity&quot;).asText()).isEqualTo(&quot;next-worker&quot;);</span>
+<span class="nc" id="L274">            assertThat(current.has(&quot;response&quot;))</span>
+<span class="nc" id="L275">                    .as(&quot;an equivalent endpoint must not leave the previous handoff marked completed&quot;)</span>
+<span class="nc" id="L276">                    .isFalse();</span>
+        }
+<span class="nc" id="L278">    }</span>
+
+    @CsvSource({
+        &quot;https://api.trello.com/1///, create, false&quot;,
+        &quot;HTTPS://API.TRELLO.COM.:443/1, create, false&quot;,
+        &quot;https://api.trello.com/1///, branch_only, true&quot;,
+        &quot;HTTPS://API.TRELLO.COM.:443/1, branch_only, true&quot;
+    })
+    @ParameterizedTest
+    void equivalentEndpointIneligibleAttemptRemovesPreviousResponse(
+            String endpoint, String mode, boolean enableEvidence) throws Exception {
+        // given
+<span class="nc" id="L290">        var previous = completedResponse();</span>
+<span class="nc" id="L291">        EffectiveConfig next = configAt(tempDir, mode, enableEvidence, endpoint);</span>
+
+        // when
+<span class="nc" id="L294">        var recording = previous.store().begin(request(next, &quot;next-worker&quot;));</span>
+
+        // then
+<span class="nc" id="L297">        assertThat(recording).isEmpty();</span>
+<span class="nc" id="L298">        assertThat(previous.path()).doesNotExist();</span>
+<span class="nc" id="L299">        assertThat(records(next)).isEmpty();</span>
+<span class="nc" id="L300">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                &quot;https://other.example.test/1&quot;,
+                &quot;https://api.trello.com:8443/1&quot;,
+                &quot;https://api.trello.com/2&quot;,
+                &quot;https://api.trello.com/1?tenant=other&quot;
+            })
+    void distinctEndpointAttemptsLeaveOtherTargetResponseIntact(String endpoint) throws Exception {
+        // given
+<span class="nc" id="L312">        var previous = completedResponse();</span>
+<span class="nc" id="L313">        EffectiveConfig ineligible = configAt(tempDir, &quot;create&quot;, false, endpoint);</span>
+<span class="nc" id="L314">        EffectiveConfig eligible = configAt(tempDir, &quot;branch_only&quot;, false, endpoint);</span>
+
+        // when
+<span class="nc" id="L317">        var skippedRecording = previous.store().begin(request(ineligible, &quot;ineligible-worker&quot;));</span>
+<span class="nc" id="L318">        var recording = previous.store().begin(request(eligible, &quot;next-worker&quot;)).orElseThrow();</span>
+<span class="nc" id="L319">        try (recording) {</span>
+
+            // then
+<span class="nc" id="L322">            assertThat(skippedRecording).isEmpty();</span>
+<span class="nc" id="L323">            assertThat(records(previous.config())).hasSize(2).contains(previous.path());</span>
+<span class="nc" id="L324">            JsonNode old = JSON.readTree(previous.path().toFile());</span>
+<span class="nc" id="L325">            assertThat(old.path(&quot;status&quot;).asText()).isEqualTo(&quot;completed&quot;);</span>
+<span class="nc" id="L326">            assertThat(old.path(&quot;response&quot;).asText()).isEqualTo(RESPONSE);</span>
+        }
+<span class="nc" id="L328">    }</span>
+
+    @Test
+    void noPrLabelUsesExistingEffectiveHandoffResolution() throws Exception {
+        // given
+<span class="nc" id="L333">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L334">        EffectiveConfig config = config(&quot;create&quot;, false);</span>
+<span class="nc" id="L335">        Card card = TestCards.cardWithLabels(&quot;card-1&quot;, &quot;TRELLO-SYNTH001&quot;, &quot;In Progress&quot;, List.of(&quot;No PR&quot;));</span>
+<span class="nc" id="L336">        var request = new AgentRunner.AgentRunRequest(card, null, &quot;Task&quot;, config, WORKER, event -&gt; {});</span>
+
+        // when
+<span class="nc" id="L339">        complete(store, request, RESPONSE);</span>
+
+        // then
+<span class="nc" id="L342">        assertThat(readOnlyRecord(config).path(&quot;response&quot;).asText()).isEqualTo(RESPONSE);</span>
+<span class="nc" id="L343">    }</span>
+
+    @Test
+    void staleWorkerCannotOverwriteNewerCompletedAttempt() throws Exception {
+        // given
+<span class="nc" id="L348">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L349">        EffectiveConfig config = config();</span>
+<span class="nc" id="L350">        var oldReady = new CountDownLatch(1);</span>
+<span class="nc" id="L351">        var releaseOld = new CountDownLatch(1);</span>
+<span class="nc" id="L352">        try (var executor = Executors.newSingleThreadExecutor()) {</span>
+<span class="nc" id="L353">            var oldResult = executor.submit(() -&gt; {</span>
+<span class="nc" id="L354">                try (var recording = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+<span class="nc" id="L355">                    successfulAnswer(recording.listener(event -&gt; {}), WORKER, &quot;Old response&quot;);</span>
+<span class="nc" id="L356">                    oldReady.countDown();</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                    if (!releaseOld.await(WAIT_SECONDS, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L358">                        throw new IllegalStateException(</span>
+                                &quot;cannot await newer fixture attempt: expected release before the deadline&quot;);
+                    }
+<span class="nc" id="L361">                    return recording.finish(AgentRunResult.ok());</span>
+                }
+            });
+            try {
+<span class="nc" id="L365">                assertThat(oldReady.await(WAIT_SECONDS, TimeUnit.SECONDS))</span>
+<span class="nc" id="L366">                        .as(&quot;older worker must have a completed answer before newer attempt starts&quot;)</span>
+<span class="nc" id="L367">                        .isTrue();</span>
+
+                // when
+<span class="nc" id="L370">                complete(store, request(config, &quot;new-worker&quot;), &quot;New response&quot;);</span>
+<span class="nc" id="L371">                releaseOld.countDown();</span>
+
+                // then
+                try {
+<span class="nc" id="L375">                    oldResult.get(WAIT_SECONDS, TimeUnit.SECONDS);</span>
+<span class="nc" id="L376">                } catch (ExecutionException e) {</span>
+<span class="nc" id="L377">                    assertThat(e.getCause()).isInstanceOf(IllegalStateException.class);</span>
+<span class="nc" id="L378">                }</span>
+<span class="nc" id="L379">                JsonNode current = readOnlyRecord(config);</span>
+<span class="nc" id="L380">                assertThat(current.path(&quot;worker_identity&quot;).asText()).isEqualTo(&quot;new-worker&quot;);</span>
+<span class="nc" id="L381">                assertThat(current.path(&quot;response&quot;).asText()).isEqualTo(&quot;New response&quot;);</span>
+            } finally {
+<span class="nc" id="L383">                releaseOld.countDown();</span>
+            }
+        }
+<span class="nc" id="L386">    }</span>
+
+    @Test
+    void retentionBoundsFinishedRecordsWithoutEvictingActiveAttempt() throws Exception {
+        // given
+<span class="nc" id="L391">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L392">        EffectiveConfig config = config();</span>
+<span class="nc" id="L393">        try (var active = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+
+            // when
+<span class="nc bnc" id="L396" title="All 2 branches missed.">            for (int index = 0; index &lt;= FinalResponseStore.MAX_FINISHED_RECORDS; index++) {</span>
+<span class="nc" id="L397">                Card card = TestCards.card(&quot;finished-&quot; + index, &quot;TRELLO-FINISHED&quot; + index, &quot;In Progress&quot;);</span>
+<span class="nc" id="L398">                complete(</span>
+                        store,
+<span class="nc" id="L400">                        new AgentRunner.AgentRunRequest(card, null, &quot;Task&quot;, config, &quot;worker-&quot; + index, event -&gt; {}),</span>
+                        RESPONSE);
+            }
+
+            // then
+<span class="nc" id="L405">            List&lt;Path&gt; retained = records(config);</span>
+<span class="nc" id="L406">            assertThat(retained)</span>
+<span class="nc" id="L407">                    .hasSize(FinalResponseStore.MAX_FINISHED_RECORDS + 1)</span>
+<span class="nc" id="L408">                    .extracting(</span>
+<span class="nc" id="L409">                            path -&gt; JSON.readTree(path.toFile()).path(&quot;status&quot;).asText())</span>
+<span class="nc" id="L410">                    .filteredOn(&quot;running&quot;::equals)</span>
+<span class="nc" id="L411">                    .hasSize(1);</span>
+<span class="nc" id="L412">            assertThat(active.finish(AgentRunResult.fail(&quot;synthetic cancellation&quot;))</span>
+<span class="nc" id="L413">                            .success())</span>
+<span class="nc" id="L414">                    .as(&quot;cancelling the active attempt must not publish a response&quot;)</span>
+<span class="nc" id="L415">                    .isFalse();</span>
+        }
+<span class="nc" id="L417">    }</span>
+
+    @EnumSource(InvalidRecord.class)
+    @ParameterizedTest
+    void invalidExistingRecordStopsAttemptBeforeAnyNewOutput(InvalidRecord invalid) throws Exception {
+        // given
+<span class="nc" id="L423">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L424">        EffectiveConfig config = config();</span>
+<span class="nc" id="L425">        complete(store, request(config, WORKER), RESPONSE);</span>
+<span class="nc" id="L426">        Path file = records(config).getFirst();</span>
+<span class="nc" id="L427">        JsonNode original = JSON.readTree(file.toFile());</span>
+<span class="nc bnc" id="L428" title="All 8 branches missed.">        switch (invalid) {</span>
+            case DIRECTORY -&gt; {
+<span class="nc" id="L430">                Files.delete(file);</span>
+<span class="nc" id="L431">                Files.createDirectory(file);</span>
+<span class="nc" id="L432">            }</span>
+<span class="nc" id="L433">            case MALFORMED -&gt; Files.writeString(file, &quot;{&quot;);</span>
+<span class="nc" id="L434">            case STATUS -&gt; Files.writeString(file, &quot;{}&quot;);</span>
+            case WRONG_CARD -&gt; {
+<span class="nc" id="L436">                ((ObjectNode) original).put(&quot;card_id&quot;, &quot;other-card&quot;);</span>
+<span class="nc" id="L437">                JSON.writeValue(file.toFile(), original);</span>
+<span class="nc" id="L438">            }</span>
+            case TIMESTAMP -&gt; {
+<span class="nc" id="L440">                ((ObjectNode) original).put(&quot;updated_at&quot;, &quot;not-an-instant&quot;);</span>
+<span class="nc" id="L441">                JSON.writeValue(file.toFile(), original);</span>
+<span class="nc" id="L442">            }</span>
+            case INCOMPLETE_RESPONSE -&gt; {
+<span class="nc" id="L444">                ((ObjectNode) original).put(&quot;status&quot;, &quot;running&quot;);</span>
+<span class="nc" id="L445">                JSON.writeValue(file.toFile(), original);</span>
+<span class="nc" id="L446">            }</span>
+<span class="nc" id="L447">            case OVERSIZED -&gt; Files.write(file, new byte[FinalResponseStore.MAX_RECORD_BYTES + 1]);</span>
+        }
+
+        // when
+<span class="nc" id="L451">        Throwable failure = catchThrowable(() -&gt; store.begin(request(config, &quot;next-worker&quot;)));</span>
+
+        // then
+<span class="nc" id="L454">        assertThat(failure)</span>
+<span class="nc" id="L455">                .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L456">                .hasMessageStartingWith(&quot;cannot prepare local final response&quot;)</span>
+<span class="nc" id="L457">                .hasCauseInstanceOf(IOException.class);</span>
+<span class="nc" id="L458">    }</span>
+
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @Test
+    void symlinkedOutputAncestorIsRejectedWithoutWritingThroughIt() throws Exception {
+        // given
+<span class="nc" id="L464">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L465">        EffectiveConfig config = config();</span>
+<span class="nc" id="L466">        Files.createDirectories(config.workspace().root());</span>
+<span class="nc" id="L467">        Path outside = Files.createDirectory(tempDir.resolve(&quot;outside&quot;));</span>
+<span class="nc" id="L468">        Files.createSymbolicLink(config.workspace().root().resolve(FinalResponseStore.DIRECTORY), outside);</span>
+
+        // when
+<span class="nc" id="L471">        Throwable failure = catchThrowable(() -&gt; store.begin(request(config, WORKER)));</span>
+
+        // then
+<span class="nc" id="L474">        assertThat(failure)</span>
+<span class="nc" id="L475">                .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L476">                .hasMessageStartingWith(&quot;cannot prepare local final response&quot;);</span>
+<span class="nc" id="L477">        assertThat(outside).isEmptyDirectory();</span>
+<span class="nc" id="L478">    }</span>
+
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @Test
+    void symlinkedRecordIsRejectedAndExistingTargetRemainsUntouched() throws Exception {
+        // given
+<span class="nc" id="L484">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L485">        EffectiveConfig config = config();</span>
+<span class="nc" id="L486">        complete(store, request(config, WORKER), RESPONSE);</span>
+<span class="nc" id="L487">        Path record = records(config).getFirst();</span>
+<span class="nc" id="L488">        Path outside = tempDir.resolve(&quot;outside.txt&quot;);</span>
+<span class="nc" id="L489">        Files.writeString(outside, &quot;unrelated content&quot;);</span>
+<span class="nc" id="L490">        Files.delete(record);</span>
+<span class="nc" id="L491">        Files.createSymbolicLink(record, outside);</span>
+
+        // when
+<span class="nc" id="L494">        Throwable failure = catchThrowable(() -&gt; store.begin(request(config, &quot;next-worker&quot;)));</span>
+
+        // then
+<span class="nc" id="L497">        assertThat(failure)</span>
+<span class="nc" id="L498">                .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L499">                .hasMessageStartingWith(&quot;cannot prepare local final response&quot;);</span>
+<span class="nc" id="L500">        assertThat(outside).content().isEqualTo(&quot;unrelated content&quot;);</span>
+<span class="nc" id="L501">    }</span>
+
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @Test
+    void outputUsesOwnerOnlyPosixPermissions() throws Exception {
+        // given
+<span class="nc" id="L507">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L508">        EffectiveConfig config = config();</span>
+
+        // when
+<span class="nc" id="L511">        complete(store, request(config, WORKER), RESPONSE);</span>
+
+        // then
+<span class="nc" id="L514">        Path record = records(config).getFirst();</span>
+<span class="nc" id="L515">        assertThat(getPosixFilePermissions(record)).hasSameElementsAs(fromString(&quot;rw-------&quot;));</span>
+<span class="nc" id="L516">        assertThat(getPosixFilePermissions(record.getParent())).hasSameElementsAs(fromString(&quot;rwx------&quot;));</span>
+<span class="nc" id="L517">    }</span>
+
+    @CsvSource({&quot;rwxrwx---, false&quot;, &quot;rwx---rwx, false&quot;, &quot;rwxrwx---, true&quot;, &quot;rwx---rwx, true&quot;})
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @ParameterizedTest
+    void rejectsWritablePosixAncestorWithoutStickyProtection(String permissions, boolean workspaceRoot)
+            throws Exception {
+        // given
+<span class="nc" id="L525">        Path shared = Files.createDirectory(tempDir.resolve(&quot;shared&quot;));</span>
+<span class="nc" id="L526">        EffectiveConfig config = configAt(shared, &quot;branch_only&quot;, false);</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">        Path unsafe = workspaceRoot ? Files.createDirectory(config.workspace().root()) : shared;</span>
+<span class="nc" id="L528">        Files.setPosixFilePermissions(unsafe, fromString(permissions));</span>
+<span class="nc" id="L529">        var store = new FinalResponseStore();</span>
+
+        try {
+
+            // when
+<span class="nc" id="L534">            Throwable failure = catchThrowable(() -&gt; store.begin(request(config, WORKER)));</span>
+
+            // then
+<span class="nc" id="L537">            assertThat(failure)</span>
+<span class="nc" id="L538">                    .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L539">                    .hasMessageStartingWith(&quot;cannot prepare local final response&quot;)</span>
+<span class="nc" id="L540">                    .rootCause()</span>
+<span class="nc" id="L541">                    .hasMessage(</span>
+                            &quot;cannot prepare local final response: writable POSIX ancestors require sticky protection&quot;);
+<span class="nc" id="L543">            assertThat(config.workspace().root().resolve(FinalResponseStore.DIRECTORY))</span>
+<span class="nc" id="L544">                    .doesNotExist();</span>
+        } finally {
+<span class="nc" id="L546">            Files.setPosixFilePermissions(unsafe, fromString(&quot;rwx------&quot;));</span>
+        }
+<span class="nc" id="L548">    }</span>
+
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @Test
+    void stickySharedPosixAncestorPreservesPrivateOutput() throws Exception {
+        // given
+<span class="nc" id="L554">        Path shared = Files.createDirectory(tempDir.resolve(&quot;shared&quot;));</span>
+<span class="nc" id="L555">        Files.setAttribute(shared, &quot;unix:mode&quot;, STICKY_SHARED_DIRECTORY_MODE);</span>
+<span class="nc" id="L556">        EffectiveConfig config = configAt(shared, &quot;branch_only&quot;, false);</span>
+<span class="nc" id="L557">        var store = new FinalResponseStore();</span>
+
+        // when
+<span class="nc" id="L560">        complete(store, request(config, WORKER), RESPONSE);</span>
+
+        // then
+<span class="nc" id="L563">        assertThat(readOnlyRecord(config).path(&quot;response&quot;).asText()).isEqualTo(RESPONSE);</span>
+<span class="nc" id="L564">        assertThat((Integer) Files.getAttribute(shared, &quot;unix:mode&quot;) &amp; STICKY_SHARED_DIRECTORY_MODE)</span>
+<span class="nc" id="L565">                .isEqualTo(STICKY_SHARED_DIRECTORY_MODE);</span>
+<span class="nc" id="L566">        Path record = records(config).getFirst();</span>
+<span class="nc" id="L567">        assertThat(getPosixFilePermissions(record)).hasSameElementsAs(fromString(&quot;rw-------&quot;));</span>
+<span class="nc" id="L568">        assertThat(getPosixFilePermissions(record.getParent())).hasSameElementsAs(fromString(&quot;rwx------&quot;));</span>
+<span class="nc" id="L569">    }</span>
+
+    @Test
+    void failedAtomicWriteDoesNotClaimCompletedDelivery() throws Exception {
+        // given
+<span class="nc" id="L574">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L575">        EffectiveConfig config = config();</span>
+<span class="nc" id="L576">        try (var recording = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+<span class="nc" id="L577">            successfulAnswer(recording.listener(event -&gt; {}), WORKER, RESPONSE);</span>
+<span class="nc" id="L578">            Path record = records(config).getFirst();</span>
+<span class="nc" id="L579">            Files.delete(record);</span>
+<span class="nc" id="L580">            Files.createDirectory(record);</span>
+
+            // when
+<span class="nc" id="L583">            Throwable failure = catchThrowable(() -&gt; recording.finish(AgentRunResult.ok()));</span>
+
+            // then
+<span class="nc" id="L586">            assertThat(failure)</span>
+<span class="nc" id="L587">                    .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L588">                    .hasMessageStartingWith(&quot;cannot save local final response&quot;);</span>
+<span class="nc" id="L589">            assertThat(record).isEmptyDirectory();</span>
+        }
+<span class="nc" id="L591">    }</span>
+
+    @Test
+    void failedSaveLogsControlledAttemptDiagnosticAfterAcceptedCompletion() throws Exception {
+        // given
+<span class="nc" id="L596">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L597">        EffectiveConfig config = config();</span>
+<span class="nc" id="L598">        String privateResponse = &quot;synthetic-sensitive-response&quot;;</span>
+<span class="nc" id="L599">        complete(store, request(config, WORKER), &quot;old-sensitive-response&quot;);</span>
+<span class="nc" id="L600">        try (var logs = new AttemptLogs();</span>
+<span class="nc" id="L601">                var recording = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+<span class="nc" id="L602">            successfulAnswer(recording.listener(event -&gt; {}), WORKER, privateResponse);</span>
+<span class="nc" id="L603">            Path path = records(config).getFirst();</span>
+<span class="nc" id="L604">            byte[] running = Files.readAllBytes(path);</span>
+<span class="nc" id="L605">            Files.delete(path);</span>
+<span class="nc" id="L606">            Files.createDirectory(path);</span>
+
+            // when
+            try {
+<span class="nc" id="L610">                assertThatThrownBy(() -&gt; recording.finish(AgentRunResult.ok()))</span>
+<span class="nc" id="L611">                        .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L612">                        .hasMessageStartingWith(&quot;cannot save local final response&quot;);</span>
+            } finally {
+<span class="nc" id="L614">                Files.delete(path);</span>
+<span class="nc" id="L615">                Files.write(path, running);</span>
+            }
+<span class="nc" id="L617">            recording.close();</span>
+
+            // then
+<span class="nc" id="L620">            var record = readOnlyRecord(config);</span>
+<span class="nc" id="L621">            assertThat(record.path(&quot;status&quot;).asText()).isEqualTo(&quot;failed&quot;);</span>
+<span class="nc" id="L622">            assertThat(record.has(&quot;response&quot;))</span>
+<span class="nc" id="L623">                    .as(&quot;a failed save after accepted completion must not expose the old or new answer&quot;)</span>
+<span class="nc" id="L624">                    .isFalse();</span>
+<span class="nc" id="L625">            assertThat(logs.records).singleElement().satisfies(log -&gt; {</span>
+<span class="nc" id="L626">                assertThat(log.getMessage())</span>
+<span class="nc" id="L627">                        .startsWith(&quot;cannot save local final response:&quot;)</span>
+<span class="nc" id="L628">                        .contains(&quot;attempt=&quot; + Sha3.sha3_256(WORKER))</span>
+<span class="nc" id="L629">                        .doesNotContain(privateResponse, &quot;old-sensitive-response&quot;, WORKER, THREAD, TURN);</span>
+<span class="nc" id="L630">                assertThat(log.getThrown()).isNull();</span>
+<span class="nc" id="L631">            });</span>
+        }
+<span class="nc" id="L633">    }</span>
+
+    @Test
+    void failedPreparationLogsControlledDiagnosticWithoutParserContent() throws Exception {
+        // given
+<span class="nc" id="L638">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L639">        EffectiveConfig config = config();</span>
+<span class="nc" id="L640">        complete(store, request(config, WORKER), RESPONSE);</span>
+<span class="nc" id="L641">        Files.writeString(records(config).getFirst(), &quot;synthetic-sensitive-malformed-json&quot;);</span>
+<span class="nc" id="L642">        try (var logs = new AttemptLogs()) {</span>
+
+            // when
+<span class="nc" id="L645">            assertThatThrownBy(() -&gt; store.begin(request(config, WORKER)))</span>
+<span class="nc" id="L646">                    .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L647">                    .hasMessageStartingWith(&quot;cannot prepare local final response&quot;);</span>
+
+            // then
+<span class="nc" id="L650">            assertThat(logs.records).singleElement().satisfies(log -&gt; {</span>
+<span class="nc" id="L651">                assertThat(log.getMessage())</span>
+<span class="nc" id="L652">                        .startsWith(&quot;cannot prepare local final response:&quot;)</span>
+<span class="nc" id="L653">                        .contains(&quot;attempt=&quot; + Sha3.sha3_256(WORKER))</span>
+<span class="nc" id="L654">                        .doesNotContain(&quot;synthetic-sensitive-malformed-json&quot;, WORKER);</span>
+<span class="nc" id="L655">                assertThat(log.getThrown()).isNull();</span>
+<span class="nc" id="L656">            });</span>
+        }
+<span class="nc" id="L658">    }</span>
+
+    @Test
+    void missingCompletedAnswerLogsControlledDiagnostic() throws Exception {
+        // given
+<span class="nc" id="L663">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L664">        EffectiveConfig config = config();</span>
+<span class="nc" id="L665">        try (var logs = new AttemptLogs();</span>
+<span class="nc" id="L666">                var recording = store.begin(request(config, WORKER)).orElseThrow()) {</span>
+
+            // when
+<span class="nc" id="L669">            AgentRunResult result = recording.finish(AgentRunResult.ok());</span>
+
+            // then
+<span class="nc" id="L672">            assertThat(result.success())</span>
+<span class="nc" id="L673">                    .as(&quot;successful protocol completion without a final answer must fail local delivery&quot;)</span>
+<span class="nc" id="L674">                    .isFalse();</span>
+<span class="nc" id="L675">            assertThat(logs.records).singleElement().satisfies(log -&gt; {</span>
+<span class="nc" id="L676">                assertThat(log.getMessage())</span>
+<span class="nc" id="L677">                        .startsWith(&quot;cannot save local final response:&quot;)</span>
+<span class="nc" id="L678">                        .contains(&quot;expected an accepted complete final answer&quot;, &quot;attempt=&quot; + Sha3.sha3_256(WORKER))</span>
+<span class="nc" id="L679">                        .doesNotContain(WORKER, THREAD, TURN);</span>
+<span class="nc" id="L680">                assertThat(log.getThrown()).isNull();</span>
+<span class="nc" id="L681">            });</span>
+        }
+<span class="nc" id="L683">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void listenerPreservesTrustedMoveAndSuccessfulTurnCallbacks(boolean expectedAllowed) throws Exception {
+        // given
+<span class="nc" id="L689">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L690">        var delegate = mock(AgentEventListener.class);</span>
+<span class="nc" id="L691">        var move = new CardHandoffMove(&quot;operation&quot;, WORKER, THREAD, TURN, &quot;card-1&quot;, &quot;board-1&quot;, &quot;review-list&quot;);</span>
+<span class="nc" id="L692">        when(delegate.beforeHandoffMove(move)).thenReturn(expectedAllowed);</span>
+<span class="nc" id="L693">        try (var recording = store.begin(request(config(), WORKER)).orElseThrow()) {</span>
+<span class="nc" id="L694">            AgentEventListener listener = recording.listener(delegate);</span>
+
+            // when
+<span class="nc" id="L697">            boolean allowed = listener.beforeHandoffMove(move);</span>
+<span class="nc" id="L698">            listener.afterHandoffMove(move, expectedAllowed);</span>
+<span class="nc" id="L699">            listener.onSuccessfulTurn(THREAD, TURN);</span>
+
+            // then
+<span class="nc" id="L702">            assertThat(allowed)</span>
+<span class="nc" id="L703">                    .as(&quot;owner move decision must remain unchanged through the output listener&quot;)</span>
+<span class="nc" id="L704">                    .isEqualTo(expectedAllowed);</span>
+<span class="nc" id="L705">            verify(delegate).beforeHandoffMove(move);</span>
+<span class="nc" id="L706">            verify(delegate).afterHandoffMove(move, expectedAllowed);</span>
+<span class="nc" id="L707">            verify(delegate).onSuccessfulTurn(THREAD, TURN);</span>
+        }
+<span class="nc" id="L709">    }</span>
+
+    @Test
+    void cardIdentityCannotEscapePrivateOutputNamespace() throws Exception {
+        // given
+<span class="nc" id="L714">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L715">        EffectiveConfig config = config();</span>
+<span class="nc" id="L716">        Card card = TestCards.card(&quot;../../outside&quot;, &quot;../../identifier&quot;, &quot;In Progress&quot;);</span>
+<span class="nc" id="L717">        var request = new AgentRunner.AgentRunRequest(card, null, &quot;Task&quot;, config, WORKER, event -&gt; {});</span>
+
+        // when
+<span class="nc" id="L720">        complete(store, request, RESPONSE);</span>
+
+        // then
+<span class="nc" id="L723">        Path record = records(config).getFirst();</span>
+<span class="nc" id="L724">        assertThat(record.getParent()).hasParentRaw(config.workspace().root().resolve(FinalResponseStore.DIRECTORY));</span>
+<span class="nc" id="L725">        assertThat(record.getFileName().toString()).matches(&quot;[a-f0-9]{64}\\.json&quot;);</span>
+<span class="nc" id="L726">        assertThat(JSON.readTree(record.toFile()).path(&quot;card_id&quot;).asText()).isEqualTo(card.id());</span>
+<span class="nc" id="L727">        assertThat(tempDir.resolve(&quot;outside&quot;)).doesNotExist();</span>
+<span class="nc" id="L728">    }</span>
+
+    @Test
+    void taskIdentifierMatchingOutputDirectoryCannotDeleteStoredResponse() throws Exception {
+        // given
+<span class="nc" id="L733">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L734">        EffectiveConfig config = config();</span>
+<span class="nc" id="L735">        Card card = TestCards.card(&quot;card-1&quot;, FinalResponseStore.DIRECTORY, &quot;In Progress&quot;);</span>
+<span class="nc" id="L736">        complete(store, new AgentRunner.AgentRunRequest(card, null, &quot;Task&quot;, config, WORKER, event -&gt; {}), RESPONSE);</span>
+<span class="nc" id="L737">        var workspaces = new WorkspaceManager(new HookRunner());</span>
+
+        // when
+<span class="nc" id="L740">        var workspace = workspaces.createForCard(card.identifier(), config);</span>
+<span class="nc" id="L741">        workspaces.removeForIdentifierIfPresent(card.identifier(), config);</span>
+
+        // then
+<span class="nc" id="L744">        assertThat(workspace.path()).doesNotExist();</span>
+<span class="nc" id="L745">        assertThat(readOnlyRecord(config).path(&quot;response&quot;).asText()).isEqualTo(RESPONSE);</span>
+<span class="nc" id="L746">    }</span>
+
+    @Test
+    void responseAtByteLimitIsPreservedWithoutTruncation() throws Exception {
+        // given
+<span class="nc" id="L751">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L752">        EffectiveConfig config = config();</span>
+<span class="nc" id="L753">        String exactLimit = &quot;a&quot;.repeat(FinalResponseStore.MAX_RESPONSE_BYTES);</span>
+
+        // when
+<span class="nc" id="L756">        complete(store, request(config, WORKER), exactLimit);</span>
+
+        // then
+<span class="nc" id="L759">        assertThat(readOnlyRecord(config).path(&quot;response&quot;).asText()).isEqualTo(exactLimit);</span>
+<span class="nc" id="L760">    }</span>
+
+    // Observe this test thread without changing logger levels, filters or other handlers.
+    private static final class AttemptLogs extends Handler implements AutoCloseable {
+<span class="nc" id="L764">        private final long ownerThreadId = Thread.currentThread().threadId();</span>
+<span class="nc" id="L765">        private final Logger logger = Logger.getLogger(FinalResponseStore.class.getName());</span>
+<span class="nc" id="L766">        private final List&lt;LogRecord&gt; records = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L768">        AttemptLogs() {</span>
+<span class="nc" id="L769">            logger.addHandler(this);</span>
+<span class="nc" id="L770">        }</span>
+
+        @Override
+        public void publish(LogRecord record) {
+<span class="nc bnc" id="L774" title="All 2 branches missed.">            if (Thread.currentThread().threadId() == ownerThreadId) {</span>
+<span class="nc" id="L775">                records.add(record);</span>
+            }
+<span class="nc" id="L777">        }</span>
+
+        @Override
+<span class="nc" id="L780">        public void flush() {}</span>
+
+        @Override
+        public void close() {
+<span class="nc" id="L784">            logger.removeHandler(this);</span>
+<span class="nc" id="L785">        }</span>
+    }
+
+    private CompletedResponse completedResponse() throws IOException {
+<span class="nc" id="L789">        var store = new FinalResponseStore();</span>
+<span class="nc" id="L790">        EffectiveConfig config = config();</span>
+<span class="nc" id="L791">        complete(store, request(config, WORKER), RESPONSE);</span>
+<span class="nc" id="L792">        return new CompletedResponse(store, config, records(config).getFirst());</span>
+    }
+
+<span class="nc" id="L795">    private record CompletedResponse(FinalResponseStore store, EffectiveConfig config, Path path) {}</span>
+
+    private AgentRunner.AgentRunRequest request(EffectiveConfig config, String worker) {
+<span class="nc" id="L798">        return new AgentRunner.AgentRunRequest(</span>
+<span class="nc" id="L799">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-SYNTH001&quot;, &quot;In Progress&quot;), null, &quot;Task&quot;, config, worker, event -&gt; {});</span>
+    }
+
+    private static void complete(FinalResponseStore store, AgentRunner.AgentRunRequest request, String response) {
+<span class="nc" id="L803">        try (var recording = store.begin(request).orElseThrow()) {</span>
+<span class="nc" id="L804">            successfulAnswer(recording.listener(event -&gt; {}), request.workerIdentity(), response);</span>
+<span class="nc" id="L805">            assertThat(recording.finish(AgentRunResult.ok())).isEqualTo(AgentRunResult.ok());</span>
+        }
+<span class="nc" id="L807">    }</span>
+
+    private static void successfulAnswer(AgentEventListener listener, String worker, String response) {
+<span class="nc" id="L810">        finalAnswer(listener, worker, THREAD, TURN, response);</span>
+<span class="nc" id="L811">        completedTurn(listener, worker, THREAD, TURN, &quot;completed&quot;);</span>
+<span class="nc" id="L812">        listener.onSuccessfulTurn(THREAD, TURN);</span>
+<span class="nc" id="L813">    }</span>
+
+    private static void finalAnswer(
+            AgentEventListener listener, String worker, String thread, String turn, String text) {
+<span class="nc" id="L817">        var payload = JSON.createObjectNode();</span>
+<span class="nc" id="L818">        payload.putObject(&quot;item&quot;)</span>
+<span class="nc" id="L819">                .put(&quot;type&quot;, &quot;agentMessage&quot;)</span>
+<span class="nc" id="L820">                .put(&quot;phase&quot;, &quot;final_answer&quot;)</span>
+<span class="nc" id="L821">                .put(&quot;text&quot;, text);</span>
+<span class="nc" id="L822">        listener.onEvent(event(&quot;item/completed&quot;, worker, thread, turn, payload));</span>
+<span class="nc" id="L823">    }</span>
+
+    private static void completedTurn(
+            AgentEventListener listener, String worker, String thread, String turn, String status) {
+<span class="nc" id="L827">        var payload = JSON.createObjectNode();</span>
+<span class="nc" id="L828">        payload.putObject(&quot;turn&quot;).put(&quot;id&quot;, turn).put(&quot;status&quot;, status);</span>
+<span class="nc" id="L829">        listener.onEvent(event(&quot;turn/completed&quot;, worker, thread, turn, payload));</span>
+<span class="nc" id="L830">    }</span>
+
+    private static AgentEvent event(String name, String worker, String thread, String turn, JsonNode payload) {
+<span class="nc" id="L833">        return new AgentEvent(</span>
+<span class="nc" id="L834">                name, Instant.parse(&quot;2026-01-01T00:00:00Z&quot;), worker, 1L, thread, turn, null, Map.of(), payload);</span>
+    }
+
+    private static List&lt;Path&gt; records(EffectiveConfig config) throws IOException {
+<span class="nc" id="L838">        List&lt;Path&gt; records = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L839">        Path outputs = config.workspace().root().resolve(FinalResponseStore.DIRECTORY);</span>
+<span class="nc bnc" id="L840" title="All 2 branches missed.">        if (!Files.isDirectory(outputs)) {</span>
+<span class="nc" id="L841">            return List.of();</span>
+        }
+<span class="nc" id="L843">        try (var namespaces = Files.newDirectoryStream(outputs)) {</span>
+<span class="nc bnc" id="L844" title="All 2 branches missed.">            for (Path namespace : namespaces) {</span>
+<span class="nc" id="L845">                try (var files = Files.newDirectoryStream(namespace, &quot;*.json&quot;)) {</span>
+<span class="nc bnc" id="L846" title="All 2 branches missed.">                    for (Path file : files) {</span>
+<span class="nc" id="L847">                        records.add(file);</span>
+<span class="nc" id="L848">                    }</span>
+                }
+<span class="nc" id="L850">            }</span>
+        }
+<span class="nc" id="L852">        return List.copyOf(records);</span>
+    }
+
+    private static JsonNode readOnlyRecord(EffectiveConfig config) throws IOException {
+<span class="nc" id="L856">        List&lt;Path&gt; paths = records(config);</span>
+<span class="nc" id="L857">        assertThat(paths).hasSize(1);</span>
+<span class="nc" id="L858">        return JSON.readTree(paths.getFirst().toFile());</span>
+    }
+
+<span class="nc" id="L861">    enum IncompleteFinal {</span>
+<span class="nc" id="L862">        BLANK,</span>
+<span class="nc" id="L863">        EMPTY,</span>
+<span class="nc" id="L864">        OVERSIZED,</span>
+<span class="nc" id="L865">        MISSING_FINAL,</span>
+<span class="nc" id="L866">        PARTIAL_FINAL,</span>
+<span class="nc" id="L867">        WRONG_THREAD,</span>
+<span class="nc" id="L868">        WRONG_TURN,</span>
+<span class="nc" id="L869">        REJECTED_FINAL,</span>
+<span class="nc" id="L870">        REJECTED_COMPLETION,</span>
+<span class="nc" id="L871">        FAILED_STATUS,</span>
+<span class="nc" id="L872">        NO_SUCCESS_CALLBACK,</span>
+<span class="nc" id="L873">        FAILED_RUN</span>
+    }
+
+<span class="nc" id="L876">    enum InvalidRecord {</span>
+<span class="nc" id="L877">        DIRECTORY,</span>
+<span class="nc" id="L878">        MALFORMED,</span>
+<span class="nc" id="L879">        STATUS,</span>
+<span class="nc" id="L880">        WRONG_CARD,</span>
+<span class="nc" id="L881">        TIMESTAMP,</span>
+<span class="nc" id="L882">        INCOMPLETE_RESPONSE,</span>
+<span class="nc" id="L883">        OVERSIZED</span>
+    }
+
+    private EffectiveConfig config() {
+<span class="nc" id="L887">        return config(&quot;branch_only&quot;, false);</span>
+    }
+
+    private EffectiveConfig config(String mode, boolean allowComments) {
+<span class="nc" id="L891">        return configAt(tempDir, mode, allowComments);</span>
+    }
+
+    private static EffectiveConfig configAt(Path directory, String mode, boolean allowComments) {
+<span class="nc" id="L895">        return configAt(directory, mode, allowComments, &quot;https://api.trello.com/1&quot;);</span>
+    }
+
+    private static EffectiveConfig configAt(Path directory, String mode, boolean allowComments, String endpoint) {
+<span class="nc" id="L899">        return new ConfigResolver(ignored -&gt; Optional.empty())</span>
+<span class="nc" id="L900">                .resolve(new WorkflowDefinition(</span>
+<span class="nc" id="L901">                        directory.resolve(&quot;WORKFLOW.md&quot;),</span>
+<span class="nc" id="L902">                        Map.of(</span>
+                                &quot;tracker&quot;,
+<span class="nc" id="L904">                                        Map.of(</span>
+                                                &quot;kind&quot;,
+                                                &quot;trello&quot;,
+                                                &quot;endpoint&quot;,
+                                                endpoint,
+                                                &quot;api_key&quot;,
+                                                &quot;key&quot;,
+                                                &quot;api_token&quot;,
+                                                &quot;token&quot;,
+                                                &quot;board_id&quot;,
+                                                &quot;board-1&quot;),
+                                &quot;workspace&quot;,
+<span class="nc" id="L916">                                        Map.of(</span>
+                                                &quot;root&quot;,
+<span class="nc" id="L918">                                                directory.resolve(&quot;workspaces&quot;).toString()),</span>
+<span class="nc" id="L919">                                &quot;github&quot;, Map.of(&quot;pull_request_mode&quot;, mode),</span>
+                                &quot;trello_tools&quot;,
+<span class="nc" id="L921">                                        Map.of(&quot;enabled&quot;, true, &quot;allow_writes&quot;, true, &quot;allow_comments&quot;, allowComments)),</span>
+                        &quot;&quot;));
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

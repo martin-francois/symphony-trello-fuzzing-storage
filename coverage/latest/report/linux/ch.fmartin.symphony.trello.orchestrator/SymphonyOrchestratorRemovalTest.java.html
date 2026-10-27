@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestratorRemovalTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestratorRemovalTest.java</span></div><h1>SymphonyOrchestratorRemovalTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.process.RuntimeProcessShutdown;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.workspace.HookRunner;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L36">final class SymphonyOrchestratorRemovalTest {</span>
+    @TempDir
+    Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;&quot;, &quot; &quot;})
+    void startupSkipsBlankIdentifiersBeforeOtherCleanup(String identifier) throws Exception {
+        // given
+<span class="nc" id="L44">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L45">        writeWorkflow(workflow, &quot;60000&quot;);</span>
+<span class="nc" id="L46">        var valid = TestCards.card(&quot;valid&quot;, &quot;TRELLO-valid&quot;, &quot;Done&quot;);</span>
+<span class="nc" id="L47">        Files.createDirectories(tempDir.resolve(&quot;work&quot;).resolve(valid.identifier()));</span>
+<span class="nc" id="L48">        var tracker = spy(new FakeTracker(List.of()));</span>
+<span class="nc" id="L49">        when(tracker.fetchTerminalCards(any()))</span>
+<span class="nc" id="L50">                .thenReturn(List.of(TestCards.card(&quot;invalid&quot;, identifier, &quot;Done&quot;), valid));</span>
+<span class="nc" id="L51">        var hooks = mock(HookRunner.class);</span>
+<span class="nc" id="L52">        var orchestrator = orchestrator(workflow, tracker, mock(AgentRunner.class), new WorkspaceManager(hooks));</span>
+        try {
+
+            // when
+<span class="nc" id="L56">            orchestrator.start();</span>
+
+            // then
+<span class="nc" id="L59">            verify(hooks).runBestEffort(any(), any(), any(), any());</span>
+<span class="nc" id="L60">            assertThat(tempDir.resolve(&quot;work&quot;).resolve(valid.identifier())).doesNotExist();</span>
+        } finally {
+<span class="nc" id="L62">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L64">    }</span>
+
+    @Test
+    void startupStopsStartingRemovalHooksAtTheRetentionThreshold() throws Exception {
+        // given
+<span class="nc" id="L69">        int threshold = 128;</span>
+<span class="nc" id="L70">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L71">        writeWorkflow(workflow, &quot;60000&quot;, &quot;hooks:\n  before_remove: true\n&quot;);</span>
+<span class="nc" id="L72">        var terminal = new ArrayList&lt;Card&gt;();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        for (int index = 0; index &lt;= threshold; index++) {</span>
+<span class="nc" id="L74">            var card = TestCards.card(&quot;terminal-&quot; + index, &quot;TRELLO-&quot; + index, &quot;Done&quot;);</span>
+<span class="nc" id="L75">            terminal.add(card);</span>
+<span class="nc" id="L76">            Files.createDirectories(tempDir.resolve(&quot;work&quot;).resolve(card.identifier()));</span>
+        }
+<span class="nc" id="L78">        var tracker = spy(new FakeTracker(List.of()));</span>
+<span class="nc" id="L79">        when(tracker.fetchTerminalCards(any())).thenReturn(terminal);</span>
+<span class="nc" id="L80">        var hooks = mock(HookRunner.class);</span>
+<span class="nc" id="L81">        var removals = new AtomicInteger();</span>
+<span class="nc" id="L82">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L83">                    removals.incrementAndGet();</span>
+<span class="nc" id="L84">                    throw new RuntimeProcessShutdown.UnconfirmedExitException();</span>
+                })
+<span class="nc" id="L86">                .when(hooks)</span>
+<span class="nc" id="L87">                .runBestEffort(any(), any(), any(), any());</span>
+<span class="nc" id="L88">        var orchestrator = orchestrator(workflow, tracker, mock(AgentRunner.class), new WorkspaceManager(hooks));</span>
+        try {
+
+            // when
+<span class="nc" id="L92">            orchestrator.start();</span>
+
+            // then
+<span class="nc" id="L95">            assertThat(removals).hasValue(threshold);</span>
+<span class="nc" id="L96">            assertThat(tempDir.resolve(&quot;work/TRELLO-&quot; + threshold)).exists();</span>
+        } finally {
+<span class="nc" id="L98">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L100">    }</span>
+
+    @CsvSource({&quot;startup,false&quot;, &quot;startup,true&quot;, &quot;terminal,false&quot;, &quot;terminal,true&quot;, &quot;missing,false&quot;, &quot;missing,true&quot;})
+    @ParameterizedTest
+    void unconfirmedRemovalHookRetainsOwnershipWithoutBlockingOtherCards(String route, boolean reloadTarget)
+            throws Exception {
+        // given
+<span class="nc" id="L107">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L108">        writeWorkflow(workflow, &quot;60000&quot;, &quot;hooks:\n  before_remove: true\n&quot;);</span>
+<span class="nc" id="L109">        var card = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-retained&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L110">        var terminal = TestCards.card(card.id(), card.identifier(), &quot;Done&quot;);</span>
+<span class="nc" id="L111">        boolean startup = &quot;startup&quot;.equals(route);</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        var tracker = spy(new FakeTracker(startup ? List.of() : List.of(card)));</span>
+<span class="nc" id="L113">        tracker.resolveConfiguredBoardId = true;</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">        when(tracker.fetchTerminalCards(any())).thenReturn(startup ? List.of(terminal) : List.of());</span>
+<span class="nc" id="L115">        Path sentinel = tempDir.resolve(&quot;work/TRELLO-retained/sentinel&quot;);</span>
+<span class="nc" id="L116">        Files.createDirectories(sentinel.getParent());</span>
+<span class="nc" id="L117">        Files.writeString(sentinel, &quot;owned by an unconfirmed removal hook&quot;);</span>
+<span class="nc" id="L118">        var hooks = mock(HookRunner.class);</span>
+<span class="nc" id="L119">        var hookInvoked = new CountDownLatch(1);</span>
+<span class="nc" id="L120">        doAnswer(invocation -&gt; {</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                    if (&quot;before_remove&quot;.equals(invocation.getArgument(0))) {</span>
+<span class="nc" id="L122">                        hookInvoked.countDown();</span>
+<span class="nc" id="L123">                        throw new RuntimeProcessShutdown.UnconfirmedExitException();</span>
+                    }
+<span class="nc" id="L125">                    return null;</span>
+                })
+<span class="nc" id="L127">                .when(hooks)</span>
+<span class="nc" id="L128">                .runBestEffort(any(), any(), any(), any());</span>
+<span class="nc" id="L129">        var releaseUnexpectedWorker = new CountDownLatch(1);</span>
+<span class="nc" id="L130">        List&lt;String&gt; launched = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L131">        AgentRunner runner = mock();</span>
+<span class="nc" id="L132">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L133">            AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc" id="L134">            launched.add(request.card().id());</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">            if (&quot;other&quot;.equals(request.card().id())) {</span>
+<span class="nc" id="L136">                tracker.setCardState(cardOnBoard(</span>
+<span class="nc" id="L137">                        &quot;other&quot;, &quot;TRELLO-other&quot;, &quot;Human Review&quot;, request.card().boardId()));</span>
+<span class="nc" id="L138">                return AgentRunResult.ok();</span>
+            }
+<span class="nc bnc" id="L140" title="All 4 branches missed.">            if (!startup &amp;&amp; launched.size() == 1) {</span>
+<span class="nc" id="L141">                return AgentRunResult.fail(&quot;controlled failure before retry cleanup&quot;);</span>
+            }
+<span class="nc" id="L143">            releaseUnexpectedWorker.await(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L144">            return AgentRunResult.fail(&quot;unexpected dispatch into retained workspace&quot;);</span>
+        });
+<span class="nc" id="L146">        var orchestrator = orchestrator(workflow, tracker, runner, new WorkspaceManager(hooks));</span>
+        try {
+<span class="nc" id="L148">            orchestrator.start();</span>
+<span class="nc" id="L149">            Throwable cleanupFailure = null;</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (!startup) {</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L152">                tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L153">                tracker.cardStates = Map.of(</span>
+<span class="nc" id="L154">                        card.id(),</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                        &quot;missing&quot;.equals(route)</span>
+<span class="nc" id="L156">                                ? new CardLookupResult.Missing(card.id())</span>
+<span class="nc" id="L157">                                : new CardLookupResult.Found(terminal));</span>
+<span class="nc" id="L158">                cleanupFailure = catchThrowable(() -&gt; orchestrator.retryNowForTests(card.id()));</span>
+            }
+<span class="nc" id="L160">            assertThat(hookInvoked.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L161">                    .as(&quot;the selected cleanup route invokes before_remove&quot;)</span>
+<span class="nc" id="L162">                    .isTrue();</span>
+
+            // when
+<span class="nc bnc" id="L165" title="All 2 branches missed.">            String board = reloadTarget ? &quot;board-2&quot; : &quot;board-1&quot;;</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">            var reactivated = reloadTarget ? cardOnBoard(&quot;replacement&quot;, card.identifier(), &quot;Todo&quot;, board) : card;</span>
+<span class="nc" id="L167">            tracker.setCandidates(List.of(reactivated));</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (reloadTarget) {</span>
+<span class="nc" id="L169">                rewriteWorkflowWithTarget(workflow, &quot;https://api.trello.com/1&quot;, board, &quot;token&quot;, &quot;fake&quot;, &quot;work&quot;);</span>
+            }
+<span class="nc" id="L171">            orchestrator.tickNowForTests();</span>
+
+            // then
+<span class="nc" id="L174">            assertThat(sentinel).exists();</span>
+<span class="nc" id="L175">            assertThat(orchestrator.snapshot().counts().running()).isZero();</span>
+<span class="nc" id="L176">            assertThat(orchestrator.snapshot().counts().retrying()).isZero();</span>
+<span class="nc" id="L177">            assertThat(cleanupFailure).isNull();</span>
+<span class="nc" id="L178">            var other = cardOnBoard(&quot;other&quot;, &quot;TRELLO-other&quot;, &quot;Todo&quot;, board);</span>
+<span class="nc" id="L179">            tracker.setCandidates(List.of(reactivated, other));</span>
+<span class="nc" id="L180">            orchestrator.tickNowForTests();</span>
+<span class="nc" id="L181">            waitUntil(() -&gt; launched.contains(other.id()));</span>
+<span class="nc" id="L182">            assertThat(launched)</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                    .containsExactlyElementsOf(startup ? List.of(other.id()) : List.of(card.id(), other.id()));</span>
+        } finally {
+<span class="nc" id="L185">            releaseUnexpectedWorker.countDown();</span>
+<span class="nc" id="L186">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L188">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

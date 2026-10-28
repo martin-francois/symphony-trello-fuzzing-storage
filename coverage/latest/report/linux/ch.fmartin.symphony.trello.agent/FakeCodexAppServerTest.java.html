@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FakeCodexAppServerTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">FakeCodexAppServerTest.java</span></div><h1>FakeCodexAppServerTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L17">final class FakeCodexAppServerTest {</span>
+    @TempDir
+    Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void everyToolRequestCarriesItsCurrentThreadAndTurn(boolean scripted) throws Exception {
+        // given
+<span class="nc" id="L25">        Path output = tempDir.resolve(&quot;stdout.jsonl&quot;);</span>
+<span class="nc" id="L26">        Path errors = tempDir.resolve(&quot;stderr.txt&quot;);</span>
+<span class="nc" id="L27">        var builder = new ProcessBuilder(</span>
+<span class="nc" id="L28">                Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, &quot;java&quot;).toString(),</span>
+<span class="nc" id="L29">                Path.of(&quot;scripts/FakeCodexAppServer.java&quot;).toAbsolutePath().toString());</span>
+<span class="nc" id="L30">        builder.redirectOutput(output.toFile()).redirectError(errors.toFile());</span>
+<span class="nc" id="L31">        builder.environment().keySet().removeIf(FakeCodexAppServerTest::fakeSetting);</span>
+<span class="nc bnc" id="L32" title="All 2 branches missed.">        if (scripted) {</span>
+<span class="nc" id="L33">            Path scripts = Files.createDirectory(tempDir.resolve(&quot;scripts&quot;));</span>
+<span class="nc" id="L34">            Files.writeString(scripts.resolve(&quot;protocol.script&quot;), &quot;tool trello_get_current_card {}\nhandoff\n&quot;);</span>
+<span class="nc" id="L35">            builder.environment().put(&quot;SYMPHONY_FAKE_CODEX_SCRIPT_DIR&quot;, scripts.toString());</span>
+        }
+<span class="nc" id="L37">        String first = turnInput(1, &quot;thread-first&quot;, scripted);</span>
+<span class="nc" id="L38">        String second = turnInput(2, &quot;thread-second&quot;, scripted);</span>
+<span class="nc" id="L39">        Process process = builder.start();</span>
+
+        // when
+        try {
+<span class="nc" id="L43">            try (var input = process.outputWriter(StandardCharsets.UTF_8)) {</span>
+<span class="nc" id="L44">                input.write(first + second);</span>
+            }
+<span class="nc" id="L46">            assertThat(process.waitFor(Duration.ofSeconds(30)))</span>
+<span class="nc" id="L47">                    .as(&quot;the fake completes both turns and exits after stdin closes&quot;)</span>
+<span class="nc" id="L48">                    .isTrue();</span>
+        } finally {
+<span class="nc" id="L50">            process.destroyForcibly();</span>
+        }
+
+        // then
+<span class="nc" id="L54">        assertThat(process.exitValue()).as(Files.readString(errors)).isZero();</span>
+<span class="nc" id="L55">        var json = new ObjectMapper();</span>
+<span class="nc" id="L56">        List&lt;ToolCall&gt; calls = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L57">        List&lt;String&gt; turns = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">        for (String line : Files.readAllLines(output)) {</span>
+<span class="nc" id="L59">            JsonNode message = json.readTree(line);</span>
+<span class="nc bnc" id="L60" title="All 2 branches missed.">            if (message.has(&quot;result&quot;)) {</span>
+<span class="nc" id="L61">                turns.add(message.path(&quot;result&quot;).path(&quot;turn&quot;).path(&quot;id&quot;).asText());</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">            } else if (message.path(&quot;method&quot;).asText().equals(&quot;item/tool/call&quot;)) {</span>
+<span class="nc" id="L63">                JsonNode params = message.path(&quot;params&quot;);</span>
+<span class="nc" id="L64">                calls.add(new ToolCall(</span>
+<span class="nc" id="L65">                        params.path(&quot;threadId&quot;).asText(),</span>
+<span class="nc" id="L66">                        params.path(&quot;turnId&quot;).asText(),</span>
+<span class="nc" id="L67">                        params.path(&quot;tool&quot;).asText()));</span>
+            }
+<span class="nc" id="L69">        }</span>
+<span class="nc" id="L70">        assertThat(turns)</span>
+<span class="nc" id="L71">                .hasSize(2)</span>
+<span class="nc" id="L72">                .doesNotHaveDuplicates()</span>
+<span class="nc" id="L73">                .allMatch(turn -&gt; turn.startsWith(&quot;turn-fake-&quot;), &quot;generated turn identities&quot;);</span>
+<span class="nc" id="L74">        List&lt;ToolCall&gt; expected = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L75">        expected.addAll(expectedCalls(&quot;thread-first&quot;, turns.getFirst(), scripted));</span>
+<span class="nc" id="L76">        expected.addAll(expectedCalls(&quot;thread-second&quot;, turns.get(1), scripted));</span>
+<span class="nc" id="L77">        assertThat(calls).containsExactlyElementsOf(expected);</span>
+<span class="nc" id="L78">    }</span>
+
+    private static boolean fakeSetting(String name) {
+<span class="nc" id="L81">        return name.startsWith(&quot;SYMPHONY_FAKE_CODEX_&quot;);</span>
+    }
+
+    private static String turnInput(int id, String thread, boolean scripted) {
+<span class="nc" id="L85">        var input = new StringBuilder(</span>
+                &quot;&quot;&quot;
+                {&quot;id&quot;:%d,&quot;method&quot;:&quot;turn/start&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;%s&quot;,&quot;input&quot;:[{&quot;text&quot;:&quot;protocol&quot;}]}}
+                &quot;&quot;&quot;
+<span class="nc" id="L89">                        .formatted(id, thread));</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (scripted) {</span>
+<span class="nc" id="L91">            input.append(success(20_000));</span>
+        }
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        for (int request = 10_000; request &lt;= 10_002; request++) {</span>
+<span class="nc" id="L94">            input.append(success(request));</span>
+        }
+<span class="nc" id="L96">        return input.toString();</span>
+    }
+
+    private static String success(int id) {
+<span class="nc" id="L100">        return &quot;{\&quot;id\&quot;:%d,\&quot;result\&quot;:{\&quot;success\&quot;:true}}\n&quot;.formatted(id);</span>
+    }
+
+    private static List&lt;ToolCall&gt; expectedCalls(String thread, String turn, boolean scripted) {
+<span class="nc" id="L104">        List&lt;ToolCall&gt; calls = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (scripted) {</span>
+<span class="nc" id="L106">            calls.add(new ToolCall(thread, turn, &quot;trello_get_current_card&quot;));</span>
+        }
+<span class="nc" id="L108">        calls.add(new ToolCall(thread, turn, &quot;trello_upsert_workpad&quot;));</span>
+<span class="nc" id="L109">        calls.add(new ToolCall(thread, turn, &quot;trello_add_comment&quot;));</span>
+<span class="nc" id="L110">        calls.add(new ToolCall(thread, turn, &quot;trello_move_current_card&quot;));</span>
+<span class="nc" id="L111">        return calls;</span>
+    }
+
+<span class="nc" id="L114">    private record ToolCall(String threadId, String turnId, String tool) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

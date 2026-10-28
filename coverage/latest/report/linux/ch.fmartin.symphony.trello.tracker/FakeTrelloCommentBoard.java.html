@@ -1,0 +1,327 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FakeTrelloCommentBoard.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">FakeTrelloCommentBoard.java</span></div><h1>FakeTrelloCommentBoard.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static ch.fmartin.symphony.trello.TestHttpExchange.query;
+import static ch.fmartin.symphony.trello.TestHttpExchange.respond;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.boardJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.listsJson;
+import static ch.fmartin.symphony.trello.testsupport.FakeTrelloServer.trelloList;
+
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
+import jakarta.ws.rs.core.Response.Status;
+import java.io.IOException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
+
+/// Stateful fake of the Trello endpoints the candidate poll uses. Unlike canned responses, comment
+/// writes change what later reads return and move the card's comment badge and `dateLastActivity`,
+/// so a test can follow one card across several poll ticks.
+<span class="nc" id="L27">final class FakeTrelloCommentBoard implements AutoCloseable {</span>
+    static final String BOARD_INPUT = &quot;input&quot;;
+    static final String BOARD_ID = &quot;board-1&quot;;
+    static final String TODO_LIST = &quot;list-todo&quot;;
+    static final String PROGRESS_LIST = &quot;list-progress&quot;;
+    static final String DONE_LIST = &quot;list-done&quot;;
+    static final String TRELLO_CARD_URL_PREFIX = &quot;https://trello.com/c/&quot;;
+
+    // Trello returns 50 actions when a card request names no actions_limit.
+    private static final String TRELLO_DEFAULT_ACTIONS_LIMIT = &quot;50&quot;;
+<span class="nc" id="L37">    private static final Instant FIRST_ACTIVITY = Instant.parse(&quot;2026-01-01T00:00:00Z&quot;);</span>
+    // Gives each generated comment a realistic payload size for the lookup measurement.
+    private static final int REVIEW_NOTE_PADDING = 200;
+
+<span class="nc" id="L41">    private static final Pattern CARD_CHECKLISTS = Pattern.compile(&quot;/1/cards/([^/]+)/checklists&quot;);</span>
+<span class="nc" id="L42">    private static final Pattern CARD_COMMENTS = Pattern.compile(&quot;/1/cards/([^/]+)/actions/comments&quot;);</span>
+<span class="nc" id="L43">    private static final Pattern CARD = Pattern.compile(&quot;/1/cards/([^/]+)&quot;);</span>
+<span class="nc" id="L44">    private static final Pattern COMMENT_TEXT = Pattern.compile(&quot;/1/actions/([^/]+)/text&quot;);</span>
+
+<span class="nc" id="L46">    private final ObjectMapper json = new ObjectMapper();</span>
+<span class="nc" id="L47">    private final FakeTrelloServer server = new FakeTrelloServer();</span>
+    // Keep insertion order so the board lists cards in the order a test adds them.
+<span class="nc" id="L49">    private final Map&lt;String, FakeCard&gt; cards = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L50">    private final List&lt;String&gt; requests = new ArrayList&lt;&gt;();</span>
+    private int nextId;
+    private long activityClock;
+    private boolean rejectCommentWrites;
+
+    FakeTrelloCommentBoard start() throws IOException {
+<span class="nc" id="L56">        server.on(&quot;/1/&quot;, this::handle).startEmpty();</span>
+<span class="nc" id="L57">        return this;</span>
+    }
+
+    String endpoint() {
+<span class="nc" id="L61">        return server.endpoint();</span>
+    }
+
+    synchronized FakeCard addCard(String id, String listId) {
+<span class="nc" id="L65">        var card = new FakeCard(id, &quot;short&quot; + id, listId);</span>
+<span class="nc" id="L66">        card.lastActivity = nextActivity();</span>
+<span class="nc" id="L67">        cards.put(id, card);</span>
+<span class="nc" id="L68">        return card;</span>
+    }
+
+    synchronized List&lt;String&gt; requests() {
+<span class="nc" id="L72">        return List.copyOf(requests);</span>
+    }
+
+    /// Answers comment writes with HTTP 429, as Trello does when the token is rate limited.
+    synchronized void rejectCommentWrites(boolean reject) {
+<span class="nc" id="L77">        rejectCommentWrites = reject;</span>
+<span class="nc" id="L78">    }</span>
+
+    synchronized void clearRequests() {
+<span class="nc" id="L81">        requests.clear();</span>
+<span class="nc" id="L82">    }</span>
+
+    @Override
+    public void close() {
+<span class="nc" id="L86">        server.close();</span>
+<span class="nc" id="L87">    }</span>
+
+    static String cardUrl(FakeCard card) {
+<span class="nc" id="L90">        return TRELLO_CARD_URL_PREFIX + card.shortLink;</span>
+    }
+
+    private synchronized void handle(HttpExchange exchange) throws IOException {
+<span class="nc" id="L94">        String method = exchange.getRequestMethod();</span>
+<span class="nc" id="L95">        String path = exchange.getRequestURI().getPath();</span>
+<span class="nc" id="L96">        requests.add(method + &quot; &quot; + exchange.getRequestURI());</span>
+<span class="nc" id="L97">        Map&lt;String, String&gt; query = query(exchange);</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        if (rejectCommentWrites</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                &amp;&amp; (CARD_COMMENTS.matcher(path).matches()</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">                        || COMMENT_TEXT.matcher(path).matches())) {</span>
+<span class="nc" id="L101">            respond(exchange, Status.TOO_MANY_REQUESTS.getStatusCode(), &quot;{}&quot;);</span>
+<span class="nc" id="L102">            return;</span>
+        }
+<span class="nc" id="L104">        String body = route(method, path, query);</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (body == null) {</span>
+<span class="nc" id="L106">            respond(exchange, Status.NOT_FOUND.getStatusCode(), &quot;{}&quot;);</span>
+        } else {
+<span class="nc" id="L108">            respond(exchange, body);</span>
+        }
+<span class="nc" id="L110">    }</span>
+
+    private @Nullable String route(String method, String path, Map&lt;String, String&gt; query)
+            throws JsonProcessingException {
+<span class="nc bnc" id="L114" title="All 4 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; path.equals(&quot;/1/boards/&quot; + BOARD_INPUT)) {</span>
+<span class="nc" id="L115">            return boardJson(BOARD_ID, &quot;Board&quot;, false);</span>
+        }
+<span class="nc bnc" id="L117" title="All 4 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; path.equals(&quot;/1/boards/&quot; + BOARD_ID + &quot;/lists&quot;)) {</span>
+<span class="nc" id="L118">            return listsJson(</span>
+<span class="nc" id="L119">                    trelloList(TODO_LIST, &quot;Todo&quot;, 1),</span>
+<span class="nc" id="L120">                    trelloList(PROGRESS_LIST, &quot;In Progress&quot;, 2),</span>
+<span class="nc" id="L121">                    trelloList(DONE_LIST, &quot;Done&quot;, 3));</span>
+        }
+<span class="nc bnc" id="L123" title="All 4 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; path.equals(&quot;/1/boards/&quot; + BOARD_ID + &quot;/cards/open&quot;)) {</span>
+<span class="nc" id="L124">            List&lt;Map&lt;String, Object&gt;&gt; payload = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            for (FakeCard card : cards.values()) {</span>
+<span class="nc" id="L126">                payload.add(card.fields());</span>
+<span class="nc" id="L127">            }</span>
+<span class="nc" id="L128">            return json.writeValueAsString(payload);</span>
+        }
+<span class="nc" id="L130">        Matcher matcher = CARD_CHECKLISTS.matcher(path);</span>
+<span class="nc bnc" id="L131" title="All 4 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; matcher.matches()) {</span>
+<span class="nc" id="L132">            FakeCard card = card(matcher.group(1));</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            return card == null ? null : json.writeValueAsString(card.checklists());</span>
+        }
+<span class="nc" id="L135">        matcher = CARD_COMMENTS.matcher(path);</span>
+<span class="nc bnc" id="L136" title="All 4 branches missed.">        if (&quot;POST&quot;.equals(method) &amp;&amp; matcher.matches()) {</span>
+<span class="nc" id="L137">            FakeCard card = card(matcher.group(1));</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            return card == null ? null : json.writeValueAsString(Map.of(&quot;id&quot;, addComment(card, query.get(&quot;text&quot;))));</span>
+        }
+<span class="nc" id="L140">        matcher = COMMENT_TEXT.matcher(path);</span>
+<span class="nc bnc" id="L141" title="All 4 branches missed.">        if (&quot;PUT&quot;.equals(method) &amp;&amp; matcher.matches()) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            return editComment(matcher.group(1), query.get(&quot;value&quot;))</span>
+<span class="nc" id="L143">                    ? json.writeValueAsString(Map.of(&quot;id&quot;, matcher.group(1)))</span>
+<span class="nc" id="L144">                    : null;</span>
+        }
+<span class="nc" id="L146">        matcher = CARD.matcher(path);</span>
+<span class="nc bnc" id="L147" title="All 4 branches missed.">        if (&quot;GET&quot;.equals(method) &amp;&amp; matcher.matches()) {</span>
+<span class="nc" id="L148">            FakeCard card = card(matcher.group(1));</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            if (card == null) {</span>
+<span class="nc" id="L150">                return null;</span>
+            }
+<span class="nc" id="L152">            Map&lt;String, Object&gt; payload = card.fields();</span>
+<span class="nc" id="L153">            payload.put(</span>
+                    &quot;actions&quot;,
+<span class="nc" id="L155">                    card.commentActions(</span>
+<span class="nc" id="L156">                            Integer.parseInt(query.getOrDefault(&quot;actions_limit&quot;, TRELLO_DEFAULT_ACTIONS_LIMIT))));</span>
+<span class="nc" id="L157">            return json.writeValueAsString(payload);</span>
+        }
+<span class="nc" id="L159">        return null;</span>
+    }
+
+    private @Nullable FakeCard card(String idOrShortLink) {
+<span class="nc" id="L163">        FakeCard byId = cards.get(idOrShortLink);</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">        if (byId != null) {</span>
+<span class="nc" id="L165">            return byId;</span>
+        }
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        for (FakeCard card : cards.values()) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">            if (card.shortLink.equals(idOrShortLink)) {</span>
+<span class="nc" id="L169">                return card;</span>
+            }
+<span class="nc" id="L171">        }</span>
+<span class="nc" id="L172">        return null;</span>
+    }
+
+    private String addComment(FakeCard card, String text) {
+<span class="nc" id="L176">        nextId++;</span>
+<span class="nc" id="L177">        String id = &quot;comment-&quot; + nextId;</span>
+        // Trello returns comment actions newest first.
+<span class="nc" id="L179">        card.comments.addFirst(new FakeComment(id, text));</span>
+<span class="nc" id="L180">        card.lastActivity = nextActivity();</span>
+<span class="nc" id="L181">        return id;</span>
+    }
+
+    private boolean editComment(String commentId, String text) {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        for (FakeCard card : cards.values()) {</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">            for (FakeComment comment : card.comments) {</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">                if (comment.id.equals(commentId)) {</span>
+<span class="nc" id="L188">                    comment.text = text;</span>
+<span class="nc" id="L189">                    card.lastActivity = nextActivity();</span>
+<span class="nc" id="L190">                    return true;</span>
+                }
+<span class="nc" id="L192">            }</span>
+<span class="nc" id="L193">        }</span>
+<span class="nc" id="L194">        return false;</span>
+    }
+
+    private Instant nextActivity() {
+<span class="nc" id="L198">        activityClock++;</span>
+<span class="nc" id="L199">        return FIRST_ACTIVITY.plusSeconds(activityClock);</span>
+    }
+
+    final class FakeCard {
+        private final String id;
+        private final String shortLink;
+        private final String listId;
+<span class="nc" id="L206">        private final List&lt;FakeComment&gt; comments = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L207">        private final List&lt;String&gt; checkItems = new ArrayList&lt;&gt;();</span>
+        private Instant lastActivity;
+
+<span class="nc" id="L210">        private FakeCard(String id, String shortLink, String listId) {</span>
+<span class="nc" id="L211">            this.id = id;</span>
+<span class="nc" id="L212">            this.shortLink = shortLink;</span>
+<span class="nc" id="L213">            this.listId = listId;</span>
+<span class="nc" id="L214">        }</span>
+
+        String id() {
+<span class="nc" id="L217">            return id;</span>
+        }
+
+        FakeCard withComments(int count) {
+<span class="nc" id="L221">            synchronized (FakeTrelloCommentBoard.this) {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">                for (int index = 0; index &lt; count; index++) {</span>
+<span class="nc" id="L223">                    addComment(this, &quot;Review note &quot; + index + &quot; for &quot; + id + &quot;. &quot; + &quot;x&quot;.repeat(REVIEW_NOTE_PADDING));</span>
+                }
+<span class="nc" id="L225">            }</span>
+<span class="nc" id="L226">            return this;</span>
+        }
+
+        FakeCard withComment(String text) {
+<span class="nc" id="L230">            synchronized (FakeTrelloCommentBoard.this) {</span>
+<span class="nc" id="L231">                addComment(this, text);</span>
+<span class="nc" id="L232">            }</span>
+<span class="nc" id="L233">            return this;</span>
+        }
+
+        /// Edits the newest comment and moves `dateLastActivity`, matching the live API edit
+        /// observation recorded in ADR 0117.
+        FakeCard withNewestCommentEdited(String text) {
+<span class="nc" id="L239">            synchronized (FakeTrelloCommentBoard.this) {</span>
+<span class="nc" id="L240">                editComment(comments.getFirst().id, text);</span>
+<span class="nc" id="L241">            }</span>
+<span class="nc" id="L242">            return this;</span>
+        }
+
+        // Checklist edits leave the comment badge and last-activity time alone, so tests cannot pass only
+        // because Trello may also move dateLastActivity for them.
+        FakeCard withChecklistItem(String name) {
+<span class="nc" id="L248">            synchronized (FakeTrelloCommentBoard.this) {</span>
+<span class="nc" id="L249">                checkItems.add(name);</span>
+<span class="nc" id="L250">            }</span>
+<span class="nc" id="L251">            return this;</span>
+        }
+
+        FakeCard withoutChecklistItems() {
+<span class="nc" id="L255">            synchronized (FakeTrelloCommentBoard.this) {</span>
+<span class="nc" id="L256">                checkItems.clear();</span>
+<span class="nc" id="L257">            }</span>
+<span class="nc" id="L258">            return this;</span>
+        }
+
+        List&lt;String&gt; commentTexts() {
+<span class="nc" id="L262">            synchronized (FakeTrelloCommentBoard.this) {</span>
+<span class="nc" id="L263">                List&lt;String&gt; texts = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">                for (FakeComment comment : comments) {</span>
+<span class="nc" id="L265">                    texts.add(comment.text);</span>
+<span class="nc" id="L266">                }</span>
+<span class="nc" id="L267">                return texts;</span>
+            }
+        }
+
+        private Map&lt;String, Object&gt; fields() {
+<span class="nc" id="L272">            Map&lt;String, Object&gt; fields = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L273">            fields.put(&quot;id&quot;, id);</span>
+<span class="nc" id="L274">            fields.put(&quot;name&quot;, &quot;Card &quot; + id);</span>
+<span class="nc" id="L275">            fields.put(&quot;desc&quot;, &quot;&quot;);</span>
+<span class="nc" id="L276">            fields.put(&quot;idList&quot;, listId);</span>
+<span class="nc" id="L277">            fields.put(&quot;idBoard&quot;, BOARD_ID);</span>
+<span class="nc" id="L278">            fields.put(&quot;closed&quot;, false);</span>
+<span class="nc" id="L279">            fields.put(&quot;shortLink&quot;, shortLink);</span>
+<span class="nc" id="L280">            fields.put(&quot;shortUrl&quot;, TRELLO_CARD_URL_PREFIX + shortLink);</span>
+<span class="nc" id="L281">            fields.put(&quot;url&quot;, TRELLO_CARD_URL_PREFIX + shortLink);</span>
+<span class="nc" id="L282">            fields.put(&quot;labels&quot;, List.of());</span>
+<span class="nc" id="L283">            fields.put(&quot;dateLastActivity&quot;, lastActivity.toString());</span>
+<span class="nc" id="L284">            fields.put(&quot;pos&quot;, 1);</span>
+<span class="nc" id="L285">            fields.put(&quot;badges&quot;, Map.of(&quot;checkItems&quot;, checkItems.size(), &quot;comments&quot;, comments.size()));</span>
+<span class="nc" id="L286">            return fields;</span>
+        }
+
+        private List&lt;Map&lt;String, Object&gt;&gt; checklists() {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">            if (checkItems.isEmpty()) {</span>
+<span class="nc" id="L291">                return List.of();</span>
+            }
+<span class="nc" id="L293">            List&lt;Map&lt;String, Object&gt;&gt; items = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">            for (int index = 0; index &lt; checkItems.size(); index++) {</span>
+<span class="nc" id="L295">                items.add(Map.of(&quot;id&quot;, id + &quot;-item-&quot; + index, &quot;name&quot;, checkItems.get(index), &quot;state&quot;, &quot;incomplete&quot;));</span>
+            }
+<span class="nc" id="L297">            return List.of(Map.of(&quot;id&quot;, id + &quot;-checklist&quot;, &quot;name&quot;, &quot;Before starting&quot;, &quot;checkItems&quot;, items));</span>
+        }
+
+        private List&lt;Map&lt;String, Object&gt;&gt; commentActions(int limit) {
+<span class="nc" id="L301">            List&lt;Map&lt;String, Object&gt;&gt; actions = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L302" title="All 2 branches missed.">            for (FakeComment comment : comments.subList(0, Math.min(limit, comments.size()))) {</span>
+<span class="nc" id="L303">                actions.add(Map.of(</span>
+                        &quot;id&quot;,
+                        comment.id,
+                        &quot;date&quot;,
+<span class="nc" id="L307">                        FIRST_ACTIVITY.toString(),</span>
+                        &quot;data&quot;,
+<span class="nc" id="L309">                        Map.of(&quot;text&quot;, comment.text),</span>
+                        &quot;memberCreator&quot;,
+<span class="nc" id="L311">                        Map.of(&quot;username&quot;, &quot;someone&quot;)));</span>
+<span class="nc" id="L312">            }</span>
+<span class="nc" id="L313">            return actions;</span>
+        }
+    }
+
+    private static final class FakeComment {
+        private final String id;
+        private String text;
+
+<span class="nc" id="L321">        private FakeComment(String id, String text) {</span>
+<span class="nc" id="L322">            this.id = id;</span>
+<span class="nc" id="L323">            this.text = text;</span>
+<span class="nc" id="L324">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

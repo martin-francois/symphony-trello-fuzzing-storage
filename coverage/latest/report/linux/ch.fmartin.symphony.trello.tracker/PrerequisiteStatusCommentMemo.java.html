@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PrerequisiteStatusCommentMemo.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">PrerequisiteStatusCommentMemo.java</span></div><h1>PrerequisiteStatusCommentMemo.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import ch.fmartin.symphony.trello.domain.Card;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
+
+/// Remembers the managed prerequisite status comment that the last lookup found on each candidate
+/// card within its tracker endpoint and board namespace, keyed by the card's comment activity.
+/// Adding or deleting a comment changes the count. Symphony forgets the answer before its own
+/// status writes. While Trello reports the same complete comment count and last-activity time,
+/// the poll reuses the remembered answer instead of reading up to
+/// [TrelloClient#WORKPAD_COMMENT_ACTION_LIMIT] comment actions again on every tick.
+///
+/// The memo lives only in memory. A restart starts empty and pays one lookup per card. See
+/// `docs/adr/0117-in-memory-prerequisite-status-lookup-memo.md`.
+<span class="fc" id="L20">final class PrerequisiteStatusCommentMemo {</span>
+    // Several threads may sync waiting feedback through the shared TrelloClient.
+<span class="fc" id="L22">    private final ConcurrentMap&lt;CardKey, Entry&gt; entries = new ConcurrentHashMap&lt;&gt;();</span>
+
+    /// A card belongs to one canonical tracker endpoint and resolved board namespace.
+<span class="nc" id="L25">    record CardKey(TrackerTarget target, String cardId) {}</span>
+
+    /// Comment activity of one card as the candidate poll's card list reports it.
+<span class="nc" id="L28">    record CommentActivity(int commentCount, @Nullable String lastActivity) {</span>
+        boolean isComplete() {
+<span class="nc bnc" id="L30" title="All 4 branches missed.">            return lastActivity != null &amp;&amp; !lastActivity.isBlank();</span>
+        }
+    }
+
+    /// Returns the card's managed status comment. Uses the remembered answer when `activity`
+    /// matches the activity of the remembered lookup, otherwise runs `lookup` and remembers its
+    /// answer. Missing activity or a null/blank timestamp invalidates the previous answer and
+    /// always runs the lookup without remembering its result.
+    Optional&lt;Card.Comment&gt; find(
+            CardKey card, @Nullable CommentActivity activity, Supplier&lt;Optional&lt;Card.Comment&gt;&gt; lookup) {
+<span class="nc bnc" id="L40" title="All 4 branches missed.">        if (activity == null || !activity.isComplete()) {</span>
+            // An incomplete observation also invalidates any lookup already in flight.
+<span class="nc" id="L42">            entries.remove(card);</span>
+<span class="nc" id="L43">            return lookup.get();</span>
+        }
+<span class="nc" id="L45">        Entry before = entries.computeIfAbsent(card, id -&gt; Entry.unknown());</span>
+        // An unknown entry has a null activity, which never equals a real one, so it always looks up.
+<span class="nc bnc" id="L47" title="All 2 branches missed.">        if (activity.equals(before.activity)) {</span>
+<span class="nc" id="L48">            return before.comment;</span>
+        }
+<span class="nc" id="L50">        Optional&lt;Card.Comment&gt; found = lookup.get();</span>
+        // Compare by identity: a forget() that ran during the lookup installed a new entry, and an
+        // answer read before that write must not replace it.
+<span class="nc" id="L53">        entries.replace(card, before, new Entry(activity, found));</span>
+<span class="nc" id="L54">        return found;</span>
+    }
+
+    /// Drops the remembered answer before Symphony attempts a status write, so the next poll
+    /// reads the comment again even if the write fails.
+    void forget(CardKey card) {
+<span class="nc" id="L60">        entries.put(card, Entry.unknown());</span>
+<span class="nc" id="L61">    }</span>
+
+    /// Keeps entries only for the given cards, so the memo stays bounded by the active candidates.
+    void retainOnly(Set&lt;CardKey&gt; cards) {
+<span class="nc" id="L65">        entries.keySet().retainAll(cards);</span>
+<span class="nc" id="L66">    }</span>
+
+    /// Uses identity equality on purpose, see [#find].
+    private static final class Entry {
+        private final @Nullable CommentActivity activity;
+        private final Optional&lt;Card.Comment&gt; comment;
+
+<span class="nc" id="L73">        private Entry(@Nullable CommentActivity activity, Optional&lt;Card.Comment&gt; comment) {</span>
+<span class="nc" id="L74">            this.activity = activity;</span>
+<span class="nc" id="L75">            this.comment = comment;</span>
+<span class="nc" id="L76">        }</span>
+
+        private static Entry unknown() {
+<span class="nc" id="L79">            return new Entry(null, Optional.empty());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

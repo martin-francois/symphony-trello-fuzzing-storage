@@ -14,6 +14,7 @@ import ch.fmartin.symphony.trello.setup.TutorialInput.Answer;
 import ch.fmartin.symphony.trello.setup.TutorialTrello.Board;
 import ch.fmartin.symphony.trello.setup.TutorialTrello.CardSnapshot;
 import ch.fmartin.symphony.trello.setup.TutorialTrello.Comment;
+import ch.fmartin.symphony.trello.tracker.SymphonyCommentFooter;
 import ch.fmartin.symphony.trello.tracker.TrelloClient;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -78,13 +79,13 @@ final class GuidedTutorial {
             Final checks: passed. Resolved addressed review threads. Merged the pull request because checks and \
             repository policy allowed it.
             Demo only: no pull request exists, so nothing was merged.&quot;&quot;&quot;;
-<span class="nc" id="L81">    private static final Duration ONE_MINUTE = Duration.ofMinutes(1);</span>
-<span class="nc" id="L82">    private static final Duration ONE_SECOND = Duration.ofSeconds(1);</span>
+<span class="nc" id="L82">    private static final Duration ONE_MINUTE = Duration.ofMinutes(1);</span>
+<span class="nc" id="L83">    private static final Duration ONE_SECOND = Duration.ofSeconds(1);</span>
     /// Keeps the quoted rework comment in the demo workpad short and on one line.
     private static final int QUOTED_COMMENT_LIMIT = 200;
-<span class="nc" id="L85">    private static final Observation ARCHIVED_CARD = new Observation(false, true, &quot;the card is archived&quot;);</span>
+<span class="nc" id="L86">    private static final Observation ARCHIVED_CARD = new Observation(false, true, &quot;the card is archived&quot;);</span>
 
-<span class="nc" id="L87">    private static final Map&lt;String, String&gt; LIST_PURPOSES = Map.of(</span>
+<span class="nc" id="L88">    private static final Map&lt;String, String&gt; LIST_PURPOSES = Map.of(</span>
             RECOMMENDED_INBOX_LIST,
             &quot;Ideas and rough tasks. Symphony leaves them alone.&quot;,
             RECOMMENDED_ACTIVE_STATE,
@@ -105,512 +106,513 @@ final class GuidedTutorial {
     private final ShutdownHooks shutdownHooks;
     private final Pacing pacing;
 
-<span class="nc" id="L108">    GuidedTutorial(TutorialTrello trello, Terminal terminal, ShutdownHooks shutdownHooks, Pacing pacing) {</span>
-<span class="nc" id="L109">        this.trello = Objects.requireNonNull(trello, &quot;trello&quot;);</span>
-<span class="nc" id="L110">        this.terminal = Objects.requireNonNull(terminal, &quot;terminal&quot;);</span>
-<span class="nc" id="L111">        this.shutdownHooks = Objects.requireNonNull(shutdownHooks, &quot;shutdownHooks&quot;);</span>
-<span class="nc" id="L112">        this.pacing = Objects.requireNonNull(pacing, &quot;pacing&quot;);</span>
-<span class="nc" id="L113">    }</span>
+<span class="nc" id="L109">    GuidedTutorial(TutorialTrello trello, Terminal terminal, ShutdownHooks shutdownHooks, Pacing pacing) {</span>
+<span class="nc" id="L110">        this.trello = Objects.requireNonNull(trello, &quot;trello&quot;);</span>
+<span class="nc" id="L111">        this.terminal = Objects.requireNonNull(terminal, &quot;terminal&quot;);</span>
+<span class="nc" id="L112">        this.shutdownHooks = Objects.requireNonNull(shutdownHooks, &quot;shutdownHooks&quot;);</span>
+<span class="nc" id="L113">        this.pacing = Objects.requireNonNull(pacing, &quot;pacing&quot;);</span>
+<span class="nc" id="L114">    }</span>
 
     /// Creates the tutorial that a user starts from the CLI: real Trello, the JVM's Ctrl+C hooks, and
     /// the default check pacing.
     static GuidedTutorial forCli(URI endpoint, TrelloCredentials credentials, Terminal terminal) {
-<span class="nc" id="L118">        return new GuidedTutorial(</span>
-<span class="nc" id="L119">                new TutorialTrello(endpoint, credentials), terminal, ShutdownHooks.runtime(), Pacing.DEFAULT);</span>
+<span class="nc" id="L119">        return new GuidedTutorial(</span>
+<span class="nc" id="L120">                new TutorialTrello(endpoint, credentials), terminal, ShutdownHooks.runtime(), Pacing.DEFAULT);</span>
     }
 
     /// Whether a board in the connected-board manifest uses GitHub integration, which selects the
     /// GitHub path when the user passed neither `--github` nor `--no-github`.
     static boolean connectedBoardUsesGithub(Path manifestPath) throws IOException {
-<span class="nc" id="L125">        return new ConnectedBoardRepository(manifestPath)</span>
-<span class="nc" id="L126">                .load().boards().stream().anyMatch(ConnectedBoard::githubEnabled);</span>
+<span class="nc" id="L126">        return new ConnectedBoardRepository(manifestPath)</span>
+<span class="nc" id="L127">                .load().boards().stream().anyMatch(ConnectedBoard::githubEnabled);</span>
     }
 
     /// The command line that starts the tutorial, for hints that tell the user how to run it again.
     static String commandLine(String cliCommand) {
-<span class="nc" id="L131">        return cliCommand + &quot; &quot; + COMMAND;</span>
+<span class="nc" id="L132">        return cliCommand + &quot; &quot; + COMMAND;</span>
     }
 
     /// Runs the whole walkthrough. Trello failures still settle the temporary board before they are
     /// rethrown.
     Outcome run(Options options) throws IOException {
-<span class="nc" id="L137">        PrintStream out = terminal.out(); // NOPMD - Terminal owns the stream.</span>
-<span class="nc" id="L138">        printIntro(out);</span>
-<span class="nc" id="L139">        String workspaceId = chooseWorkspace(options);</span>
-<span class="nc" id="L140">        var cleanup = new TutorialBoardCleanup(trello::archiveBoard, TrelloSetupApi.LONGEST_REQUEST);</span>
-<span class="nc" id="L141">        var session = new Session(options, cleanup);</span>
-<span class="nc" id="L142">        Runnable unregisterHook = shutdownHooks.register(() -&gt; settleWithoutAsking(session, &quot;Tutorial interrupted.&quot;));</span>
-<span class="nc" id="L143">        try (var input = new TutorialInput(terminal)) {</span>
-<span class="nc" id="L144">            createBoard(session, workspaceId);</span>
-<span class="nc" id="L145">            Outcome outcome = walkThrough(session, input);</span>
-<span class="nc" id="L146">            settleAtEnd(session, input, outcome);</span>
-<span class="nc" id="L147">            return outcome;</span>
-<span class="nc" id="L148">        } catch (IOException | RuntimeException e) {</span>
-<span class="nc" id="L149">            settleWithoutAsking(session, &quot;The tutorial stopped because of an error.&quot;);</span>
-<span class="nc" id="L150">            throw e;</span>
+<span class="nc" id="L138">        PrintStream out = terminal.out(); // NOPMD - Terminal owns the stream.</span>
+<span class="nc" id="L139">        printIntro(out);</span>
+<span class="nc" id="L140">        String workspaceId = chooseWorkspace(options);</span>
+<span class="nc" id="L141">        var cleanup = new TutorialBoardCleanup(trello::archiveBoard, TrelloSetupApi.LONGEST_REQUEST);</span>
+<span class="nc" id="L142">        var session = new Session(options, cleanup);</span>
+<span class="nc" id="L143">        Runnable unregisterHook = shutdownHooks.register(() -&gt; settleWithoutAsking(session, &quot;Tutorial interrupted.&quot;));</span>
+<span class="nc" id="L144">        try (var input = new TutorialInput(terminal)) {</span>
+<span class="nc" id="L145">            createBoard(session, workspaceId);</span>
+<span class="nc" id="L146">            Outcome outcome = walkThrough(session, input);</span>
+<span class="nc" id="L147">            settleAtEnd(session, input, outcome);</span>
+<span class="nc" id="L148">            return outcome;</span>
+<span class="nc" id="L149">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L150">            settleWithoutAsking(session, &quot;The tutorial stopped because of an error.&quot;);</span>
+<span class="nc" id="L151">            throw e;</span>
         } finally {
-<span class="nc" id="L152">            unregisterHook.run();</span>
+<span class="nc" id="L153">            unregisterHook.run();</span>
         }
     }
 
     private void printIntro(PrintStream out) {
-<span class="nc" id="L157">        out.println();</span>
-<span class="nc" id="L158">        out.println(&quot;Guided tutorial&quot;);</span>
-<span class="nc" id="L159">        out.println(&quot;This walkthrough creates a temporary Trello board, asks you to move one sample card through the&quot;);</span>
-<span class="nc" id="L160">        out.println(&quot;workflow, and shows how Symphony reacts. It does not change your connected boards, your&quot;);</span>
-<span class="nc" id="L161">        out.println(&quot;repositories, or your workflow files. The tutorial plays Symphony's part itself, so no Codex&quot;);</span>
-<span class="nc" id="L162">        out.println(&quot;work runs and no pull request is created.&quot;);</span>
-<span class="nc" id="L163">    }</span>
+<span class="nc" id="L158">        out.println();</span>
+<span class="nc" id="L159">        out.println(&quot;Guided tutorial&quot;);</span>
+<span class="nc" id="L160">        out.println(&quot;This walkthrough creates a temporary Trello board, asks you to move one sample card through the&quot;);</span>
+<span class="nc" id="L161">        out.println(&quot;workflow, and shows how Symphony reacts. It does not change your connected boards, your&quot;);</span>
+<span class="nc" id="L162">        out.println(&quot;repositories, or your workflow files. The tutorial plays Symphony's part itself, so no Codex&quot;);</span>
+<span class="nc" id="L163">        out.println(&quot;work runs and no pull request is created.&quot;);</span>
+<span class="nc" id="L164">    }</span>
 
     private String chooseWorkspace(Options options) throws IOException {
-<span class="nc bnc" id="L166" title="All 2 branches missed.">        if (options.workspaceId().isPresent()) {</span>
-<span class="nc" id="L167">            return options.workspaceId().get();</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (options.workspaceId().isPresent()) {</span>
+<span class="nc" id="L168">            return options.workspaceId().get();</span>
         }
-<span class="nc" id="L169">        List&lt;WorkspaceInfo&gt; workspaces = trello.workspaces();</span>
-<span class="nc bnc" id="L170" title="All 2 branches missed.">        if (workspaces.isEmpty()) {</span>
-<span class="nc" id="L171">            throw new TrelloBoardSetupException(</span>
+<span class="nc" id="L170">        List&lt;WorkspaceInfo&gt; workspaces = trello.workspaces();</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (workspaces.isEmpty()) {</span>
+<span class="nc" id="L172">            throw new TrelloBoardSetupException(</span>
                     &quot;setup_workspace_required&quot;,
                     &quot;No Trello Workspace was found for this token. Create a Workspace in Trello, then start the&quot;
                             + &quot; tutorial again.&quot;);
         }
-<span class="nc bnc" id="L176" title="All 2 branches missed.">        if (workspaces.size() == 1) {</span>
-<span class="nc" id="L177">            return workspaces.getFirst().id();</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">        if (workspaces.size() == 1) {</span>
+<span class="nc" id="L178">            return workspaces.getFirst().id();</span>
         }
-<span class="nc" id="L179">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L180">        terminal.info(&quot;Choose the Trello Workspace for the temporary tutorial board:&quot;);</span>
-<span class="nc bnc" id="L181" title="All 2 branches missed.">        for (int i = 0; i &lt; workspaces.size(); i++) {</span>
-<span class="nc" id="L182">            terminal.info(&quot;  &quot; + (i + 1) + &quot;. &quot;</span>
-<span class="nc" id="L183">                    + DisplayNames.quotedName(workspaces.get(i).displayName()));</span>
+<span class="nc" id="L180">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L181">        terminal.info(&quot;Choose the Trello Workspace for the temporary tutorial board:&quot;);</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        for (int i = 0; i &lt; workspaces.size(); i++) {</span>
+<span class="nc" id="L183">            terminal.info(&quot;  &quot; + (i + 1) + &quot;. &quot;</span>
+<span class="nc" id="L184">                    + DisplayNames.quotedName(workspaces.get(i).displayName()));</span>
         }
-<span class="nc" id="L185">        int selected = PromptSupport.requiredChoice(</span>
-<span class="nc" id="L186">                terminal.readLine(&quot;Workspace: &quot;),</span>
-<span class="nc" id="L187">                workspaces.size(),</span>
+<span class="nc" id="L186">        int selected = PromptSupport.requiredChoice(</span>
+<span class="nc" id="L187">                terminal.readLine(&quot;Workspace: &quot;),</span>
+<span class="nc" id="L188">                workspaces.size(),</span>
                 &quot;setup_workspace_id_required&quot;,
                 &quot;Workspace selection is required. Pass --workspace-id to choose it without a prompt.&quot;);
-<span class="nc" id="L190">        return workspaces.get(selected - 1).id();</span>
+<span class="nc" id="L191">        return workspaces.get(selected - 1).id();</span>
     }
 
     private void createBoard(Session session, String workspaceId) {
-<span class="nc" id="L194">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L195">        terminal.info(&quot;Creating the temporary tutorial board...&quot;);</span>
-<span class="nc" id="L196">        Board board = session.cleanup.create(() -&gt; trello.createBoard(BOARD_NAME, workspaceId));</span>
-<span class="nc" id="L197">        session.board = board;</span>
-<span class="nc" id="L198">        terminal.info(&quot;  OK  Board created: &quot; + DisplayNames.quotedName(BOARD_NAME));</span>
-<span class="nc bnc" id="L199" title="All 2 branches missed.">        for (String listName : session.listNames()) {</span>
-<span class="nc" id="L200">            session.listIds.put(listName, trello.createList(board, listName));</span>
-<span class="nc" id="L201">        }</span>
-<span class="nc" id="L202">        terminal.info(&quot;  OK  Lists: &quot; + DisplayNames.quotedList(session.listNames()));</span>
-<span class="nc" id="L203">        session.cardId = trello.createCard(session.listId(RECOMMENDED_INBOX_LIST), CARD_NAME, CARD_DESCRIPTION);</span>
-<span class="nc" id="L204">        terminal.info(</span>
-<span class="nc" id="L205">                &quot;  OK  Sample card in &quot; + quoted(RECOMMENDED_INBOX_LIST) + &quot;: &quot; + DisplayNames.quotedName(CARD_NAME));</span>
-<span class="nc" id="L206">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L207">        terminal.info(&quot;Open the tutorial board in your browser:&quot;);</span>
-<span class="nc" id="L208">        terminal.info(&quot;  &quot; + board.url());</span>
-<span class="nc" id="L209">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L210">        terminal.info(&quot;What each Trello list means:&quot;);</span>
-<span class="nc" id="L211">        int width = session.listNames().stream()</span>
-<span class="nc" id="L212">                .mapToInt(name -&gt; quoted(name).length())</span>
-<span class="nc" id="L213">                .max()</span>
-<span class="nc" id="L214">                .orElse(0);</span>
-<span class="nc bnc" id="L215" title="All 2 branches missed.">        for (String listName : session.listNames()) {</span>
-<span class="nc" id="L216">            terminal.info(&quot;  &quot; + padded(quoted(listName), width) + &quot;  &quot; + LIST_PURPOSES.get(listName));</span>
-<span class="nc" id="L217">        }</span>
-<span class="nc" id="L218">    }</span>
+<span class="nc" id="L195">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L196">        terminal.info(&quot;Creating the temporary tutorial board...&quot;);</span>
+<span class="nc" id="L197">        Board board = session.cleanup.create(() -&gt; trello.createBoard(BOARD_NAME, workspaceId));</span>
+<span class="nc" id="L198">        session.board = board;</span>
+<span class="nc" id="L199">        terminal.info(&quot;  OK  Board created: &quot; + DisplayNames.quotedName(BOARD_NAME));</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        for (String listName : session.listNames()) {</span>
+<span class="nc" id="L201">            session.listIds.put(listName, trello.createList(board, listName));</span>
+<span class="nc" id="L202">        }</span>
+<span class="nc" id="L203">        terminal.info(&quot;  OK  Lists: &quot; + DisplayNames.quotedList(session.listNames()));</span>
+<span class="nc" id="L204">        session.cardId = trello.createCard(session.listId(RECOMMENDED_INBOX_LIST), CARD_NAME, CARD_DESCRIPTION);</span>
+<span class="nc" id="L205">        terminal.info(</span>
+<span class="nc" id="L206">                &quot;  OK  Sample card in &quot; + quoted(RECOMMENDED_INBOX_LIST) + &quot;: &quot; + DisplayNames.quotedName(CARD_NAME));</span>
+<span class="nc" id="L207">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L208">        terminal.info(&quot;Open the tutorial board in your browser:&quot;);</span>
+<span class="nc" id="L209">        terminal.info(&quot;  &quot; + board.url());</span>
+<span class="nc" id="L210">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L211">        terminal.info(&quot;What each Trello list means:&quot;);</span>
+<span class="nc" id="L212">        int width = session.listNames().stream()</span>
+<span class="nc" id="L213">                .mapToInt(name -&gt; quoted(name).length())</span>
+<span class="nc" id="L214">                .max()</span>
+<span class="nc" id="L215">                .orElse(0);</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">        for (String listName : session.listNames()) {</span>
+<span class="nc" id="L217">            terminal.info(&quot;  &quot; + padded(quoted(listName), width) + &quot;  &quot; + LIST_PURPOSES.get(listName));</span>
+<span class="nc" id="L218">        }</span>
+<span class="nc" id="L219">    }</span>
 
     private Outcome walkThrough(Session session, TutorialInput input) throws IOException {
-<span class="nc" id="L221">        printStepHeading(Step.QUEUE, &quot;queue the card&quot;);</span>
-<span class="nc" id="L222">        terminal.info(&quot;In Trello, move the card &quot; + DisplayNames.quotedName(CARD_NAME));</span>
-<span class="nc" id="L223">        terminal.info(&quot;from &quot; + quoted(RECOMMENDED_INBOX_LIST) + &quot; to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot;.&quot;);</span>
-<span class="nc bnc" id="L224" title="All 2 branches missed.">        if (await(session, input, new ListExpectation(session, RECOMMENDED_INBOX_LIST, RECOMMENDED_ACTIVE_STATE))</span>
+<span class="nc" id="L222">        printStepHeading(Step.QUEUE, &quot;queue the card&quot;);</span>
+<span class="nc" id="L223">        terminal.info(&quot;In Trello, move the card &quot; + DisplayNames.quotedName(CARD_NAME));</span>
+<span class="nc" id="L224">        terminal.info(&quot;from &quot; + quoted(RECOMMENDED_INBOX_LIST) + &quot; to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot;.&quot;);</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">        if (await(session, input, new ListExpectation(session, RECOMMENDED_INBOX_LIST, RECOMMENDED_ACTIVE_STATE))</span>
                 == StepResult.QUIT) {
-<span class="nc" id="L226">            return Outcome.STOPPED;</span>
+<span class="nc" id="L227">            return Outcome.STOPPED;</span>
         }
-<span class="nc bnc" id="L228" title="All 4 branches missed.">        if (!simulatePickup(session, input) || !simulateHandoff(session, input)) {</span>
-<span class="nc" id="L229">            return Outcome.STOPPED;</span>
-        }
-
-<span class="nc" id="L232">        var rework = new ReworkExpectation(session, card(session));</span>
-<span class="nc" id="L233">        printStepHeading(Step.REWORK, &quot;ask for a change&quot;);</span>
-<span class="nc" id="L234">        terminal.info(&quot;Pretend the result needs one more change. Add a Trello comment to the card, for example:&quot;);</span>
-<span class="nc" id="L235">        terminal.info(&quot;  &quot; + SAMPLE_CHANGE_REQUEST);</span>
-<span class="nc" id="L236">        terminal.info(</span>
-<span class="nc" id="L237">                &quot;Then move the card back to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot; so Symphony can address it.&quot;);</span>
-<span class="nc bnc" id="L238" title="All 2 branches missed.">        if (session.options.github()) {</span>
-<span class="nc" id="L239">            terminal.info(&quot;In a real run you can also write review comments on the pull request in GitHub.&quot;);</span>
-<span class="nc" id="L240">            terminal.info(&quot;Symphony reads both.&quot;);</span>
-        }
-<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (await(session, input, rework) == StepResult.QUIT) {</span>
-<span class="nc" id="L243">            return Outcome.STOPPED;</span>
-        }
-<span class="nc bnc" id="L245" title="All 2 branches missed.">        if (!simulateRework(session, input, rework)) {</span>
-<span class="nc" id="L246">            return Outcome.STOPPED;</span>
+<span class="nc bnc" id="L229" title="All 4 branches missed.">        if (!simulatePickup(session, input) || !simulateHandoff(session, input)) {</span>
+<span class="nc" id="L230">            return Outcome.STOPPED;</span>
         }
 
-<span class="nc bnc" id="L249" title="All 2 branches missed.">        if (!session.options.github()) {</span>
-<span class="nc" id="L250">            printConcurrencyNote();</span>
+<span class="nc" id="L233">        var rework = new ReworkExpectation(session, card(session));</span>
+<span class="nc" id="L234">        printStepHeading(Step.REWORK, &quot;ask for a change&quot;);</span>
+<span class="nc" id="L235">        terminal.info(&quot;Pretend the result needs one more change. Add a Trello comment to the card, for example:&quot;);</span>
+<span class="nc" id="L236">        terminal.info(&quot;  &quot; + SAMPLE_CHANGE_REQUEST);</span>
+<span class="nc" id="L237">        terminal.info(</span>
+<span class="nc" id="L238">                &quot;Then move the card back to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot; so Symphony can address it.&quot;);</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">        if (session.options.github()) {</span>
+<span class="nc" id="L240">            terminal.info(&quot;In a real run you can also write review comments on the pull request in GitHub.&quot;);</span>
+<span class="nc" id="L241">            terminal.info(&quot;Symphony reads both.&quot;);</span>
+        }
+<span class="nc bnc" id="L243" title="All 2 branches missed.">        if (await(session, input, rework) == StepResult.QUIT) {</span>
+<span class="nc" id="L244">            return Outcome.STOPPED;</span>
+        }
+<span class="nc bnc" id="L246" title="All 2 branches missed.">        if (!simulateRework(session, input, rework)) {</span>
+<span class="nc" id="L247">            return Outcome.STOPPED;</span>
         }
 
-<span class="nc bnc" id="L253" title="All 2 branches missed.">        boolean finished = session.options.github() ? mergingStep(session, input) : doneStep(session, input);</span>
-<span class="nc bnc" id="L254" title="All 2 branches missed.">        if (!finished) {</span>
-<span class="nc" id="L255">            return Outcome.STOPPED;</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (!session.options.github()) {</span>
+<span class="nc" id="L251">            printConcurrencyNote();</span>
         }
-<span class="nc bnc" id="L257" title="All 2 branches missed.">        if (session.options.github()) {</span>
-<span class="nc" id="L258">            printConcurrencyNote();</span>
+
+<span class="nc bnc" id="L254" title="All 2 branches missed.">        boolean finished = session.options.github() ? mergingStep(session, input) : doneStep(session, input);</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        if (!finished) {</span>
+<span class="nc" id="L256">            return Outcome.STOPPED;</span>
+        }
+<span class="nc bnc" id="L258" title="All 2 branches missed.">        if (session.options.github()) {</span>
+<span class="nc" id="L259">            printConcurrencyNote();</span>
         } else {
-<span class="nc" id="L260">            printWhatGitHubAdds(session.options);</span>
+<span class="nc" id="L261">            printWhatGitHubAdds(session.options);</span>
         }
-<span class="nc" id="L262">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L263">        terminal.info(&quot;You finished the tutorial. Use the same flow on your connected board.&quot;);</span>
-<span class="nc" id="L264">        return Outcome.COMPLETED;</span>
+<span class="nc" id="L263">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L264">        terminal.info(&quot;You finished the tutorial. Use the same flow on your connected board.&quot;);</span>
+<span class="nc" id="L265">        return Outcome.COMPLETED;</span>
     }
 
     private void printConcurrencyNote() {
-<span class="nc" id="L268">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L269">        terminal.info(CONCURRENCY_NOTE);</span>
-<span class="nc" id="L270">        terminal.info(&quot;The README workflow contract has the details:&quot;);</span>
-<span class="nc" id="L271">        terminal.info(&quot;  &quot; + ProjectDocs.WORKFLOW_CONTRACT_URL);</span>
-<span class="nc" id="L272">    }</span>
+<span class="nc" id="L269">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L270">        terminal.info(CONCURRENCY_NOTE);</span>
+<span class="nc" id="L271">        terminal.info(&quot;The README workflow contract has the details:&quot;);</span>
+<span class="nc" id="L272">        terminal.info(&quot;  &quot; + ProjectDocs.WORKFLOW_CONTRACT_URL);</span>
+<span class="nc" id="L273">    }</span>
 
     private boolean simulatePickup(Session session, TutorialInput input) throws IOException {
-<span class="nc" id="L275">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L276">        terminal.info(&quot;Symphony picks up the card&quot;);</span>
-<span class="nc" id="L277">        terminal.info(&quot;Symphony dispatches cards from &quot; + quoted(RECOMMENDED_ACTIVE_STATE)</span>
+<span class="nc" id="L276">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L277">        terminal.info(&quot;Symphony picks up the card&quot;);</span>
+<span class="nc" id="L278">        terminal.info(&quot;Symphony dispatches cards from &quot; + quoted(RECOMMENDED_ACTIVE_STATE)</span>
                 + &quot;. When it starts one, it moves the card to&quot;);
-<span class="nc" id="L279">        terminal.info(quoted(RECOMMENDED_IN_PROGRESS_STATE) + &quot; and adds one &quot; + quoted(TrelloClient.WORKPAD_MARKER)</span>
+<span class="nc" id="L280">        terminal.info(quoted(RECOMMENDED_IN_PROGRESS_STATE) + &quot; and adds one &quot; + quoted(TrelloClient.WORKPAD_MARKER)</span>
                 + &quot; Trello comment. The tutorial does the same now.&quot;);
-<span class="nc" id="L281">        moveCard(session, RECOMMENDED_IN_PROGRESS_STATE);</span>
-<span class="nc" id="L282">        session.workpadCommentId = trello.addComment(session.cardId, workpad(&quot;In progress&quot;, PICKUP_PLAN));</span>
-<span class="nc" id="L283">        session.tutorialCommentIds.add(session.workpadCommentId);</span>
-<span class="nc" id="L284">        terminal.info(&quot;  OK  Added the Codex Workpad comment&quot;);</span>
-<span class="nc" id="L285">        terminal.info(&quot;Open the card and read the workpad comment. Symphony records progress and handoff notes&quot;);</span>
-<span class="nc" id="L286">        terminal.info(&quot;there, and it updates this one comment instead of adding new ones.&quot;);</span>
-<span class="nc" id="L287">        return pause(input);</span>
+<span class="nc" id="L282">        moveCard(session, RECOMMENDED_IN_PROGRESS_STATE);</span>
+<span class="nc" id="L283">        session.workpadCommentId = trello.addComment(session.cardId, workpad(&quot;In progress&quot;, PICKUP_PLAN));</span>
+<span class="nc" id="L284">        session.tutorialCommentIds.add(session.workpadCommentId);</span>
+<span class="nc" id="L285">        terminal.info(&quot;  OK  Added the Codex Workpad comment&quot;);</span>
+<span class="nc" id="L286">        terminal.info(&quot;Open the card and read the workpad comment. Symphony records progress and handoff notes&quot;);</span>
+<span class="nc" id="L287">        terminal.info(&quot;there, and it updates this one comment instead of adding new ones.&quot;);</span>
+<span class="nc" id="L288">        return pause(input);</span>
     }
 
     private boolean simulateHandoff(Session session, TutorialInput input) throws IOException {
-<span class="nc" id="L291">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L292">        terminal.info(&quot;Codex hands the card over for review&quot;);</span>
-<span class="nc" id="L293">        terminal.info(&quot;When Codex finishes, it updates the workpad with a summary and moves the card to &quot;</span>
-<span class="nc" id="L294">                + quoted(RECOMMENDED_REVIEW_STATE) + &quot;.&quot;);</span>
-<span class="nc" id="L295">        trello.updateComment(session.workpadCommentId, workpad(&quot;Ready for human review&quot;, handoffNotes(session)));</span>
-<span class="nc" id="L296">        terminal.info(&quot;  OK  Updated the workpad with handoff notes&quot;);</span>
-<span class="nc" id="L297">        moveCard(session, RECOMMENDED_REVIEW_STATE);</span>
-<span class="nc bnc" id="L298" title="All 2 branches missed.">        if (session.options.github()) {</span>
-<span class="nc" id="L299">            terminal.info(&quot;With GitHub integration, Codex creates or updates a pull request and links it on the card.&quot;);</span>
-<span class="nc" id="L300">            terminal.info(</span>
+<span class="nc" id="L292">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L293">        terminal.info(&quot;Codex hands the card over for review&quot;);</span>
+<span class="nc" id="L294">        terminal.info(&quot;When Codex finishes, it updates the workpad with a summary and moves the card to &quot;</span>
+<span class="nc" id="L295">                + quoted(RECOMMENDED_REVIEW_STATE) + &quot;.&quot;);</span>
+<span class="nc" id="L296">        trello.updateComment(session.workpadCommentId, workpad(&quot;Ready for human review&quot;, handoffNotes(session)));</span>
+<span class="nc" id="L297">        terminal.info(&quot;  OK  Updated the workpad with handoff notes&quot;);</span>
+<span class="nc" id="L298">        moveCard(session, RECOMMENDED_REVIEW_STATE);</span>
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        if (session.options.github()) {</span>
+<span class="nc" id="L300">            terminal.info(&quot;With GitHub integration, Codex creates or updates a pull request and links it on the card.&quot;);</span>
+<span class="nc" id="L301">            terminal.info(</span>
                     &quot;Look for the \&quot;Pull request\&quot; line in the workpad. In a real run it shows the pull request URL.&quot;);
-<span class="nc" id="L302">            terminal.info(&quot;You can review and comment on either the pull request in GitHub or the Trello card.&quot;);</span>
+<span class="nc" id="L303">            terminal.info(&quot;You can review and comment on either the pull request in GitHub or the Trello card.&quot;);</span>
         } else {
-<span class="nc" id="L304">            terminal.info(&quot;Review the result: read the workpad notes on the card.&quot;);</span>
+<span class="nc" id="L305">            terminal.info(&quot;Review the result: read the workpad notes on the card.&quot;);</span>
         }
-<span class="nc" id="L306">        return pause(input);</span>
+<span class="nc" id="L307">        return pause(input);</span>
     }
 
     private boolean simulateRework(Session session, TutorialInput input, ReworkExpectation rework) throws IOException {
-<span class="nc" id="L310">        String request = rework.newestRequest(card(session)).orElse(SAMPLE_CHANGE_REQUEST);</span>
-<span class="nc" id="L311">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L312">        terminal.info(&quot;Symphony treats this as rework&quot;);</span>
-<span class="nc" id="L313">        terminal.info(&quot;Symphony picks the card up again. The card already has a workpad, so Codex treats this as&quot;);</span>
-<span class="nc" id="L314">        terminal.info(</span>
+<span class="nc" id="L311">        String request = rework.newestRequest(card(session)).orElse(SAMPLE_CHANGE_REQUEST);</span>
+<span class="nc" id="L312">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L313">        terminal.info(&quot;Symphony treats this as rework&quot;);</span>
+<span class="nc" id="L314">        terminal.info(&quot;Symphony picks the card up again. The card already has a workpad, so Codex treats this as&quot;);</span>
+<span class="nc" id="L315">        terminal.info(</span>
                 &quot;rework: it rereads the card, your new Trello comments, and the workpad before it changes anything.&quot;);
-<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (session.options.github()) {</span>
-<span class="nc" id="L317">            terminal.info(&quot;With GitHub integration, it normally updates the existing pull request.&quot;);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">        if (session.options.github()) {</span>
+<span class="nc" id="L318">            terminal.info(&quot;With GitHub integration, it normally updates the existing pull request.&quot;);</span>
         }
-<span class="nc" id="L319">        moveCard(session, RECOMMENDED_IN_PROGRESS_STATE);</span>
-<span class="nc" id="L320">        String reworkNotes = &quot;Rework input: your Trello comment \&quot;&quot; + oneLine(request) + &quot;\&quot;\n&quot;</span>
+<span class="nc" id="L320">        moveCard(session, RECOMMENDED_IN_PROGRESS_STATE);</span>
+<span class="nc" id="L321">        String reworkNotes = &quot;Rework input: your Trello comment \&quot;&quot; + oneLine(request) + &quot;\&quot;\n&quot;</span>
                 + &quot;Summary: Read the new Trello comment, made the requested change, and checked it again.\n&quot;
-<span class="nc" id="L322">                + nextStepNote(session);</span>
-<span class="nc" id="L323">        trello.updateComment(session.workpadCommentId, workpad(&quot;Ready for human review (rework done)&quot;, reworkNotes));</span>
-<span class="nc" id="L324">        terminal.info(&quot;  OK  Updated the workpad with your comment as rework input&quot;);</span>
-<span class="nc" id="L325">        moveCard(session, RECOMMENDED_REVIEW_STATE);</span>
-<span class="nc" id="L326">        return pause(input);</span>
+<span class="nc" id="L323">                + nextStepNote(session);</span>
+<span class="nc" id="L324">        trello.updateComment(session.workpadCommentId, workpad(&quot;Ready for human review (rework done)&quot;, reworkNotes));</span>
+<span class="nc" id="L325">        terminal.info(&quot;  OK  Updated the workpad with your comment as rework input&quot;);</span>
+<span class="nc" id="L326">        moveCard(session, RECOMMENDED_REVIEW_STATE);</span>
+<span class="nc" id="L327">        return pause(input);</span>
     }
 
     private boolean doneStep(Session session, TutorialInput input) throws IOException {
-<span class="nc" id="L330">        printStepHeading(Step.FINISH, &quot;accept the result&quot;);</span>
-<span class="nc" id="L331">        terminal.info(&quot;The result looks good now. Move the card to &quot; + quoted(RECOMMENDED_DONE_STATE) + &quot;.&quot;);</span>
-<span class="nc bnc" id="L332" title="All 2 branches missed.">        if (await(session, input, new ListExpectation(session, RECOMMENDED_REVIEW_STATE, RECOMMENDED_DONE_STATE))</span>
+<span class="nc" id="L331">        printStepHeading(Step.FINISH, &quot;accept the result&quot;);</span>
+<span class="nc" id="L332">        terminal.info(&quot;The result looks good now. Move the card to &quot; + quoted(RECOMMENDED_DONE_STATE) + &quot;.&quot;);</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">        if (await(session, input, new ListExpectation(session, RECOMMENDED_REVIEW_STATE, RECOMMENDED_DONE_STATE))</span>
                 == StepResult.QUIT) {
-<span class="nc" id="L334">            return false;</span>
+<span class="nc" id="L335">            return false;</span>
         }
-<span class="nc" id="L336">        terminal.info(quoted(RECOMMENDED_DONE_STATE) + &quot; is a terminal list. Symphony leaves cards there alone.&quot;);</span>
-<span class="nc" id="L337">        return true;</span>
+<span class="nc" id="L337">        terminal.info(quoted(RECOMMENDED_DONE_STATE) + &quot; is a terminal list. Symphony leaves cards there alone.&quot;);</span>
+<span class="nc" id="L338">        return true;</span>
     }
 
     private boolean mergingStep(Session session, TutorialInput input) throws IOException {
-<span class="nc" id="L341">        printStepHeading(Step.FINISH, &quot;approve the pull request with &quot; + quoted(RECOMMENDED_MERGING_STATE));</span>
-<span class="nc" id="L342">        terminal.info(MERGING_EXAMPLE);</span>
-<span class="nc" id="L343">        terminal.info(&quot;Move the card to &quot; + quoted(RECOMMENDED_MERGING_STATE) + &quot; now.&quot;);</span>
-<span class="nc bnc" id="L344" title="All 2 branches missed.">        if (await(session, input, new ListExpectation(session, RECOMMENDED_REVIEW_STATE, RECOMMENDED_MERGING_STATE))</span>
+<span class="nc" id="L342">        printStepHeading(Step.FINISH, &quot;approve the pull request with &quot; + quoted(RECOMMENDED_MERGING_STATE));</span>
+<span class="nc" id="L343">        terminal.info(MERGING_EXAMPLE);</span>
+<span class="nc" id="L344">        terminal.info(&quot;Move the card to &quot; + quoted(RECOMMENDED_MERGING_STATE) + &quot; now.&quot;);</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        if (await(session, input, new ListExpectation(session, RECOMMENDED_REVIEW_STATE, RECOMMENDED_MERGING_STATE))</span>
                 == StepResult.QUIT) {
-<span class="nc" id="L346">            return false;</span>
+<span class="nc" id="L347">            return false;</span>
         }
-<span class="nc" id="L348">        trello.updateComment(session.workpadCommentId, workpad(&quot;Merged&quot;, MERGE_NOTES));</span>
-<span class="nc" id="L349">        terminal.info(&quot;  OK  Updated the workpad with the final checks and merge result (demo only)&quot;);</span>
-<span class="nc" id="L350">        moveCard(session, RECOMMENDED_DONE_STATE);</span>
-<span class="nc" id="L351">        terminal.info(&quot;If you merge a pull request yourself instead, move the card to &quot; + quoted(RECOMMENDED_DONE_STATE)</span>
+<span class="nc" id="L349">        trello.updateComment(session.workpadCommentId, workpad(&quot;Merged&quot;, MERGE_NOTES));</span>
+<span class="nc" id="L350">        terminal.info(&quot;  OK  Updated the workpad with the final checks and merge result (demo only)&quot;);</span>
+<span class="nc" id="L351">        moveCard(session, RECOMMENDED_DONE_STATE);</span>
+<span class="nc" id="L352">        terminal.info(&quot;If you merge a pull request yourself instead, move the card to &quot; + quoted(RECOMMENDED_DONE_STATE)</span>
                 + &quot; yourself.&quot;);
-<span class="nc" id="L353">        return true;</span>
+<span class="nc" id="L354">        return true;</span>
     }
 
     // Step declares the steps in the order the user meets them, so its position is the step number.
     @SuppressWarnings(&quot;EnumOrdinal&quot;)
     private void printStepHeading(Step step, String title) {
-<span class="nc" id="L359">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L360">        terminal.info(&quot;Step &quot; + (step.ordinal() + 1) + &quot; of &quot; + Step.values().length + &quot;: &quot; + title);</span>
-<span class="nc" id="L361">    }</span>
+<span class="nc" id="L360">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L361">        terminal.info(&quot;Step &quot; + (step.ordinal() + 1) + &quot; of &quot; + Step.values().length + &quot;: &quot; + title);</span>
+<span class="nc" id="L362">    }</span>
 
     private void printWhatGitHubAdds(Options options) {
-<span class="nc" id="L364">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L365">        terminal.info(&quot;What GitHub pull request integration adds&quot;);</span>
-<span class="nc" id="L366">        terminal.info(&quot;Without GitHub integration, Symphony still runs the Trello and Codex loop for card-based work.&quot;);</span>
-<span class="nc" id="L367">        terminal.info(&quot;Setup adds GitHub-specific lists such as &quot; + quoted(RECOMMENDED_MERGING_STATE)</span>
+<span class="nc" id="L365">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L366">        terminal.info(&quot;What GitHub pull request integration adds&quot;);</span>
+<span class="nc" id="L367">        terminal.info(&quot;Without GitHub integration, Symphony still runs the Trello and Codex loop for card-based work.&quot;);</span>
+<span class="nc" id="L368">        terminal.info(&quot;Setup adds GitHub-specific lists such as &quot; + quoted(RECOMMENDED_MERGING_STATE)</span>
                 + &quot; only when GitHub integration is configured.&quot;);
-<span class="nc" id="L369">        terminal.info(&quot;With it, Symphony can create and update pull requests, link them on Trello cards, and process&quot;);</span>
-<span class="nc" id="L370">        terminal.info(&quot;feedback from pull requests and Trello comments. &quot; + quoted(RECOMMENDED_MERGING_STATE)</span>
+<span class="nc" id="L370">        terminal.info(&quot;With it, Symphony can create and update pull requests, link them on Trello cards, and process&quot;);</span>
+<span class="nc" id="L371">        terminal.info(&quot;feedback from pull requests and Trello comments. &quot; + quoted(RECOMMENDED_MERGING_STATE)</span>
                 + &quot; then means \&quot;do final checks and merge&quot;);
-<span class="nc" id="L372">        terminal.info(</span>
-<span class="nc" id="L373">                &quot;this PR if safe\&quot; before Symphony moves the finished card to &quot; + quoted(RECOMMENDED_DONE_STATE) + &quot;.&quot;);</span>
-<span class="nc" id="L374">        terminal.info(&quot;To add GitHub integration later, run:&quot;);</span>
-<span class="nc" id="L375">        terminal.info(&quot;  &quot; + options.cliCommand() + &quot; setup-local configure-github&quot;);</span>
-<span class="nc" id="L376">    }</span>
+<span class="nc" id="L373">        terminal.info(</span>
+<span class="nc" id="L374">                &quot;this PR if safe\&quot; before Symphony moves the finished card to &quot; + quoted(RECOMMENDED_DONE_STATE) + &quot;.&quot;);</span>
+<span class="nc" id="L375">        terminal.info(&quot;To add GitHub integration later, run:&quot;);</span>
+<span class="nc" id="L376">        terminal.info(&quot;  &quot; + options.cliCommand() + &quot; setup-local configure-github&quot;);</span>
+<span class="nc" id="L377">    }</span>
 
     private StepResult await(Session session, TutorialInput input, Expectation expectation) throws IOException {
-<span class="nc" id="L379">        terminal.info(&quot;The tutorial checks the board every &quot; + describe(pacing.interval()) + &quot; for up to &quot;</span>
-<span class="nc" id="L380">                + describe(pacing.automaticWindow()) + &quot;.&quot;);</span>
-<span class="nc" id="L381">        input.showPromptAgain();</span>
-<span class="nc" id="L382">        int automaticChecks = 0;</span>
-<span class="nc" id="L383">        boolean explicitCheck = false;</span>
-<span class="nc" id="L384">        Observation reported = null;</span>
+<span class="nc" id="L380">        terminal.info(&quot;The tutorial checks the board every &quot; + describe(pacing.interval()) + &quot; for up to &quot;</span>
+<span class="nc" id="L381">                + describe(pacing.automaticWindow()) + &quot;.&quot;);</span>
+<span class="nc" id="L382">        input.showPromptAgain();</span>
+<span class="nc" id="L383">        int automaticChecks = 0;</span>
+<span class="nc" id="L384">        boolean explicitCheck = false;</span>
+<span class="nc" id="L385">        Observation reported = null;</span>
         while (true) {
-<span class="nc" id="L386">            Observation observation = expectation.observe(card(session));</span>
-<span class="nc bnc" id="L387" title="All 2 branches missed.">            if (observation.satisfied()) {</span>
-<span class="nc" id="L388">                terminal.out().println();</span>
-<span class="nc" id="L389">                terminal.info(&quot;  OK  &quot; + capitalized(observation.description()));</span>
-<span class="nc" id="L390">                return StepResult.DONE;</span>
+<span class="nc" id="L387">            Observation observation = expectation.observe(card(session));</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">            if (observation.satisfied()) {</span>
+<span class="nc" id="L389">                terminal.out().println();</span>
+<span class="nc" id="L390">                terminal.info(&quot;  OK  &quot; + capitalized(observation.description()));</span>
+<span class="nc" id="L391">                return StepResult.DONE;</span>
             }
-<span class="nc bnc" id="L392" title="All 6 branches missed.">            if (explicitCheck || (observation.changed() &amp;&amp; !observation.equals(reported))) {</span>
-<span class="nc" id="L393">                printCorrection(session, observation, expectation);</span>
-<span class="nc" id="L394">                input.showPromptAgain();</span>
-<span class="nc" id="L395">                reported = observation;</span>
+<span class="nc bnc" id="L393" title="All 6 branches missed.">            if (explicitCheck || (observation.changed() &amp;&amp; !observation.equals(reported))) {</span>
+<span class="nc" id="L394">                printCorrection(session, observation, expectation);</span>
+<span class="nc" id="L395">                input.showPromptAgain();</span>
+<span class="nc" id="L396">                reported = observation;</span>
             }
-<span class="nc" id="L397">            explicitCheck = false;</span>
+<span class="nc" id="L398">            explicitCheck = false;</span>
             Answer answer;
-<span class="nc bnc" id="L399" title="All 2 branches missed.">            if (automaticChecks &lt; pacing.automaticChecks()) {</span>
-<span class="nc" id="L400">                Optional&lt;Answer&gt; polled = input.poll(CHECK_PROMPT, pacing.interval());</span>
-<span class="nc bnc" id="L401" title="All 2 branches missed.">                if (polled.isEmpty()) {</span>
-<span class="nc" id="L402">                    automaticChecks++;</span>
-<span class="nc bnc" id="L403" title="All 2 branches missed.">                    if (automaticChecks == pacing.automaticChecks()) {</span>
-<span class="nc" id="L404">                        terminal.out().println();</span>
-<span class="nc" id="L405">                        terminal.info(</span>
-<span class="nc" id="L406">                                &quot;  Stopped checking automatically after &quot; + describe(pacing.automaticWindow()) + &quot;.&quot;);</span>
-<span class="nc" id="L407">                        explicitCheck = true;</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">            if (automaticChecks &lt; pacing.automaticChecks()) {</span>
+<span class="nc" id="L401">                Optional&lt;Answer&gt; polled = input.poll(CHECK_PROMPT, pacing.interval());</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">                if (polled.isEmpty()) {</span>
+<span class="nc" id="L403">                    automaticChecks++;</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">                    if (automaticChecks == pacing.automaticChecks()) {</span>
+<span class="nc" id="L405">                        terminal.out().println();</span>
+<span class="nc" id="L406">                        terminal.info(</span>
+<span class="nc" id="L407">                                &quot;  Stopped checking automatically after &quot; + describe(pacing.automaticWindow()) + &quot;.&quot;);</span>
+<span class="nc" id="L408">                        explicitCheck = true;</span>
                     }
                     continue;
                 }
-<span class="nc" id="L411">                answer = polled.get();</span>
-<span class="nc" id="L412">            } else {</span>
-<span class="nc" id="L413">                answer = input.read(CHECK_PROMPT);</span>
+<span class="nc" id="L412">                answer = polled.get();</span>
+<span class="nc" id="L413">            } else {</span>
+<span class="nc" id="L414">                answer = input.read(CHECK_PROMPT);</span>
             }
-<span class="nc bnc" id="L415" title="All 4 branches missed.">            switch (command(answer)) {</span>
+<span class="nc bnc" id="L416" title="All 4 branches missed.">            switch (command(answer)) {</span>
                 case QUIT -&gt; {
-<span class="nc" id="L417">                    return StepResult.QUIT;</span>
+<span class="nc" id="L418">                    return StepResult.QUIT;</span>
                 }
                 case SKIP -&gt; {
-<span class="nc" id="L420">                    terminal.info(&quot;  OK  &quot; + expectation.doForUser());</span>
-<span class="nc" id="L421">                    return StepResult.SKIPPED;</span>
+<span class="nc" id="L421">                    terminal.info(&quot;  OK  &quot; + expectation.doForUser());</span>
+<span class="nc" id="L422">                    return StepResult.SKIPPED;</span>
                 }
                 case CHECK -&gt; {
-<span class="nc" id="L424">                    explicitCheck = true;</span>
+<span class="nc" id="L425">                    explicitCheck = true;</span>
                 }
             }
-<span class="nc" id="L427">        }</span>
+<span class="nc" id="L428">        }</span>
     }
 
     private void printCorrection(Session session, Observation observation, Expectation expectation) {
-<span class="nc" id="L431">        terminal.out().println();</span>
-<span class="nc" id="L432">        terminal.info(&quot;  Not yet: &quot; + observation.description() + &quot;.&quot;);</span>
-<span class="nc" id="L433">        terminal.info(&quot;  Expected: &quot; + expectation.expected() + &quot;.&quot;);</span>
-<span class="nc" id="L434">        terminal.info(&quot;  Board:&quot;);</span>
-<span class="nc" id="L435">        terminal.info(&quot;    &quot; + session.board.url());</span>
-<span class="nc" id="L436">    }</span>
+<span class="nc" id="L432">        terminal.out().println();</span>
+<span class="nc" id="L433">        terminal.info(&quot;  Not yet: &quot; + observation.description() + &quot;.&quot;);</span>
+<span class="nc" id="L434">        terminal.info(&quot;  Expected: &quot; + expectation.expected() + &quot;.&quot;);</span>
+<span class="nc" id="L435">        terminal.info(&quot;  Board:&quot;);</span>
+<span class="nc" id="L436">        terminal.info(&quot;    &quot; + session.board.url());</span>
+<span class="nc" id="L437">    }</span>
 
     private boolean pause(TutorialInput input) throws IOException {
-<span class="nc bnc" id="L439" title="All 2 branches missed.">        return command(input.read(CONTINUE_PROMPT)) != Command.QUIT;</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">        return command(input.read(CONTINUE_PROMPT)) != Command.QUIT;</span>
     }
 
     private void settleAtEnd(Session session, TutorialInput input, Outcome outcome) throws IOException {
-<span class="nc bnc" id="L443" title="All 2 branches missed.">        if (outcome == Outcome.STOPPED) {</span>
-<span class="nc" id="L444">            terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L445">            terminal.info(&quot;Stopped the tutorial.&quot;);</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">        if (outcome == Outcome.STOPPED) {</span>
+<span class="nc" id="L445">            terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L446">            terminal.info(&quot;Stopped the tutorial.&quot;);</span>
         }
-<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (session.options.cleanup() == BoardCleanup.KEEP) {</span>
-<span class="nc" id="L448">            session.cleanup.keep();</span>
-<span class="nc" id="L449">            printKeptBoard(session.board);</span>
-<span class="nc" id="L450">            return;</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">        if (session.options.cleanup() == BoardCleanup.KEEP) {</span>
+<span class="nc" id="L449">            session.cleanup.keep();</span>
+<span class="nc" id="L450">            printKeptBoard(session.board);</span>
+<span class="nc" id="L451">            return;</span>
         }
-<span class="nc" id="L452">        terminal.info(&quot;&quot;);</span>
-<span class="nc bnc" id="L453" title="All 2 branches missed.">        if (!PromptSupport.yesDefaultTrue(input.read(CLEANUP_PROMPT).line())) {</span>
-<span class="nc" id="L454">            session.cleanup.keep();</span>
-<span class="nc" id="L455">            printKeptBoard(session.board);</span>
-<span class="nc" id="L456">            return;</span>
+<span class="nc" id="L453">        terminal.info(&quot;&quot;);</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">        if (!PromptSupport.yesDefaultTrue(input.read(CLEANUP_PROMPT).line())) {</span>
+<span class="nc" id="L455">            session.cleanup.keep();</span>
+<span class="nc" id="L456">            printKeptBoard(session.board);</span>
+<span class="nc" id="L457">            return;</span>
         }
-<span class="nc" id="L458">        archive(session.cleanup, session.board);</span>
-<span class="nc" id="L459">    }</span>
+<span class="nc" id="L459">        archive(session.cleanup, session.board);</span>
+<span class="nc" id="L460">    }</span>
 
     /// Settles the board after a failure or an interrupt, when there is no one to ask. On Ctrl+C
     /// this runs on the shutdown hook thread.
     private void settleWithoutAsking(Session session, String reason) {
-<span class="nc bnc" id="L464" title="All 2 branches missed.">        if (!session.cleanup.creationStarted()) {</span>
-<span class="nc" id="L465">            return;</span>
+<span class="nc bnc" id="L465" title="All 2 branches missed.">        if (!session.cleanup.creationStarted()) {</span>
+<span class="nc" id="L466">            return;</span>
         }
-<span class="nc" id="L467">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L468">        terminal.info(reason);</span>
-<span class="nc bnc" id="L469" title="All 2 branches missed.">        if (session.cleanup.creationPending()) {</span>
-<span class="nc" id="L470">            terminal.info(</span>
-<span class="nc bnc" id="L471" title="All 2 branches missed.">                    session.options.cleanup() == BoardCleanup.ARCHIVE_BY_DEFAULT</span>
-<span class="nc" id="L472">                            ? &quot;Waiting for Trello to finish creating the board so it can be archived.&quot;</span>
-<span class="nc" id="L473">                            : &quot;Waiting for Trello to finish creating the board so its link can be shown.&quot;);</span>
+<span class="nc" id="L468">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L469">        terminal.info(reason);</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">        if (session.cleanup.creationPending()) {</span>
+<span class="nc" id="L471">            terminal.info(</span>
+<span class="nc bnc" id="L472" title="All 2 branches missed.">                    session.options.cleanup() == BoardCleanup.ARCHIVE_BY_DEFAULT</span>
+<span class="nc" id="L473">                            ? &quot;Waiting for Trello to finish creating the board so it can be archived.&quot;</span>
+<span class="nc" id="L474">                            : &quot;Waiting for Trello to finish creating the board so its link can be shown.&quot;);</span>
         }
-<span class="nc" id="L475">        session.cleanup</span>
-<span class="nc" id="L476">                .createdBoard()</span>
-<span class="nc" id="L477">                .ifPresentOrElse(</span>
-<span class="nc" id="L478">                        board -&gt; settleCreatedBoardWithoutAsking(session, board),</span>
+<span class="nc" id="L476">        session.cleanup</span>
+<span class="nc" id="L477">                .createdBoard()</span>
+<span class="nc" id="L478">                .ifPresentOrElse(</span>
+<span class="nc" id="L479">                        board -&gt; settleCreatedBoardWithoutAsking(session, board),</span>
                         // The board request got no answer, so Trello may still have created the board.
-<span class="nc" id="L480">                        () -&gt; terminal.info(&quot;If Trello created the board &quot; + DisplayNames.quotedName(BOARD_NAME)</span>
+<span class="nc" id="L481">                        () -&gt; terminal.info(&quot;If Trello created the board &quot; + DisplayNames.quotedName(BOARD_NAME)</span>
                                 + &quot;, archive it in Trello.&quot;));
-<span class="nc" id="L482">    }</span>
+<span class="nc" id="L483">    }</span>
 
     private void settleCreatedBoardWithoutAsking(Session session, Board board) {
-<span class="nc bnc" id="L485" title="All 2 branches missed.">        if (session.options.cleanup() == BoardCleanup.ARCHIVE_BY_DEFAULT) {</span>
-<span class="nc" id="L486">            archive(session.cleanup, board);</span>
-<span class="nc bnc" id="L487" title="All 2 branches missed.">        } else if (session.cleanup.keep()) {</span>
-<span class="nc" id="L488">            printKeptBoard(board);</span>
+<span class="nc bnc" id="L486" title="All 2 branches missed.">        if (session.options.cleanup() == BoardCleanup.ARCHIVE_BY_DEFAULT) {</span>
+<span class="nc" id="L487">            archive(session.cleanup, board);</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        } else if (session.cleanup.keep()) {</span>
+<span class="nc" id="L489">            printKeptBoard(board);</span>
         }
-<span class="nc" id="L490">    }</span>
+<span class="nc" id="L491">    }</span>
 
     private void archive(TutorialBoardCleanup cleanup, Board board) {
         try {
-<span class="nc bnc" id="L494" title="All 2 branches missed.">            if (cleanup.archive()) {</span>
-<span class="nc" id="L495">                terminal.info(&quot;  OK  Archived the temporary tutorial board&quot;);</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">            if (cleanup.archive()) {</span>
+<span class="nc" id="L496">                terminal.info(&quot;  OK  Archived the temporary tutorial board&quot;);</span>
             }
-<span class="nc" id="L497">        } catch (RuntimeException e) {</span>
-<span class="nc" id="L498">            terminal.info(&quot;  WARN  Could not archive the temporary tutorial board. Archive it in Trello:&quot;);</span>
-<span class="nc" id="L499">            terminal.info(&quot;    &quot; + board.url());</span>
-<span class="nc" id="L500">        }</span>
-<span class="nc" id="L501">    }</span>
+<span class="nc" id="L498">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L499">            terminal.info(&quot;  WARN  Could not archive the temporary tutorial board. Archive it in Trello:&quot;);</span>
+<span class="nc" id="L500">            terminal.info(&quot;    &quot; + board.url());</span>
+<span class="nc" id="L501">        }</span>
+<span class="nc" id="L502">    }</span>
 
     private void printKeptBoard(Board board) {
-<span class="nc" id="L504">        terminal.info(&quot;&quot;);</span>
-<span class="nc" id="L505">        terminal.info(&quot;The temporary tutorial board stays in Trello:&quot;);</span>
-<span class="nc" id="L506">        terminal.info(&quot;  &quot; + board.url());</span>
-<span class="nc" id="L507">        terminal.info(&quot;It is not connected to Symphony, so Symphony does not manage it.&quot;);</span>
-<span class="nc" id="L508">        terminal.info(&quot;Archive it in Trello when you no longer need it.&quot;);</span>
-<span class="nc" id="L509">    }</span>
+<span class="nc" id="L505">        terminal.info(&quot;&quot;);</span>
+<span class="nc" id="L506">        terminal.info(&quot;The temporary tutorial board stays in Trello:&quot;);</span>
+<span class="nc" id="L507">        terminal.info(&quot;  &quot; + board.url());</span>
+<span class="nc" id="L508">        terminal.info(&quot;It is not connected to Symphony, so Symphony does not manage it.&quot;);</span>
+<span class="nc" id="L509">        terminal.info(&quot;Archive it in Trello when you no longer need it.&quot;);</span>
+<span class="nc" id="L510">    }</span>
 
     private CardSnapshot card(Session session) {
         try {
-<span class="nc" id="L513">            return trello.card(session.cardId);</span>
-<span class="nc" id="L514">        } catch (TrelloBoardSetupException e) {</span>
-<span class="nc bnc" id="L515" title="All 2 branches missed.">            if (&quot;trello_resource_not_found&quot;.equals(e.code())) {</span>
-<span class="nc" id="L516">                throw new TrelloBoardSetupException(</span>
+<span class="nc" id="L514">            return trello.card(session.cardId);</span>
+<span class="nc" id="L515">        } catch (TrelloBoardSetupException e) {</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">            if (&quot;trello_resource_not_found&quot;.equals(e.code())) {</span>
+<span class="nc" id="L517">                throw new TrelloBoardSetupException(</span>
                         &quot;setup_tutorial_card_missing&quot;,
                         &quot;The tutorial card is no longer in Trello. Start the tutorial again with: &quot;
-<span class="nc" id="L519">                                + commandLine(session.options.cliCommand()),</span>
+<span class="nc" id="L520">                                + commandLine(session.options.cliCommand()),</span>
                         e);
             }
-<span class="nc" id="L522">            throw e;</span>
+<span class="nc" id="L523">            throw e;</span>
         }
     }
 
     private void moveCard(Session session, String listName) {
-<span class="nc" id="L527">        trello.moveCard(session.cardId, session.listId(listName));</span>
-<span class="nc" id="L528">        terminal.info(&quot;  OK  Moved the card to &quot; + quoted(listName));</span>
-<span class="nc" id="L529">    }</span>
+<span class="nc" id="L528">        trello.moveCard(session.cardId, session.listId(listName));</span>
+<span class="nc" id="L529">        terminal.info(&quot;  OK  Moved the card to &quot; + quoted(listName));</span>
+<span class="nc" id="L530">    }</span>
 
     private String handoffNotes(Session session) {
-<span class="nc bnc" id="L532" title="All 2 branches missed.">        String pullRequestLine = session.options.github() ? DEMO_PULL_REQUEST_LINE + &quot;\n&quot; : &quot;&quot;;</span>
-<span class="nc" id="L533">        return HANDOFF_SUMMARY + &quot;\n&quot; + pullRequestLine + nextStepNote(session);</span>
+<span class="nc bnc" id="L533" title="All 2 branches missed.">        String pullRequestLine = session.options.github() ? DEMO_PULL_REQUEST_LINE + &quot;\n&quot; : &quot;&quot;;</span>
+<span class="nc" id="L534">        return HANDOFF_SUMMARY + &quot;\n&quot; + pullRequestLine + nextStepNote(session);</span>
     }
 
     private static String nextStepNote(Session session) {
-<span class="nc bnc" id="L537" title="All 2 branches missed.">        String accept = session.options.github()</span>
-<span class="nc" id="L538">                ? &quot;move the card to &quot; + quoted(RECOMMENDED_MERGING_STATE) + &quot; when the pull request is good&quot;</span>
-<span class="nc" id="L539">                : &quot;move the card to &quot; + quoted(RECOMMENDED_DONE_STATE) + &quot; when it is good&quot;;</span>
-<span class="nc" id="L540">        return &quot;Next: Review the result. &quot; + capitalized(accept) + &quot;, or add a Trello comment and move the card&quot;</span>
-<span class="nc" id="L541">                + &quot; back to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot; when it needs more work.&quot;;</span>
+<span class="nc bnc" id="L538" title="All 2 branches missed.">        String accept = session.options.github()</span>
+<span class="nc" id="L539">                ? &quot;move the card to &quot; + quoted(RECOMMENDED_MERGING_STATE) + &quot; when the pull request is good&quot;</span>
+<span class="nc" id="L540">                : &quot;move the card to &quot; + quoted(RECOMMENDED_DONE_STATE) + &quot; when it is good&quot;;</span>
+<span class="nc" id="L541">        return &quot;Next: Review the result. &quot; + capitalized(accept) + &quot;, or add a Trello comment and move the card&quot;</span>
+<span class="nc" id="L542">                + &quot; back to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot; when it needs more work.&quot;;</span>
     }
 
     private static String workpad(String status, String details) {
-<span class="nc" id="L545">        return TrelloClient.WORKPAD_MARKER + &quot;\n\n&quot; + DEMO_NOTICE + &quot;\n\nStatus: &quot; + status + &quot;\n&quot; + details;</span>
+<span class="nc" id="L546">        return SymphonyCommentFooter.append(</span>
+                TrelloClient.WORKPAD_MARKER + &quot;\n\n&quot; + DEMO_NOTICE + &quot;\n\nStatus: &quot; + status + &quot;\n&quot; + details);
     }
 
     private static String oneLine(String text) {
-<span class="nc" id="L549">        String collapsed = text.strip().replaceAll(&quot;\\s+&quot;, &quot; &quot;);</span>
-<span class="nc bnc" id="L550" title="All 2 branches missed.">        return collapsed.length() &lt;= QUOTED_COMMENT_LIMIT</span>
-<span class="nc" id="L551">                ? collapsed</span>
-<span class="nc" id="L552">                : collapsed.substring(0, QUOTED_COMMENT_LIMIT) + &quot;...&quot;;</span>
+<span class="nc" id="L551">        String collapsed = text.strip().replaceAll(&quot;\\s+&quot;, &quot; &quot;);</span>
+<span class="nc bnc" id="L552" title="All 2 branches missed.">        return collapsed.length() &lt;= QUOTED_COMMENT_LIMIT</span>
+<span class="nc" id="L553">                ? collapsed</span>
+<span class="nc" id="L554">                : collapsed.substring(0, QUOTED_COMMENT_LIMIT) + &quot;...&quot;;</span>
     }
 
     private static Command command(Answer answer) {
-<span class="nc" id="L556">        String line = answer.line();</span>
-<span class="nc bnc" id="L557" title="All 2 branches missed.">        if (line == null) {</span>
-<span class="nc" id="L558">            return Command.QUIT;</span>
+<span class="nc" id="L558">        String line = answer.line();</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">        if (line == null) {</span>
+<span class="nc" id="L560">            return Command.QUIT;</span>
         }
-<span class="nc bnc" id="L560" title="All 3 branches missed.">        return switch (line.strip().toLowerCase(Locale.ROOT)) {</span>
-<span class="nc" id="L561">            case &quot;q&quot;, &quot;quit&quot;, &quot;stop&quot; -&gt; Command.QUIT;</span>
-<span class="nc" id="L562">            case &quot;s&quot;, &quot;skip&quot; -&gt; Command.SKIP;</span>
-<span class="nc" id="L563">            default -&gt; Command.CHECK;</span>
+<span class="nc bnc" id="L562" title="All 3 branches missed.">        return switch (line.strip().toLowerCase(Locale.ROOT)) {</span>
+<span class="nc" id="L563">            case &quot;q&quot;, &quot;quit&quot;, &quot;stop&quot; -&gt; Command.QUIT;</span>
+<span class="nc" id="L564">            case &quot;s&quot;, &quot;skip&quot; -&gt; Command.SKIP;</span>
+<span class="nc" id="L565">            default -&gt; Command.CHECK;</span>
         };
     }
 
     static String describe(Duration duration) {
-<span class="nc bnc" id="L568" title="All 4 branches missed.">        if (duration.compareTo(ONE_MINUTE) &gt;= 0 &amp;&amp; duration.toSecondsPart() == 0) {</span>
-<span class="nc" id="L569">            return plural(duration.toMinutes(), &quot;minute&quot;);</span>
+<span class="nc bnc" id="L570" title="All 4 branches missed.">        if (duration.compareTo(ONE_MINUTE) &gt;= 0 &amp;&amp; duration.toSecondsPart() == 0) {</span>
+<span class="nc" id="L571">            return plural(duration.toMinutes(), &quot;minute&quot;);</span>
         }
-<span class="nc bnc" id="L571" title="All 2 branches missed.">        if (duration.compareTo(ONE_SECOND) &gt;= 0) {</span>
-<span class="nc" id="L572">            return plural(duration.toSeconds(), &quot;second&quot;);</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">        if (duration.compareTo(ONE_SECOND) &gt;= 0) {</span>
+<span class="nc" id="L574">            return plural(duration.toSeconds(), &quot;second&quot;);</span>
         }
-<span class="nc" id="L574">        return plural(duration.toMillis(), &quot;millisecond&quot;);</span>
+<span class="nc" id="L576">        return plural(duration.toMillis(), &quot;millisecond&quot;);</span>
     }
 
     private static String plural(long amount, String unit) {
-<span class="nc bnc" id="L578" title="All 2 branches missed.">        return amount + &quot; &quot; + unit + (amount == 1 ? &quot;&quot; : &quot;s&quot;);</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">        return amount + &quot; &quot; + unit + (amount == 1 ? &quot;&quot; : &quot;s&quot;);</span>
     }
 
     private static String capitalized(String text) {
-<span class="nc bnc" id="L582" title="All 2 branches missed.">        return text.isEmpty() ? text : Character.toUpperCase(text.charAt(0)) + text.substring(1);</span>
+<span class="nc bnc" id="L584" title="All 2 branches missed.">        return text.isEmpty() ? text : Character.toUpperCase(text.charAt(0)) + text.substring(1);</span>
     }
 
     private static String padded(String text, int width) {
-<span class="nc" id="L586">        return text + &quot; &quot;.repeat(Math.max(0, width - text.length()));</span>
+<span class="nc" id="L588">        return text + &quot; &quot;.repeat(Math.max(0, width - text.length()));</span>
     }
 
     private static String quoted(String listName) {
-<span class="nc" id="L590">        return DisplayNames.quotedName(listName);</span>
+<span class="nc" id="L592">        return DisplayNames.quotedName(listName);</span>
     }
 
     /// Settings for one tutorial run.
     record Options(boolean github, BoardCleanup cleanup, Optional&lt;String&gt; workspaceId, String cliCommand) {
-<span class="nc" id="L595">        Options {</span>
-<span class="nc" id="L596">            Objects.requireNonNull(cleanup, &quot;cleanup&quot;);</span>
-<span class="nc" id="L597">            Objects.requireNonNull(workspaceId, &quot;workspaceId&quot;);</span>
-<span class="nc" id="L598">            Objects.requireNonNull(cliCommand, &quot;cliCommand&quot;);</span>
-<span class="nc" id="L599">        }</span>
+<span class="nc" id="L597">        Options {</span>
+<span class="nc" id="L598">            Objects.requireNonNull(cleanup, &quot;cleanup&quot;);</span>
+<span class="nc" id="L599">            Objects.requireNonNull(workspaceId, &quot;workspaceId&quot;);</span>
+<span class="nc" id="L600">            Objects.requireNonNull(cliCommand, &quot;cliCommand&quot;);</span>
+<span class="nc" id="L601">        }</span>
     }
 
     /// How often and how long a step checks Trello by itself before it only checks on request.
-<span class="nc" id="L603">    record Pacing(Duration interval, int automaticChecks) {</span>
+<span class="nc" id="L605">    record Pacing(Duration interval, int automaticChecks) {</span>
         /// Five-second checks stay far below Trello's rate limit while still reacting quickly.
-<span class="nc" id="L605">        private static final Duration DEFAULT_INTERVAL = Duration.ofSeconds(5);</span>
+<span class="nc" id="L607">        private static final Duration DEFAULT_INTERVAL = Duration.ofSeconds(5);</span>
         /// Long enough to find the board in a browser and move a card, short enough not to poll an
         /// abandoned tutorial for long.
-<span class="nc" id="L608">        private static final Duration DEFAULT_WINDOW = Duration.ofMinutes(3);</span>
-<span class="nc" id="L609">        static final Pacing DEFAULT =</span>
-<span class="nc" id="L610">                new Pacing(DEFAULT_INTERVAL, Math.toIntExact(DEFAULT_WINDOW.dividedBy(DEFAULT_INTERVAL)));</span>
+<span class="nc" id="L610">        private static final Duration DEFAULT_WINDOW = Duration.ofMinutes(3);</span>
+<span class="nc" id="L611">        static final Pacing DEFAULT =</span>
+<span class="nc" id="L612">                new Pacing(DEFAULT_INTERVAL, Math.toIntExact(DEFAULT_WINDOW.dividedBy(DEFAULT_INTERVAL)));</span>
 
         Duration automaticWindow() {
-<span class="nc" id="L613">            return interval.multipliedBy(automaticChecks);</span>
+<span class="nc" id="L615">            return interval.multipliedBy(automaticChecks);</span>
         }
     }
 
@@ -621,10 +623,10 @@ final class GuidedTutorial {
         Runnable register(Runnable action);
 
         static ShutdownHooks runtime() {
-<span class="nc" id="L624">            return action -&gt; {</span>
-<span class="nc" id="L625">                var hook = new Thread(action, &quot;tutorial-cleanup&quot;);</span>
-<span class="nc" id="L626">                Runtime.getRuntime().addShutdownHook(hook);</span>
-<span class="nc" id="L627">                return () -&gt; removeUnlessShuttingDown(hook);</span>
+<span class="nc" id="L626">            return action -&gt; {</span>
+<span class="nc" id="L627">                var hook = new Thread(action, &quot;tutorial-cleanup&quot;);</span>
+<span class="nc" id="L628">                Runtime.getRuntime().addShutdownHook(hook);</span>
+<span class="nc" id="L629">                return () -&gt; removeUnlessShuttingDown(hook);</span>
             };
         }
 
@@ -632,47 +634,47 @@ final class GuidedTutorial {
         /// is safe because the cleanup claims the board at most once.
         private static boolean removeUnlessShuttingDown(Thread hook) {
             try {
-<span class="nc" id="L635">                return Runtime.getRuntime().removeShutdownHook(hook);</span>
-<span class="nc" id="L636">            } catch (IllegalStateException alreadyShuttingDown) {</span>
-<span class="nc" id="L637">                return false;</span>
+<span class="nc" id="L637">                return Runtime.getRuntime().removeShutdownHook(hook);</span>
+<span class="nc" id="L638">            } catch (IllegalStateException alreadyShuttingDown) {</span>
+<span class="nc" id="L639">                return false;</span>
             }
         }
     }
 
     /// What happens to the temporary board when the tutorial ends.
-<span class="nc" id="L643">    enum BoardCleanup {</span>
+<span class="nc" id="L645">    enum BoardCleanup {</span>
         /// Ask at the end with archive as the default, and archive without asking after a failure or
         /// Ctrl+C.
-<span class="nc" id="L646">        ARCHIVE_BY_DEFAULT,</span>
+<span class="nc" id="L648">        ARCHIVE_BY_DEFAULT,</span>
         /// Keep the board on every path (`--no-cleanup`).
-<span class="nc" id="L648">        KEEP</span>
+<span class="nc" id="L650">        KEEP</span>
     }
 
-<span class="nc" id="L651">    enum Outcome {</span>
-<span class="nc" id="L652">        COMPLETED,</span>
-<span class="nc" id="L653">        STOPPED</span>
+<span class="nc" id="L653">    enum Outcome {</span>
+<span class="nc" id="L654">        COMPLETED,</span>
+<span class="nc" id="L655">        STOPPED</span>
     }
 
     /// The steps the user performs, in the order the tutorial shows them.
-<span class="nc" id="L657">    private enum Step {</span>
-<span class="nc" id="L658">        QUEUE,</span>
-<span class="nc" id="L659">        REWORK,</span>
-<span class="nc" id="L660">        FINISH</span>
+<span class="nc" id="L659">    private enum Step {</span>
+<span class="nc" id="L660">        QUEUE,</span>
+<span class="nc" id="L661">        REWORK,</span>
+<span class="nc" id="L662">        FINISH</span>
     }
 
-<span class="nc" id="L663">    private enum StepResult {</span>
-<span class="nc" id="L664">        DONE,</span>
-<span class="nc" id="L665">        SKIPPED,</span>
-<span class="nc" id="L666">        QUIT</span>
+<span class="nc" id="L665">    private enum StepResult {</span>
+<span class="nc" id="L666">        DONE,</span>
+<span class="nc" id="L667">        SKIPPED,</span>
+<span class="nc" id="L668">        QUIT</span>
     }
 
-<span class="nc" id="L669">    private enum Command {</span>
-<span class="nc" id="L670">        CHECK,</span>
-<span class="nc" id="L671">        SKIP,</span>
-<span class="nc" id="L672">        QUIT</span>
+<span class="nc" id="L671">    private enum Command {</span>
+<span class="nc" id="L672">        CHECK,</span>
+<span class="nc" id="L673">        SKIP,</span>
+<span class="nc" id="L674">        QUIT</span>
     }
 
-<span class="nc" id="L675">    private record Observation(boolean satisfied, boolean changed, String description) {}</span>
+<span class="nc" id="L677">    private record Observation(boolean satisfied, boolean changed, String description) {}</span>
 
     private interface Expectation {
         Observation observe(CardSnapshot card);
@@ -689,93 +691,93 @@ final class GuidedTutorial {
         private final String from;
         private final String to;
 
-<span class="nc" id="L692">        private ListExpectation(Session session, String from, String to) {</span>
-<span class="nc" id="L693">            this.session = session;</span>
-<span class="nc" id="L694">            this.from = from;</span>
-<span class="nc" id="L695">            this.to = to;</span>
-<span class="nc" id="L696">        }</span>
+<span class="nc" id="L694">        private ListExpectation(Session session, String from, String to) {</span>
+<span class="nc" id="L695">            this.session = session;</span>
+<span class="nc" id="L696">            this.from = from;</span>
+<span class="nc" id="L697">            this.to = to;</span>
+<span class="nc" id="L698">        }</span>
 
         @Override
         public Observation observe(CardSnapshot card) {
-<span class="nc bnc" id="L700" title="All 2 branches missed.">            if (card.archived()) {</span>
-<span class="nc" id="L701">                return ARCHIVED_CARD;</span>
+<span class="nc bnc" id="L702" title="All 2 branches missed.">            if (card.archived()) {</span>
+<span class="nc" id="L703">                return ARCHIVED_CARD;</span>
             }
-<span class="nc bnc" id="L703" title="All 2 branches missed.">            if (session.cardIsIn(card, to)) {</span>
-<span class="nc" id="L704">                return new Observation(true, true, &quot;the card is in &quot; + quoted(to));</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">            if (session.cardIsIn(card, to)) {</span>
+<span class="nc" id="L706">                return new Observation(true, true, &quot;the card is in &quot; + quoted(to));</span>
             }
-<span class="nc bnc" id="L706" title="All 2 branches missed.">            if (session.cardIsIn(card, from)) {</span>
-<span class="nc" id="L707">                return new Observation(false, false, &quot;the card is still in &quot; + quoted(from));</span>
+<span class="nc bnc" id="L708" title="All 2 branches missed.">            if (session.cardIsIn(card, from)) {</span>
+<span class="nc" id="L709">                return new Observation(false, false, &quot;the card is still in &quot; + quoted(from));</span>
             }
-<span class="nc" id="L709">            return new Observation(false, true, session.whereIs(card));</span>
+<span class="nc" id="L711">            return new Observation(false, true, session.whereIs(card));</span>
         }
 
         @Override
         public String expected() {
-<span class="nc" id="L714">            return &quot;the card is in &quot; + quoted(to);</span>
+<span class="nc" id="L716">            return &quot;the card is in &quot; + quoted(to);</span>
         }
 
         @Override
         public String doForUser() {
-<span class="nc" id="L719">            trello.moveCard(session.cardId, session.listId(to));</span>
-<span class="nc" id="L720">            return &quot;The tutorial moved the card to &quot; + quoted(to) + &quot; for you&quot;;</span>
+<span class="nc" id="L721">            trello.moveCard(session.cardId, session.listId(to));</span>
+<span class="nc" id="L722">            return &quot;The tutorial moved the card to &quot; + quoted(to) + &quot; for you&quot;;</span>
         }
     }
 
     /// Expects a new Trello comment on the card and the card back in the queue list.
     private final class ReworkExpectation implements Expectation {
         private final Session session;
-<span class="nc" id="L727">        private final Set&lt;String&gt; knownCommentIds = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L729">        private final Set&lt;String&gt; knownCommentIds = new HashSet&lt;&gt;();</span>
 
-<span class="nc" id="L729">        private ReworkExpectation(Session session, CardSnapshot before) {</span>
-<span class="nc" id="L730">            this.session = session;</span>
-<span class="nc" id="L731">            before.comments().forEach(comment -&gt; knownCommentIds.add(comment.id()));</span>
-<span class="nc" id="L732">            knownCommentIds.addAll(session.tutorialCommentIds);</span>
-<span class="nc" id="L733">        }</span>
+<span class="nc" id="L731">        private ReworkExpectation(Session session, CardSnapshot before) {</span>
+<span class="nc" id="L732">            this.session = session;</span>
+<span class="nc" id="L733">            before.comments().forEach(comment -&gt; knownCommentIds.add(comment.id()));</span>
+<span class="nc" id="L734">            knownCommentIds.addAll(session.tutorialCommentIds);</span>
+<span class="nc" id="L735">        }</span>
 
         @Override
         public Observation observe(CardSnapshot card) {
-<span class="nc" id="L737">            boolean commented = newestRequest(card).isPresent();</span>
-<span class="nc bnc" id="L738" title="All 2 branches missed.">            if (card.archived()) {</span>
-<span class="nc" id="L739">                return ARCHIVED_CARD;</span>
+<span class="nc" id="L739">            boolean commented = newestRequest(card).isPresent();</span>
+<span class="nc bnc" id="L740" title="All 2 branches missed.">            if (card.archived()) {</span>
+<span class="nc" id="L741">                return ARCHIVED_CARD;</span>
             }
-<span class="nc" id="L741">            String queue = quoted(RECOMMENDED_ACTIVE_STATE);</span>
-<span class="nc" id="L742">            String review = quoted(RECOMMENDED_REVIEW_STATE);</span>
-<span class="nc bnc" id="L743" title="All 2 branches missed.">            if (session.cardIsIn(card, RECOMMENDED_ACTIVE_STATE)) {</span>
-<span class="nc bnc" id="L744" title="All 2 branches missed.">                return commented</span>
-<span class="nc" id="L745">                        ? new Observation(true, true, &quot;the card is back in &quot; + queue + &quot; with your new Trello comment&quot;)</span>
-<span class="nc" id="L746">                        : new Observation(</span>
+<span class="nc" id="L743">            String queue = quoted(RECOMMENDED_ACTIVE_STATE);</span>
+<span class="nc" id="L744">            String review = quoted(RECOMMENDED_REVIEW_STATE);</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">            if (session.cardIsIn(card, RECOMMENDED_ACTIVE_STATE)) {</span>
+<span class="nc bnc" id="L746" title="All 2 branches missed.">                return commented</span>
+<span class="nc" id="L747">                        ? new Observation(true, true, &quot;the card is back in &quot; + queue + &quot; with your new Trello comment&quot;)</span>
+<span class="nc" id="L748">                        : new Observation(</span>
                                 false, true, &quot;the card is in &quot; + queue + &quot;, but it has no new Trello comment&quot;);
             }
-<span class="nc bnc" id="L749" title="All 2 branches missed.">            if (session.cardIsIn(card, RECOMMENDED_REVIEW_STATE)) {</span>
-<span class="nc bnc" id="L750" title="All 2 branches missed.">                return commented</span>
-<span class="nc" id="L751">                        ? new Observation(false, true, &quot;you added a Trello comment, but the card is still in &quot; + review)</span>
-<span class="nc" id="L752">                        : new Observation(</span>
+<span class="nc bnc" id="L751" title="All 2 branches missed.">            if (session.cardIsIn(card, RECOMMENDED_REVIEW_STATE)) {</span>
+<span class="nc bnc" id="L752" title="All 2 branches missed.">                return commented</span>
+<span class="nc" id="L753">                        ? new Observation(false, true, &quot;you added a Trello comment, but the card is still in &quot; + review)</span>
+<span class="nc" id="L754">                        : new Observation(</span>
                                 false, false, &quot;the card is still in &quot; + review + &quot; and has no new Trello comment&quot;);
             }
-<span class="nc" id="L755">            return new Observation(false, true, session.whereIs(card));</span>
+<span class="nc" id="L757">            return new Observation(false, true, session.whereIs(card));</span>
         }
 
         /// Trello returns comments newest first, so the first new one is the latest request.
         Optional&lt;String&gt; newestRequest(CardSnapshot card) {
-<span class="nc" id="L760">            return card.comments().stream()</span>
-<span class="nc bnc" id="L761" title="All 2 branches missed.">                    .filter(comment -&gt; !knownCommentIds.contains(comment.id()))</span>
-<span class="nc" id="L762">                    .map(Comment::text)</span>
-<span class="nc bnc" id="L763" title="All 2 branches missed.">                    .filter(text -&gt; !text.isBlank())</span>
-<span class="nc" id="L764">                    .findFirst();</span>
+<span class="nc" id="L762">            return card.comments().stream()</span>
+<span class="nc bnc" id="L763" title="All 2 branches missed.">                    .filter(comment -&gt; !knownCommentIds.contains(comment.id()))</span>
+<span class="nc" id="L764">                    .map(Comment::text)</span>
+<span class="nc bnc" id="L765" title="All 2 branches missed.">                    .filter(text -&gt; !text.isBlank())</span>
+<span class="nc" id="L766">                    .findFirst();</span>
         }
 
         @Override
         public String expected() {
-<span class="nc" id="L769">            return &quot;the card is in &quot; + quoted(RECOMMENDED_ACTIVE_STATE)</span>
+<span class="nc" id="L771">            return &quot;the card is in &quot; + quoted(RECOMMENDED_ACTIVE_STATE)</span>
                     + &quot; and has a new Trello comment that asks for a change&quot;;
         }
 
         @Override
         public String doForUser() {
-<span class="nc" id="L775">            trello.addComment(session.cardId, SAMPLE_CHANGE_REQUEST);</span>
-<span class="nc" id="L776">            trello.moveCard(session.cardId, session.listId(RECOMMENDED_ACTIVE_STATE));</span>
-<span class="nc" id="L777">            return &quot;The tutorial added the comment &quot; + DisplayNames.quotedName(SAMPLE_CHANGE_REQUEST)</span>
-<span class="nc" id="L778">                    + &quot; and moved the card to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot; for you&quot;;</span>
+<span class="nc" id="L777">            trello.addComment(session.cardId, SymphonyCommentFooter.append(SAMPLE_CHANGE_REQUEST));</span>
+<span class="nc" id="L778">            trello.moveCard(session.cardId, session.listId(RECOMMENDED_ACTIVE_STATE));</span>
+<span class="nc" id="L779">            return &quot;The tutorial added the comment &quot; + DisplayNames.quotedName(SAMPLE_CHANGE_REQUEST)</span>
+<span class="nc" id="L780">                    + &quot; and moved the card to &quot; + quoted(RECOMMENDED_ACTIVE_STATE) + &quot; for you&quot;;</span>
         }
     }
 
@@ -783,43 +785,43 @@ final class GuidedTutorial {
     private static final class Session {
         private final Options options;
         private final TutorialBoardCleanup cleanup;
-<span class="nc" id="L786">        private final Map&lt;String, String&gt; listIds = new HashMap&lt;&gt;();</span>
-<span class="nc" id="L787">        private final Set&lt;String&gt; tutorialCommentIds = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L788">        private final Map&lt;String, String&gt; listIds = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L789">        private final Set&lt;String&gt; tutorialCommentIds = new HashSet&lt;&gt;();</span>
         private Board board;
         private String cardId;
         private String workpadCommentId;
 
-<span class="nc" id="L792">        private Session(Options options, TutorialBoardCleanup cleanup) {</span>
-<span class="nc" id="L793">            this.options = options;</span>
-<span class="nc" id="L794">            this.cleanup = cleanup;</span>
-<span class="nc" id="L795">        }</span>
+<span class="nc" id="L794">        private Session(Options options, TutorialBoardCleanup cleanup) {</span>
+<span class="nc" id="L795">            this.options = options;</span>
+<span class="nc" id="L796">            this.cleanup = cleanup;</span>
+<span class="nc" id="L797">        }</span>
 
         private List&lt;String&gt; listNames() {
-<span class="nc bnc" id="L798" title="All 2 branches missed.">            return options.github()</span>
-<span class="nc" id="L799">                    ? TrelloBoardSetup.RECOMMENDED_LISTS</span>
-<span class="nc" id="L800">                    : TrelloBoardSetup.RECOMMENDED_NON_GITHUB_LISTS;</span>
+<span class="nc bnc" id="L800" title="All 2 branches missed.">            return options.github()</span>
+<span class="nc" id="L801">                    ? TrelloBoardSetup.RECOMMENDED_LISTS</span>
+<span class="nc" id="L802">                    : TrelloBoardSetup.RECOMMENDED_NON_GITHUB_LISTS;</span>
         }
 
         private String listId(String listName) {
-<span class="nc" id="L804">            return listIds.get(listName);</span>
+<span class="nc" id="L806">            return listIds.get(listName);</span>
         }
 
         /// List ids are unique, so any matching entry is the card's list.
         private Optional&lt;String&gt; listName(String listId) {
-<span class="nc" id="L809">            return listIds.entrySet().stream()</span>
-<span class="nc" id="L810">                    .filter(entry -&gt; entry.getValue().equals(listId))</span>
-<span class="nc" id="L811">                    .map(Map.Entry::getKey)</span>
-<span class="nc" id="L812">                    .findAny();</span>
+<span class="nc" id="L811">            return listIds.entrySet().stream()</span>
+<span class="nc" id="L812">                    .filter(entry -&gt; entry.getValue().equals(listId))</span>
+<span class="nc" id="L813">                    .map(Map.Entry::getKey)</span>
+<span class="nc" id="L814">                    .findAny();</span>
         }
 
         private boolean cardIsIn(CardSnapshot card, String expectedList) {
-<span class="nc" id="L816">            return listName(card.listId()).filter(expectedList::equals).isPresent();</span>
+<span class="nc" id="L818">            return listName(card.listId()).filter(expectedList::equals).isPresent();</span>
         }
 
         private String whereIs(CardSnapshot card) {
-<span class="nc" id="L820">            return listName(card.listId())</span>
-<span class="nc" id="L821">                    .map(name -&gt; &quot;the card is in &quot; + DisplayNames.quotedName(name))</span>
-<span class="nc" id="L822">                    .orElse(&quot;the card is no longer on the tutorial board&quot;);</span>
+<span class="nc" id="L822">            return listName(card.listId())</span>
+<span class="nc" id="L823">                    .map(name -&gt; &quot;the card is in &quot; + DisplayNames.quotedName(name))</span>
+<span class="nc" id="L824">                    .orElse(&quot;the card is no longer on the tutorial board&quot;);</span>
         }
     }
 }

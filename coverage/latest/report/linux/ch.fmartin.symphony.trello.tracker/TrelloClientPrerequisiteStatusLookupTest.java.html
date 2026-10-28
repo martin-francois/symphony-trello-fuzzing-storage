@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloClientPrerequisiteStatusLookupTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">TrelloClientPrerequisiteStatusLookupTest.java</span></div><h1>TrelloClientPrerequisiteStatusLookupTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static ch.fmartin.symphony.trello.tracker.FakeTrelloCommentBoard.DONE_LIST;
+import static ch.fmartin.symphony.trello.tracker.FakeTrelloCommentBoard.PROGRESS_LIST;
+import static ch.fmartin.symphony.trello.tracker.FakeTrelloCommentBoard.TODO_LIST;
+import static ch.fmartin.symphony.trello.tracker.FakeTrelloCommentBoard.cardUrl;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.InstanceOfAssertFactories.STRING;
+
+import ch.fmartin.symphony.trello.config.ConfigResolver;
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.tracker.FakeTrelloCommentBoard.FakeCard;
+import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/// Covers how often the candidate poll reads comment actions to keep the managed prerequisite
+/// status comment truthful, across several poll ticks against a stateful fake board.
+<span class="nc" id="L29">final class TrelloClientPrerequisiteStatusLookupTest {</span>
+    private static final String STALE_WAITING_STATUS = TrelloClient.WAITING_COMMENT_MARKER + &quot;\n\nOld waiting text&quot;;
+
+<span class="nc" id="L32">    private final TrelloClient client = new TrelloClient(new ObjectMapper());</span>
+    private FakeTrelloCommentBoard board;
+    private EffectiveConfig config;
+
+    @TempDir
+    Path tempDir;
+
+    @BeforeEach
+    void startBoard() throws Exception {
+<span class="nc" id="L41">        board = new FakeTrelloCommentBoard().start();</span>
+<span class="nc" id="L42">        config = configuration(board);</span>
+<span class="nc" id="L43">    }</span>
+
+    private EffectiveConfig configuration(FakeTrelloCommentBoard target) {
+<span class="nc" id="L46">        Map&lt;String, Object&gt; tracker = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L47">        tracker.put(&quot;kind&quot;, &quot;trello&quot;);</span>
+<span class="nc" id="L48">        tracker.put(&quot;endpoint&quot;, target.endpoint());</span>
+<span class="nc" id="L49">        tracker.put(&quot;api_key&quot;, &quot;key&quot;);</span>
+<span class="nc" id="L50">        tracker.put(&quot;api_token&quot;, &quot;token&quot;);</span>
+<span class="nc" id="L51">        tracker.put(&quot;board_id&quot;, FakeTrelloCommentBoard.BOARD_INPUT);</span>
+<span class="nc" id="L52">        tracker.put(&quot;active_states&quot;, List.of(&quot;Todo&quot;));</span>
+<span class="nc" id="L53">        tracker.put(&quot;terminal_states&quot;, List.of(&quot;Done&quot;));</span>
+<span class="nc" id="L54">        tracker.put(&quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;));</span>
+<span class="nc" id="L55">        return new ConfigResolver()</span>
+<span class="nc" id="L56">                .resolve(new WorkflowDefinition(tempDir.resolve(&quot;WORKFLOW.md&quot;), Map.of(&quot;tracker&quot;, tracker), &quot;&quot;))</span>
+<span class="nc" id="L57">                .withResolvedBoardId(FakeTrelloCommentBoard.BOARD_ID);</span>
+    }
+
+    @AfterEach
+    void stopBoard() {
+<span class="nc" id="L62">        board.close();</span>
+<span class="nc" id="L63">    }</span>
+
+    @Test
+    void waitingStatusIsWrittenOnceAndClearedAfterPrerequisitesAreRemovedWithoutRepeatedLookups() {
+        // given
+<span class="nc" id="L68">        FakeCard prerequisite = board.addCard(&quot;prerequisite&quot;, TODO_LIST);</span>
+<span class="nc" id="L69">        FakeCard card = board.addCard(&quot;waiting&quot;, TODO_LIST).withComments(2).withChecklistItem(cardUrl(prerequisite));</span>
+
+        // when
+<span class="nc" id="L72">        List&lt;List&lt;String&gt;&gt; waitingTicks = List.of(pollTick(), pollTick(), pollTick());</span>
+<span class="nc" id="L73">        card.withoutChecklistItems();</span>
+<span class="nc" id="L74">        List&lt;List&lt;String&gt;&gt; clearedTicks = List.of(pollTick(), pollTick(), pollTick());</span>
+
+        // then
+<span class="nc" id="L77">        assertThat(waitingTicks)</span>
+<span class="nc" id="L78">                .as(&quot;while the card waits: look up and write, verify the write, then reuse the answer&quot;)</span>
+<span class="nc" id="L79">                .satisfiesExactly(</span>
+<span class="nc" id="L80">                        tick -&gt; assertThat(tick)</span>
+<span class="nc" id="L81">                                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L82">                                .hasSize(1),</span>
+<span class="nc" id="L83">                        tick -&gt; assertThat(tick)</span>
+<span class="nc" id="L84">                                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L85">                                .hasSize(1),</span>
+<span class="nc" id="L86">                        tick -&gt; assertThat(tick)</span>
+<span class="nc" id="L87">                                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L88">                                .isEmpty());</span>
+<span class="nc" id="L89">        assertThat(waitingTicks.getFirst())</span>
+<span class="nc" id="L90">                .filteredOn(TrelloClientPrerequisiteStatusLookupTest::isWrite)</span>
+<span class="nc" id="L91">                .singleElement(STRING)</span>
+<span class="nc" id="L92">                .startsWith(&quot;POST /1/cards/waiting/actions/comments?&quot;);</span>
+<span class="nc" id="L93">        assertThat(clearedTicks)</span>
+<span class="nc" id="L94">                .as(&quot;after the prerequisite items were removed: update the remembered comment, verify, reuse&quot;)</span>
+<span class="nc" id="L95">                .satisfiesExactly(</span>
+<span class="nc" id="L96">                        tick -&gt; assertThat(tick)</span>
+<span class="nc" id="L97">                                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L98">                                .isEmpty(),</span>
+<span class="nc" id="L99">                        tick -&gt; assertThat(tick)</span>
+<span class="nc" id="L100">                                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L101">                                .hasSize(1),</span>
+<span class="nc" id="L102">                        tick -&gt; assertThat(tick)</span>
+<span class="nc" id="L103">                                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L104">                                .isEmpty());</span>
+<span class="nc" id="L105">        assertThat(clearedTicks.getFirst())</span>
+<span class="nc" id="L106">                .filteredOn(TrelloClientPrerequisiteStatusLookupTest::isWrite)</span>
+<span class="nc" id="L107">                .singleElement(STRING)</span>
+<span class="nc" id="L108">                .startsWith(&quot;PUT /1/actions/&quot;);</span>
+<span class="nc" id="L109">        assertThat(card.commentTexts())</span>
+<span class="nc" id="L110">                .filteredOn(text -&gt; text.startsWith(TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER))</span>
+<span class="nc" id="L111">                .singleElement(STRING)</span>
+<span class="nc" id="L112">                .contains(&quot;Status: prerequisites resolved.&quot;)</span>
+<span class="nc" id="L113">                .doesNotContain(&quot;waiting for prerequisites&quot;);</span>
+<span class="nc" id="L114">    }</span>
+
+    @Test
+    void staleWaitingMarkerAddedAfterAnEarlierLookupIsClearedOnTheNextTick() {
+        // given
+<span class="nc" id="L119">        FakeCard card = board.addCard(&quot;ready&quot;, TODO_LIST).withComments(3);</span>
+
+        // when
+<span class="nc" id="L122">        List&lt;String&gt; firstTick = pollTick();</span>
+<span class="nc" id="L123">        List&lt;String&gt; unchangedTick = pollTick();</span>
+        // Adding a comment changes the comment badge, for example a status written by an older run.
+<span class="nc" id="L125">        card.withComment(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L126">        List&lt;String&gt; tickAfterNewComment = pollTick();</span>
+
+        // then
+<span class="nc" id="L129">        assertThat(firstTick).filteredOn(statusLookupOf(card)).hasSize(1);</span>
+<span class="nc" id="L130">        assertThat(unchangedTick).filteredOn(statusLookupOf(card)).isEmpty();</span>
+<span class="nc" id="L131">        assertThat(tickAfterNewComment).filteredOn(statusLookupOf(card)).hasSize(1);</span>
+<span class="nc" id="L132">        assertThat(card.commentTexts())</span>
+<span class="nc" id="L133">                .first(STRING)</span>
+<span class="nc" id="L134">                .startsWith(TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER)</span>
+<span class="nc" id="L135">                .contains(&quot;Status: prerequisites resolved.&quot;);</span>
+<span class="nc" id="L136">    }</span>
+
+    @Test
+    void commentEditThatMovesLastActivityIsLookedUpAgainWithAnUnchangedCommentCount() {
+        // given
+<span class="nc" id="L141">        FakeCard card = board.addCard(&quot;ready&quot;, TODO_LIST).withComments(2).withComment(STALE_WAITING_STATUS);</span>
+        // The first tick writes the resolved status and the second confirms it.
+<span class="nc" id="L143">        pollTick();</span>
+<span class="nc" id="L144">        pollTick();</span>
+
+        // when
+<span class="nc" id="L147">        List&lt;String&gt; unchangedTick = pollTick();</span>
+<span class="nc" id="L148">        card.withNewestCommentEdited(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L149">        List&lt;String&gt; tickAfterEdit = pollTick();</span>
+
+        // then
+<span class="nc" id="L152">        assertThat(unchangedTick).filteredOn(statusLookupOf(card)).isEmpty();</span>
+<span class="nc" id="L153">        assertThat(tickAfterEdit).filteredOn(statusLookupOf(card)).hasSize(1);</span>
+<span class="nc" id="L154">        assertThat(card.commentTexts())</span>
+<span class="nc" id="L155">                .hasSize(3)</span>
+<span class="nc" id="L156">                .first(STRING)</span>
+<span class="nc" id="L157">                .startsWith(TrelloClient.PREREQUISITE_STATUS_COMMENT_MARKER)</span>
+<span class="nc" id="L158">                .contains(&quot;Status: prerequisites resolved.&quot;);</span>
+<span class="nc" id="L159">    }</span>
+
+    @Test
+    void rateLimitedStatusWriteIsRetriedWithAFreshLookupOnTheNextTick() {
+        // given
+<span class="nc" id="L164">        FakeCard card = board.addCard(&quot;ready&quot;, TODO_LIST).withComments(2).withComment(STALE_WAITING_STATUS);</span>
+
+        // when
+<span class="nc" id="L167">        board.rejectCommentWrites(true);</span>
+<span class="nc" id="L168">        List&lt;String&gt; rateLimitedTick = pollTick();</span>
+<span class="nc" id="L169">        board.rejectCommentWrites(false);</span>
+<span class="nc" id="L170">        List&lt;String&gt; nextTick = pollTick();</span>
+
+        // then
+<span class="nc" id="L173">        assertThat(rateLimitedTick)</span>
+<span class="nc" id="L174">                .as(&quot;the poll survives the rejected write&quot;)</span>
+<span class="nc" id="L175">                .filteredOn(TrelloClientPrerequisiteStatusLookupTest::isWrite)</span>
+<span class="nc" id="L176">                .singleElement(STRING)</span>
+<span class="nc" id="L177">                .startsWith(&quot;PUT /1/actions/&quot;);</span>
+<span class="nc" id="L178">        assertThat(nextTick)</span>
+<span class="nc" id="L179">                .as(&quot;the rejected write does not leave a remembered answer behind&quot;)</span>
+<span class="nc" id="L180">                .filteredOn(statusLookupOf(card))</span>
+<span class="nc" id="L181">                .hasSize(1);</span>
+<span class="nc" id="L182">        assertThat(nextTick)</span>
+<span class="nc" id="L183">                .filteredOn(TrelloClientPrerequisiteStatusLookupTest::isWrite)</span>
+<span class="nc" id="L184">                .singleElement(STRING)</span>
+<span class="nc" id="L185">                .startsWith(&quot;PUT /1/actions/&quot;);</span>
+<span class="nc" id="L186">        assertThat(card.commentTexts()).first(STRING).contains(&quot;Status: prerequisites resolved.&quot;);</span>
+<span class="nc" id="L187">    }</span>
+
+    @Test
+    void statusCommentsOfInactiveTerminalOrCommentlessCardsAreNeverLookedUp() {
+        // given
+<span class="nc" id="L192">        FakeCard inactive = board.addCard(&quot;inactive&quot;, PROGRESS_LIST).withComment(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L193">        FakeCard terminal = board.addCard(&quot;terminal&quot;, DONE_LIST).withComment(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L194">        FakeCard withoutComments =</span>
+<span class="nc" id="L195">                board.addCard(&quot;ordinary-checklist&quot;, TODO_LIST).withChecklistItem(&quot;Write docs&quot;);</span>
+
+        // when
+<span class="nc" id="L198">        List&lt;String&gt; requests = pollTick();</span>
+
+        // then
+<span class="nc" id="L201">        assertThat(requests)</span>
+<span class="nc" id="L202">                .noneMatch(statusLookupOf(inactive))</span>
+<span class="nc" id="L203">                .noneMatch(statusLookupOf(terminal))</span>
+<span class="nc" id="L204">                .noneMatch(statusLookupOf(withoutComments));</span>
+<span class="nc" id="L205">        assertThat(inactive.commentTexts()).containsExactly(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L206">        assertThat(terminal.commentTexts()).containsExactly(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L207">        assertThat(requests).noneMatch(TrelloClientPrerequisiteStatusLookupTest::isWrite);</span>
+<span class="nc" id="L208">    }</span>
+
+    @Test
+    void changedEndpointDoesNotReuseAbsentStatusForSameCardActivity() throws Exception {
+        // given
+<span class="nc" id="L213">        board.addCard(&quot;ready&quot;, TODO_LIST).withComments(1);</span>
+<span class="nc" id="L214">        pollTick();</span>
+<span class="nc" id="L215">        try (var nextBoard = new FakeTrelloCommentBoard().start()) {</span>
+<span class="nc" id="L216">            FakeCard nextCard = nextBoard.addCard(&quot;ready&quot;, TODO_LIST).withComment(STALE_WAITING_STATUS);</span>
+<span class="nc" id="L217">            EffectiveConfig nextConfig = configuration(nextBoard);</span>
+
+            // when
+<span class="nc" id="L220">            client.fetchCandidateCards(nextConfig);</span>
+
+            // then
+<span class="nc" id="L223">            assertThat(nextBoard.requests())</span>
+<span class="nc" id="L224">                    .filteredOn(statusLookupOf(nextCard))</span>
+<span class="nc" id="L225">                    .hasSize(1);</span>
+<span class="nc" id="L226">            assertThat(nextCard.commentTexts())</span>
+<span class="nc" id="L227">                    .singleElement(STRING)</span>
+<span class="nc" id="L228">                    .contains(&quot;Status: prerequisites resolved.&quot;)</span>
+<span class="nc" id="L229">                    .doesNotContain(&quot;Old waiting text&quot;);</span>
+        }
+<span class="nc" id="L231">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;&quot;, &quot;_Managed by Symphony_&quot;, &quot;_Written by Symphony_&quot;})
+    void unchangedResolvedStatusRetainsItsAttributionAcrossWarmPolls(String footer) {
+        // given
+        String resolved =
+                &quot;&quot;&quot;
+                ## Symphony Prerequisite Status
+
+                Status: prerequisites resolved.
+
+                Symphony may start this Trello card when other dispatch rules allow.&quot;&quot;&quot;
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                        + (footer.isEmpty() ? &quot;&quot; : &quot;\n\n&quot; + footer);</span>
+<span class="nc" id="L245">        FakeCard card = board.addCard(&quot;ready&quot;, TODO_LIST).withComment(resolved);</span>
+
+        // when
+<span class="nc" id="L248">        List&lt;String&gt; firstTick = pollTick();</span>
+<span class="nc" id="L249">        List&lt;String&gt; warmTick = pollTick();</span>
+
+        // then
+<span class="nc" id="L252">        assertThat(firstTick).filteredOn(statusLookupOf(card)).hasSize(1);</span>
+<span class="nc" id="L253">        assertThat(firstTick).noneMatch(TrelloClientPrerequisiteStatusLookupTest::isWrite);</span>
+<span class="nc" id="L254">        assertThat(warmTick).filteredOn(statusLookupOf(card)).isEmpty();</span>
+<span class="nc" id="L255">        assertThat(warmTick).noneMatch(TrelloClientPrerequisiteStatusLookupTest::isWrite);</span>
+<span class="nc" id="L256">        assertThat(card.commentTexts()).containsExactly(resolved);</span>
+<span class="nc" id="L257">    }</span>
+
+    private List&lt;String&gt; pollTick() {
+<span class="nc" id="L260">        board.clearRequests();</span>
+<span class="nc" id="L261">        client.fetchCandidateCards(config);</span>
+<span class="nc" id="L262">        return board.requests();</span>
+    }
+
+    /// Matches the deep comment read that looks for the card's managed status comment.
+    private static Predicate&lt;String&gt; statusLookupOf(FakeCard card) {
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        return request -&gt; request.startsWith(&quot;GET /1/cards/&quot; + card.id() + &quot;?&quot;)</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">                &amp;&amp; request.contains(&quot;actions_limit=&quot; + TrelloClient.WORKPAD_COMMENT_ACTION_LIMIT);</span>
+    }
+
+    private static boolean isWrite(String request) {
+<span class="nc bnc" id="L272" title="All 2 branches missed.">        return !request.startsWith(&quot;GET &quot;);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

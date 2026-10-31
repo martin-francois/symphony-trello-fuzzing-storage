@@ -8,9 +8,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.jspecify.annotations.NullMarked;
 
 /// Version provenance for generated workflow bodies (ADR 0095). The store keeps one record per
@@ -27,23 +30,65 @@ final class GeneratedWorkflowStore {
     private final ObjectMapper json;
     private final Path storePath;
 
-<span class="nc" id="L30">    private GeneratedWorkflowStore(Path storePath) {</span>
-<span class="nc" id="L31">        this.storePath = storePath.toAbsolutePath().normalize();</span>
-<span class="nc" id="L32">        this.json = ConnectedBoardRepository.jsonMapper();</span>
-<span class="nc" id="L33">    }</span>
+<span class="nc" id="L33">    private GeneratedWorkflowStore(Path storePath) {</span>
+<span class="nc" id="L34">        this.storePath = storePath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L35">        this.json = ConnectedBoardRepository.jsonMapper();</span>
+<span class="nc" id="L36">    }</span>
 
     static GeneratedWorkflowStore inConfigDir(Path configDir) {
-<span class="nc" id="L36">        return new GeneratedWorkflowStore(configDir.resolve(FILE_NAME));</span>
+<span class="nc" id="L39">        return new GeneratedWorkflowStore(configDir.resolve(FILE_NAME));</span>
     }
 
     static GeneratedWorkflowStore besideManifest(Path manifestPath) {
-<span class="nc" id="L40">        Path manifest = manifestPath.toAbsolutePath().normalize();</span>
-<span class="nc" id="L41">        Path store = manifest.resolveSibling(FILE_NAME);</span>
-<span class="nc bnc" id="L42" title="All 2 branches missed.">        if (PathsEqual.samePath(store, manifest)) {</span>
-<span class="nc" id="L43">            throw new IllegalArgumentException(</span>
-                    &quot;cannot record generated workflows: use a manifest filename other than generated-workflows.json&quot;);
+<span class="nc" id="L43">        validateManifestPath(manifestPath);</span>
+<span class="nc" id="L44">        Path manifest = manifestPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L45">        return new GeneratedWorkflowStore(manifest.resolveSibling(FILE_NAME));</span>
+    }
+
+    static void validateManifestPath(Path manifestPath) {
+<span class="nc" id="L49">        Path manifest = manifestPath.toAbsolutePath();</span>
+<span class="nc" id="L50">        Path store = manifest.normalize().resolveSibling(FILE_NAME);</span>
+        boolean collision;
+        try {
+<span class="nc" id="L53">            collision =</span>
+<span class="nc bnc" id="L54" title="All 2 branches missed.">                    prospectiveRealPath(manifest, new HashSet&lt;&gt;()).equals(prospectiveRealPath(store, new HashSet&lt;&gt;()))</span>
+<span class="nc bnc" id="L55" title="All 6 branches missed.">                            || (Files.exists(manifest) &amp;&amp; Files.exists(store) &amp;&amp; Files.isSameFile(manifest, store));</span>
+<span class="nc" id="L56">        } catch (IOException e) {</span>
+<span class="nc" id="L57">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;,
+                    &quot;Cannot resolve the connected-board manifest path safely. Pass --manifest with a different path.&quot;,
+                    e);
+<span class="nc" id="L61">        }</span>
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (collision) {</span>
+<span class="nc" id="L63">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_invalid_arguments&quot;,
+                    &quot;The connected-board manifest resolves to &quot; + FILE_NAME
+                            + &quot; and that file is reserved for generated workflow provenance. Pass --manifest with &quot;
+                            + ConnectedBoardManifest.FILE_NAME + &quot; or another filename instead.&quot;);
         }
-<span class="nc" id="L46">        return new GeneratedWorkflowStore(store);</span>
+<span class="nc" id="L69">    }</span>
+
+    /// Resolve aliases before setup creates either file, including a link to a missing target.
+    private static Path prospectiveRealPath(Path path, Set&lt;Path&gt; visitedLinks) throws IOException {
+        try {
+<span class="nc" id="L74">            return path.toRealPath();</span>
+<span class="nc" id="L75">        } catch (NoSuchFileException e) {</span>
+<span class="nc" id="L76">            Path absolute = path.toAbsolutePath();</span>
+<span class="nc" id="L77">            Path parent = absolute.getParent();</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (parent == null) {</span>
+<span class="nc" id="L79">                throw e;</span>
+            }
+            // Resolve parents before interpreting &quot;..&quot;: a directory symlink can change its meaning.
+<span class="nc" id="L82">            Path prospective = prospectiveRealPath(parent, visitedLinks).resolve(absolute.getFileName());</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">            if (Files.isSymbolicLink(prospective)) {</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                if (!visitedLinks.add(prospective)) {</span>
+<span class="nc" id="L85">                    throw new IOException(&quot;symbolic link cycle in manifest path&quot;, e);</span>
+                }
+<span class="nc" id="L87">                return prospectiveRealPath(</span>
+<span class="nc" id="L88">                        prospective.resolveSibling(Files.readSymbolicLink(prospective)), visitedLinks);</span>
+            }
+<span class="nc" id="L90">            return prospective;</span>
+        }
     }
 
     /// Records the body that setup just generated with the running Symphony version. A failure here
@@ -51,85 +96,93 @@ final class GeneratedWorkflowStore {
     /// later migration check then treats the workflow as having no recorded provenance.
     static Optional&lt;String&gt; recordGenerated(Path manifestPath, Path workflowPath, GeneratedWorkflowBodyInputs inputs) {
         try {
-<span class="nc" id="L54">            besideManifest(manifestPath)</span>
-<span class="nc" id="L55">                    .put(GeneratedWorkflowRecord.current(workflowPath, SymphonyVersion.currentText(), inputs));</span>
-<span class="nc" id="L56">            return Optional.empty();</span>
-<span class="nc" id="L57">        } catch (IOException | RuntimeException e) {</span>
-<span class="nc" id="L58">            return Optional.of(&quot;  WARN  Could not record which Symphony version generated &quot;</span>
-<span class="nc" id="L59">                    + PathNames.fileName(workflowPath) + &quot; in the provenance store. Later updates will ask for a&quot;</span>
+<span class="nc" id="L99">            besideManifest(manifestPath)</span>
+<span class="nc" id="L100">                    .put(GeneratedWorkflowRecord.current(workflowPath, SymphonyVersion.currentText(), inputs));</span>
+<span class="nc" id="L101">            return Optional.empty();</span>
+<span class="nc" id="L102">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L103">            return Optional.of(&quot;  WARN  Could not record which Symphony version generated &quot;</span>
+<span class="nc" id="L104">                    + PathNames.fileName(workflowPath) + &quot; in the provenance store. Later updates will ask for a&quot;</span>
                     + &quot; manual workflow migration if the generated workflow changes.&quot;);
         }
     }
 
     Path storePath() {
-<span class="nc" id="L65">        return storePath;</span>
+<span class="nc" id="L110">        return storePath;</span>
     }
 
     List&lt;GeneratedWorkflowRecord&gt; records() throws IOException {
-<span class="nc" id="L69">        return records(load());</span>
+<span class="nc" id="L114">        return records(load());</span>
     }
 
     static Optional&lt;GeneratedWorkflowRecord&gt; find(List&lt;GeneratedWorkflowRecord&gt; records, Path workflowPath) {
-<span class="nc" id="L73">        return records.stream()</span>
-<span class="nc" id="L74">                .filter(record -&gt; PathsEqual.samePath(record.workflowPath(), workflowPath))</span>
-<span class="nc" id="L75">                .findAny();</span>
+<span class="nc" id="L118">        return records.stream()</span>
+<span class="nc" id="L119">                .filter(record -&gt; PathsEqual.samePath(record.workflowPath(), workflowPath))</span>
+<span class="nc" id="L120">                .findAny();</span>
     }
 
     /// Replaces the record for the same workflow path, or adds it.
     void put(GeneratedWorkflowRecord record) throws IOException {
-<span class="nc" id="L80">        ObjectNode document = load();</span>
-<span class="nc" id="L81">        List&lt;GeneratedWorkflowRecord&gt; stored = records(document);</span>
-<span class="nc" id="L82">        ArrayNode workflows = json.createArrayNode();</span>
+<span class="nc" id="L125">        ObjectNode document = load();</span>
+<span class="nc" id="L126">        List&lt;GeneratedWorkflowRecord&gt; stored = records(document);</span>
+<span class="nc" id="L127">        ArrayNode workflows = json.createArrayNode();</span>
         // Keep untouched records as JSON so an older app preserves newer generator inputs.
-<span class="nc bnc" id="L84" title="All 2 branches missed.">        for (int index = 0; index &lt; stored.size(); index++) {</span>
-<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (!PathsEqual.samePath(stored.get(index).workflowPath(), record.workflowPath())) {</span>
-<span class="nc" id="L86">                workflows.add(document.path(&quot;workflows&quot;).get(index));</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        for (int index = 0; index &lt; stored.size(); index++) {</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            if (!PathsEqual.samePath(stored.get(index).workflowPath(), record.workflowPath())) {</span>
+<span class="nc" id="L131">                workflows.add(document.path(&quot;workflows&quot;).get(index));</span>
             }
         }
-<span class="nc" id="L89">        workflows.add(json.valueToTree(record));</span>
-<span class="nc" id="L90">        document.put(&quot;formatVersion&quot;, FORMAT_VERSION);</span>
-<span class="nc" id="L91">        document.set(&quot;workflows&quot;, workflows);</span>
-<span class="nc" id="L92">        save(document);</span>
-<span class="nc" id="L93">    }</span>
+<span class="nc" id="L134">        workflows.add(json.valueToTree(record));</span>
+<span class="nc" id="L135">        document.put(&quot;formatVersion&quot;, FORMAT_VERSION);</span>
+<span class="nc" id="L136">        document.set(&quot;workflows&quot;, workflows);</span>
+<span class="nc" id="L137">        save(document);</span>
+<span class="nc" id="L138">    }</span>
 
     private List&lt;GeneratedWorkflowRecord&gt; records(ObjectNode document) throws IOException {
-<span class="nc" id="L96">        return json.treeToValue(document, StoredRecords.class).workflows();</span>
+<span class="nc" id="L141">        return json.treeToValue(document, StoredRecords.class).workflows();</span>
     }
 
     private ObjectNode load() throws IOException {
-<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (!Files.isRegularFile(storePath)) {</span>
-<span class="nc" id="L101">            return json.createObjectNode();</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        if (!Files.isRegularFile(storePath)) {</span>
+<span class="nc" id="L146">            return json.createObjectNode();</span>
         }
         try {
-<span class="nc" id="L104">            JsonNode document = json.readTree(storePath.toFile());</span>
-<span class="nc bnc" id="L105" title="All 2 branches missed.">            if (!(document instanceof ObjectNode object)) {</span>
-<span class="nc" id="L106">                throw new IOException(&quot;cannot read generated workflow store: expected a JSON object&quot;);</span>
+<span class="nc" id="L149">            JsonNode document = json.readTree(storePath.toFile());</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (!(document instanceof ObjectNode object)) {</span>
+<span class="nc" id="L151">                throw new IOException(&quot;cannot read generated workflow store: expected a JSON object&quot;);</span>
             }
-<span class="nc" id="L108">            return object;</span>
-<span class="nc" id="L109">        } catch (JsonProcessingException e) {</span>
-<span class="nc" id="L110">            throw new IOException(&quot;cannot read generated workflow store: expected valid JSON&quot;, e);</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            if (object.has(ConnectedBoardManifest.BOARDS_FIELD)) {</span>
+<span class="nc" id="L154">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_manifest_unavailable&quot;,
+                        storePath + &quot; contains a connected-board manifest, not generated workflow provenance. &quot;
+                                + &quot;Back up this file and the workflows, then move the connected-board data to &quot;
+                                + ConnectedBoardManifest.FILE_NAME + &quot; or another manifest filename before retrying. &quot;
+                                + &quot;Keep the original backup and separate any provenance fields; no files were changed.&quot;);
+            }
+<span class="nc" id="L161">            return object;</span>
+<span class="nc" id="L162">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L163">            throw new IOException(&quot;cannot read generated workflow store: expected valid JSON&quot;, e);</span>
         }
     }
 
     private void save(ObjectNode records) throws IOException {
-<span class="nc" id="L115">        Path parent = storePath.getParent();</span>
-<span class="nc bnc" id="L116" title="All 2 branches missed.">        if (parent != null) {</span>
-<span class="nc" id="L117">            Files.createDirectories(parent);</span>
+<span class="nc" id="L168">        Path parent = storePath.getParent();</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        if (parent != null) {</span>
+<span class="nc" id="L170">            Files.createDirectories(parent);</span>
         }
-<span class="nc" id="L119">        Path temporary = AtomicFiles.siblingTemporaryFile(storePath);</span>
+<span class="nc" id="L172">        Path temporary = AtomicFiles.siblingTemporaryFile(storePath);</span>
         try {
-<span class="nc" id="L121">            json.writerWithDefaultPrettyPrinter().writeValue(temporary.toFile(), records);</span>
-<span class="nc" id="L122">            AtomicFiles.replace(temporary, storePath);</span>
+<span class="nc" id="L174">            json.writerWithDefaultPrettyPrinter().writeValue(temporary.toFile(), records);</span>
+<span class="nc" id="L175">            AtomicFiles.replace(temporary, storePath);</span>
         } finally {
-<span class="nc" id="L124">            AtomicFiles.deleteQuietly(temporary);</span>
+<span class="nc" id="L177">            AtomicFiles.deleteQuietly(temporary);</span>
         }
-<span class="nc" id="L126">    }</span>
+<span class="nc" id="L179">    }</span>
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     record StoredRecords(int formatVersion, List&lt;GeneratedWorkflowRecord&gt; workflows) {
-<span class="nc" id="L130">        StoredRecords {</span>
-<span class="nc bnc" id="L131" title="All 2 branches missed.">            workflows = workflows == null ? List.of() : List.copyOf(workflows);</span>
-<span class="nc" id="L132">        }</span>
+<span class="nc" id="L183">        StoredRecords {</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">            workflows = workflows == null ? List.of() : List.copyOf(workflows);</span>
+<span class="nc" id="L185">        }</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

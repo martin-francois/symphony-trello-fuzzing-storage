@@ -1,0 +1,600 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SymphonyOrchestratorStatusViewTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">SymphonyOrchestratorStatusViewTest.java</span></div><h1>SymphonyOrchestratorStatusViewTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import static ch.fmartin.symphony.trello.orchestrator.SymphonyOrchestratorTestSupport.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.InstanceOfAssertFactories.list;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.TestCards;
+import ch.fmartin.symphony.trello.agent.AgentRunResult;
+import ch.fmartin.symphony.trello.agent.AgentRunner;
+import ch.fmartin.symphony.trello.agent.TrelloHandoffToolHandler;
+import ch.fmartin.symphony.trello.domain.Card;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/// Owns the published status view: status readers take no lock, and an operation publishes a
+/// reader-visible change before the Trello, worker or filesystem I/O that follows it. Each test
+/// reads the status from inside that I/O, where the operation still holds the operation lock.
+/// ADR 0105 maps the publish points to these tests.
+<span class="nc" id="L39">final class SymphonyOrchestratorStatusViewTest {</span>
+<span class="nc" id="L40">    private static final Duration STALL_TIMEOUT = Duration.ofSeconds(1);</span>
+    private static final String SLOW_POLL_INTERVAL_MILLIS = &quot;60000&quot;;
+<span class="nc" id="L42">    private static final Duration MODIFICATION_TIME_ADVANCE = Duration.ofSeconds(2);</span>
+    /// Lets one tick dispatch a second card while the first one still runs.
+    private static final String TWO_AGENTS = &quot;agent:\n  max_concurrent_agents: 2&quot;;
+<span class="nc" id="L45">    private static final Optional&lt;RuntimeSnapshot.DispatchPause&gt; NO_PAUSE = Optional.empty();</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void statusReadersAnswerWhileATickIsBlockedInsideTrelloFetch() throws Exception {
+        // given
+<span class="nc" id="L53">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L54">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS);</span>
+<span class="nc" id="L55">        Duration expectedInterval = Duration.ofMillis(Long.parseLong(SLOW_POLL_INTERVAL_MILLIS));</span>
+<span class="nc" id="L56">        var tracker = new BlockingTracker();</span>
+<span class="nc" id="L57">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, mock());</span>
+<span class="nc" id="L58">        orchestrator.start();</span>
+        try {
+<span class="nc" id="L60">            assertThat(tracker.firstFetchStarted.await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L61">                    .as(</span>
+                            &quot;the blocked tick should enter its first tracker fetch within %d seconds&quot;,
+<span class="nc" id="L63">                            WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L64">                    .isTrue();</span>
+
+            // when
+<span class="nc" id="L67">            CompletableFuture&lt;Optional&lt;CardDebugDetails&gt;&gt; details =</span>
+<span class="nc" id="L68">                    CompletableFuture.supplyAsync(() -&gt; orchestrator.cardDetails(&quot;TRELLO-abc&quot;), OWN_PLATFORM_THREAD);</span>
+<span class="nc" id="L69">            CompletableFuture&lt;Boolean&gt; started =</span>
+<span class="nc" id="L70">                    CompletableFuture.supplyAsync(orchestrator::isStarted, OWN_PLATFORM_THREAD);</span>
+<span class="nc" id="L71">            CompletableFuture&lt;RuntimeSnapshot&gt; snapshot =</span>
+<span class="nc" id="L72">                    CompletableFuture.supplyAsync(orchestrator::snapshot, OWN_PLATFORM_THREAD);</span>
+
+            // then
+<span class="nc" id="L75">            assertThat(details)</span>
+<span class="nc" id="L76">                    .as(&quot;card details must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L77">                    .succeedsWithin(WAIT_TIMEOUT)</span>
+<span class="nc" id="L78">                    .isEqualTo(Optional.empty());</span>
+<span class="nc" id="L79">            assertThat(started)</span>
+<span class="nc" id="L80">                    .as(&quot;the started state must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L81">                    .succeedsWithin(WAIT_TIMEOUT)</span>
+<span class="nc" id="L82">                    .isEqualTo(true);</span>
+<span class="nc" id="L83">            assertThat(snapshot)</span>
+<span class="nc" id="L84">                    .as(&quot;polling status must not wait for the in-flight Trello poll&quot;)</span>
+<span class="nc" id="L85">                    .succeedsWithin(WAIT_TIMEOUT)</span>
+<span class="nc" id="L86">                    .extracting(RuntimeSnapshot::polling)</span>
+<span class="nc" id="L87">                    .isEqualTo(new RuntimeSnapshot.Polling(</span>
+<span class="nc" id="L88">                            expectedInterval, expectedInterval, Optional.empty(), Optional.empty()));</span>
+<span class="nc" id="L89">            assertThat(tracker.firstFetchCompleted)</span>
+<span class="nc" id="L90">                    .as(&quot;the tracker remains blocked until all reader assertions finish&quot;)</span>
+<span class="nc" id="L91">                    .isNotDone();</span>
+        } finally {
+<span class="nc" id="L93">            tracker.releaseFirstFetch.countDown();</span>
+<span class="nc" id="L94">            orchestrator.stop();</span>
+        }
+<span class="nc" id="L96">        assertThat(tracker.firstFetchCompleted)</span>
+<span class="nc" id="L97">                .as(&quot;the blocked tracker completes without a hidden timeout or failure&quot;)</span>
+<span class="nc" id="L98">                .succeedsWithin(WAIT_TIMEOUT)</span>
+<span class="nc" id="L99">                .isNull();</span>
+<span class="nc" id="L100">    }</span>
+
+    @Test
+    void localStatusShowsTheSelectedBoardWhileStartupCleanupFetchesTerminalCards() throws Exception {
+        // given
+<span class="nc" id="L105">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L106">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS);</span>
+<span class="nc" id="L107">        var tracker = new StartBlockingTracker();</span>
+<span class="nc" id="L108">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, mock());</span>
+<span class="nc" id="L109">        var starter = Thread.ofPlatform().start(orchestrator::start);</span>
+
+        // when
+<span class="nc" id="L112">        assertThat(tracker.terminalFetchStarted.await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L113">                .as(&quot;startup should enter terminal-card fetching within %d seconds&quot;, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L114">                .isTrue();</span>
+<span class="nc" id="L115">        String boardDuringStartup = orchestrator.selectedBoardId();</span>
+<span class="nc" id="L116">        boolean startedDuringStartup = orchestrator.isStarted();</span>
+<span class="nc" id="L117">        tracker.releaseTerminalFetch.countDown();</span>
+<span class="nc" id="L118">        assertThat(starter.join(WAIT_TIMEOUT))</span>
+<span class="nc" id="L119">                .as(</span>
+                        &quot;startup should finish within %d seconds once the terminal fetch is released&quot;,
+<span class="nc" id="L121">                        WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L122">                .isTrue();</span>
+<span class="nc" id="L123">        boolean startedAfterStartup = orchestrator.isStarted();</span>
+<span class="nc" id="L124">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L127">        assertThat(boardDuringStartup)</span>
+<span class="nc" id="L128">                .as(&quot;the board resolved by startup must be visible before the startup cleanup I/O&quot;)</span>
+<span class="nc" id="L129">                .isEqualTo(&quot;board-1&quot;);</span>
+<span class="nc" id="L130">        assertThat(startedDuringStartup)</span>
+<span class="nc" id="L131">                .as(&quot;the orchestrator must not report started before startup finished&quot;)</span>
+<span class="nc" id="L132">                .isFalse();</span>
+<span class="nc" id="L133">        assertThat(startedAfterStartup)</span>
+<span class="nc" id="L134">                .as(&quot;the orchestrator must report started once start() returned&quot;)</span>
+<span class="nc" id="L135">                .isTrue();</span>
+<span class="nc" id="L136">    }</span>
+
+    @Test
+    void workerSeesItsCardRunningWhileTheDispatchingTickContinues() throws Exception {
+        // given
+<span class="nc" id="L141">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L142">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS, TWO_AGENTS);</span>
+<span class="nc" id="L143">        var tracker = new FakeTracker(List.of(</span>
+<span class="nc" id="L144">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;Todo&quot;), TestCards.card(&quot;card-2&quot;, &quot;TRELLO-second&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L145">        var firstWorkerRead = new CountDownLatch(1);</span>
+<span class="nc" id="L146">        var runningSeenByFirstWorker = new AtomicReference&lt;RuntimeSnapshot&gt;();</span>
+<span class="nc" id="L147">        var orchestratorRef = new AtomicReference&lt;SymphonyOrchestrator&gt;();</span>
+<span class="nc" id="L148">        AgentRunner runner = mock();</span>
+<span class="nc" id="L149">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L150">                    AgentRunner.AgentRunRequest request = invocation.getArgument(0);</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                    if (request.card().id().equals(&quot;card-1&quot;)) {</span>
+<span class="nc" id="L152">                        runningSeenByFirstWorker.set(orchestratorRef.get().snapshot());</span>
+<span class="nc" id="L153">                        firstWorkerRead.countDown();</span>
+                    }
+<span class="nc" id="L155">                    return AgentRunResult.ok();</span>
+                })
+<span class="nc" id="L157">                .when(runner)</span>
+<span class="nc" id="L158">                .run(any());</span>
+<span class="nc" id="L159">        var promptRefreshes = new AtomicInteger();</span>
+<span class="nc" id="L160">        var secondDispatchReached = new CountDownLatch(1);</span>
+        // The second prompt refresh belongs to the second card, after the first card's dispatch.
+<span class="nc" id="L162">        tracker.stateFetchHook = () -&gt; {</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (promptRefreshes.incrementAndGet() == 2) {</span>
+<span class="nc" id="L164">                secondDispatchReached.countDown();</span>
+<span class="nc" id="L165">                awaitRelease(firstWorkerRead, &quot;the tick paused before its second dispatch&quot;);</span>
+            }
+<span class="nc" id="L167">        };</span>
+<span class="nc" id="L168">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L169">        orchestratorRef.set(orchestrator);</span>
+
+        // when
+<span class="nc" id="L172">        orchestrator.start();</span>
+<span class="nc" id="L173">        assertThat(secondDispatchReached.await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L174">                .as(</span>
+                        &quot;the tick should reach the second card's prompt refresh within %d seconds&quot;,
+<span class="nc" id="L176">                        WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L177">                .isTrue();</span>
+<span class="nc" id="L178">        assertThat(firstWorkerRead.await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L179">                .as(&quot;the first worker should read the status within %d seconds&quot;, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L180">                .isTrue();</span>
+<span class="nc" id="L181">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L184">        assertThat(runningSeenByFirstWorker.get().running())</span>
+<span class="nc" id="L185">                .as(&quot;a dispatched card must show as running before its tick continues with the next card&quot;)</span>
+<span class="nc" id="L186">                .extracting(RuntimeSnapshot.RunningRow::cardIdentifier)</span>
+<span class="nc" id="L187">                .containsExactly(&quot;TRELLO-first&quot;);</span>
+<span class="nc" id="L188">    }</span>
+
+    @Test
+    void workerExitRefreshSeesTheCardNoLongerRunning() throws Exception {
+        // given
+<span class="nc" id="L193">        FailingWorkerScenario scenario = failingWorkerScenario();</span>
+<span class="nc" id="L194">        var snapshotDuringExitRefresh = new AtomicReference&lt;RuntimeSnapshot&gt;();</span>
+        // Workers run on virtual threads, so the first virtual-thread fetch is the worker-exit refresh.
+<span class="nc" id="L196">        scenario.tracker().stateFetchHook = () -&gt; {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            if (Thread.currentThread().isVirtual()) {</span>
+<span class="nc" id="L198">                snapshotDuringExitRefresh.compareAndSet(</span>
+<span class="nc" id="L199">                        null, scenario.orchestrator().snapshot());</span>
+            }
+<span class="nc" id="L201">        };</span>
+
+        // when
+<span class="nc" id="L204">        scenario.startAndAwaitRetry();</span>
+<span class="nc" id="L205">        scenario.orchestrator().stop();</span>
+
+        // then
+<span class="nc" id="L208">        assertThat(snapshotDuringExitRefresh.get())</span>
+<span class="nc" id="L209">                .as(&quot;the worker-exit card refresh should have read the status&quot;)</span>
+<span class="nc" id="L210">                .isNotNull()</span>
+<span class="nc" id="L211">                .extracting(RuntimeSnapshot::counts)</span>
+<span class="nc" id="L212">                .as(&quot;an exited worker must leave the running rows before its worker-exit Trello I/O&quot;)</span>
+<span class="nc" id="L213">                .isEqualTo(new RuntimeSnapshot.Counts(0, 0));</span>
+<span class="nc" id="L214">    }</span>
+
+    @Test
+    void terminatedCardLeavesTheRunningRowsBeforeItsWorkerIsCancelled() throws Exception {
+        // given
+<span class="nc" id="L219">        BlockedWorkerScenario scenario = startOneBlockedWorker();</span>
+<span class="nc" id="L220">        FakeTracker tracker = scenario.tracker();</span>
+<span class="nc" id="L221">        SymphonyOrchestrator orchestrator = scenario.orchestrator();</span>
+<span class="nc" id="L222">        CancelObservation cancel = scenario.cancel();</span>
+<span class="nc" id="L223">        tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;done&quot;));</span>
+
+        // when
+<span class="nc" id="L226">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L227">        RuntimeSnapshot seenByCancel = cancel.snapshot().get();</span>
+<span class="nc" id="L228">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L231">        assertThat(seenByCancel)</span>
+<span class="nc" id="L232">                .as(&quot;reconciliation should have cancelled the worker of the terminal card&quot;)</span>
+<span class="nc" id="L233">                .isNotNull()</span>
+<span class="nc" id="L234">                .extracting(RuntimeSnapshot::running, list(RuntimeSnapshot.RunningRow.class))</span>
+<span class="nc" id="L235">                .as(&quot;a terminated card must leave the running rows before its worker is cancelled&quot;)</span>
+<span class="nc" id="L236">                .isEmpty();</span>
+<span class="nc" id="L237">    }</span>
+
+    @Test
+    void isStartedReadsTheViewAfterEachStartAndStop() throws Exception {
+        // given
+<span class="nc" id="L242">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L243">        SymphonyOrchestrator orchestrator = orchestrator(workflow, new FakeTracker(List.of()), mock());</span>
+
+        // when
+<span class="nc" id="L246">        assertThatThrownBy(orchestrator::start)</span>
+<span class="nc" id="L247">                .as(&quot;startup fails while the workflow file is missing&quot;)</span>
+<span class="nc" id="L248">                .isInstanceOf(RuntimeException.class);</span>
+<span class="nc" id="L249">        boolean startedAfterFailedStart = orchestrator.isStarted();</span>
+<span class="nc" id="L250">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS);</span>
+<span class="nc" id="L251">        orchestrator.start();</span>
+<span class="nc" id="L252">        boolean startedAfterStart = orchestrator.isStarted();</span>
+<span class="nc" id="L253">        orchestrator.start();</span>
+<span class="nc" id="L254">        boolean startedAfterRepeatedStart = orchestrator.isStarted();</span>
+<span class="nc" id="L255">        orchestrator.stop();</span>
+<span class="nc" id="L256">        boolean startedAfterStop = orchestrator.isStarted();</span>
+<span class="nc" id="L257">        orchestrator.stop();</span>
+<span class="nc" id="L258">        boolean startedAfterRepeatedStop = orchestrator.isStarted();</span>
+
+        // then
+<span class="nc" id="L261">        assertThat(startedAfterFailedStart)</span>
+<span class="nc" id="L262">                .as(&quot;a failed start leaves the orchestrator stopped&quot;)</span>
+<span class="nc" id="L263">                .isFalse();</span>
+<span class="nc" id="L264">        assertThat(startedAfterStart).as(&quot;start publishes the started state&quot;).isTrue();</span>
+<span class="nc" id="L265">        assertThat(startedAfterRepeatedStart)</span>
+<span class="nc" id="L266">                .as(&quot;a repeated start keeps the started state&quot;)</span>
+<span class="nc" id="L267">                .isTrue();</span>
+<span class="nc" id="L268">        assertThat(startedAfterStop).as(&quot;stop publishes the stopped state&quot;).isFalse();</span>
+<span class="nc" id="L269">        assertThat(startedAfterRepeatedStop)</span>
+<span class="nc" id="L270">                .as(&quot;a repeated stop keeps the stopped state&quot;)</span>
+<span class="nc" id="L271">                .isFalse();</span>
+<span class="nc" id="L272">    }</span>
+
+    @Test
+    void stopShowsTheStoppedStateWhileItCancelsWorkers() throws Exception {
+        // given
+<span class="nc" id="L277">        BlockedWorkerScenario scenario = startOneBlockedWorker();</span>
+<span class="nc" id="L278">        SymphonyOrchestrator orchestrator = scenario.orchestrator();</span>
+<span class="nc" id="L279">        CancelObservation cancel = scenario.cancel();</span>
+
+        // when
+<span class="nc" id="L282">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L285">        assertThat(cancel.snapshot().get())</span>
+<span class="nc" id="L286">                .as(&quot;stop should have cancelled the running worker&quot;)</span>
+<span class="nc" id="L287">                .isNotNull()</span>
+<span class="nc" id="L288">                .extracting(RuntimeSnapshot::counts)</span>
+<span class="nc" id="L289">                .as(&quot;stop must clear the running rows before it cancels the workers&quot;)</span>
+<span class="nc" id="L290">                .isEqualTo(new RuntimeSnapshot.Counts(0, 0));</span>
+<span class="nc" id="L291">        assertThat(cancel.startedWhenCancelled())</span>
+<span class="nc" id="L292">                .as(&quot;stop must report the orchestrator as stopped before it cancels the workers&quot;)</span>
+<span class="nc" id="L293">                .hasValue(false);</span>
+<span class="nc" id="L294">    }</span>
+
+    @Test
+    void reloadedRoutingIsVisibleWhileTheReloadTickReconcilesRunningCards() throws Exception {
+        // given
+<span class="nc" id="L299">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L300">        writeWorkflowWithActiveStates(workflow, &quot;[Todo]&quot;, &quot;&quot;);</span>
+<span class="nc" id="L301">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L302">        AgentRunner runner = mock();</span>
+<span class="nc" id="L303">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L304">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L305">        orchestrator.start();</span>
+<span class="nc" id="L306">        assertThat(blockingRun.started().await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L307">                .as(&quot;the worker should start within %d seconds&quot;, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L308">                .isTrue();</span>
+        // Only the manual tick below may reload, so the reload and its reconciliation share one tick.
+<span class="nc" id="L310">        orchestrator.stopWorkflowWatcherForTests();</span>
+<span class="nc" id="L311">        long previousModified = Files.getLastModifiedTime(workflow).toMillis();</span>
+<span class="nc" id="L312">        writeWorkflowWithActiveStates(workflow, &quot;[Todo, Doing]&quot;, &quot;&quot;);</span>
+<span class="nc" id="L313">        Files.setLastModifiedTime(</span>
+<span class="nc" id="L314">                workflow, FileTime.fromMillis(previousModified + MODIFICATION_TIME_ADVANCE.toMillis()));</span>
+<span class="nc" id="L315">        var routingDuringReconcile = new AtomicReference&lt;RuntimeSnapshot.Routing&gt;();</span>
+<span class="nc" id="L316">        tracker.stateFetchHook = () -&gt; routingDuringReconcile.compareAndSet(</span>
+<span class="nc" id="L317">                null, orchestrator.snapshot().routing());</span>
+
+        // when
+<span class="nc" id="L320">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L321">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L324">        assertThat(routingDuringReconcile.get())</span>
+<span class="nc" id="L325">                .as(&quot;the reload tick should refresh the running card&quot;)</span>
+<span class="nc" id="L326">                .isNotNull()</span>
+<span class="nc" id="L327">                .extracting(RuntimeSnapshot.Routing::activeLists, list(String.class))</span>
+<span class="nc" id="L328">                .as(&quot;a reloaded workflow must be visible before the reconciliation Trello I/O&quot;)</span>
+<span class="nc" id="L329">                .containsExactly(&quot;Todo&quot;, &quot;Doing&quot;);</span>
+<span class="nc" id="L330">    }</span>
+
+    @Test
+    void retryTimerCardRefreshSeesTheRetryLeaveTheQueue() throws Exception {
+        // given
+<span class="nc" id="L335">        FailingWorkerScenario scenario = failingWorkerScenario();</span>
+<span class="nc" id="L336">        SymphonyOrchestrator orchestrator = scenario.orchestrator();</span>
+<span class="nc" id="L337">        scenario.startAndAwaitRetry();</span>
+<span class="nc" id="L338">        var snapshotDuringRetryRefresh = new AtomicReference&lt;RuntimeSnapshot&gt;();</span>
+<span class="nc" id="L339">        scenario.tracker().stateFetchHook =</span>
+<span class="nc" id="L340">                () -&gt; snapshotDuringRetryRefresh.compareAndSet(null, orchestrator.snapshot());</span>
+
+        // when
+<span class="nc" id="L343">        orchestrator.retryNowForTests(&quot;card-1&quot;);</span>
+<span class="nc" id="L344">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L347">        assertThat(snapshotDuringRetryRefresh.get())</span>
+<span class="nc" id="L348">                .as(&quot;the retry timer should refresh the card&quot;)</span>
+<span class="nc" id="L349">                .isNotNull()</span>
+<span class="nc" id="L350">                .extracting(RuntimeSnapshot::counts)</span>
+<span class="nc" id="L351">                .as(&quot;a fired retry must leave the retry rows before its card refresh&quot;)</span>
+<span class="nc" id="L352">                .isEqualTo(new RuntimeSnapshot.Counts(0, 0));</span>
+<span class="nc" id="L353">    }</span>
+
+    @Test
+    void refreshedCardStateIsVisibleWhileTheTickDispatchesTheNextCard() throws Exception {
+        // given
+<span class="nc" id="L358">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L359">        writeWorkflowWithActiveStates(workflow, &quot;[Todo, Doing]&quot;, TWO_AGENTS);</span>
+<span class="nc" id="L360">        Card first = TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;Todo&quot;);</span>
+<span class="nc" id="L361">        var tracker = new FakeTracker(List.of(first));</span>
+<span class="nc" id="L362">        AgentRunner runner = mock();</span>
+<span class="nc" id="L363">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L364">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L365">        orchestrator.start();</span>
+<span class="nc" id="L366">        assertThat(blockingRun.started().await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L367">                .as(&quot;the first worker should start within %d seconds&quot;, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L368">                .isTrue();</span>
+<span class="nc" id="L369">        tracker.setCandidates(List.of(</span>
+<span class="nc" id="L370">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;Doing&quot;), TestCards.card(&quot;card-2&quot;, &quot;TRELLO-second&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L371">        AtomicReference&lt;RuntimeSnapshot&gt; atNextDispatch = captureStatusAtNextPromptRefresh(tracker, orchestrator);</span>
+
+        // when
+<span class="nc" id="L374">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L375">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L378">        assertThat(atNextDispatch.get())</span>
+<span class="nc" id="L379">                .as(&quot;the tick should refresh the second card before dispatching it&quot;)</span>
+<span class="nc" id="L380">                .isNotNull()</span>
+<span class="nc" id="L381">                .extracting(RuntimeSnapshot::running, list(RuntimeSnapshot.RunningRow.class))</span>
+<span class="nc" id="L382">                .as(&quot;a reconciled card state must be visible before the tick dispatches the next card&quot;)</span>
+<span class="nc" id="L383">                .singleElement()</span>
+<span class="nc" id="L384">                .extracting(RuntimeSnapshot.RunningRow::state)</span>
+<span class="nc" id="L385">                .isEqualTo(&quot;Doing&quot;);</span>
+<span class="nc" id="L386">    }</span>
+
+    @Test
+    void scheduledRetryIsVisibleWhileTheTickDispatchesTheNextCard() throws Exception {
+        // given
+<span class="nc" id="L391">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L392">        writeWorkflowWithStallTimeout(workflow, STALL_TIMEOUT.toMillis());</span>
+<span class="nc" id="L393">        var clock = new MutableClock(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;));</span>
+<span class="nc" id="L394">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-stalled&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L395">        AgentRunner runner = mock();</span>
+<span class="nc" id="L396">        BlockingRun blockingRun = blockRunnerUntilCancelled(runner);</span>
+<span class="nc" id="L397">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, successfulWorkpadHandler());</span>
+<span class="nc" id="L398">        orchestrator.start();</span>
+<span class="nc" id="L399">        assertThat(blockingRun.started().await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L400">                .as(&quot;the first worker should start within %d seconds&quot;, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L401">                .isTrue();</span>
+<span class="nc" id="L402">        tracker.setCandidates(List.of(</span>
+<span class="nc" id="L403">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-stalled&quot;, &quot;Todo&quot;), TestCards.card(&quot;card-2&quot;, &quot;TRELLO-next&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L404">        clock.advance(STALL_TIMEOUT.multipliedBy(2));</span>
+<span class="nc" id="L405">        AtomicReference&lt;RuntimeSnapshot&gt; atNextDispatch = captureStatusAtNextPromptRefresh(tracker, orchestrator);</span>
+
+        // when
+<span class="nc" id="L408">        orchestrator.tickNowForTests();</span>
+<span class="nc" id="L409">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L412">        assertThat(atNextDispatch.get())</span>
+<span class="nc" id="L413">                .as(&quot;the tick should refresh the second card before dispatching it&quot;)</span>
+<span class="nc" id="L414">                .isNotNull()</span>
+<span class="nc" id="L415">                .extracting(RuntimeSnapshot::retrying, list(RuntimeSnapshot.RetryRow.class))</span>
+<span class="nc" id="L416">                .as(&quot;the retry of a stalled card must be visible before the tick dispatches the next card&quot;)</span>
+<span class="nc" id="L417">                .extracting(RuntimeSnapshot.RetryRow::cardIdentifier)</span>
+<span class="nc" id="L418">                .containsExactly(&quot;TRELLO-stalled&quot;);</span>
+<span class="nc" id="L419">    }</span>
+
+    @Test
+    void rearmedUsagePauseIsVisibleBeforeItsWorkpadUpdate() throws Exception {
+        // given
+<span class="nc" id="L424">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L425">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS, &quot;agent:\n  max_retry_backoff_ms: 0&quot;);</span>
+<span class="nc" id="L426">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L427">        var clock = new MutableClock(now);</span>
+<span class="nc" id="L428">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L429">        AgentRunner runner = mock();</span>
+<span class="nc" id="L430">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L431">            tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-first&quot;, &quot;Human Review&quot;));</span>
+<span class="nc" id="L432">            return AgentRunResult.codexUsageLimit(&quot;turn_failed: Usage is unavailable.&quot;, Optional.empty());</span>
+        });
+<span class="nc" id="L434">        var orchestratorRef = new AtomicReference&lt;SymphonyOrchestrator&gt;();</span>
+<span class="nc" id="L435">        WorkpadObservation workpads = observeStatusOnWorkpadWrites(orchestratorRef);</span>
+<span class="nc" id="L436">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, workpads.handler());</span>
+<span class="nc" id="L437">        orchestratorRef.set(orchestrator);</span>
+<span class="nc" id="L438">        orchestrator.start();</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().dispatchPause() != null);</span>
+<span class="nc" id="L440">        tracker.setCandidateList(List.of());</span>
+<span class="nc" id="L441">        clock.advance(Duration.ofSeconds(1));</span>
+
+        // when
+<span class="nc" id="L444">        orchestrator.dispatchPauseDeadlineNowForTests(now.plusSeconds(1));</span>
+<span class="nc" id="L445">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L448">        assertThat(workpads.pausesSeenByUpdates())</span>
+<span class="nc" id="L449">                .as(&quot;each paused workpad section must be written after the status shows the same deadline&quot;)</span>
+<span class="nc" id="L450">                .extracting(RuntimeSnapshot.DispatchPause::until)</span>
+<span class="nc" id="L451">                .containsExactly(now.plusSeconds(1), now.plusSeconds(2));</span>
+<span class="nc" id="L452">    }</span>
+
+    @Test
+    void clearedUsagePauseIsVisibleBeforeItsWorkpadCleanup() throws Exception {
+        // given
+<span class="nc" id="L457">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L458">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS, &quot;agent:\n  max_retry_backoff_ms: 60000&quot;);</span>
+<span class="nc" id="L459">        var clock = new MutableClock(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;));</span>
+<span class="nc" id="L460">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L461">        var runs = new AtomicInteger();</span>
+<span class="nc" id="L462">        AgentRunner runner = mock();</span>
+<span class="nc" id="L463">        when(runner.run(any())).thenAnswer(invocation -&gt; {</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">            if (runs.incrementAndGet() == 1) {</span>
+<span class="nc" id="L465">                return AgentRunResult.codexUsageLimit(&quot;turn_failed: Usage is unavailable.&quot;, Optional.empty());</span>
+            }
+<span class="nc" id="L467">            tracker.setCardState(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Human Review&quot;));</span>
+<span class="nc" id="L468">            return AgentRunResult.ok();</span>
+        });
+<span class="nc" id="L470">        var orchestratorRef = new AtomicReference&lt;SymphonyOrchestrator&gt;();</span>
+<span class="nc" id="L471">        WorkpadObservation workpads = observeStatusOnWorkpadWrites(orchestratorRef);</span>
+<span class="nc" id="L472">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner, clock, workpads.handler());</span>
+<span class="nc" id="L473">        orchestratorRef.set(orchestrator);</span>
+<span class="nc" id="L474">        orchestrator.start();</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">        waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L476">        clock.advance(Duration.ofSeconds(60));</span>
+
+        // when
+<span class="nc" id="L479">        orchestrator.retryNowForTests(&quot;card-1&quot;);</span>
+<span class="nc bnc" id="L480" title="All 4 branches missed.">        waitUntil(() -&gt; runs.get() == 2 &amp;&amp; orchestrator.snapshot().dispatchPause() == null);</span>
+<span class="nc" id="L481">        orchestrator.stop();</span>
+
+        // then
+<span class="nc" id="L484">        assertThat(workpads.pausesSeenByCleanups())</span>
+<span class="nc" id="L485">                .as(&quot;the usage workpad cleanup must run after the status shows the pause as cleared&quot;)</span>
+<span class="nc" id="L486">                .containsExactly(NO_PAUSE);</span>
+<span class="nc" id="L487">    }</span>
+
+    /// One card whose worker fails with a generic error, so the orchestrator schedules a retry.
+    private FailingWorkerScenario failingWorkerScenario() throws Exception {
+<span class="nc" id="L491">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L492">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS);</span>
+<span class="nc" id="L493">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L494">        AgentRunner runner = mock();</span>
+<span class="nc" id="L495">        when(runner.run(any())).thenReturn(AgentRunResult.fail(&quot;generic failure&quot;));</span>
+<span class="nc" id="L496">        return new FailingWorkerScenario(tracker, orchestrator(workflow, tracker, runner));</span>
+    }
+
+<span class="nc" id="L499">    private record FailingWorkerScenario(FakeTracker tracker, SymphonyOrchestrator orchestrator) {</span>
+        void startAndAwaitRetry() throws Exception {
+<span class="nc" id="L501">            orchestrator.start();</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            waitUntil(() -&gt; orchestrator.snapshot().counts().retrying() == 1);</span>
+<span class="nc" id="L503">        }</span>
+    }
+
+    /// Starts an orchestrator whose only card runs a worker that blocks until it is cancelled.
+    private BlockedWorkerScenario startOneBlockedWorker() throws Exception {
+<span class="nc" id="L508">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L509">        writeWorkflow(workflow, SLOW_POLL_INTERVAL_MILLIS);</span>
+<span class="nc" id="L510">        var tracker = new FakeTracker(List.of(TestCards.card(&quot;card-1&quot;, &quot;TRELLO-abc&quot;, &quot;Todo&quot;)));</span>
+<span class="nc" id="L511">        var orchestratorRef = new AtomicReference&lt;SymphonyOrchestrator&gt;();</span>
+<span class="nc" id="L512">        AgentRunner runner = mock();</span>
+<span class="nc" id="L513">        CancelObservation cancel = blockUntilCancelledAndObserveStatus(runner, orchestratorRef);</span>
+<span class="nc" id="L514">        SymphonyOrchestrator orchestrator = orchestrator(workflow, tracker, runner);</span>
+<span class="nc" id="L515">        orchestratorRef.set(orchestrator);</span>
+<span class="nc" id="L516">        orchestrator.start();</span>
+<span class="nc" id="L517">        assertThat(cancel.started().await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L518">                .as(&quot;the worker should start within %d seconds&quot;, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L519">                .isTrue();</span>
+<span class="nc" id="L520">        return new BlockedWorkerScenario(tracker, orchestrator, cancel);</span>
+    }
+
+<span class="nc" id="L523">    private record BlockedWorkerScenario(</span>
+            FakeTracker tracker, SymphonyOrchestrator orchestrator, CancelObservation cancel) {}
+
+    /// Blocks every run until the orchestrator cancels it, and records the status the orchestrator
+    /// shows at the moment it cancels the worker.
+    private static CancelObservation blockUntilCancelledAndObserveStatus(
+            AgentRunner runner, AtomicReference&lt;SymphonyOrchestrator&gt; orchestrator) {
+<span class="nc" id="L530">        var started = new CountDownLatch(1);</span>
+<span class="nc" id="L531">        var snapshot = new AtomicReference&lt;RuntimeSnapshot&gt;();</span>
+<span class="nc" id="L532">        var startedWhenCancelled = new AtomicReference&lt;Boolean&gt;();</span>
+<span class="nc" id="L533">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L534">                    started.countDown();</span>
+                    try {
+<span class="nc" id="L536">                        blockUntilInterruptedOrTimedOut(BLOCKED_WORKER_TIMEOUT);</span>
+<span class="nc" id="L537">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L538">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L539">                    }</span>
+<span class="nc" id="L540">                    return AgentRunResult.fail(&quot;interrupted&quot;);</span>
+                })
+<span class="nc" id="L542">                .when(runner)</span>
+<span class="nc" id="L543">                .run(any());</span>
+<span class="nc" id="L544">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L545">                    snapshot.compareAndSet(null, orchestrator.get().snapshot());</span>
+<span class="nc" id="L546">                    startedWhenCancelled.compareAndSet(null, orchestrator.get().isStarted());</span>
+<span class="nc" id="L547">                    return null;</span>
+                })
+<span class="nc" id="L549">                .when(runner)</span>
+<span class="nc" id="L550">                .cancel(any());</span>
+<span class="nc" id="L551">        return new CancelObservation(started, snapshot, startedWhenCancelled);</span>
+    }
+
+    /// Records the dispatch pause the status shows each time the orchestrator writes a usage
+    /// workpad section, separately for paused sections and for cleanups.
+    private static WorkpadObservation observeStatusOnWorkpadWrites(AtomicReference&lt;SymphonyOrchestrator&gt; orchestrator) {
+        // Operation threads record while the test thread reads, so the lists must be thread-safe.
+<span class="nc" id="L558">        List&lt;RuntimeSnapshot.DispatchPause&gt; pausesSeenByUpdates = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L559">        List&lt;Optional&lt;RuntimeSnapshot.DispatchPause&gt;&gt; pausesSeenByCleanups = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L560">        TrelloHandoffToolHandler handler = mock();</span>
+<span class="nc" id="L561">        doAnswer(invocation -&gt; {</span>
+<span class="nc" id="L562">                    RuntimeSnapshot.DispatchPause shown =</span>
+<span class="nc" id="L563">                            orchestrator.get().snapshot().dispatchPause();</span>
+<span class="nc bnc" id="L564" title="All 2 branches missed.">                    if (invocation.getArgument(2) == null) {</span>
+<span class="nc" id="L565">                        pausesSeenByCleanups.add(Optional.ofNullable(shown));</span>
+                    } else {
+<span class="nc" id="L567">                        pausesSeenByUpdates.add(shown);</span>
+                    }
+<span class="nc" id="L569">                    return true;</span>
+                })
+<span class="nc" id="L571">                .when(handler)</span>
+<span class="nc" id="L572">                .updateCodexUsageSection(any(), anyString(), nullable(String.class));</span>
+<span class="nc" id="L573">        return new WorkpadObservation(handler, pausesSeenByUpdates, pausesSeenByCleanups);</span>
+    }
+
+<span class="nc" id="L576">    private record WorkpadObservation(</span>
+            TrelloHandoffToolHandler handler,
+            List&lt;RuntimeSnapshot.DispatchPause&gt; pausesSeenByUpdates,
+            List&lt;Optional&lt;RuntimeSnapshot.DispatchPause&gt;&gt; pausesSeenByCleanups) {}
+
+    /// Captures the status at the first prompt refresh from now on, which a tick runs right before
+    /// it dispatches a card.
+    private static AtomicReference&lt;RuntimeSnapshot&gt; captureStatusAtNextPromptRefresh(
+            FakeTracker tracker, SymphonyOrchestrator orchestrator) {
+<span class="nc" id="L585">        int promptRefreshesBefore = tracker.promptStateFetches.get();</span>
+<span class="nc" id="L586">        var captured = new AtomicReference&lt;RuntimeSnapshot&gt;();</span>
+<span class="nc" id="L587">        tracker.stateFetchHook = () -&gt; {</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">            if (tracker.promptStateFetches.get() &gt; promptRefreshesBefore) {</span>
+<span class="nc" id="L589">                captured.compareAndSet(null, orchestrator.snapshot());</span>
+            }
+<span class="nc" id="L591">        };</span>
+<span class="nc" id="L592">        return captured;</span>
+    }
+
+<span class="nc" id="L595">    private record CancelObservation(</span>
+            CountDownLatch started,
+            AtomicReference&lt;RuntimeSnapshot&gt; snapshot,
+            AtomicReference&lt;Boolean&gt; startedWhenCancelled) {}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

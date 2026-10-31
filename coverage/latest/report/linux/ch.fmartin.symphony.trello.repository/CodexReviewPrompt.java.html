@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodexReviewPrompt.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.repository</a> &gt; <span class="el_source">CodexReviewPrompt.java</span></div><h1>CodexReviewPrompt.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.repository;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import java.util.Optional;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/// Renders the runtime section for the pre-handoff Codex review loop.
+///
+/// Symphony appends this section after the persisted workflow prompt, the same way it appends the
+/// repository source context, so editing the workflow's review settings takes effect on the next
+/// dispatch for generated, older, and hand-written workflows alike. See ADR 0121.
+@NullMarked
+public final class CodexReviewPrompt {
+    /// Workflow text and shipped skills refer to the runtime section by this title.
+    public static final String TITLE = &quot;Codex Review Before Handoff&quot;;
+
+    public static final String HEADING = &quot;## &quot; + TITLE;
+
+    /// The Codex CLI flag that turns off its sandbox. A nested review may use it only when the
+    /// workflow's own Codex turns already run without the sandbox.
+    static final String SANDBOX_BYPASS_FLAG = &quot;--dangerously-bypass-approvals-and-sandbox&quot;;
+
+    /// Codex CLI config keys for `codex review -c`, the same names as in `~/.codex/config.toml`.
+    static final String MODEL_CONFIG_KEY = &quot;model&quot;;
+
+    static final String REASONING_EFFORT_CONFIG_KEY = &quot;model_reasoning_effort&quot;;
+
+    private CodexReviewPrompt() {}
+
+    /// Returns the runtime section, or nothing when the workflow sets zero review rounds.
+    public static Optional&lt;String&gt; render(
+            EffectiveConfig.CodexReviewConfig codexReview, EffectiveConfig.CodexConfig codex) {
+<span class="nc bnc" id="L34" title="All 2 branches missed.">        if (!codexReview.enabled()) {</span>
+<span class="nc" id="L35">            return Optional.empty();</span>
+        }
+<span class="nc" id="L37">        boolean workflowBypassesSandbox = codex.bypassesSandbox();</span>
+        String reviewCommand = CodexReviewTiming.COMMAND_PREFIX
+                + &quot;codex &quot;
+<span class="nc bnc" id="L40" title="All 2 branches missed.">                + (workflowBypassesSandbox ? SANDBOX_BYPASS_FLAG + &quot; &quot; : &quot;&quot;)</span>
+                + &quot;review&quot;
+<span class="nc" id="L42">                + configOverride(MODEL_CONFIG_KEY, reviewerSetting(codexReview.model(), codex.model()))</span>
+<span class="nc" id="L43">                + configOverride(</span>
+                        REASONING_EFFORT_CONFIG_KEY,
+<span class="nc" id="L45">                        reviewerSetting(codexReview.reasoningEffort(), codex.reasoningEffort()))</span>
+                + &quot; - &lt; &lt;brief-file&gt;&quot;;
+<span class="nc" id="L47">        return Optional.of(</span>
+                &quot;&quot;&quot;
+                %s
+
+                This workflow sets `%s: %d`, `%s: %d`, and `%s: %d`.
+                This final runtime section is authoritative for when the review loop runs. It supersedes earlier
+                workflow or skill text that orders validation, push, pull request, or handoff steps differently. It
+                does not change which handoff this workflow uses.
+
+                Apply it to repository-changing work: work that leaves commits or file changes for someone to review,
+                including rework after review feedback. Skip it for repository-independent work, API-only actions,
+                read-only investigation, and blocked handoffs that hand over no candidate change.
+
+                Required order:
+
+                1. Finish the implementation candidate and commit it locally, unless the card or workflow asks for a
+                   patch or uncommitted changes instead. Do not push yet.
+                2. Run the review loop below. Do not push, open or update a pull request, or move the card while it
+                   runs.
+                3. Run the required local validation once on the reviewed candidate. This includes the CI-equivalent
+                   local checks used when CI is unavailable, cannot run, or does not apply because the handoff has no
+                   pull request.
+                4. Only then hand off the way this workflow asks: push the branch, create or update the pull request,
+                   write the branch-only handoff's proposed description file such as `PR.md`, or leave the local
+                   commit or patch. Then move the card to the review handoff list.
+
+                Before round 1, record:
+
+                - %s
+                - the base commit SHA: the merge base with the freshly fetched remote default branch, or the base
+                  the card requested.
+                - the diff commands: round 1 reviews `git diff &lt;base-sha&gt; HEAD`, and later rounds add
+                  `git diff &lt;reviewed-sha&gt; HEAD` for the change since the previous round. When the candidate is not
+                  committed, every round reviews the full `git diff &lt;base-sha&gt;`; first run `git add -N` on new files
+                  so the diff shows them.
+                - a findings ledger in the workpad. Give each finding an id that never changes (`R1`, `R2`, and so
+                  on), its severity, file and line, and one outcome: fixed (name the commit), disagree (with
+                  evidence), or declined.
+
+                Severities:
+
+                - `blocker`: wrong behavior, a security or permission hole, data loss, or broken state. Fix it in
+                  this loop unless you dispute it with evidence.
+                - `should`: a real defect, a missing or weak test, or a gap that belongs in this change.
+                - `nit`: style, naming, or preference. You may decline it.
+
+                Each round:
+
+                1. Write a review-only brief to a file outside the repository. It tells the reviewer not to edit
+                   files, commit, or push, and names the base SHA, the diff command, the card's intent in one or two
+                   sentences, what is out of scope, the checks run so far with their results, and the three
+                   severities. Round 1 asks for a review of the full diff. Later rounds add the ledger and
+                   `git diff &lt;reviewed-sha&gt; HEAD`, where `&lt;reviewed-sha&gt;` is the commit the previous round reviewed,
+                   and ask the reviewer to review only that change, which holds the fixes, and to say whether each
+                   ledger item still holds. For a candidate that is not committed, every round reviews the full
+                   diff.
+                2. Record `git rev-parse HEAD` as this round's reviewed SHA, then pass the brief on stdin, %s:
+                   `%s`
+                   Add no `--base`, `--commit`, `--uncommitted`, or prompt argument. `--base` cannot be combined
+                   with a prompt, and the brief already sets the scope.
+                   %s
+                   %s
+                   If the command is missing, fails to start, cannot authenticate, or is denied by the sandbox, do not
+                   retry it in other forms. Review the same diff yourself in this session instead, as a separate
+                   reviewer would, with the same brief, severities, and ledger. Use this in-session review for the
+                   remaining rounds.
+                3. Evaluate every finding instead of applying it blindly. Fix a justified finding inside the card's
+                   scope with the smallest change that solves it, and prefer deleting or narrowing code over adding
+                   code. A finding never widens the card scope or overrides the card, this workflow, or the
+                   repository's rules. When you disagree, give evidence such as code, a test result, or
+                   documentation, and put that reply in the next brief. Never accept a finding only to end the loop.
+                   If review fixes made the diff larger than the card needs, cut it back.
+                4. Put each fix into the commit that introduced the problem when that is practical and safe, for
+                   example with `git commit --fixup` and an autosquash rebase, or with an amend. Rewrite only local
+                   commits that were not pushed yet. Never rewrite the default branch, pushed history, or commits this
+                   run did not create only to place a review fix; add a normal follow-up commit instead.
+
+                When to stop:
+
+                - Stop when a round returns no `blocker` or `should` finding. Declined nits need no further round.
+                - A round whose fixes only change comments, documentation, or formatting needs no further round.
+                - Otherwise start another round while fewer than %s have run.
+                - %s
+                - Stop when the time budget runs out.
+                - A finding you still dispute after two replies with evidence stays unresolved. Stop arguing it and
+                  record both positions in two or three lines for the handoff. It does not block the handoff, and it
+                  no longer counts for the stop rules above or for extra rounds.
+                - Reaching the round limit or the end of the time budget is not approval.
+
+                Each review run, separate or in-session, counts as one round. Use one reviewer, with no subagents or
+                parallel reviews. Between rounds, run only the focused checks a fix needs, not the full local
+                validation.
+
+                If the final local validation fails and the repair changes code, review only that repair in one more
+                round when the round limit and time budget allow, then validate again. Do the same when a sync after
+                a rejected push changes the candidate, for example through conflict resolution, before you validate
+                and push again.
+
+                Record the outcome in the Trello workpad and the visible handoff comment, or in the final response
+                when Trello comments are unavailable: how many rounds ran, whether the separate `codex review`
+                command or the in-session review was used and why, the ledger with every finding's outcome, and why
+                the loop ended: no `blocker` or `should` finding left, round limit, or time budget. List every
+                `blocker` or `should` finding that is still open as a handoff caveat, and every disputed finding
+                with both positions.
+
+                %s
+                &quot;&quot;&quot;
+<span class="nc" id="L154">                        .formatted(</span>
+                                HEADING,
+                                EffectiveConfig.CodexReviewConfig.MAX_ROUNDS_PATH,
+<span class="nc" id="L157">                                codexReview.maxRounds(),</span>
+                                EffectiveConfig.CodexReviewConfig.EXTENDED_MAX_ROUNDS_PATH,
+<span class="nc" id="L159">                                codexReview.extendedMaxRounds(),</span>
+                                EffectiveConfig.CodexReviewConfig.TIMEOUT_MS_PATH,
+<span class="nc" id="L161">                                codexReview.timeout().toMillis(),</span>
+<span class="nc" id="L162">                                CodexReviewTiming.budgetBullet(codexReview),</span>
+                                CodexReviewTiming.COMMAND_TIME_LIMIT,
+                                reviewCommand,
+<span class="nc" id="L165">                                sandboxRule(workflowBypassesSandbox),</span>
+<span class="nc" id="L166">                                CodexReviewTiming.waitRule(codex),</span>
+<span class="nc" id="L167">                                rounds(codexReview.maxRounds()),</span>
+<span class="nc" id="L168">                                extendedRoundsRule(codexReview),</span>
+<span class="nc" id="L169">                                unfinishedReviewRule(codexReview))</span>
+<span class="nc" id="L170">                        .stripTrailing());</span>
+    }
+
+    /// The reviewer follows the workflow's own model and effort unless the review keys name one. A
+    /// workflow value that cannot appear unquoted in the command is left out, so the nested Codex
+    /// uses its own configured default instead of a broken command.
+    private static Optional&lt;String&gt; reviewerSetting(@Nullable String reviewValue, @Nullable String workflowValue) {
+<span class="nc" id="L177">        return Optional.ofNullable(reviewValue).or(() -&gt; commandTokenSetting(workflowValue));</span>
+    }
+
+    private static Optional&lt;String&gt; commandTokenSetting(@Nullable String workflowValue) {
+<span class="nc" id="L181">        return Optional.ofNullable(workflowValue)</span>
+<span class="nc" id="L182">                .map(String::strip)</span>
+<span class="nc" id="L183">                .filter(EffectiveConfig.CodexReviewConfig::commandToken);</span>
+    }
+
+    /// Single quotes keep the TOML string quotes through the shell, so Codex reads a string value.
+    private static String configOverride(String key, Optional&lt;String&gt; value) {
+<span class="nc" id="L188">        return value.map(setting -&gt; &quot; -c '&quot; + key + &quot;=\&quot;&quot; + setting + &quot;\&quot;'&quot;).orElse(&quot;&quot;);</span>
+    }
+
+    private static String rounds(int count) {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">        return count == 1 ? &quot;1 round&quot; : count + &quot; rounds&quot;;</span>
+    }
+
+    /// Handing off with caveats is the only behavior for an unfinished review today. ADR 0121 leaves room
+    /// for a later setting that blocks the card instead; that setting would choose its rule here.
+    private static String unfinishedReviewRule(EffectiveConfig.CodexReviewConfig codexReview) {
+<span class="nc" id="L198">        return &quot;&quot;&quot;</span>
+                When the round limit or the time budget ends the loop, still hand off the normal way in step 4,
+                with the open findings as caveats. An unfinished review does not block the handoff. %s&quot;&quot;&quot;
+<span class="nc" id="L201">                .formatted(CodexReviewTiming.budgetEndedNote(codexReview));</span>
+    }
+
+    private static String extendedRoundsRule(EffectiveConfig.CodexReviewConfig codexReview) {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        if (codexReview.extendedMaxRounds() == codexReview.maxRounds()) {</span>
+<span class="nc" id="L206">            return &quot;Never run more than %s.&quot;.formatted(rounds(codexReview.maxRounds()));</span>
+        }
+<span class="nc" id="L208">        return &quot;&quot;&quot;</span>
+                After round %d, start another round, up to %s in total, only while a `blocker` or `should` finding
+                  about %s stays open with evidence.&quot;&quot;&quot;
+<span class="nc" id="L211">                .formatted(</span>
+<span class="nc" id="L212">                        codexReview.maxRounds(),</span>
+<span class="nc" id="L213">                        rounds(codexReview.extendedMaxRounds()),</span>
+                        EffectiveConfig.CodexReviewConfig.HIGH_RISK_TOPICS);
+    }
+
+    private static String sandboxRule(boolean workflowBypassesSandbox) {
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (workflowBypassesSandbox) {</span>
+<span class="nc" id="L219">            return &quot;&quot;&quot;</span>
+                    This workflow already runs Codex without its sandbox, so the separate review runs the same way. Do
+                       not add other sandbox or approval settings.&quot;&quot;&quot;;
+        }
+<span class="nc" id="L223">        return &quot;&quot;&quot;</span>
+                Do not add `%s` or change sandbox settings to make it run. A Codex
+                   session inside a `workspaceWrite` sandbox often cannot start a nested `codex review` because the
+                   Codex home directory is read-only there.&quot;&quot;&quot;
+<span class="nc" id="L227">                .formatted(SANDBOX_BYPASS_FLAG);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

@@ -32,13 +32,14 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-<span class="nc" id="L37">final class CodexAppServerClientTest {</span>
+<span class="nc" id="L38">final class CodexAppServerClientTest {</span>
     private static final int TEST_PROTOCOL_TIMEOUT_MILLIS = 5_000;
     private static final int TEST_EXTENDED_TURN_TIMEOUT_MILLIS = 10_000;
 
-<span class="nc" id="L41">    private final ObjectMapper json = new ObjectMapper();</span>
+<span class="nc" id="L42">    private final ObjectMapper json = new ObjectMapper();</span>
 
     @TempDir
     Path tempDir;
@@ -46,8 +47,8 @@ import org.junit.jupiter.params.provider.ValueSource;
     @Test
     void launchesCodexWithGitDiscoveryLimitedToWorkspacesRoot() throws Exception {
         // given
-<span class="nc" id="L49">        Path ceilingOutput = tempDir.resolve(&quot;ceiling.txt&quot;);</span>
-<span class="nc" id="L50">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L50">        Path ceilingOutput = tempDir.resolve(&quot;ceiling.txt&quot;);</span>
+<span class="nc" id="L51">        Path appServer = writeExecutableScript(</span>
                 &quot;ceiling-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -65,33 +66,126 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;
-<span class="nc" id="L68">                        .replace(&quot;__CEILING_OUTPUT__&quot;, ceilingOutput.toString()));</span>
-<span class="nc" id="L69">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L70">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-ceiling&quot;);</span>
-<span class="nc" id="L71">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L72">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L69">                        .replace(&quot;__CEILING_OUTPUT__&quot;, ceilingOutput.toString()));</span>
+<span class="nc" id="L70">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L71">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-ceiling&quot;);</span>
+<span class="nc" id="L72">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L73">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L75">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L76">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L77">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-ceiling&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L78">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-ceiling&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a no-op turn.&quot;,
                 &quot;worker-ceiling&quot;,
-<span class="nc" id="L81">                event -&gt; {});</span>
+<span class="nc" id="L82">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L84">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L85">        assertThat(ceilingOutput)</span>
-<span class="nc" id="L86">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L87">                .isEqualTo(</span>
-<span class="nc" id="L88">                        config.workspace().root().toAbsolutePath().normalize().toString());</span>
-<span class="nc" id="L89">    }</span>
+<span class="nc" id="L85">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L86">        assertThat(ceilingOutput)</span>
+<span class="nc" id="L87">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L88">                .isEqualTo(</span>
+<span class="nc" id="L89">                        config.workspace().root().toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L90">    }</span>
+
+    @CsvSource({&quot;stdout, ''&quot;, &quot;stderr, '&gt;&amp;2'&quot;})
+    @ParameterizedTest(name = &quot;updates on {0}&quot;)
+    void keepsATurnRunningPastTheTurnTimeoutWhileTheAppServerKeepsStreaming(String stream, String redirect)
+            throws Exception {
+        // given
+<span class="nc" id="L97">        int silenceLimitMillis = 2_500;</span>
+<span class="nc" id="L98">        Path appServer = writeExecutableScript(</span>
+                &quot;streaming-app-server-&quot; + stream + &quot;.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;streaming-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-streaming&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*)
+                      echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-streaming&quot;}}}'
+                      # Eight updates half a second apart: four seconds in total, longer than the
+                      # turn timeout, with every gap far shorter than it.
+                      for _ in 1 2 3 4 5 6 7 8; do
+                        sleep 0.5
+                        echo '{&quot;method&quot;:&quot;item/agentMessage/delta&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-streaming&quot;,&quot;turnId&quot;:&quot;turn-streaming&quot;,&quot;delta&quot;:&quot;.&quot;}}' __REDIRECT__
+                      done
+                      echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-streaming&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-streaming&quot;,&quot;error&quot;:null}}}'
+                      ;;
+                  esac
+                done
+                &quot;&quot;&quot;
+<span class="nc" id="L119">                        .replace(&quot;__REDIRECT__&quot;, redirect));</span>
+<span class="nc" id="L120">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L122">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L124">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L126">                silenceLimitMillis));</span>
+<span class="nc" id="L127">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-streaming&quot;);</span>
+<span class="nc" id="L128">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L129">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L132">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L134">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-streaming&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Stream updates for longer than the turn timeout.&quot;,
+                &quot;worker-streaming&quot;,
+<span class="nc" id="L138">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L141">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L142">    }</span>
+
+    @Test
+    void failsATurnWithTurnTimeoutAfterTheAppServerStaysSilent() throws Exception {
+        // given
+<span class="nc" id="L147">        int silenceLimitMillis = 300;</span>
+<span class="nc" id="L148">        Path appServer = writeExecutableScript(</span>
+                &quot;silent-app-server.sh&quot;,
+                &quot;&quot;&quot;
+                #!/usr/bin/env bash
+                while IFS= read -r line; do
+                  case &quot;$line&quot; in
+                    *\\&quot;method\\&quot;:\\&quot;initialize\\&quot;*) echo '{&quot;id&quot;:1,&quot;result&quot;:{&quot;userAgent&quot;:&quot;silent-test&quot;}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;thread/start\\&quot;*) echo '{&quot;id&quot;:2,&quot;result&quot;:{&quot;thread&quot;:{&quot;id&quot;:&quot;thread-silent&quot;}}}' ;;
+                    *\\&quot;method\\&quot;:\\&quot;turn/start\\&quot;*) echo '{&quot;id&quot;:3,&quot;result&quot;:{&quot;turn&quot;:{&quot;id&quot;:&quot;turn-silent&quot;}}}' ;;
+                  esac
+                done
+                &quot;&quot;&quot;);
+<span class="nc" id="L160">        EffectiveConfig config = config(Map.of(</span>
+                &quot;command&quot;,
+<span class="nc" id="L162">                appServer.toString(),</span>
+                &quot;read_timeout_ms&quot;,
+<span class="nc" id="L164">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+                &quot;turn_timeout_ms&quot;,
+<span class="nc" id="L166">                silenceLimitMillis));</span>
+<span class="nc" id="L167">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-silent&quot;);</span>
+<span class="nc" id="L168">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L169">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+
+        // when
+<span class="nc" id="L172">        AgentRunResult result = client.runTurn(</span>
+                config,
+<span class="nc" id="L174">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-silent&quot;, &quot;Ready for Codex&quot;),</span>
+                workspace,
+                &quot;Stay silent after the turn starts.&quot;,
+                &quot;worker-silent&quot;,
+<span class="nc" id="L178">                event -&gt; {});</span>
+
+        // then
+<span class="nc" id="L181">        assertThat(result)</span>
+<span class="nc" id="L182">                .isEqualTo(AgentRunResult.fail(&quot;turn_timeout: no app-server output for &quot; + silenceLimitMillis + &quot; ms&quot;));</span>
+<span class="nc" id="L183">    }</span>
 
     @Test
     void handlesTurnCompletedArrivingBeforeAwaiterIsRegistered() throws Exception {
         // given
-<span class="nc" id="L94">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L188">        Path appServer = writeExecutableScript(</span>
                 &quot;fast-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -106,34 +200,34 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L109">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L110">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-fast&quot;);</span>
-<span class="nc" id="L111">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L112">        Instant eventTime = Instant.parse(&quot;2026-05-11T12:34:56Z&quot;);</span>
-<span class="nc" id="L113">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L203">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L204">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-fast&quot;);</span>
+<span class="nc" id="L205">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L206">        Instant eventTime = Instant.parse(&quot;2026-05-11T12:34:56Z&quot;);</span>
+<span class="nc" id="L207">        var client = new CodexAppServerClient(</span>
                 json,
                 new TrelloHandoffToolHandler(json, new TrelloClient(json)),
-<span class="nc" id="L116">                Clock.fixed(eventTime, ZoneOffset.UTC));</span>
-<span class="nc" id="L117">        List&lt;AgentEvent&gt; events = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L210">                Clock.fixed(eventTime, ZoneOffset.UTC));</span>
+<span class="nc" id="L211">        List&lt;AgentEvent&gt; events = new ArrayList&lt;&gt;();</span>
 
         // when
-<span class="nc" id="L120">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L214">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L122">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-fast&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L216">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-fast&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a fast no-op turn.&quot;,
                 &quot;worker-fast&quot;,
-<span class="nc" id="L126">                events::add);</span>
+<span class="nc" id="L220">                events::add);</span>
 
         // then
-<span class="nc" id="L129">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L130">        assertThat(events).allSatisfy(event -&gt; assertThat(event.timestamp()).isEqualTo(eventTime));</span>
-<span class="nc" id="L131">    }</span>
+<span class="nc" id="L223">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L224">        assertThat(events).allSatisfy(event -&gt; assertThat(event.timestamp()).isEqualTo(eventTime));</span>
+<span class="nc" id="L225">    }</span>
 
     @Test
     void keepsQueuedTurnCompletionWhenAppServerExitsBeforeAwaiterIsRegistered() throws Exception {
         // given
-<span class="nc" id="L136">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L230">        Path appServer = writeExecutableScript(</span>
                 &quot;completed-then-exit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -150,34 +244,34 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L153">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L247">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
-<span class="nc" id="L155">                appServer.toString(),</span>
+<span class="nc" id="L249">                appServer.toString(),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L157">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L251">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L159">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L160">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-completed-exit&quot;);</span>
-<span class="nc" id="L161">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L162">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L253">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L254">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-completed-exit&quot;);</span>
+<span class="nc" id="L255">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L256">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L165">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L259">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L167">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-completed-exit&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L261">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-completed-exit&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a completed exit no-op turn.&quot;,
                 &quot;worker-completed-exit&quot;,
-<span class="nc" id="L171">                event -&gt; {});</span>
+<span class="nc" id="L265">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L174">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L175">    }</span>
+<span class="nc" id="L268">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L269">    }</span>
 
     @Test
     void preservesAppServerErrorResponseMessage() throws Exception {
         // given
-<span class="nc" id="L180">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L274">        Path appServer = writeExecutableScript(</span>
                 &quot;error-response-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -191,31 +285,31 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L194">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L195">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-error-response&quot;);</span>
-<span class="nc" id="L196">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L197">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L288">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L289">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-error-response&quot;);</span>
+<span class="nc" id="L290">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L291">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L200">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L294">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L202">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-error-response&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L296">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-error-response&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do an error-response turn.&quot;,
                 &quot;worker-error-response&quot;,
-<span class="nc" id="L206">                event -&gt; {});</span>
+<span class="nc" id="L300">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L209">        assertThat(result)</span>
-<span class="nc" id="L210">                .isEqualTo(</span>
-<span class="nc" id="L211">                        AgentRunResult.fail(&quot;codex_protocol_error: {\&quot;code\&quot;:-32000,\&quot;message\&quot;:\&quot;bad initialize\&quot;}&quot;));</span>
-<span class="nc" id="L212">    }</span>
+<span class="nc" id="L303">        assertThat(result)</span>
+<span class="nc" id="L304">                .isEqualTo(</span>
+<span class="nc" id="L305">                        AgentRunResult.fail(&quot;codex_protocol_error: {\&quot;code\&quot;:-32000,\&quot;message\&quot;:\&quot;bad initialize\&quot;}&quot;));</span>
+<span class="nc" id="L306">    }</span>
 
     @Test
     void sendsAdditionalWritableRootsAsWorkspaceWriteSandboxPolicy() throws Exception {
         // given
-<span class="nc" id="L217">        Path capture = tempDir.resolve(&quot;turn-start.jsonl&quot;);</span>
-<span class="nc" id="L218">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L311">        Path capture = tempDir.resolve(&quot;turn-start.jsonl&quot;);</span>
+<span class="nc" id="L312">        Path appServer = writeExecutableScript(</span>
                 &quot;capturing-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -232,44 +326,44 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L235">        Path extraRoot = tempDir.resolve(&quot;allowed-project&quot;);</span>
-<span class="nc" id="L236">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L329">        Path extraRoot = tempDir.resolve(&quot;allowed-project&quot;);</span>
+<span class="nc" id="L330">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
                 appServer + &quot; &quot; + capture,
                 &quot;additional_writable_roots&quot;,
-<span class="nc" id="L240">                List.of(extraRoot.toString()),</span>
+<span class="nc" id="L334">                List.of(extraRoot.toString()),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L242">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L336">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L244">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L245">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-capture&quot;);</span>
-<span class="nc" id="L246">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L247">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L338">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L339">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-capture&quot;);</span>
+<span class="nc" id="L340">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L341">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L250">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L344">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L252">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-capture&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L346">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-capture&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a capture no-op turn.&quot;,
                 &quot;worker-capture&quot;,
-<span class="nc" id="L256">                event -&gt; {});</span>
+<span class="nc" id="L350">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L259">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L260">        assertThat(json.readTree(Files.readString(capture))</span>
-<span class="nc" id="L261">                        .path(&quot;params&quot;)</span>
-<span class="nc" id="L262">                        .path(&quot;sandboxPolicy&quot;)</span>
-<span class="nc" id="L263">                        .path(&quot;writableRoots&quot;))</span>
-<span class="nc" id="L264">                .extracting(JsonNode::asText)</span>
-<span class="nc" id="L265">                .contains(extraRoot.toAbsolutePath().normalize().toString());</span>
-<span class="nc" id="L266">    }</span>
+<span class="nc" id="L353">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L354">        assertThat(json.readTree(Files.readString(capture))</span>
+<span class="nc" id="L355">                        .path(&quot;params&quot;)</span>
+<span class="nc" id="L356">                        .path(&quot;sandboxPolicy&quot;)</span>
+<span class="nc" id="L357">                        .path(&quot;writableRoots&quot;))</span>
+<span class="nc" id="L358">                .extracting(JsonNode::asText)</span>
+<span class="nc" id="L359">                .contains(extraRoot.toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L360">    }</span>
 
     @Test
     void preservesWorkspaceWriteNetworkAccessWhenMergingWritableRoots() throws Exception {
         // given
-<span class="nc" id="L271">        Path capture = tempDir.resolve(&quot;turn-start-network.jsonl&quot;);</span>
-<span class="nc" id="L272">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L365">        Path capture = tempDir.resolve(&quot;turn-start-network.jsonl&quot;);</span>
+<span class="nc" id="L366">        Path appServer = writeExecutableScript(</span>
                 &quot;capturing-network-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -286,49 +380,49 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L289">        Path extraRoot = tempDir.resolve(&quot;allowed-project&quot;);</span>
-<span class="nc" id="L290">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L383">        Path extraRoot = tempDir.resolve(&quot;allowed-project&quot;);</span>
+<span class="nc" id="L384">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
                 appServer + &quot; &quot; + capture,
                 &quot;turn_sandbox_policy&quot;,
-<span class="nc" id="L294">                Map.of(&quot;type&quot;, &quot;workspaceWrite&quot;, &quot;networkAccess&quot;, true),</span>
+<span class="nc" id="L388">                Map.of(&quot;type&quot;, &quot;workspaceWrite&quot;, &quot;networkAccess&quot;, true),</span>
                 &quot;additional_writable_roots&quot;,
-<span class="nc" id="L296">                List.of(extraRoot.toString()),</span>
+<span class="nc" id="L390">                List.of(extraRoot.toString()),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L298">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L392">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L300">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L301">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-capture-network&quot;);</span>
-<span class="nc" id="L302">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L303">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L394">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L395">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-capture-network&quot;);</span>
+<span class="nc" id="L396">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L397">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L306">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L400">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L308">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-capture-network&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L402">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-capture-network&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a capture no-op turn.&quot;,
                 &quot;worker-capture&quot;,
-<span class="nc" id="L312">                event -&gt; {});</span>
+<span class="nc" id="L406">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L315">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L316">        JsonNode sandboxPolicy =</span>
-<span class="nc" id="L317">                json.readTree(Files.readString(capture)).path(&quot;params&quot;).path(&quot;sandboxPolicy&quot;);</span>
-<span class="nc" id="L318">        assertThat(sandboxPolicy.path(&quot;type&quot;).asText()).isEqualTo(&quot;workspaceWrite&quot;);</span>
-<span class="nc" id="L319">        assertThat(sandboxPolicy.path(&quot;networkAccess&quot;))</span>
-<span class="nc" id="L320">                .as(&quot;workspace-write sandbox policy networkAccess&quot;)</span>
-<span class="nc" id="L321">                .isEqualTo(json.getNodeFactory().booleanNode(true));</span>
-<span class="nc" id="L322">        assertThat(sandboxPolicy.path(&quot;writableRoots&quot;))</span>
-<span class="nc" id="L323">                .extracting(JsonNode::asText)</span>
-<span class="nc" id="L324">                .contains(extraRoot.toAbsolutePath().normalize().toString());</span>
-<span class="nc" id="L325">    }</span>
+<span class="nc" id="L409">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L410">        JsonNode sandboxPolicy =</span>
+<span class="nc" id="L411">                json.readTree(Files.readString(capture)).path(&quot;params&quot;).path(&quot;sandboxPolicy&quot;);</span>
+<span class="nc" id="L412">        assertThat(sandboxPolicy.path(&quot;type&quot;).asText()).isEqualTo(&quot;workspaceWrite&quot;);</span>
+<span class="nc" id="L413">        assertThat(sandboxPolicy.path(&quot;networkAccess&quot;))</span>
+<span class="nc" id="L414">                .as(&quot;workspace-write sandbox policy networkAccess&quot;)</span>
+<span class="nc" id="L415">                .isEqualTo(json.getNodeFactory().booleanNode(true));</span>
+<span class="nc" id="L416">        assertThat(sandboxPolicy.path(&quot;writableRoots&quot;))</span>
+<span class="nc" id="L417">                .extracting(JsonNode::asText)</span>
+<span class="nc" id="L418">                .contains(extraRoot.toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L419">    }</span>
 
     @Test
     void sendsConfiguredModelAndReasoningEffortToCodexAppServer() throws Exception {
         // given
-<span class="nc" id="L330">        Path capture = tempDir.resolve(&quot;model-requests.jsonl&quot;);</span>
-<span class="nc" id="L331">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L424">        Path capture = tempDir.resolve(&quot;model-requests.jsonl&quot;);</span>
+<span class="nc" id="L425">        Path appServer = writeExecutableScript(</span>
                 &quot;model-capturing-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -349,7 +443,7 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L352">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L446">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
                 appServer + &quot; &quot; + capture,
                 &quot;model&quot;,
@@ -357,38 +451,38 @@ import org.junit.jupiter.params.provider.ValueSource;
                 &quot;reasoning_effort&quot;,
                 &quot;xhigh&quot;,
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L360">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L454">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L362">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L363">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-model&quot;);</span>
-<span class="nc" id="L364">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L365">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L456">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L457">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-model&quot;);</span>
+<span class="nc" id="L458">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L459">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L368">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L462">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L370">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-model&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L464">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-model&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a model capture no-op turn.&quot;,
                 &quot;worker-model&quot;,
-<span class="nc" id="L374">                event -&gt; {});</span>
+<span class="nc" id="L468">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L377">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L378">        List&lt;JsonNode&gt; requests = capturedRequests(capture);</span>
-<span class="nc" id="L379">        assertThat(requests)</span>
-<span class="nc" id="L380">                .extracting(request -&gt; request.path(&quot;method&quot;).asText())</span>
-<span class="nc" id="L381">                .containsExactly(&quot;thread/start&quot;, &quot;turn/start&quot;);</span>
-<span class="nc" id="L382">        assertThat(requests.getFirst().path(&quot;params&quot;).path(&quot;model&quot;).asText()).isEqualTo(&quot;gpt-5.5&quot;);</span>
-<span class="nc" id="L383">        assertThat(requests.get(1).path(&quot;params&quot;).path(&quot;model&quot;).asText()).isEqualTo(&quot;gpt-5.5&quot;);</span>
-<span class="nc" id="L384">        assertThat(requests.get(1).path(&quot;params&quot;).path(&quot;effort&quot;).asText()).isEqualTo(&quot;xhigh&quot;);</span>
-<span class="nc" id="L385">    }</span>
+<span class="nc" id="L471">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L472">        List&lt;JsonNode&gt; requests = capturedRequests(capture);</span>
+<span class="nc" id="L473">        assertThat(requests)</span>
+<span class="nc" id="L474">                .extracting(request -&gt; request.path(&quot;method&quot;).asText())</span>
+<span class="nc" id="L475">                .containsExactly(&quot;thread/start&quot;, &quot;turn/start&quot;);</span>
+<span class="nc" id="L476">        assertThat(requests.getFirst().path(&quot;params&quot;).path(&quot;model&quot;).asText()).isEqualTo(&quot;gpt-5.5&quot;);</span>
+<span class="nc" id="L477">        assertThat(requests.get(1).path(&quot;params&quot;).path(&quot;model&quot;).asText()).isEqualTo(&quot;gpt-5.5&quot;);</span>
+<span class="nc" id="L478">        assertThat(requests.get(1).path(&quot;params&quot;).path(&quot;effort&quot;).asText()).isEqualTo(&quot;xhigh&quot;);</span>
+<span class="nc" id="L479">    }</span>
 
     @Test
     void omitsModelAndReasoningEffortWhenWorkflowDoesNotConfigureThem() throws Exception {
         // given
-<span class="nc" id="L390">        Path capture = tempDir.resolve(&quot;default-model-requests.jsonl&quot;);</span>
-<span class="nc" id="L391">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L484">        Path capture = tempDir.resolve(&quot;default-model-requests.jsonl&quot;);</span>
+<span class="nc" id="L485">        Path appServer = writeExecutableScript(</span>
                 &quot;default-model-capturing-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -409,52 +503,52 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L412">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L506">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
                 appServer + &quot; &quot; + capture,
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L416">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L510">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L418">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L419">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-default-model&quot;);</span>
-<span class="nc" id="L420">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L421">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L512">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L513">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-default-model&quot;);</span>
+<span class="nc" id="L514">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L515">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L424">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L518">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L426">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-default-model&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L520">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-default-model&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a default model capture no-op turn.&quot;,
                 &quot;worker-default-model&quot;,
-<span class="nc" id="L430">                event -&gt; {});</span>
+<span class="nc" id="L524">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L433">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L434">        List&lt;JsonNode&gt; requests = capturedRequests(capture);</span>
-<span class="nc" id="L435">        assertThat(requests)</span>
-<span class="nc" id="L436">                .extracting(request -&gt; request.path(&quot;method&quot;).asText())</span>
-<span class="nc" id="L437">                .containsExactly(&quot;thread/start&quot;, &quot;turn/start&quot;);</span>
-<span class="nc" id="L438">        assertThat(requests)</span>
-<span class="nc" id="L439">                .satisfiesExactly(</span>
-<span class="nc" id="L440">                        request -&gt; assertThat(request.path(&quot;params&quot;))</span>
-<span class="nc" id="L441">                                .as(&quot;thread/start params&quot;)</span>
-<span class="nc" id="L442">                                .isInstanceOfSatisfying(ObjectNode.class, params -&gt; assertThat(params.path(&quot;model&quot;))</span>
-<span class="nc" id="L443">                                        .as(&quot;thread/start omitted model&quot;)</span>
-<span class="nc" id="L444">                                        .isEqualTo(json.missingNode())),</span>
-<span class="nc" id="L445">                        request -&gt; assertThat(request.path(&quot;params&quot;))</span>
-<span class="nc" id="L446">                                .as(&quot;turn/start params&quot;)</span>
-<span class="nc" id="L447">                                .isInstanceOfSatisfying(ObjectNode.class, params -&gt; assertThatObject(params)</span>
-<span class="nc" id="L448">                                        .as(&quot;turn/start omitted [model, effort]&quot;)</span>
-<span class="nc" id="L449">                                        .extracting(node -&gt; node.path(&quot;model&quot;), node -&gt; node.path(&quot;effort&quot;))</span>
-<span class="nc" id="L450">                                        .containsExactly(json.missingNode(), json.missingNode())));</span>
-<span class="nc" id="L451">    }</span>
+<span class="nc" id="L527">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L528">        List&lt;JsonNode&gt; requests = capturedRequests(capture);</span>
+<span class="nc" id="L529">        assertThat(requests)</span>
+<span class="nc" id="L530">                .extracting(request -&gt; request.path(&quot;method&quot;).asText())</span>
+<span class="nc" id="L531">                .containsExactly(&quot;thread/start&quot;, &quot;turn/start&quot;);</span>
+<span class="nc" id="L532">        assertThat(requests)</span>
+<span class="nc" id="L533">                .satisfiesExactly(</span>
+<span class="nc" id="L534">                        request -&gt; assertThat(request.path(&quot;params&quot;))</span>
+<span class="nc" id="L535">                                .as(&quot;thread/start params&quot;)</span>
+<span class="nc" id="L536">                                .isInstanceOfSatisfying(ObjectNode.class, params -&gt; assertThat(params.path(&quot;model&quot;))</span>
+<span class="nc" id="L537">                                        .as(&quot;thread/start omitted model&quot;)</span>
+<span class="nc" id="L538">                                        .isEqualTo(json.missingNode())),</span>
+<span class="nc" id="L539">                        request -&gt; assertThat(request.path(&quot;params&quot;))</span>
+<span class="nc" id="L540">                                .as(&quot;turn/start params&quot;)</span>
+<span class="nc" id="L541">                                .isInstanceOfSatisfying(ObjectNode.class, params -&gt; assertThatObject(params)</span>
+<span class="nc" id="L542">                                        .as(&quot;turn/start omitted [model, effort]&quot;)</span>
+<span class="nc" id="L543">                                        .extracting(node -&gt; node.path(&quot;model&quot;), node -&gt; node.path(&quot;effort&quot;))</span>
+<span class="nc" id="L544">                                        .containsExactly(json.missingNode(), json.missingNode())));</span>
+<span class="nc" id="L545">    }</span>
 
     @Test
     void continuesMultipleTurnsOnOneThreadWhenControllerRequestsIt() throws Exception {
         // given
-<span class="nc" id="L456">        Path capture = tempDir.resolve(&quot;turns.jsonl&quot;);</span>
-<span class="nc" id="L457">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L550">        Path capture = tempDir.resolve(&quot;turns.jsonl&quot;);</span>
+<span class="nc" id="L551">        Path appServer = writeExecutableScript(</span>
                 &quot;multi-turn-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -474,53 +568,53 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L477">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L571">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
                 appServer + &quot; &quot; + capture,
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L481">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L575">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L483">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L484">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-multi-turn&quot;);</span>
-<span class="nc" id="L485">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L486">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L577">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L578">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-multi-turn&quot;);</span>
+<span class="nc" id="L579">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L580">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L489">        AgentRunResult result = client.runSession(</span>
+<span class="nc" id="L583">        AgentRunResult result = client.runSession(</span>
                 config,
-<span class="nc" id="L491">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-multi-turn&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L585">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-multi-turn&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;first turn&quot;,
                 &quot;worker-multi-turn&quot;,
-<span class="nc" id="L495">                event -&gt; {},</span>
-<span class="nc bnc" id="L496" title="All 2 branches missed.">                completedTurns -&gt; completedTurns == 1</span>
-<span class="nc" id="L497">                        ? CodexAppServerClient.TurnDecision.continueWith(&quot;second turn&quot;)</span>
-<span class="nc" id="L498">                        : CodexAppServerClient.TurnDecision.stop());</span>
+<span class="nc" id="L589">                event -&gt; {},</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">                completedTurns -&gt; completedTurns == 1</span>
+<span class="nc" id="L591">                        ? CodexAppServerClient.TurnDecision.continueWith(&quot;second turn&quot;)</span>
+<span class="nc" id="L592">                        : CodexAppServerClient.TurnDecision.stop());</span>
 
         // then
-<span class="nc" id="L501">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L502">        List&lt;JsonNode&gt; turns = Files.readAllLines(capture).stream()</span>
-<span class="nc" id="L503">                .map(line -&gt; {</span>
+<span class="nc" id="L595">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L596">        List&lt;JsonNode&gt; turns = Files.readAllLines(capture).stream()</span>
+<span class="nc" id="L597">                .map(line -&gt; {</span>
                     try {
-<span class="nc" id="L505">                        return json.readTree(line);</span>
-<span class="nc" id="L506">                    } catch (Exception e) {</span>
-<span class="nc" id="L507">                        throw new AssertionError(e);</span>
+<span class="nc" id="L599">                        return json.readTree(line);</span>
+<span class="nc" id="L600">                    } catch (Exception e) {</span>
+<span class="nc" id="L601">                        throw new AssertionError(e);</span>
                     }
                 })
-<span class="nc" id="L510">                .toList();</span>
-<span class="nc" id="L511">        assertThat(turns).hasSize(2);</span>
-<span class="nc" id="L512">        assertThat(turns)</span>
-<span class="nc" id="L513">                .extracting(turn -&gt; turn.path(&quot;params&quot;).path(&quot;threadId&quot;).asText())</span>
-<span class="nc" id="L514">                .containsExactly(&quot;thread-shared&quot;, &quot;thread-shared&quot;);</span>
-<span class="nc" id="L515">        assertThat(turns)</span>
-<span class="nc" id="L516">                .extracting(turn -&gt; turn.at(&quot;/params/input/0/text&quot;).asText())</span>
-<span class="nc" id="L517">                .containsExactly(&quot;first turn&quot;, &quot;second turn&quot;);</span>
-<span class="nc" id="L518">    }</span>
+<span class="nc" id="L604">                .toList();</span>
+<span class="nc" id="L605">        assertThat(turns).hasSize(2);</span>
+<span class="nc" id="L606">        assertThat(turns)</span>
+<span class="nc" id="L607">                .extracting(turn -&gt; turn.path(&quot;params&quot;).path(&quot;threadId&quot;).asText())</span>
+<span class="nc" id="L608">                .containsExactly(&quot;thread-shared&quot;, &quot;thread-shared&quot;);</span>
+<span class="nc" id="L609">        assertThat(turns)</span>
+<span class="nc" id="L610">                .extracting(turn -&gt; turn.at(&quot;/params/input/0/text&quot;).asText())</span>
+<span class="nc" id="L611">                .containsExactly(&quot;first turn&quot;, &quot;second turn&quot;);</span>
+<span class="nc" id="L612">    }</span>
 
     @Test
     void failsPromptlyWhenAppServerExitsBeforeTurnCompletion() throws Exception {
         // given
-<span class="nc" id="L523">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L617">        Path appServer = writeExecutableScript(</span>
                 &quot;exiting-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -536,36 +630,36 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L539">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L633">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
-<span class="nc" id="L541">                appServer.toString(),</span>
+<span class="nc" id="L635">                appServer.toString(),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L543">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L637">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L545">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L546">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-exit&quot;);</span>
-<span class="nc" id="L547">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L548">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L639">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L640">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-exit&quot;);</span>
+<span class="nc" id="L641">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L642">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L551">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L645">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L553">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-exit&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L647">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-exit&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do an exit no-op turn.&quot;,
                 &quot;worker-exit&quot;,
-<span class="nc" id="L557">                event -&gt; {});</span>
+<span class="nc" id="L651">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L560">        assertThat(result)</span>
-<span class="nc" id="L561">                .isEqualTo(AgentRunResult.fail(</span>
+<span class="nc" id="L654">        assertThat(result)</span>
+<span class="nc" id="L655">                .isEqualTo(AgentRunResult.fail(</span>
                         &quot;process_exit: codex app-server stdout closed before active turn completed&quot;));
-<span class="nc" id="L563">    }</span>
+<span class="nc" id="L657">    }</span>
 
     @Test
     void failsPromptlyWhenAppServerExitsBeforeRequestResponse() throws Exception {
         // given
-<span class="nc" id="L568">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L662">        Path appServer = writeExecutableScript(</span>
                 &quot;exiting-before-request-response-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -577,36 +671,36 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L580">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L674">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
-<span class="nc" id="L582">                appServer.toString(),</span>
+<span class="nc" id="L676">                appServer.toString(),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L584">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L678">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L586">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L587">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-exit-request&quot;);</span>
-<span class="nc" id="L588">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L589">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L680">                TEST_EXTENDED_TURN_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L681">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-exit-request&quot;);</span>
+<span class="nc" id="L682">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L683">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L592">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L686">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L594">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-exit-request&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L688">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-exit-request&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do an exit before response turn.&quot;,
                 &quot;worker-exit-request&quot;,
-<span class="nc" id="L598">                event -&gt; {});</span>
+<span class="nc" id="L692">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L601">        assertThat(result)</span>
-<span class="nc" id="L602">                .isEqualTo(AgentRunResult.fail(</span>
+<span class="nc" id="L695">        assertThat(result)</span>
+<span class="nc" id="L696">                .isEqualTo(AgentRunResult.fail(</span>
                         &quot;process_exit: codex app-server stdout closed before active turn completed&quot;));
-<span class="nc" id="L604">    }</span>
+<span class="nc" id="L698">    }</span>
 
     @Test
     void failsTurnWhenAppServerEmitsTurnFailureNotification() throws Exception {
         // given
-<span class="nc" id="L609">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L703">        Path appServer = writeExecutableScript(</span>
                 &quot;failed-turn-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -622,28 +716,28 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L625">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L626">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-failed&quot;);</span>
-<span class="nc" id="L627">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L628">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L719">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L720">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-failed&quot;);</span>
+<span class="nc" id="L721">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L722">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L631">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L725">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L633">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-failed&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L727">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-failed&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a failed turn.&quot;,
                 &quot;worker-failed&quot;,
-<span class="nc" id="L637">                event -&gt; {});</span>
+<span class="nc" id="L731">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L640">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: tool failed&quot;));</span>
-<span class="nc" id="L641">    }</span>
+<span class="nc" id="L734">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: tool failed&quot;));</span>
+<span class="nc" id="L735">    }</span>
 
     @Test
     void preservesGenericTurnFailureFormattingForNestedBadRequest() throws Exception {
         // given
-<span class="nc" id="L646">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L740">        Path appServer = writeExecutableScript(</span>
                 &quot;nested-bad-request-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -660,20 +754,20 @@ import org.junit.jupiter.params.provider.ValueSource;
                 &quot;&quot;&quot;);
 
         // when
-<span class="nc" id="L663">        AgentRunResult result = runFailureTurn(</span>
-<span class="nc" id="L664">                appServer, Clock.fixed(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;), ZoneOffset.UTC), &quot;nested-bad-request&quot;);</span>
+<span class="nc" id="L757">        AgentRunResult result = runFailureTurn(</span>
+<span class="nc" id="L758">                appServer, Clock.fixed(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;), ZoneOffset.UTC), &quot;nested-bad-request&quot;);</span>
 
         // then
-<span class="nc" id="L667">        assertThat(result)</span>
-<span class="nc" id="L668">                .isEqualTo(</span>
-<span class="nc" id="L669">                        AgentRunResult.fail(</span>
+<span class="nc" id="L761">        assertThat(result)</span>
+<span class="nc" id="L762">                .isEqualTo(</span>
+<span class="nc" id="L763">                        AgentRunResult.fail(</span>
                                 &quot;turn_failed: {\&quot;threadId\&quot;:\&quot;thread-bad-request\&quot;,\&quot;turn\&quot;:{\&quot;id\&quot;:\&quot;turn-bad-request\&quot;,\&quot;error\&quot;:{\&quot;message\&quot;:\&quot;unknown model\&quot;,\&quot;codexErrorInfo\&quot;:\&quot;badRequest\&quot;}}}&quot;));
-<span class="nc" id="L671">    }</span>
+<span class="nc" id="L765">    }</span>
 
     @Test
     void failsTurnWhenAppServerEmitsTerminalErrorNotification() throws Exception {
         // given
-<span class="nc" id="L676">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L770">        Path appServer = writeExecutableScript(</span>
                 &quot;terminal-error-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -689,125 +783,125 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L692">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L693">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-error&quot;);</span>
-<span class="nc" id="L694">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L695">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L786">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L787">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-error&quot;);</span>
+<span class="nc" id="L788">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L789">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L698">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L792">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L700">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-error&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L794">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-error&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a terminal error turn.&quot;,
                 &quot;worker-error&quot;,
-<span class="nc" id="L704">                event -&gt; {});</span>
+<span class="nc" id="L798">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L707">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: model request failed&quot;));</span>
-<span class="nc" id="L708">    }</span>
+<span class="nc" id="L801">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: model request failed&quot;));</span>
+<span class="nc" id="L802">    }</span>
 
     @Test
     void classifiesCompletedUsageLimitAndUsesLatestExhaustedWindowResetWithoutLeakingDetails() throws Exception {
         // given
-<span class="nc" id="L713">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L714">        Instant primaryReset = now.plusSeconds(60);</span>
-<span class="nc" id="L715">        Instant secondaryReset = now.plusSeconds(120);</span>
-<span class="nc" id="L716">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L807">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L808">        Instant primaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L809">        Instant secondaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L810">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;completed-usage-limit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__},&quot;secondary&quot;:{&quot;usedPercent&quot;:101,&quot;resetsAt&quot;:__SECONDARY_RESET__}}}}'
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;additionalDetails&quot;:&quot;private account payload&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L722">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(primaryReset.getEpochSecond()))</span>
-<span class="nc" id="L723">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(secondaryReset.getEpochSecond())));</span>
+<span class="nc" id="L816">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(primaryReset.getEpochSecond()))</span>
+<span class="nc" id="L817">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(secondaryReset.getEpochSecond())));</span>
 
         // when
-<span class="nc" id="L726">        List&lt;AgentEvent&gt; events = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L727">        AgentRunResult result =</span>
-<span class="nc" id="L728">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;completed-usage&quot;, events::add);</span>
+<span class="nc" id="L820">        List&lt;AgentEvent&gt; events = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L821">        AgentRunResult result =</span>
+<span class="nc" id="L822">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;completed-usage&quot;, events::add);</span>
 
         // then
-<span class="nc" id="L731">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L732">        assertThat(result.reason()).isEqualTo(&quot;turn_failed: Usage is unavailable.&quot;);</span>
-<span class="nc" id="L733">        assertThat(result.reason()).doesNotContain(&quot;private account payload&quot;, &quot;additionalDetails&quot;, &quot;rateLimits&quot;);</span>
-<span class="nc" id="L734">        assertThat(result.retryNotBefore()).hasValue(secondaryReset);</span>
-<span class="nc" id="L735">        assertThat(events.stream()</span>
-<span class="nc" id="L736">                        .filter(event -&gt; event.event().equals(&quot;turn/completed&quot;))</span>
-<span class="nc" id="L737">                        .map(AgentEvent::message))</span>
-<span class="nc" id="L738">                .containsExactly(&quot;Usage is unavailable.&quot;)</span>
-<span class="nc" id="L739">                .allSatisfy(message -&gt; assertThat(message)</span>
-<span class="nc" id="L740">                        .doesNotContain(&quot;private account payload&quot;, &quot;additionalDetails&quot;, &quot;codexErrorInfo&quot;));</span>
-<span class="nc" id="L741">    }</span>
+<span class="nc" id="L825">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L826">        assertThat(result.reason()).isEqualTo(&quot;turn_failed: Usage is unavailable.&quot;);</span>
+<span class="nc" id="L827">        assertThat(result.reason()).doesNotContain(&quot;private account payload&quot;, &quot;additionalDetails&quot;, &quot;rateLimits&quot;);</span>
+<span class="nc" id="L828">        assertThat(result.retryNotBefore()).hasValue(secondaryReset);</span>
+<span class="nc" id="L829">        assertThat(events.stream()</span>
+<span class="nc" id="L830">                        .filter(event -&gt; event.event().equals(&quot;turn/completed&quot;))</span>
+<span class="nc" id="L831">                        .map(AgentEvent::message))</span>
+<span class="nc" id="L832">                .containsExactly(&quot;Usage is unavailable.&quot;)</span>
+<span class="nc" id="L833">                .allSatisfy(message -&gt; assertThat(message)</span>
+<span class="nc" id="L834">                        .doesNotContain(&quot;private account payload&quot;, &quot;additionalDetails&quot;, &quot;codexErrorInfo&quot;));</span>
+<span class="nc" id="L835">    }</span>
 
     @Test
     void rejectedRateLimitEventCannotSupplyAUsageRetryDeadline() throws Exception {
         // given
-<span class="nc" id="L746">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L747">        Instant rejectedReset = now.plusSeconds(120);</span>
-<span class="nc" id="L748">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L840">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L841">        Instant rejectedReset = now.plusSeconds(120);</span>
+<span class="nc" id="L842">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;rejected-rate-limit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__}}}}'
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L754">                        .replace(&quot;__RESET__&quot;, Long.toString(rejectedReset.getEpochSecond())));</span>
-<span class="nc" id="L755">        List&lt;AgentEvent&gt; acceptedEvents = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L756">        AgentEventListener listener = new AgentEventListener() {</span>
+<span class="nc" id="L848">                        .replace(&quot;__RESET__&quot;, Long.toString(rejectedReset.getEpochSecond())));</span>
+<span class="nc" id="L849">        List&lt;AgentEvent&gt; acceptedEvents = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L850">        AgentEventListener listener = new AgentEventListener() {</span>
             @Override
             public void onEvent(AgentEvent event) {
-<span class="nc" id="L759">                acceptedEvents.add(event);</span>
-<span class="nc" id="L760">            }</span>
+<span class="nc" id="L853">                acceptedEvents.add(event);</span>
+<span class="nc" id="L854">            }</span>
 
             @Override
             public boolean onEventAndReportAccepted(AgentEvent event) {
-<span class="nc bnc" id="L764" title="All 2 branches missed.">                if (event.event().equals(&quot;account/rateLimits/updated&quot;)) {</span>
-<span class="nc" id="L765">                    return false;</span>
+<span class="nc bnc" id="L858" title="All 2 branches missed.">                if (event.event().equals(&quot;account/rateLimits/updated&quot;)) {</span>
+<span class="nc" id="L859">                    return false;</span>
                 }
-<span class="nc" id="L767">                onEvent(event);</span>
-<span class="nc" id="L768">                return true;</span>
+<span class="nc" id="L861">                onEvent(event);</span>
+<span class="nc" id="L862">                return true;</span>
             }
         };
 
         // when
-<span class="nc" id="L773">        AgentRunResult result =</span>
-<span class="nc" id="L774">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;rejected-rate-limit&quot;, listener);</span>
+<span class="nc" id="L867">        AgentRunResult result =</span>
+<span class="nc" id="L868">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;rejected-rate-limit&quot;, listener);</span>
 
         // then
-<span class="nc" id="L777">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L778">        assertThat(result.retryNotBefore()).isEmpty();</span>
-<span class="nc" id="L779">        assertThat(acceptedEvents).noneMatch(event -&gt; event.event().equals(&quot;account/rateLimits/updated&quot;));</span>
-<span class="nc" id="L780">    }</span>
+<span class="nc" id="L871">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L872">        assertThat(result.retryNotBefore()).isEmpty();</span>
+<span class="nc" id="L873">        assertThat(acceptedEvents).noneMatch(event -&gt; event.event().equals(&quot;account/rateLimits/updated&quot;));</span>
+<span class="nc" id="L874">    }</span>
 
     @Test
     void preservesSchemaValidFarFutureUsageResetThatExceedsMillisecondDurationRange() throws Exception {
         // given
-<span class="nc" id="L785">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L786">        Instant farFutureReset = Instant.ofEpochSecond(Instant.MAX.getEpochSecond() - 1);</span>
-<span class="nc" id="L787">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L879">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L880">        Instant farFutureReset = Instant.ofEpochSecond(Instant.MAX.getEpochSecond() - 1);</span>
+<span class="nc" id="L881">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;far-future-usage-limit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__},&quot;secondary&quot;:null}}}'
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L793">                        .replace(&quot;__RESET__&quot;, Long.toString(farFutureReset.getEpochSecond())));</span>
+<span class="nc" id="L887">                        .replace(&quot;__RESET__&quot;, Long.toString(farFutureReset.getEpochSecond())));</span>
 
         // when
-<span class="nc" id="L796">        AgentRunResult result = runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;far-future-usage&quot;);</span>
+<span class="nc" id="L890">        AgentRunResult result = runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;far-future-usage&quot;);</span>
 
         // then
-<span class="nc" id="L799">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L800">        assertThat(result.retryNotBefore()).hasValue(farFutureReset);</span>
-<span class="nc" id="L801">    }</span>
+<span class="nc" id="L893">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L894">        assertThat(result.retryNotBefore()).hasValue(farFutureReset);</span>
+<span class="nc" id="L895">    }</span>
 
     @Test
     void mergesSparseRollingRateLimitWindowsWithoutClearingUnavailableValues() throws Exception {
         // given
-<span class="nc" id="L806">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L807">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
-<span class="nc" id="L808">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
-<span class="nc" id="L809">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
-<span class="nc" id="L810">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L900">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L901">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L902">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L903">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L904">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;sparse-rate-limit-updates-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__}}}}'
@@ -815,106 +909,106 @@ import org.junit.jupiter.params.provider.ValueSource;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:null}}}}'
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L818">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
-<span class="nc" id="L819">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
+<span class="nc" id="L912">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
+<span class="nc" id="L913">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
 
         // when
-<span class="nc" id="L822">        AgentRunResult result =</span>
-<span class="nc" id="L823">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;sparse-rate-limits&quot;, event -&gt; {</span>
-<span class="nc bnc" id="L824" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
-<span class="nc" id="L825">                        publishedRateLimits.add(event.payload());</span>
+<span class="nc" id="L916">        AgentRunResult result =</span>
+<span class="nc" id="L917">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;sparse-rate-limits&quot;, event -&gt; {</span>
+<span class="nc bnc" id="L918" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L919">                        publishedRateLimits.add(event.payload());</span>
                     }
-<span class="nc" id="L827">                });</span>
+<span class="nc" id="L921">                });</span>
 
         // then
-<span class="nc" id="L830">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L831">        assertThat(result.retryNotBefore()).hasValue(laterPrimaryReset);</span>
-<span class="nc" id="L832">        assertThat(publishedRateLimits).hasSize(3);</span>
-<span class="nc" id="L833">        assertThat(publishedRateLimits.get(1).path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
-<span class="nc" id="L834">                .isEqualTo(laterPrimaryReset.getEpochSecond());</span>
-<span class="nc" id="L835">        assertThat(publishedRateLimits.get(2).path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
-<span class="nc" id="L836">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
-<span class="nc" id="L837">    }</span>
+<span class="nc" id="L924">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L925">        assertThat(result.retryNotBefore()).hasValue(laterPrimaryReset);</span>
+<span class="nc" id="L926">        assertThat(publishedRateLimits).hasSize(3);</span>
+<span class="nc" id="L927">        assertThat(publishedRateLimits.get(1).path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L928">                .isEqualTo(laterPrimaryReset.getEpochSecond());</span>
+<span class="nc" id="L929">        assertThat(publishedRateLimits.get(2).path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L930">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
+<span class="nc" id="L931">    }</span>
 
     @ParameterizedTest
     @ValueSource(strings = {&quot;\&quot;rateLimits\&quot;:null&quot;, &quot;&quot;, &quot;\&quot;rateLimits\&quot;:\&quot;malformed\&quot;&quot;, &quot;\&quot;rateLimits\&quot;:[]&quot;})
     void malformedRateLimitUpdatesRetainCanonicalSnapshot(String malformedRateLimits) throws Exception {
         // given
-<span class="nc" id="L843">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L844">        Instant reset = now.plusSeconds(120);</span>
-<span class="nc" id="L845">        String notifications =</span>
+<span class="nc" id="L937">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L938">        Instant reset = now.plusSeconds(120);</span>
+<span class="nc" id="L939">        String notifications =</span>
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__},&quot;planType&quot;:&quot;team&quot;}}}'
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{__MALFORMED_RATE_LIMITS__}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L850">                        .replace(&quot;__RESET__&quot;, Long.toString(reset.getEpochSecond()))</span>
-<span class="nc" id="L851">                        .replace(&quot;__MALFORMED_RATE_LIMITS__&quot;, malformedRateLimits);</span>
-<span class="nc" id="L852">        Path appServer = writeRateLimitNotificationScript(</span>
-<span class="nc" id="L853">                &quot;malformed-after-valid-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()) + &quot;.sh&quot;,</span>
+<span class="nc" id="L944">                        .replace(&quot;__RESET__&quot;, Long.toString(reset.getEpochSecond()))</span>
+<span class="nc" id="L945">                        .replace(&quot;__MALFORMED_RATE_LIMITS__&quot;, malformedRateLimits);</span>
+<span class="nc" id="L946">        Path appServer = writeRateLimitNotificationScript(</span>
+<span class="nc" id="L947">                &quot;malformed-after-valid-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()) + &quot;.sh&quot;,</span>
                 notifications);
-<span class="nc" id="L855">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L949">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
 
         // when
-<span class="nc" id="L858">        AgentRunResult result = runFailureTurn(</span>
+<span class="nc" id="L952">        AgentRunResult result = runFailureTurn(</span>
                 appServer,
-<span class="nc" id="L860">                Clock.fixed(now, ZoneOffset.UTC),</span>
-<span class="nc" id="L861">                &quot;malformed-after-valid-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()),</span>
+<span class="nc" id="L954">                Clock.fixed(now, ZoneOffset.UTC),</span>
+<span class="nc" id="L955">                &quot;malformed-after-valid-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()),</span>
                 event -&gt; {
-<span class="nc bnc" id="L863" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
-<span class="nc" id="L864">                        publishedRateLimits.add(event.payload());</span>
+<span class="nc bnc" id="L957" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L958">                        publishedRateLimits.add(event.payload());</span>
                     }
-<span class="nc" id="L866">                });</span>
+<span class="nc" id="L960">                });</span>
 
         // then
-<span class="nc" id="L869">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L870">        assertThat(publishedRateLimits).hasSize(2);</span>
-<span class="nc" id="L871">        JsonNode canonical = publishedRateLimits.getFirst();</span>
-<span class="nc" id="L872">        assertThat(canonical.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong()).isEqualTo(reset.getEpochSecond());</span>
-<span class="nc" id="L873">        assertThat(canonical.path(&quot;planType&quot;).asText()).isEqualTo(&quot;team&quot;);</span>
-<span class="nc" id="L874">        assertThat(publishedRateLimits.get(1)).isEqualTo(canonical);</span>
-<span class="nc" id="L875">    }</span>
+<span class="nc" id="L963">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L964">        assertThat(publishedRateLimits).hasSize(2);</span>
+<span class="nc" id="L965">        JsonNode canonical = publishedRateLimits.getFirst();</span>
+<span class="nc" id="L966">        assertThat(canonical.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong()).isEqualTo(reset.getEpochSecond());</span>
+<span class="nc" id="L967">        assertThat(canonical.path(&quot;planType&quot;).asText()).isEqualTo(&quot;team&quot;);</span>
+<span class="nc" id="L968">        assertThat(publishedRateLimits.get(1)).isEqualTo(canonical);</span>
+<span class="nc" id="L969">    }</span>
 
     @ParameterizedTest
     @ValueSource(strings = {&quot;\&quot;rateLimits\&quot;:null&quot;, &quot;&quot;, &quot;\&quot;rateLimits\&quot;:\&quot;malformed\&quot;&quot;, &quot;\&quot;rateLimits\&quot;:[]&quot;})
     void malformedFirstRateLimitUpdatePublishesAbsentCanonicalState(String malformedRateLimits) throws Exception {
         // given
-<span class="nc" id="L881">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L882">        String notifications =</span>
+<span class="nc" id="L975">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L976">        String notifications =</span>
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{__MALFORMED_RATE_LIMITS__}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L886">                        .replace(&quot;__MALFORMED_RATE_LIMITS__&quot;, malformedRateLimits);</span>
-<span class="nc" id="L887">        Path appServer = writeRateLimitNotificationScript(</span>
-<span class="nc" id="L888">                &quot;malformed-first-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()) + &quot;.sh&quot;, notifications);</span>
-<span class="nc" id="L889">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L980">                        .replace(&quot;__MALFORMED_RATE_LIMITS__&quot;, malformedRateLimits);</span>
+<span class="nc" id="L981">        Path appServer = writeRateLimitNotificationScript(</span>
+<span class="nc" id="L982">                &quot;malformed-first-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()) + &quot;.sh&quot;, notifications);</span>
+<span class="nc" id="L983">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
 
         // when
-<span class="nc" id="L892">        AgentRunResult result = runFailureTurn(</span>
+<span class="nc" id="L986">        AgentRunResult result = runFailureTurn(</span>
                 appServer,
-<span class="nc" id="L894">                Clock.fixed(now, ZoneOffset.UTC),</span>
-<span class="nc" id="L895">                &quot;malformed-first-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()),</span>
+<span class="nc" id="L988">                Clock.fixed(now, ZoneOffset.UTC),</span>
+<span class="nc" id="L989">                &quot;malformed-first-&quot; + Integer.toUnsignedString(malformedRateLimits.hashCode()),</span>
                 event -&gt; {
-<span class="nc bnc" id="L897" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
-<span class="nc" id="L898">                        publishedRateLimits.add(event.payload());</span>
+<span class="nc bnc" id="L991" title="All 2 branches missed.">                    if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L992">                        publishedRateLimits.add(event.payload());</span>
                     }
-<span class="nc" id="L900">                });</span>
+<span class="nc" id="L994">                });</span>
 
         // then
-<span class="nc" id="L903">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L904">        assertThat(publishedRateLimits).containsExactly(json.nullNode());</span>
-<span class="nc" id="L905">    }</span>
+<span class="nc" id="L997">        assertThat(result).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L998">        assertThat(publishedRateLimits).containsExactly(json.nullNode());</span>
+<span class="nc" id="L999">    }</span>
 
     @Test
     void sharesSparseRateLimitsAndMetadataAcrossSequentialAppServerSessions() throws Exception {
         // given
-<span class="nc" id="L910">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L911">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
-<span class="nc" id="L912">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
-<span class="nc" id="L913">        String firstSession = &quot;sequential-rate-limit-first&quot;;</span>
-<span class="nc" id="L914">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
-<span class="nc" id="L915">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1004">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1005">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L1006">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L1007">        String firstSession = &quot;sequential-rate-limit-first&quot;;</span>
+<span class="nc" id="L1008">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1009">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;sequential-shared-rate-limit-app-server.sh&quot;,
-<span class="nc" id="L917">                sessionRoleByWorkspace(firstSession, &quot;first&quot;, &quot;second&quot;),</span>
+<span class="nc" id="L1011">                sessionRoleByWorkspace(firstSession, &quot;first&quot;, &quot;second&quot;),</span>
                 &quot;&quot;&quot;
                 if [ &quot;$session&quot; = first ]; then
                   echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__PRIMARY_RESET__},&quot;credits&quot;:{&quot;balance&quot;:&quot;7&quot;,&quot;hasCredits&quot;:true,&quot;unlimited&quot;:false},&quot;planType&quot;:&quot;team&quot;,&quot;limitId&quot;:&quot;limit-a&quot;,&quot;limitName&quot;:&quot;Initial limit&quot;,&quot;individualLimit&quot;:{&quot;limit&quot;:&quot;100&quot;,&quot;remainingPercent&quot;:25,&quot;resetsAt&quot;:__PRIMARY_RESET__,&quot;used&quot;:&quot;75&quot;},&quot;rateLimitReachedType&quot;:&quot;rate_limit_reached&quot;,&quot;futureMetadata&quot;:{&quot;opaque&quot;:&quot;preserve-me&quot;}}}}'
@@ -924,103 +1018,103 @@ import org.junit.jupiter.params.provider.ValueSource;
                   echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 fi
                 &quot;&quot;&quot;
-<span class="nc" id="L927">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
-<span class="nc" id="L928">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
-<span class="nc" id="L929">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L930">        var client = new CodexAppServerClient(</span>
-<span class="nc" id="L931">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
-<span class="nc" id="L932">        AgentEventListener listener = event -&gt; {</span>
-<span class="nc bnc" id="L933" title="All 2 branches missed.">            if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
-<span class="nc" id="L934">                publishedRateLimits.add(event.payload());</span>
+<span class="nc" id="L1021">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
+<span class="nc" id="L1022">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
+<span class="nc" id="L1023">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1024">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L1025">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L1026">        AgentEventListener listener = event -&gt; {</span>
+<span class="nc bnc" id="L1027" title="All 2 branches missed.">            if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L1028">                publishedRateLimits.add(event.payload());</span>
             }
-<span class="nc" id="L936">        };</span>
+<span class="nc" id="L1030">        };</span>
 
         // when
-<span class="nc" id="L939">        AgentRunResult first = runTurn(client, config, firstSession, listener);</span>
-<span class="nc" id="L940">        AgentRunResult second = runTurn(client, config, &quot;sequential-rate-limit-second&quot;, listener);</span>
+<span class="nc" id="L1033">        AgentRunResult first = runTurn(client, config, firstSession, listener);</span>
+<span class="nc" id="L1034">        AgentRunResult second = runTurn(client, config, &quot;sequential-rate-limit-second&quot;, listener);</span>
 
         // then
-<span class="nc" id="L943">        assertThat(first).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L944">        assertThat(second.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L945">        assertThat(second.retryNotBefore()).hasValue(laterPrimaryReset);</span>
-<span class="nc" id="L946">        assertThat(publishedRateLimits).hasSize(2);</span>
-<span class="nc" id="L947">        JsonNode merged = publishedRateLimits.get(1);</span>
-<span class="nc" id="L948">        assertThat(merged.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong()).isEqualTo(laterPrimaryReset.getEpochSecond());</span>
-<span class="nc" id="L949">        assertThat(merged.path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
-<span class="nc" id="L950">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
-<span class="nc" id="L951">        assertThat(merged.path(&quot;credits&quot;).path(&quot;balance&quot;).asText()).isEqualTo(&quot;7&quot;);</span>
-<span class="nc" id="L952">        assertThat(merged.path(&quot;planType&quot;).asText()).isEqualTo(&quot;team&quot;);</span>
-<span class="nc" id="L953">        assertThat(merged.path(&quot;limitId&quot;).asText()).isEqualTo(&quot;limit-a&quot;);</span>
-<span class="nc" id="L954">        assertThat(merged.path(&quot;limitName&quot;).asText()).isEqualTo(&quot;Updated limit&quot;);</span>
-<span class="nc" id="L955">        assertThat(merged.path(&quot;individualLimit&quot;).path(&quot;used&quot;).asText()).isEqualTo(&quot;75&quot;);</span>
-<span class="nc" id="L956">        assertThat(merged.path(&quot;rateLimitReachedType&quot;).asText()).isEqualTo(&quot;rate_limit_reached&quot;);</span>
-<span class="nc" id="L957">        assertThat(merged.path(&quot;futureMetadata&quot;).path(&quot;opaque&quot;).asText()).isEqualTo(&quot;preserve-me&quot;);</span>
-<span class="nc" id="L958">        assertThat(merged.path(&quot;futureAdded&quot;).asText()).isEqualTo(&quot;available&quot;);</span>
-<span class="nc" id="L959">    }</span>
+<span class="nc" id="L1037">        assertThat(first).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1038">        assertThat(second.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L1039">        assertThat(second.retryNotBefore()).hasValue(laterPrimaryReset);</span>
+<span class="nc" id="L1040">        assertThat(publishedRateLimits).hasSize(2);</span>
+<span class="nc" id="L1041">        JsonNode merged = publishedRateLimits.get(1);</span>
+<span class="nc" id="L1042">        assertThat(merged.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong()).isEqualTo(laterPrimaryReset.getEpochSecond());</span>
+<span class="nc" id="L1043">        assertThat(merged.path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L1044">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
+<span class="nc" id="L1045">        assertThat(merged.path(&quot;credits&quot;).path(&quot;balance&quot;).asText()).isEqualTo(&quot;7&quot;);</span>
+<span class="nc" id="L1046">        assertThat(merged.path(&quot;planType&quot;).asText()).isEqualTo(&quot;team&quot;);</span>
+<span class="nc" id="L1047">        assertThat(merged.path(&quot;limitId&quot;).asText()).isEqualTo(&quot;limit-a&quot;);</span>
+<span class="nc" id="L1048">        assertThat(merged.path(&quot;limitName&quot;).asText()).isEqualTo(&quot;Updated limit&quot;);</span>
+<span class="nc" id="L1049">        assertThat(merged.path(&quot;individualLimit&quot;).path(&quot;used&quot;).asText()).isEqualTo(&quot;75&quot;);</span>
+<span class="nc" id="L1050">        assertThat(merged.path(&quot;rateLimitReachedType&quot;).asText()).isEqualTo(&quot;rate_limit_reached&quot;);</span>
+<span class="nc" id="L1051">        assertThat(merged.path(&quot;futureMetadata&quot;).path(&quot;opaque&quot;).asText()).isEqualTo(&quot;preserve-me&quot;);</span>
+<span class="nc" id="L1052">        assertThat(merged.path(&quot;futureAdded&quot;).asText()).isEqualTo(&quot;available&quot;);</span>
+<span class="nc" id="L1053">    }</span>
 
     @Test
     void isolatesRateLimitSnapshotsForDifferentConfiguredCodexCommands() throws Exception {
         // given
-<span class="nc" id="L964">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L965">        Instant firstAccountReset = now.plusSeconds(120);</span>
-<span class="nc" id="L966">        Instant secondAccountReset = now.plusSeconds(60);</span>
-<span class="nc" id="L967">        Path firstAppServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1058">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1059">        Instant firstAccountReset = now.plusSeconds(120);</span>
+<span class="nc" id="L1060">        Instant secondAccountReset = now.plusSeconds(60);</span>
+<span class="nc" id="L1061">        Path firstAppServer = writeUsageFixtureScript(</span>
                 &quot;first-account-rate-limit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__FIRST_RESET__},&quot;planType&quot;:&quot;first-account&quot;}}}'
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L973">                        .replace(&quot;__FIRST_RESET__&quot;, Long.toString(firstAccountReset.getEpochSecond())));</span>
-<span class="nc" id="L974">        Path secondAppServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1067">                        .replace(&quot;__FIRST_RESET__&quot;, Long.toString(firstAccountReset.getEpochSecond())));</span>
+<span class="nc" id="L1068">        Path secondAppServer = writeUsageFixtureScript(</span>
                 &quot;second-account-rate-limit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;secondary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__SECOND_RESET__}}}}'
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L980">                        .replace(&quot;__SECOND_RESET__&quot;, Long.toString(secondAccountReset.getEpochSecond())));</span>
-<span class="nc" id="L981">        EffectiveConfig firstConfig = config(firstAppServer);</span>
-<span class="nc" id="L982">        EffectiveConfig secondConfig = config(secondAppServer);</span>
-<span class="nc" id="L983">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
-<span class="nc" id="L984">        var client = new CodexAppServerClient(</span>
-<span class="nc" id="L985">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
-<span class="nc" id="L986">        AgentEventListener listener = event -&gt; {</span>
-<span class="nc bnc" id="L987" title="All 2 branches missed.">            if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
-<span class="nc" id="L988">                publishedRateLimits.add(event.payload());</span>
+<span class="nc" id="L1074">                        .replace(&quot;__SECOND_RESET__&quot;, Long.toString(secondAccountReset.getEpochSecond())));</span>
+<span class="nc" id="L1075">        EffectiveConfig firstConfig = config(firstAppServer);</span>
+<span class="nc" id="L1076">        EffectiveConfig secondConfig = config(secondAppServer);</span>
+<span class="nc" id="L1077">        List&lt;JsonNode&gt; publishedRateLimits = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L1078">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L1079">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L1080">        AgentEventListener listener = event -&gt; {</span>
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">            if (&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L1082">                publishedRateLimits.add(event.payload());</span>
             }
-<span class="nc" id="L990">        };</span>
+<span class="nc" id="L1084">        };</span>
 
         // when
-<span class="nc" id="L993">        AgentRunResult first = runTurn(client, firstConfig, &quot;first-rate-limit-account&quot;, listener);</span>
-<span class="nc" id="L994">        AgentRunResult second = runTurn(client, secondConfig, &quot;second-rate-limit-account&quot;, listener);</span>
+<span class="nc" id="L1087">        AgentRunResult first = runTurn(client, firstConfig, &quot;first-rate-limit-account&quot;, listener);</span>
+<span class="nc" id="L1088">        AgentRunResult second = runTurn(client, secondConfig, &quot;second-rate-limit-account&quot;, listener);</span>
 
         // then
-<span class="nc" id="L997">        assertThat(first).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L998">        assertThat(second.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L999">        assertThat(second.retryNotBefore()).hasValue(secondAccountReset);</span>
-<span class="nc" id="L1000">        assertThat(publishedRateLimits)</span>
-<span class="nc" id="L1001">                .hasSize(2)</span>
-<span class="nc" id="L1002">                .element(1)</span>
-<span class="nc" id="L1003">                .isInstanceOfSatisfying(ObjectNode.class, snapshot -&gt; assertThatObject(snapshot)</span>
-<span class="nc" id="L1004">                        .as(&quot;second rate-limit snapshot omitted [primary, planType]&quot;)</span>
-<span class="nc" id="L1005">                        .extracting(node -&gt; node.path(&quot;primary&quot;), node -&gt; node.path(&quot;planType&quot;))</span>
-<span class="nc" id="L1006">                        .containsExactly(json.missingNode(), json.missingNode()));</span>
-<span class="nc" id="L1007">    }</span>
+<span class="nc" id="L1091">        assertThat(first).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1092">        assertThat(second.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L1093">        assertThat(second.retryNotBefore()).hasValue(secondAccountReset);</span>
+<span class="nc" id="L1094">        assertThat(publishedRateLimits)</span>
+<span class="nc" id="L1095">                .hasSize(2)</span>
+<span class="nc" id="L1096">                .element(1)</span>
+<span class="nc" id="L1097">                .isInstanceOfSatisfying(ObjectNode.class, snapshot -&gt; assertThatObject(snapshot)</span>
+<span class="nc" id="L1098">                        .as(&quot;second rate-limit snapshot omitted [primary, planType]&quot;)</span>
+<span class="nc" id="L1099">                        .extracting(node -&gt; node.path(&quot;primary&quot;), node -&gt; node.path(&quot;planType&quot;))</span>
+<span class="nc" id="L1100">                        .containsExactly(json.missingNode(), json.missingNode()));</span>
+<span class="nc" id="L1101">    }</span>
 
     @Test
     void atomicallySharesConcurrentSparseRateLimitsWithUsageDeadline() throws Exception {
         // given
-<span class="nc" id="L1012">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L1013">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
-<span class="nc" id="L1014">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
-<span class="nc" id="L1015">        String firstSession = &quot;concurrent-rate-limit-first&quot;;</span>
-<span class="nc" id="L1016">        Path primaryReady = tempDir.resolve(&quot;concurrent-primary-ready&quot;);</span>
-<span class="nc" id="L1017">        Path secondaryReady = tempDir.resolve(&quot;concurrent-secondary-ready&quot;);</span>
-<span class="nc" id="L1018">        Path primaryObserved = tempDir.resolve(&quot;concurrent-primary-observed&quot;);</span>
-<span class="nc" id="L1019">        Path secondaryObserved = tempDir.resolve(&quot;concurrent-secondary-observed&quot;);</span>
-<span class="nc" id="L1020">        List&lt;JsonNode&gt; publishedRateLimits = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L1021">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1106">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1107">        Instant laterPrimaryReset = now.plusSeconds(120);</span>
+<span class="nc" id="L1108">        Instant earlierSecondaryReset = now.plusSeconds(60);</span>
+<span class="nc" id="L1109">        String firstSession = &quot;concurrent-rate-limit-first&quot;;</span>
+<span class="nc" id="L1110">        Path primaryReady = tempDir.resolve(&quot;concurrent-primary-ready&quot;);</span>
+<span class="nc" id="L1111">        Path secondaryReady = tempDir.resolve(&quot;concurrent-secondary-ready&quot;);</span>
+<span class="nc" id="L1112">        Path primaryObserved = tempDir.resolve(&quot;concurrent-primary-observed&quot;);</span>
+<span class="nc" id="L1113">        Path secondaryObserved = tempDir.resolve(&quot;concurrent-secondary-observed&quot;);</span>
+<span class="nc" id="L1114">        List&lt;JsonNode&gt; publishedRateLimits = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L1115">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;concurrent-shared-rate-limit-app-server.sh&quot;,
-<span class="nc" id="L1023">                sessionRoleByWorkspace(firstSession, &quot;primary&quot;, &quot;secondary&quot;),</span>
+<span class="nc" id="L1117">                sessionRoleByWorkspace(firstSession, &quot;primary&quot;, &quot;secondary&quot;),</span>
                 &quot;&quot;&quot;
                 if [ &quot;$session&quot; = primary ]; then
                   touch '__PRIMARY_READY__'
@@ -1040,83 +1134,83 @@ import org.junit.jupiter.params.provider.ValueSource;
                   echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 fi
                 &quot;&quot;&quot;
-<span class="nc" id="L1043">                        .replace(&quot;__PRIMARY_READY__&quot;, primaryReady.toString())</span>
-<span class="nc" id="L1044">                        .replace(&quot;__SECONDARY_READY__&quot;, secondaryReady.toString())</span>
-<span class="nc" id="L1045">                        .replace(&quot;__PRIMARY_OBSERVED__&quot;, primaryObserved.toString())</span>
-<span class="nc" id="L1046">                        .replace(&quot;__SECONDARY_OBSERVED__&quot;, secondaryObserved.toString())</span>
-<span class="nc" id="L1047">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
-<span class="nc" id="L1048">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
-<span class="nc" id="L1049">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L1137">                        .replace(&quot;__PRIMARY_READY__&quot;, primaryReady.toString())</span>
+<span class="nc" id="L1138">                        .replace(&quot;__SECONDARY_READY__&quot;, secondaryReady.toString())</span>
+<span class="nc" id="L1139">                        .replace(&quot;__PRIMARY_OBSERVED__&quot;, primaryObserved.toString())</span>
+<span class="nc" id="L1140">                        .replace(&quot;__SECONDARY_OBSERVED__&quot;, secondaryObserved.toString())</span>
+<span class="nc" id="L1141">                        .replace(&quot;__PRIMARY_RESET__&quot;, Long.toString(laterPrimaryReset.getEpochSecond()))</span>
+<span class="nc" id="L1142">                        .replace(&quot;__SECONDARY_RESET__&quot;, Long.toString(earlierSecondaryReset.getEpochSecond())));</span>
+<span class="nc" id="L1143">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
-<span class="nc" id="L1051">                appServer.toString(),</span>
+<span class="nc" id="L1145">                appServer.toString(),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L1053">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L1147">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L1055">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L1056">        var client = new CodexAppServerClient(</span>
-<span class="nc" id="L1057">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
-<span class="nc" id="L1058">        AgentEventListener listener = event -&gt; {</span>
-<span class="nc bnc" id="L1059" title="All 2 branches missed.">            if (!&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
-<span class="nc" id="L1060">                return;</span>
+<span class="nc" id="L1149">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L1150">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L1151">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L1152">        AgentEventListener listener = event -&gt; {</span>
+<span class="nc bnc" id="L1153" title="All 2 branches missed.">            if (!&quot;account/rateLimits/updated&quot;.equals(event.event())) {</span>
+<span class="nc" id="L1154">                return;</span>
             }
-<span class="nc" id="L1062">            publishedRateLimits.add(event.payload());</span>
-<span class="nc bnc" id="L1063" title="All 2 branches missed.">            if (event.payload().path(&quot;primary&quot;).isObject()) {</span>
-<span class="nc" id="L1064">                markObserved(primaryObserved);</span>
+<span class="nc" id="L1156">            publishedRateLimits.add(event.payload());</span>
+<span class="nc bnc" id="L1157" title="All 2 branches missed.">            if (event.payload().path(&quot;primary&quot;).isObject()) {</span>
+<span class="nc" id="L1158">                markObserved(primaryObserved);</span>
             }
-<span class="nc bnc" id="L1066" title="All 2 branches missed.">            if (event.payload().path(&quot;secondary&quot;).isObject()) {</span>
-<span class="nc" id="L1067">                markObserved(secondaryObserved);</span>
+<span class="nc bnc" id="L1160" title="All 2 branches missed.">            if (event.payload().path(&quot;secondary&quot;).isObject()) {</span>
+<span class="nc" id="L1161">                markObserved(secondaryObserved);</span>
             }
-<span class="nc" id="L1069">        };</span>
-<span class="nc" id="L1070">        Path firstWorkspace = workspace(firstSession);</span>
-<span class="nc" id="L1071">        Path secondWorkspace = workspace(&quot;concurrent-rate-limit-second&quot;);</span>
+<span class="nc" id="L1163">        };</span>
+<span class="nc" id="L1164">        Path firstWorkspace = workspace(firstSession);</span>
+<span class="nc" id="L1165">        Path secondWorkspace = workspace(&quot;concurrent-rate-limit-second&quot;);</span>
 
         // when
         List&lt;AgentRunResult&gt; results;
-<span class="nc" id="L1075">        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {</span>
-<span class="nc" id="L1076">            var first = executor.submit(() -&gt; client.runTurn(</span>
+<span class="nc" id="L1169">        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {</span>
+<span class="nc" id="L1170">            var first = executor.submit(() -&gt; client.runTurn(</span>
                     config,
-<span class="nc" id="L1078">                    TestCards.card(&quot;card-1&quot;, &quot;TRELLO-&quot; + firstSession, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1172">                    TestCards.card(&quot;card-1&quot;, &quot;TRELLO-&quot; + firstSession, &quot;Ready for Codex&quot;),</span>
                     firstWorkspace,
                     &quot;Run the concurrent fixture.&quot;,
                     &quot;worker-&quot; + firstSession,
                     listener));
-<span class="nc" id="L1083">            var second = executor.submit(() -&gt; client.runTurn(</span>
+<span class="nc" id="L1177">            var second = executor.submit(() -&gt; client.runTurn(</span>
                     config,
-<span class="nc" id="L1085">                    TestCards.card(&quot;card-2&quot;, &quot;TRELLO-concurrent-rate-limit-second&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1179">                    TestCards.card(&quot;card-2&quot;, &quot;TRELLO-concurrent-rate-limit-second&quot;, &quot;Ready for Codex&quot;),</span>
                     secondWorkspace,
                     &quot;Run the concurrent fixture.&quot;,
                     &quot;worker-concurrent-rate-limit-second&quot;,
                     listener));
-<span class="nc" id="L1090">            results = List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));</span>
+<span class="nc" id="L1184">            results = List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));</span>
         }
 
         // then
-<span class="nc" id="L1094">        assertThat(results).contains(AgentRunResult.ok());</span>
-<span class="nc" id="L1095">        AgentRunResult usageLimit = results.stream()</span>
-<span class="nc bnc" id="L1096" title="All 2 branches missed.">                .filter(result -&gt; result.failureCategory() == AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT)</span>
-<span class="nc" id="L1097">                .findFirst()</span>
-<span class="nc" id="L1098">                .orElseThrow();</span>
-<span class="nc" id="L1099">        assertThat(usageLimit.retryNotBefore()).hasValue(laterPrimaryReset);</span>
-<span class="nc" id="L1100">        assertThat(publishedRateLimits).hasSize(2);</span>
-<span class="nc" id="L1101">        JsonNode latestPublished = publishedRateLimits.getLast();</span>
-<span class="nc" id="L1102">        assertThat(latestPublished.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
-<span class="nc" id="L1103">                .isEqualTo(laterPrimaryReset.getEpochSecond());</span>
-<span class="nc" id="L1104">        assertThat(latestPublished.path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
-<span class="nc" id="L1105">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
-<span class="nc" id="L1106">    }</span>
+<span class="nc" id="L1188">        assertThat(results).contains(AgentRunResult.ok());</span>
+<span class="nc" id="L1189">        AgentRunResult usageLimit = results.stream()</span>
+<span class="nc bnc" id="L1190" title="All 2 branches missed.">                .filter(result -&gt; result.failureCategory() == AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT)</span>
+<span class="nc" id="L1191">                .findFirst()</span>
+<span class="nc" id="L1192">                .orElseThrow();</span>
+<span class="nc" id="L1193">        assertThat(usageLimit.retryNotBefore()).hasValue(laterPrimaryReset);</span>
+<span class="nc" id="L1194">        assertThat(publishedRateLimits).hasSize(2);</span>
+<span class="nc" id="L1195">        JsonNode latestPublished = publishedRateLimits.getLast();</span>
+<span class="nc" id="L1196">        assertThat(latestPublished.path(&quot;primary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L1197">                .isEqualTo(laterPrimaryReset.getEpochSecond());</span>
+<span class="nc" id="L1198">        assertThat(latestPublished.path(&quot;secondary&quot;).path(&quot;resetsAt&quot;).asLong())</span>
+<span class="nc" id="L1199">                .isEqualTo(earlierSecondaryReset.getEpochSecond());</span>
+<span class="nc" id="L1200">    }</span>
 
     @ParameterizedTest(name = &quot;accepted={0}&quot;)
     @ValueSource(booleans = {true, false})
     void usageDeadlineWaitsForAnInFlightRateLimitUpdateDecision(boolean accepted) throws Exception {
         // given
-<span class="nc" id="L1112">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L1113">        Instant reset = now.plusSeconds(120);</span>
-<span class="nc" id="L1114">        String rateLimitSession = &quot;inflight-rate-limit-update&quot;;</span>
-<span class="nc" id="L1115">        String usageSession = &quot;inflight-usage-limit&quot;;</span>
-<span class="nc" id="L1116">        Path acceptanceEntered = tempDir.resolve(&quot;inflight-rate-limit-acceptance-entered&quot;);</span>
-<span class="nc" id="L1117">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1206">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1207">        Instant reset = now.plusSeconds(120);</span>
+<span class="nc" id="L1208">        String rateLimitSession = &quot;inflight-rate-limit-update&quot;;</span>
+<span class="nc" id="L1209">        String usageSession = &quot;inflight-usage-limit&quot;;</span>
+<span class="nc" id="L1210">        Path acceptanceEntered = tempDir.resolve(&quot;inflight-rate-limit-acceptance-entered&quot;);</span>
+<span class="nc" id="L1211">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;inflight-accepted-rate-limit-app-server.sh&quot;,
-<span class="nc" id="L1119">                sessionRoleByWorkspace(rateLimitSession, &quot;rate-limit&quot;, &quot;usage&quot;),</span>
+<span class="nc" id="L1213">                sessionRoleByWorkspace(rateLimitSession, &quot;rate-limit&quot;, &quot;usage&quot;),</span>
                 &quot;&quot;&quot;
                 if [ &quot;$session&quot; = rate-limit ]; then
                   echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__RESET__}}}}'
@@ -1126,127 +1220,127 @@ import org.junit.jupiter.params.provider.ValueSource;
                   echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;Usage is unavailable.&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}}'
                 fi
                 &quot;&quot;&quot;
-<span class="nc" id="L1129">                        .replace(&quot;__ACCEPTANCE_ENTERED__&quot;, acceptanceEntered.toString())</span>
-<span class="nc" id="L1130">                        .replace(&quot;__RESET__&quot;, Long.toString(reset.getEpochSecond())));</span>
-<span class="nc" id="L1131">        EffectiveConfig config = config(Map.of(</span>
+<span class="nc" id="L1223">                        .replace(&quot;__ACCEPTANCE_ENTERED__&quot;, acceptanceEntered.toString())</span>
+<span class="nc" id="L1224">                        .replace(&quot;__RESET__&quot;, Long.toString(reset.getEpochSecond())));</span>
+<span class="nc" id="L1225">        EffectiveConfig config = config(Map.of(</span>
                 &quot;command&quot;,
-<span class="nc" id="L1133">                appServer.toString(),</span>
+<span class="nc" id="L1227">                appServer.toString(),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L1135">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L1229">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L1137">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
-<span class="nc" id="L1138">        var client = new CodexAppServerClient(</span>
-<span class="nc" id="L1139">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
-<span class="nc" id="L1140">        var releaseAcceptance = new CountDownLatch(1);</span>
-<span class="nc" id="L1141">        var usageFailurePublished = new CountDownLatch(1);</span>
-<span class="nc" id="L1142">        AgentEventListener listener = new AgentEventListener() {</span>
+<span class="nc" id="L1231">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L1232">        var client = new CodexAppServerClient(</span>
+<span class="nc" id="L1233">                json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), Clock.fixed(now, ZoneOffset.UTC));</span>
+<span class="nc" id="L1234">        var releaseAcceptance = new CountDownLatch(1);</span>
+<span class="nc" id="L1235">        var usageFailurePublished = new CountDownLatch(1);</span>
+<span class="nc" id="L1236">        AgentEventListener listener = new AgentEventListener() {</span>
             @Override
             public void onEvent(AgentEvent event) {
-<span class="nc bnc" id="L1145" title="All 2 branches missed.">                if (isTypedUsageFailure(event)) {</span>
-<span class="nc" id="L1146">                    usageFailurePublished.countDown();</span>
+<span class="nc bnc" id="L1239" title="All 2 branches missed.">                if (isTypedUsageFailure(event)) {</span>
+<span class="nc" id="L1240">                    usageFailurePublished.countDown();</span>
                 }
-<span class="nc" id="L1148">            }</span>
+<span class="nc" id="L1242">            }</span>
 
             @Override
             public boolean onEventAndReportAccepted(AgentEvent event) {
-<span class="nc bnc" id="L1152" title="All 2 branches missed.">                if (event.event().equals(&quot;account/rateLimits/updated&quot;)) {</span>
-<span class="nc" id="L1153">                    markObserved(acceptanceEntered);</span>
+<span class="nc bnc" id="L1246" title="All 2 branches missed.">                if (event.event().equals(&quot;account/rateLimits/updated&quot;)) {</span>
+<span class="nc" id="L1247">                    markObserved(acceptanceEntered);</span>
                     try {
-<span class="nc" id="L1155">                        assertThat(releaseAcceptance.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L1156">                                .as(&quot;the test releases in-flight rate-limit acceptance within 5 seconds&quot;)</span>
-<span class="nc" id="L1157">                                .isTrue();</span>
-<span class="nc" id="L1158">                    } catch (InterruptedException e) {</span>
-<span class="nc" id="L1159">                        Thread.currentThread().interrupt();</span>
-<span class="nc" id="L1160">                        throw new AssertionError(e);</span>
-<span class="nc" id="L1161">                    }</span>
+<span class="nc" id="L1249">                        assertThat(releaseAcceptance.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1250">                                .as(&quot;the test releases in-flight rate-limit acceptance within 5 seconds&quot;)</span>
+<span class="nc" id="L1251">                                .isTrue();</span>
+<span class="nc" id="L1252">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L1253">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1254">                        throw new AssertionError(e);</span>
+<span class="nc" id="L1255">                    }</span>
                 }
-<span class="nc" id="L1163">                onEvent(event);</span>
-<span class="nc" id="L1164">                return accepted;</span>
+<span class="nc" id="L1257">                onEvent(event);</span>
+<span class="nc" id="L1258">                return accepted;</span>
             }
         };
 
         // when
         AgentRunResult rateLimitRun;
         AgentRunResult usageRun;
-<span class="nc" id="L1171">        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {</span>
-<span class="nc" id="L1172">            Future&lt;AgentRunResult&gt; rateLimitFuture =</span>
-<span class="nc" id="L1173">                    executor.submit(() -&gt; runTurn(client, config, rateLimitSession, listener));</span>
-<span class="nc" id="L1174">            Future&lt;AgentRunResult&gt; usageFuture = executor.submit(() -&gt; runTurn(client, config, usageSession, listener));</span>
+<span class="nc" id="L1265">        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {</span>
+<span class="nc" id="L1266">            Future&lt;AgentRunResult&gt; rateLimitFuture =</span>
+<span class="nc" id="L1267">                    executor.submit(() -&gt; runTurn(client, config, rateLimitSession, listener));</span>
+<span class="nc" id="L1268">            Future&lt;AgentRunResult&gt; usageFuture = executor.submit(() -&gt; runTurn(client, config, usageSession, listener));</span>
             try {
-<span class="nc" id="L1176">                assertThat(usageFailurePublished.await(5, TimeUnit.SECONDS))</span>
-<span class="nc" id="L1177">                        .as(&quot;the usage-limit event is published within 5 seconds&quot;)</span>
-<span class="nc" id="L1178">                        .isTrue();</span>
-<span class="nc" id="L1179">                assertThatThrownBy(() -&gt; usageFuture.get(500, TimeUnit.MILLISECONDS))</span>
-<span class="nc" id="L1180">                        .as(&quot;the usage-limit run remains incomplete while event acceptance is in flight&quot;)</span>
-<span class="nc" id="L1181">                        .isInstanceOf(TimeoutException.class);</span>
+<span class="nc" id="L1270">                assertThat(usageFailurePublished.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L1271">                        .as(&quot;the usage-limit event is published within 5 seconds&quot;)</span>
+<span class="nc" id="L1272">                        .isTrue();</span>
+<span class="nc" id="L1273">                assertThatThrownBy(() -&gt; usageFuture.get(500, TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L1274">                        .as(&quot;the usage-limit run remains incomplete while event acceptance is in flight&quot;)</span>
+<span class="nc" id="L1275">                        .isInstanceOf(TimeoutException.class);</span>
             } finally {
-<span class="nc" id="L1183">                releaseAcceptance.countDown();</span>
+<span class="nc" id="L1277">                releaseAcceptance.countDown();</span>
             }
-<span class="nc" id="L1185">            rateLimitRun = rateLimitFuture.get(10, TimeUnit.SECONDS);</span>
-<span class="nc" id="L1186">            usageRun = usageFuture.get(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1279">            rateLimitRun = rateLimitFuture.get(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L1280">            usageRun = usageFuture.get(10, TimeUnit.SECONDS);</span>
         }
 
         // then
-<span class="nc" id="L1190">        assertThat(rateLimitRun).isEqualTo(AgentRunResult.ok());</span>
-<span class="nc" id="L1191">        assertThat(usageRun.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc bnc" id="L1192" title="All 2 branches missed.">        if (accepted) {</span>
-<span class="nc" id="L1193">            assertThat(usageRun.retryNotBefore()).hasValue(reset);</span>
+<span class="nc" id="L1284">        assertThat(rateLimitRun).isEqualTo(AgentRunResult.ok());</span>
+<span class="nc" id="L1285">        assertThat(usageRun.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc bnc" id="L1286" title="All 2 branches missed.">        if (accepted) {</span>
+<span class="nc" id="L1287">            assertThat(usageRun.retryNotBefore()).hasValue(reset);</span>
         } else {
-<span class="nc" id="L1195">            assertThat(usageRun.retryNotBefore()).isEmpty();</span>
+<span class="nc" id="L1289">            assertThat(usageRun.retryNotBefore()).isEmpty();</span>
         }
-<span class="nc" id="L1197">    }</span>
+<span class="nc" id="L1291">    }</span>
 
     @Test
     void classifiesTerminalUsageLimitWithoutInventingResetFromMessageOrMalformedWindows() throws Exception {
         // given
-<span class="nc" id="L1202">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
-<span class="nc" id="L1203">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1296">        Instant now = Instant.parse(&quot;2026-07-10T12:00:00Z&quot;);</span>
+<span class="nc" id="L1297">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;terminal-usage-limit-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;account/rateLimits/updated&quot;,&quot;params&quot;:{&quot;rateLimits&quot;:{&quot;primary&quot;:{&quot;usedPercent&quot;:100,&quot;resetsAt&quot;:__OVERSIZED_RESET__},&quot;secondary&quot;:{&quot;usedPercent&quot;:2147483648,&quot;resetsAt&quot;:4102444800}}}}'
                 echo '{&quot;method&quot;:&quot;error&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turnId&quot;:&quot;turn-usage&quot;,&quot;willRetry&quot;:false,&quot;error&quot;:{&quot;message&quot;:&quot;Try again tomorrow at a localized time.&quot;,&quot;additionalDetails&quot;:&quot;private provider payload&quot;,&quot;codexErrorInfo&quot;:&quot;usageLimitExceeded&quot;}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L1209">                        .replace(&quot;__OVERSIZED_RESET__&quot;, &quot;9&quot;.repeat(24)));</span>
+<span class="nc" id="L1303">                        .replace(&quot;__OVERSIZED_RESET__&quot;, &quot;9&quot;.repeat(24)));</span>
 
         // when
-<span class="nc" id="L1212">        List&lt;AgentEvent&gt; events = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L1213">        AgentRunResult result =</span>
-<span class="nc" id="L1214">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;terminal-usage&quot;, events::add);</span>
+<span class="nc" id="L1306">        List&lt;AgentEvent&gt; events = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L1307">        AgentRunResult result =</span>
+<span class="nc" id="L1308">                runFailureTurn(appServer, Clock.fixed(now, ZoneOffset.UTC), &quot;terminal-usage&quot;, events::add);</span>
 
         // then
-<span class="nc" id="L1217">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
-<span class="nc" id="L1218">        assertThat(result.reason()).isEqualTo(&quot;turn_failed: Try again tomorrow at a localized time.&quot;);</span>
-<span class="nc" id="L1219">        assertThat(result.reason()).doesNotContain(&quot;private provider payload&quot;, &quot;additionalDetails&quot;);</span>
-<span class="nc" id="L1220">        assertThat(result.retryNotBefore()).isEmpty();</span>
-<span class="nc" id="L1221">        assertThat(events.stream()</span>
-<span class="nc" id="L1222">                        .filter(event -&gt; event.event().equals(&quot;error&quot;))</span>
-<span class="nc" id="L1223">                        .map(AgentEvent::message))</span>
-<span class="nc" id="L1224">                .containsExactly(&quot;Try again tomorrow at a localized time.&quot;)</span>
-<span class="nc" id="L1225">                .allSatisfy(message -&gt; assertThat(message)</span>
-<span class="nc" id="L1226">                        .doesNotContain(&quot;private provider payload&quot;, &quot;additionalDetails&quot;, &quot;codexErrorInfo&quot;));</span>
-<span class="nc" id="L1227">    }</span>
+<span class="nc" id="L1311">        assertThat(result.failureCategory()).isEqualTo(AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT);</span>
+<span class="nc" id="L1312">        assertThat(result.reason()).isEqualTo(&quot;turn_failed: Try again tomorrow at a localized time.&quot;);</span>
+<span class="nc" id="L1313">        assertThat(result.reason()).doesNotContain(&quot;private provider payload&quot;, &quot;additionalDetails&quot;);</span>
+<span class="nc" id="L1314">        assertThat(result.retryNotBefore()).isEmpty();</span>
+<span class="nc" id="L1315">        assertThat(events.stream()</span>
+<span class="nc" id="L1316">                        .filter(event -&gt; event.event().equals(&quot;error&quot;))</span>
+<span class="nc" id="L1317">                        .map(AgentEvent::message))</span>
+<span class="nc" id="L1318">                .containsExactly(&quot;Try again tomorrow at a localized time.&quot;)</span>
+<span class="nc" id="L1319">                .allSatisfy(message -&gt; assertThat(message)</span>
+<span class="nc" id="L1320">                        .doesNotContain(&quot;private provider payload&quot;, &quot;additionalDetails&quot;, &quot;codexErrorInfo&quot;));</span>
+<span class="nc" id="L1321">    }</span>
 
     @Test
     void keepsMessageOnlyUsageWordingGeneric() throws Exception {
         // given
-<span class="nc" id="L1232">        Path appServer = writeUsageFixtureScript(</span>
+<span class="nc" id="L1326">        Path appServer = writeUsageFixtureScript(</span>
                 &quot;message-only-usage-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;failed&quot;,&quot;error&quot;:{&quot;message&quot;:&quot;You have hit your usage limit.&quot;}}}}'
                 &quot;&quot;&quot;);
 
         // when
-<span class="nc" id="L1239">        AgentRunResult result = runFailureTurn(</span>
-<span class="nc" id="L1240">                appServer, Clock.fixed(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;), ZoneOffset.UTC), &quot;message-only-usage&quot;);</span>
+<span class="nc" id="L1333">        AgentRunResult result = runFailureTurn(</span>
+<span class="nc" id="L1334">                appServer, Clock.fixed(Instant.parse(&quot;2026-07-10T12:00:00Z&quot;), ZoneOffset.UTC), &quot;message-only-usage&quot;);</span>
 
         // then
-<span class="nc" id="L1243">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: You have hit your usage limit.&quot;));</span>
-<span class="nc" id="L1244">    }</span>
+<span class="nc" id="L1337">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_failed: You have hit your usage limit.&quot;));</span>
+<span class="nc" id="L1338">    }</span>
 
     @Test
     void failsTurnWhenAppServerEmitsTurnCancellationNotification() throws Exception {
         // given
-<span class="nc" id="L1249">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L1343">        Path appServer = writeExecutableScript(</span>
                 &quot;cancelled-turn-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -1262,28 +1356,28 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L1265">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L1266">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-cancelled&quot;);</span>
-<span class="nc" id="L1267">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L1268">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L1359">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1360">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-cancelled&quot;);</span>
+<span class="nc" id="L1361">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L1362">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L1271">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L1365">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L1273">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-cancelled&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1367">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-cancelled&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do a cancelled turn.&quot;,
                 &quot;worker-cancelled&quot;,
-<span class="nc" id="L1277">                event -&gt; {});</span>
+<span class="nc" id="L1371">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L1280">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_cancelled: operator cancelled&quot;));</span>
-<span class="nc" id="L1281">    }</span>
+<span class="nc" id="L1374">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_cancelled: operator cancelled&quot;));</span>
+<span class="nc" id="L1375">    }</span>
 
     @Test
     void failsTurnWhenAppServerCompletesTurnAsInterrupted() throws Exception {
         // given
-<span class="nc" id="L1286">        Path appServer = writeExecutableScript(</span>
+<span class="nc" id="L1380">        Path appServer = writeExecutableScript(</span>
                 &quot;interrupted-turn-app-server.sh&quot;,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -1299,75 +1393,75 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;);
-<span class="nc" id="L1302">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L1303">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-interrupted&quot;);</span>
-<span class="nc" id="L1304">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L1305">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
+<span class="nc" id="L1396">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1397">        Path workspace = config.workspace().root().resolve(&quot;TRELLO-interrupted&quot;);</span>
+<span class="nc" id="L1398">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L1399">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)));</span>
 
         // when
-<span class="nc" id="L1308">        AgentRunResult result = client.runTurn(</span>
+<span class="nc" id="L1402">        AgentRunResult result = client.runTurn(</span>
                 config,
-<span class="nc" id="L1310">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-interrupted&quot;, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1404">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-interrupted&quot;, &quot;Ready for Codex&quot;),</span>
                 workspace,
                 &quot;Do an interrupted turn.&quot;,
                 &quot;worker-interrupted&quot;,
-<span class="nc" id="L1314">                event -&gt; {});</span>
+<span class="nc" id="L1408">                event -&gt; {});</span>
 
         // then
-<span class="nc" id="L1317">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_interrupted: turn status interrupted&quot;));</span>
-<span class="nc" id="L1318">    }</span>
+<span class="nc" id="L1411">        assertThat(result).isEqualTo(AgentRunResult.fail(&quot;turn_interrupted: turn status interrupted&quot;));</span>
+<span class="nc" id="L1412">    }</span>
 
     private EffectiveConfig config(Path appServer) {
-<span class="nc" id="L1321">        return config(Map.of(</span>
+<span class="nc" id="L1415">        return config(Map.of(</span>
                 &quot;command&quot;,
-<span class="nc" id="L1323">                appServer.toString(),</span>
+<span class="nc" id="L1417">                appServer.toString(),</span>
                 &quot;read_timeout_ms&quot;,
-<span class="nc" id="L1325">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
+<span class="nc" id="L1419">                TEST_PROTOCOL_TIMEOUT_MILLIS,</span>
                 &quot;turn_timeout_ms&quot;,
-<span class="nc" id="L1327">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
+<span class="nc" id="L1421">                TEST_PROTOCOL_TIMEOUT_MILLIS));</span>
     }
 
     private AgentRunResult runFailureTurn(Path appServer, Clock clock, String identifier) throws Exception {
-<span class="nc" id="L1331">        return runFailureTurn(appServer, clock, identifier, event -&gt; {});</span>
+<span class="nc" id="L1425">        return runFailureTurn(appServer, clock, identifier, event -&gt; {});</span>
     }
 
     private AgentRunResult runFailureTurn(Path appServer, Clock clock, String identifier, AgentEventListener listener)
             throws Exception {
-<span class="nc" id="L1336">        EffectiveConfig config = config(appServer);</span>
-<span class="nc" id="L1337">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), clock);</span>
-<span class="nc" id="L1338">        return runTurn(client, config, identifier, listener);</span>
+<span class="nc" id="L1430">        EffectiveConfig config = config(appServer);</span>
+<span class="nc" id="L1431">        var client = new CodexAppServerClient(json, new TrelloHandoffToolHandler(json, new TrelloClient(json)), clock);</span>
+<span class="nc" id="L1432">        return runTurn(client, config, identifier, listener);</span>
     }
 
     private AgentRunResult runTurn(
             CodexAppServerClient client, EffectiveConfig config, String identifier, AgentEventListener listener)
             throws Exception {
-<span class="nc" id="L1344">        return client.runTurn(</span>
+<span class="nc" id="L1438">        return client.runTurn(</span>
                 config,
-<span class="nc" id="L1346">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-&quot; + identifier, &quot;Ready for Codex&quot;),</span>
-<span class="nc" id="L1347">                workspace(identifier),</span>
+<span class="nc" id="L1440">                TestCards.card(&quot;card-1&quot;, &quot;TRELLO-&quot; + identifier, &quot;Ready for Codex&quot;),</span>
+<span class="nc" id="L1441">                workspace(identifier),</span>
                 &quot;Run the failure fixture.&quot;,
                 &quot;worker-&quot; + identifier,
                 listener);
     }
 
     private Path workspace(String identifier) throws IOException {
-<span class="nc" id="L1354">        Path workspace = tempDir.resolve(&quot;workspaces&quot;).resolve(&quot;TRELLO-&quot; + identifier);</span>
-<span class="nc" id="L1355">        Files.createDirectories(workspace);</span>
-<span class="nc" id="L1356">        return workspace;</span>
+<span class="nc" id="L1448">        Path workspace = tempDir.resolve(&quot;workspaces&quot;).resolve(&quot;TRELLO-&quot; + identifier);</span>
+<span class="nc" id="L1449">        Files.createDirectories(workspace);</span>
+<span class="nc" id="L1450">        return workspace;</span>
     }
 
     private void markObserved(Path marker) {
         try {
-<span class="nc" id="L1361">            Files.writeString(marker, &quot;observed&quot;);</span>
-<span class="nc" id="L1362">        } catch (IOException e) {</span>
-<span class="nc" id="L1363">            throw new UncheckedIOException(e);</span>
-<span class="nc" id="L1364">        }</span>
-<span class="nc" id="L1365">    }</span>
+<span class="nc" id="L1455">            Files.writeString(marker, &quot;observed&quot;);</span>
+<span class="nc" id="L1456">        } catch (IOException e) {</span>
+<span class="nc" id="L1457">            throw new UncheckedIOException(e);</span>
+<span class="nc" id="L1458">        }</span>
+<span class="nc" id="L1459">    }</span>
 
     private static boolean isTypedUsageFailure(AgentEvent event) {
-<span class="nc bnc" id="L1368" title="All 2 branches missed.">        return event.event().equals(&quot;turn/completed&quot;)</span>
-<span class="nc bnc" id="L1369" title="All 2 branches missed.">                &amp;&amp; event.payload() != null</span>
-<span class="nc bnc" id="L1370" title="All 2 branches missed.">                &amp;&amp; event.payload().at(&quot;/turn/error/codexErrorInfo&quot;).asText().equals(&quot;usageLimitExceeded&quot;);</span>
+<span class="nc bnc" id="L1462" title="All 2 branches missed.">        return event.event().equals(&quot;turn/completed&quot;)</span>
+<span class="nc bnc" id="L1463" title="All 2 branches missed.">                &amp;&amp; event.payload() != null</span>
+<span class="nc bnc" id="L1464" title="All 2 branches missed.">                &amp;&amp; event.payload().at(&quot;/turn/error/codexErrorInfo&quot;).asText().equals(&quot;usageLimitExceeded&quot;);</span>
     }
 
     /// Shell setup that sets `session` from the fixture process's working directory: `role` for the workspace of
@@ -1376,36 +1470,36 @@ import org.junit.jupiter.params.provider.ValueSource;
     /// success when `mkdir(2)` fails but another process has created the directory by then.
     private String sessionRoleByWorkspace(String workspaceIdentifier, String role, String otherRole)
             throws IOException {
-<span class="nc" id="L1379">        return &quot;&quot;&quot;</span>
+<span class="nc" id="L1473">        return &quot;&quot;&quot;</span>
                 if [ &quot;${PWD##*/}&quot; = '__ROLE_WORKSPACE__' ]; then
                   session=__MATCHING_ROLE__
                 else
                   session=__OTHER_ROLE__
                 fi
                 &quot;&quot;&quot;
-<span class="nc" id="L1386">                .replace(</span>
+<span class="nc" id="L1480">                .replace(</span>
                         &quot;__ROLE_WORKSPACE__&quot;,
-<span class="nc" id="L1388">                        workspace(workspaceIdentifier).getFileName().toString())</span>
-<span class="nc" id="L1389">                .replace(&quot;__MATCHING_ROLE__&quot;, role)</span>
-<span class="nc" id="L1390">                .replace(&quot;__OTHER_ROLE__&quot;, otherRole);</span>
+<span class="nc" id="L1482">                        workspace(workspaceIdentifier).getFileName().toString())</span>
+<span class="nc" id="L1483">                .replace(&quot;__MATCHING_ROLE__&quot;, role)</span>
+<span class="nc" id="L1484">                .replace(&quot;__OTHER_ROLE__&quot;, otherRole);</span>
     }
 
     private Path writeRateLimitNotificationScript(String fileName, String notifications) throws Exception {
-<span class="nc" id="L1394">        return writeUsageFixtureScript(</span>
+<span class="nc" id="L1488">        return writeUsageFixtureScript(</span>
                 fileName,
                 &quot;&quot;&quot;
                 __RATE_LIMIT_NOTIFICATIONS__
                 echo '{&quot;method&quot;:&quot;turn/completed&quot;,&quot;params&quot;:{&quot;threadId&quot;:&quot;thread-usage&quot;,&quot;turn&quot;:{&quot;id&quot;:&quot;turn-usage&quot;,&quot;items&quot;:[],&quot;status&quot;:&quot;completed&quot;,&quot;error&quot;:null}}}'
                 &quot;&quot;&quot;
-<span class="nc" id="L1400">                        .replace(&quot;__RATE_LIMIT_NOTIFICATIONS__&quot;, notifications));</span>
+<span class="nc" id="L1494">                        .replace(&quot;__RATE_LIMIT_NOTIFICATIONS__&quot;, notifications));</span>
     }
 
     private Path writeUsageFixtureScript(String fileName, String turnResponses) throws Exception {
-<span class="nc" id="L1404">        return writeUsageFixtureScript(fileName, &quot;&quot;, turnResponses);</span>
+<span class="nc" id="L1498">        return writeUsageFixtureScript(fileName, &quot;&quot;, turnResponses);</span>
     }
 
     private Path writeUsageFixtureScript(String fileName, String setup, String turnResponses) throws Exception {
-<span class="nc" id="L1408">        return writeExecutableScript(</span>
+<span class="nc" id="L1502">        return writeExecutableScript(</span>
                 fileName,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -1421,38 +1515,38 @@ import org.junit.jupiter.params.provider.ValueSource;
                   esac
                 done
                 &quot;&quot;&quot;
-<span class="nc" id="L1424">                        .replace(&quot;__SETUP__&quot;, setup)</span>
-<span class="nc" id="L1425">                        .replace(&quot;__TURN_RESPONSES__&quot;, turnResponses));</span>
+<span class="nc" id="L1518">                        .replace(&quot;__SETUP__&quot;, setup)</span>
+<span class="nc" id="L1519">                        .replace(&quot;__TURN_RESPONSES__&quot;, turnResponses));</span>
     }
 
     private Path writeExecutableScript(String fileName, String content) throws Exception {
-<span class="nc" id="L1429">        Path script = tempDir.resolve(fileName);</span>
-<span class="nc" id="L1430">        Files.writeString(script, content);</span>
-<span class="nc" id="L1431">        script.toFile().setExecutable(true);</span>
-<span class="nc" id="L1432">        return script;</span>
+<span class="nc" id="L1523">        Path script = tempDir.resolve(fileName);</span>
+<span class="nc" id="L1524">        Files.writeString(script, content);</span>
+<span class="nc" id="L1525">        script.toFile().setExecutable(true);</span>
+<span class="nc" id="L1526">        return script;</span>
     }
 
     private List&lt;JsonNode&gt; capturedRequests(Path capture) throws Exception {
-<span class="nc" id="L1436">        return Files.readAllLines(capture).stream().map(this::readJsonLine).toList();</span>
+<span class="nc" id="L1530">        return Files.readAllLines(capture).stream().map(this::readJsonLine).toList();</span>
     }
 
     private JsonNode readJsonLine(String line) {
         try {
-<span class="nc" id="L1441">            return json.readTree(line);</span>
-<span class="nc" id="L1442">        } catch (Exception e) {</span>
-<span class="nc" id="L1443">            throw new IllegalStateException(e);</span>
+<span class="nc" id="L1535">            return json.readTree(line);</span>
+<span class="nc" id="L1536">        } catch (Exception e) {</span>
+<span class="nc" id="L1537">            throw new IllegalStateException(e);</span>
         }
     }
 
     private EffectiveConfig config(Map&lt;String, Object&gt; codexConfig) {
-<span class="nc" id="L1448">        return new ConfigResolver()</span>
-<span class="nc" id="L1449">                .resolve(new WorkflowDefinition(</span>
-<span class="nc" id="L1450">                        tempDir.resolve(&quot;WORKFLOW.md&quot;),</span>
-<span class="nc" id="L1451">                        Map.of(</span>
+<span class="nc" id="L1542">        return new ConfigResolver()</span>
+<span class="nc" id="L1543">                .resolve(new WorkflowDefinition(</span>
+<span class="nc" id="L1544">                        tempDir.resolve(&quot;WORKFLOW.md&quot;),</span>
+<span class="nc" id="L1545">                        Map.of(</span>
                                 &quot;tracker&quot;,
-<span class="nc" id="L1453">                                Map.of(&quot;kind&quot;, &quot;trello&quot;, &quot;api_key&quot;, &quot;key&quot;, &quot;api_token&quot;, &quot;token&quot;, &quot;board_id&quot;, &quot;board&quot;),</span>
+<span class="nc" id="L1547">                                Map.of(&quot;kind&quot;, &quot;trello&quot;, &quot;api_key&quot;, &quot;key&quot;, &quot;api_token&quot;, &quot;token&quot;, &quot;board_id&quot;, &quot;board&quot;),</span>
                                 &quot;workspace&quot;,
-<span class="nc" id="L1455">                                Map.of(&quot;root&quot;, tempDir.resolve(&quot;workspaces&quot;).toString()),</span>
+<span class="nc" id="L1549">                                Map.of(&quot;root&quot;, tempDir.resolve(&quot;workspaces&quot;).toString()),</span>
                                 &quot;codex&quot;,
                                 codexConfig),
                         &quot;&quot;));

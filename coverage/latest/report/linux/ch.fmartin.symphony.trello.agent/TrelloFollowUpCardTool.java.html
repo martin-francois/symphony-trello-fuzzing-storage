@@ -7,7 +7,10 @@ import ch.fmartin.symphony.trello.config.FollowUpRelationship;
 import ch.fmartin.symphony.trello.config.StateNames;
 import ch.fmartin.symphony.trello.domain.Card;
 import ch.fmartin.symphony.trello.tracker.SymphonyCommentFooter;
+import ch.fmartin.symphony.trello.tracker.TrelloCardText;
+import ch.fmartin.symphony.trello.tracker.TrelloCardWrites;
 import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.tracker.TrelloMarkdown;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.time.Clock;
 import java.time.Duration;
@@ -19,7 +22,6 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
@@ -38,11 +40,11 @@ final class TrelloFollowUpCardTool {
     static final String FOLLOW_UP_ATTACHMENT_PREFIX = &quot;Follow-up: &quot;;
     static final String SOURCE_ATTACHMENT_PREFIX = &quot;Follow-up of: &quot;;
     static final String ACCEPTANCE_CRITERIA_HEADING = &quot;## Acceptance criteria&quot;;
-    static final int MAX_TITLE_CODE_POINTS = 200;
-    static final int MAX_DESCRIPTION_CODE_POINTS = 4000;
+    static final int MAX_TITLE_CODE_POINTS = TrelloCardText.MAX_TITLE_CODE_POINTS;
+    static final int MAX_DESCRIPTION_CODE_POINTS = TrelloCardText.MAX_DESCRIPTION_CODE_POINTS;
     static final int MAX_ACCEPTANCE_CRITERIA = 10;
     static final int MAX_ACCEPTANCE_CRITERION_CODE_POINTS = 300;
-<span class="fc" id="L45">    static final Duration RATE_WINDOW = Duration.ofHours(1);</span>
+<span class="fc" id="L47">    static final Duration RATE_WINDOW = Duration.ofHours(1);</span>
     // Trello's POST /labels needs a color; sky is neutral and differs from the default priority colors.
     static final String NEW_LABEL_COLOR = &quot;sky&quot;;
     static final String STATUS_CREATED = &quot;follow_up_card_created&quot;;
@@ -50,27 +52,27 @@ final class TrelloFollowUpCardTool {
     // Card roles named in prerequisite checklist conflict messages.
     static final String CURRENT_CARD_ROLE = &quot;current card&quot;;
     static final String FOLLOW_UP_CARD_ROLE = &quot;follow-up card&quot;;
-<span class="fc" id="L53">    private static final Set&lt;String&gt; ARGUMENT_NAMES =</span>
-<span class="fc" id="L54">            Set.of(&quot;title&quot;, &quot;description&quot;, &quot;acceptance_criteria&quot;, &quot;relationship&quot;);</span>
+<span class="fc" id="L55">    private static final Set&lt;String&gt; ARGUMENT_NAMES =</span>
+<span class="fc" id="L56">            Set.of(&quot;title&quot;, &quot;description&quot;, &quot;acceptance_criteria&quot;, &quot;relationship&quot;);</span>
 
     private final TrelloClient trello;
     private final Clock clock;
     // Creation times, oldest first: the hourly window drops entries from the front as they expire.
-<span class="fc" id="L59">    private final Deque&lt;Instant&gt; recentCreations = new ArrayDeque&lt;&gt;();</span>
+<span class="fc" id="L61">    private final Deque&lt;Instant&gt; recentCreations = new ArrayDeque&lt;&gt;();</span>
     // One lock for the whole process: the duplicate check, the limits, and the create must not
     // interleave between two sessions, and follow-up creation is rare enough to serialize.
-<span class="fc" id="L62">    private final Object creationLock = new Object();</span>
+<span class="fc" id="L64">    private final Object creationLock = new Object();</span>
 
-<span class="fc" id="L64">    TrelloFollowUpCardTool(TrelloClient trello, Clock clock) {</span>
-<span class="fc" id="L65">        this.trello = trello;</span>
-<span class="fc" id="L66">        this.clock = clock;</span>
-<span class="fc" id="L67">    }</span>
+<span class="fc" id="L66">    TrelloFollowUpCardTool(TrelloClient trello, Clock clock) {</span>
+<span class="fc" id="L67">        this.trello = trello;</span>
+<span class="fc" id="L68">        this.clock = clock;</span>
+<span class="fc" id="L69">    }</span>
 
     /// Links are part of every follow-up, so the tool is offered only when it can attach them.
     static boolean advertised(EffectiveConfig config) {
-<span class="nc bnc" id="L71" title="All 2 branches missed.">        return config.trelloTools().followUpCards().enabled()</span>
-<span class="nc bnc" id="L72" title="All 2 branches missed.">                &amp;&amp; config.trelloTools().allowUrlAttachments()</span>
-<span class="nc bnc" id="L73" title="All 2 branches missed.">                &amp;&amp; config.trelloTools().allowComments();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        return config.trelloTools().followUpCards().enabled()</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">                &amp;&amp; config.trelloTools().allowUrlAttachments()</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">                &amp;&amp; config.trelloTools().allowComments();</span>
     }
 
     Outcome handle(
@@ -78,43 +80,41 @@ final class TrelloFollowUpCardTool {
             Card card,
             JsonNode arguments,
             Function&lt;String, Optional&lt;TrelloClient.BoardList&gt;&gt; allowedMoveTarget) {
-<span class="nc" id="L81">        EffectiveConfig.FollowUpCardsConfig policy = config.trelloTools().followUpCards();</span>
-<span class="nc bnc" id="L82" title="All 2 branches missed.">        if (!policy.enabled()) {</span>
-<span class="nc" id="L83">            return Outcome.failure(</span>
+<span class="nc" id="L83">        EffectiveConfig.FollowUpCardsConfig policy = config.trelloTools().followUpCards();</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (!policy.enabled()) {</span>
+<span class="nc" id="L85">            return Outcome.failure(</span>
                     &quot;trello_follow_up_cards_disabled&quot;,
                     &quot;Follow-up cards are disabled by trello_tools.follow_up_cards.enabled.&quot;);
         }
-<span class="nc bnc" id="L87" title="All 2 branches missed.">        if (!config.trelloTools().allowUrlAttachments()) {</span>
-<span class="nc" id="L88">            return Outcome.failure(</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (!config.trelloTools().allowUrlAttachments()) {</span>
+<span class="nc" id="L90">            return Outcome.failure(</span>
                     &quot;trello_url_attachments_disabled&quot;,
                     &quot;Follow-up cards link both cards with URL attachments, which trello_tools.allow_url_attachments disables.&quot;);
         }
-<span class="nc bnc" id="L92" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
-<span class="nc" id="L93">            return Outcome.failure(</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L95">            return Outcome.failure(</span>
                     &quot;trello_comments_disabled&quot;,
                     &quot;Follow-up cards need trello_tools.allow_comments to record the managed workpad section.&quot;);
         }
         Request request;
         try {
-<span class="nc" id="L99">            request = Request.parse(arguments);</span>
-<span class="nc" id="L100">        } catch (IllegalArgumentException e) {</span>
-<span class="nc" id="L101">            return Outcome.failure(&quot;invalid_follow_up_card&quot;, e.getMessage());</span>
-<span class="nc" id="L102">        }</span>
-<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (!FollowUpCardMetadata.validShortLink(card.shortLink())) {</span>
-<span class="nc" id="L104">            return Outcome.failure(</span>
+<span class="nc" id="L101">            request = Request.parse(arguments);</span>
+<span class="nc" id="L102">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L103">            return Outcome.failure(&quot;invalid_follow_up_card&quot;, e.getMessage());</span>
+<span class="nc" id="L104">        }</span>
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (!FollowUpCardMetadata.validShortLink(card.shortLink())) {</span>
+<span class="nc" id="L106">            return Outcome.failure(</span>
                     &quot;trello_follow_up_missing_card_link&quot;, &quot;The current Trello card has no usable short link.&quot;);
         }
-<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (request.relationship().prerequisiteSide() != FollowUpRelationship.PrerequisiteSide.NONE</span>
-<span class="nc bnc" id="L108" title="All 2 branches missed.">                &amp;&amp; !config.trelloTools().allowChecklists()) {</span>
-<span class="nc" id="L109">            return Outcome.failure(</span>
+<span class="nc bnc" id="L109" title="All 2 branches missed.">        if (request.relationship().prerequisiteSide() != FollowUpRelationship.PrerequisiteSide.NONE</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                &amp;&amp; !config.trelloTools().allowChecklists()) {</span>
+<span class="nc" id="L111">            return Outcome.failure(</span>
                     &quot;trello_checklists_disabled&quot;,
                     &quot;Prerequisite follow-ups use the Must finish first checklist, which trello_tools.allow_checklists disables.&quot;);
         }
 
-<span class="nc" id="L114">        synchronized (creationLock) {</span>
-<span class="nc" id="L115">            List&lt;TrelloClient.BoardList&gt; openLists = trello.fetchBoardLists(config).stream()</span>
-<span class="nc bnc" id="L116" title="All 2 branches missed.">                    .filter(list -&gt; !list.closed())</span>
-<span class="nc" id="L117">                    .toList();</span>
+<span class="nc" id="L116">        synchronized (creationLock) {</span>
+<span class="nc" id="L117">            List&lt;TrelloClient.BoardList&gt; openLists = TrelloCardWrites.openLists(trello.fetchBoardLists(config));</span>
 <span class="nc" id="L118">            Checked&lt;TrelloClient.BoardList&gt; destination = destinationList(config, policy, openLists);</span>
 <span class="nc" id="L119">            Checked&lt;Optional&lt;TrelloClient.BoardList&gt;&gt; blockedTarget =</span>
 <span class="nc" id="L120">                    blockedTarget(config, policy, request.relationship(), allowedMoveTarget);</span>
@@ -371,29 +371,26 @@ final class TrelloFollowUpCardTool {
             EffectiveConfig config,
             EffectiveConfig.FollowUpCardsConfig policy,
             List&lt;TrelloClient.BoardList&gt; openLists) {
-<span class="nc" id="L374">        String normalizedName = StateNames.normalize(policy.listName());</span>
-<span class="nc" id="L375">        List&lt;TrelloClient.BoardList&gt; matches = openLists.stream()</span>
-<span class="nc bnc" id="L376" title="All 2 branches missed.">                .filter(list -&gt; policy.listId() == null</span>
-<span class="nc" id="L377">                        ? StateNames.normalize(list.name()).equals(normalizedName)</span>
-<span class="nc" id="L378">                        : list.id().equals(policy.listId()))</span>
-<span class="nc" id="L379">                .toList();</span>
-<span class="nc bnc" id="L380" title="All 2 branches missed.">        if (matches.size() &gt; 1) {</span>
-<span class="nc" id="L381">            return Checked.failed(</span>
-                    &quot;trello_follow_up_list_ambiguous&quot;,
-                    &quot;The follow-up list name matches more than one open Trello list. Rename the duplicates or set trello_tools.follow_up_cards.list_id.&quot;);
-        }
-<span class="nc bnc" id="L385" title="All 2 branches missed.">        if (matches.isEmpty()) {</span>
-<span class="nc" id="L386">            return Checked.failed(</span>
-                    &quot;trello_follow_up_list_missing&quot;,
-                    &quot;The configured follow-up list is not open on the configured board.&quot;);
-        }
-<span class="nc" id="L390">        TrelloClient.BoardList list = matches.getFirst();</span>
-<span class="nc bnc" id="L391" title="All 4 branches missed.">        if (TrelloClient.isActiveList(config, list) || TrelloClient.isTerminalList(config, list)) {</span>
-<span class="nc" id="L392">            return Checked.failed(</span>
+<span class="nc bnc" id="L374" title="All 3 branches missed.">        return switch (TrelloCardWrites.matchOpenList(openLists, policy.listId(), policy.listName())) {</span>
+<span class="nc" id="L375">            case TrelloCardWrites.OpenListMatch.Found found -&gt; intakeList(config, found.list());</span>
+            case TrelloCardWrites.OpenListMatch.Missing _ -&gt;
+<span class="nc" id="L377">                Checked.failed(</span>
+                        &quot;trello_follow_up_list_missing&quot;,
+                        &quot;The configured follow-up list is not open on the configured board.&quot;);
+            case TrelloCardWrites.OpenListMatch.Ambiguous _ -&gt;
+<span class="nc" id="L381">                Checked.failed(</span>
+                        &quot;trello_follow_up_list_ambiguous&quot;,
+                        &quot;The follow-up list name matches more than one open Trello list. Rename the duplicates or set trello_tools.follow_up_cards.list_id.&quot;);
+        };
+    }
+
+    private static Checked&lt;TrelloClient.BoardList&gt; intakeList(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="nc bnc" id="L388" title="All 4 branches missed.">        if (TrelloClient.isActiveList(config, list) || TrelloClient.isTerminalList(config, list)) {</span>
+<span class="nc" id="L389">            return Checked.failed(</span>
                     &quot;trello_follow_up_list_not_allowed&quot;,
                     &quot;The follow-up list must not be an active or terminal list, so a human decides when follow-up work starts.&quot;);
         }
-<span class="nc" id="L396">        return Checked.of(list);</span>
+<span class="nc" id="L393">        return Checked.of(list);</span>
     }
 
     private static Checked&lt;Optional&lt;TrelloClient.BoardList&gt;&gt; blockedTarget(
@@ -401,178 +398,149 @@ final class TrelloFollowUpCardTool {
             EffectiveConfig.FollowUpCardsConfig policy,
             FollowUpRelationship relationship,
             Function&lt;String, Optional&lt;TrelloClient.BoardList&gt;&gt; allowedMoveTarget) {
-<span class="nc bnc" id="L404" title="All 4 branches missed.">        if (!relationship.sourceCardWaits() || !policy.moveCurrentCardToBlocked()) {</span>
-<span class="nc" id="L405">            return Checked.of(Optional.empty());</span>
+<span class="nc bnc" id="L401" title="All 4 branches missed.">        if (!relationship.sourceCardWaits() || !policy.moveCurrentCardToBlocked()) {</span>
+<span class="nc" id="L402">            return Checked.of(Optional.empty());</span>
         }
-<span class="nc" id="L407">        String blockedState = config.tracker().blockedState();</span>
-<span class="nc bnc" id="L408" title="All 4 branches missed.">        if (blockedState == null || blockedState.isBlank()) {</span>
-<span class="nc" id="L409">            return Checked.failed(</span>
+<span class="nc" id="L404">        String blockedState = config.tracker().blockedState();</span>
+<span class="nc bnc" id="L405" title="All 4 branches missed.">        if (blockedState == null || blockedState.isBlank()) {</span>
+<span class="nc" id="L406">            return Checked.failed(</span>
                     &quot;trello_follow_up_blocked_list_missing&quot;,
                     &quot;trello_tools.follow_up_cards.move_current_card_to_blocked needs tracker.blocked_state.&quot;);
         }
-<span class="nc bnc" id="L413" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
-<span class="nc" id="L414">            return Checked.failed(</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (!config.trelloTools().allowComments()) {</span>
+<span class="nc" id="L411">            return Checked.failed(</span>
                     &quot;trello_comments_disabled&quot;,
                     &quot;Moving the current card to the blocked list needs a handoff comment, which trello_tools.allow_comments disables.&quot;);
         }
-<span class="nc" id="L418">        return allowedMoveTarget</span>
-<span class="nc" id="L419">                .apply(blockedState)</span>
-<span class="nc" id="L420">                .map(target -&gt; Checked.of(Optional.of(target)))</span>
-<span class="nc" id="L421">                .orElseGet(() -&gt; Checked.failed(</span>
+<span class="nc" id="L415">        return allowedMoveTarget</span>
+<span class="nc" id="L416">                .apply(blockedState)</span>
+<span class="nc" id="L417">                .map(target -&gt; Checked.of(Optional.of(target)))</span>
+<span class="nc" id="L418">                .orElseGet(() -&gt; Checked.failed(</span>
                         &quot;trello_move_not_allowed&quot;,
                         &quot;The blocked list must be open and included in the configured Trello move allowlist.&quot;));
     }
 
     private void pruneRateWindow(Instant now) {
-<span class="nc" id="L427">        Instant windowStart = now.minus(RATE_WINDOW);</span>
-<span class="nc bnc" id="L428" title="All 4 branches missed.">        while (!recentCreations.isEmpty() &amp;&amp; !recentCreations.peekFirst().isAfter(windowStart)) {</span>
-<span class="nc" id="L429">            recentCreations.removeFirst();</span>
+<span class="nc" id="L424">        Instant windowStart = now.minus(RATE_WINDOW);</span>
+<span class="nc bnc" id="L425" title="All 4 branches missed.">        while (!recentCreations.isEmpty() &amp;&amp; !recentCreations.peekFirst().isAfter(windowStart)) {</span>
+<span class="nc" id="L426">            recentCreations.removeFirst();</span>
         }
-<span class="nc" id="L431">    }</span>
+<span class="nc" id="L428">    }</span>
 
     static String blockedHandoffText(String followUpUrl) {
-<span class="nc" id="L434">        return &quot;Blocked by [the follow-up card](&quot; + followUpUrl + &quot;): it must finish first. Symphony added it to the &quot;</span>
+<span class="nc" id="L431">        return &quot;Blocked by [the follow-up card](&quot; + followUpUrl + &quot;): it must finish first. Symphony added it to the &quot;</span>
                 + PREREQUISITE_CHECKLIST_NAME
                 + &quot; checklist on this card, and Symphony dispatches this card again once that card is done and&quot;
                 + &quot; the card is back in an active list.&quot;;
     }
 
     private static String oneLine(@Nullable String text) {
-<span class="nc bnc" id="L441" title="All 2 branches missed.">        if (text == null) {</span>
-<span class="nc" id="L442">            return &quot;&quot;;</span>
+<span class="nc bnc" id="L438" title="All 2 branches missed.">        if (text == null) {</span>
+<span class="nc" id="L439">            return &quot;&quot;;</span>
         }
-<span class="nc" id="L444">        var line = new StringBuilder();</span>
-<span class="nc bnc" id="L445" title="All 2 branches missed.">        text.codePoints().forEach(codePoint -&gt; line.appendCodePoint(lineBreakOrControl(codePoint) ? ' ' : codePoint));</span>
-<span class="nc" id="L446">        return line.toString().strip();</span>
-    }
-
-    private static boolean lineBreakOrControl(int codePoint) {
-<span class="nc" id="L450">        int type = Character.getType(codePoint);</span>
-<span class="nc bnc" id="L451" title="All 6 branches missed.">        return Character.isISOControl(codePoint)</span>
-                || type == Character.LINE_SEPARATOR
-                || type == Character.PARAGRAPH_SEPARATOR;
+<span class="nc" id="L441">        var line = new StringBuilder();</span>
+<span class="nc" id="L442">        text.codePoints()</span>
+<span class="nc" id="L443">                .forEach(codePoint -&gt;</span>
+<span class="nc bnc" id="L444" title="All 2 branches missed.">                        line.appendCodePoint(TrelloCardText.lineBreakOrControl(codePoint) ? ' ' : codePoint));</span>
+<span class="nc" id="L445">        return line.toString().strip();</span>
     }
 
     private static String truncate(String text, int maxCodePoints) {
-<span class="nc bnc" id="L457" title="All 2 branches missed.">        if (text.codePointCount(0, text.length()) &lt;= maxCodePoints) {</span>
-<span class="nc" id="L458">            return text;</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">        if (text.codePointCount(0, text.length()) &lt;= maxCodePoints) {</span>
+<span class="nc" id="L450">            return text;</span>
         }
-<span class="nc" id="L460">        return text.substring(0, text.offsetByCodePoints(0, maxCodePoints)).stripTrailing();</span>
+<span class="nc" id="L452">        return text.substring(0, text.offsetByCodePoints(0, maxCodePoints)).stripTrailing();</span>
     }
 
     /// Validated tool arguments. Every text value is checked before any Trello request.
-<span class="nc" id="L464">    record Request(String title, String descriptionBody, FollowUpRelationship relationship) {</span>
+<span class="nc" id="L456">    record Request(String title, String descriptionBody, FollowUpRelationship relationship) {</span>
         static Request parse(JsonNode arguments) {
-<span class="nc" id="L466">            checkArgument(arguments.isObject(), &quot;arguments must be an object&quot;);</span>
-<span class="nc" id="L467">            arguments</span>
-<span class="nc" id="L468">                    .fieldNames()</span>
-<span class="nc" id="L469">                    .forEachRemaining(name -&gt; checkArgument(</span>
-<span class="nc" id="L470">                            ARGUMENT_NAMES.contains(name),</span>
+<span class="nc" id="L458">            checkArgument(arguments.isObject(), &quot;arguments must be an object&quot;);</span>
+<span class="nc" id="L459">            arguments</span>
+<span class="nc" id="L460">                    .fieldNames()</span>
+<span class="nc" id="L461">                    .forEachRemaining(name -&gt; checkArgument(</span>
+<span class="nc" id="L462">                            ARGUMENT_NAMES.contains(name),</span>
                             &quot;Unsupported argument %s; Symphony chooses the board, list, labels, and cards&quot;,
                             name));
-<span class="nc" id="L473">            String title = requiredLine(arguments, &quot;title&quot;, MAX_TITLE_CODE_POINTS);</span>
-<span class="nc" id="L474">            String description = requiredText(arguments, &quot;description&quot;).replace(&quot;\r\n&quot;, &quot;\n&quot;);</span>
-<span class="nc" id="L475">            checkArgument(</span>
-<span class="nc bnc" id="L476" title="All 2 branches missed.">                    description.codePointCount(0, description.length()) &lt;= MAX_DESCRIPTION_CODE_POINTS,</span>
-                    &quot;description must be at most %s characters&quot;,
-                    MAX_DESCRIPTION_CODE_POINTS);
-<span class="nc" id="L479">            checkArgument(</span>
-                    description
-<span class="nc" id="L481">                            .codePoints()</span>
-<span class="nc" id="L482">                            .noneMatch(codePoint -&gt;</span>
-<span class="nc bnc" id="L483" title="All 6 branches missed.">                                    codePoint != '\n' &amp;&amp; codePoint != '\t' &amp;&amp; lineBreakOrControl(codePoint)),</span>
-                    &quot;description must not contain control characters&quot;);
-<span class="nc" id="L485">            checkArgument(</span>
-<span class="nc" id="L486">                    description.lines().map(String::strip).noneMatch(SymphonyCommentFooter::hasAttributionPrefix),</span>
-                    &quot;cannot accept description: omit the attribution footer; Symphony writes it&quot;);
-<span class="nc" id="L488">            List&lt;String&gt; criteria = acceptanceCriteria(arguments);</span>
-<span class="nc" id="L489">            FollowUpRelationship relationship = relationship(arguments);</span>
-<span class="nc" id="L490">            var body = new StringBuilder(description.strip());</span>
-<span class="nc" id="L491">            body.append(&quot;\n\n&quot;).append(ACCEPTANCE_CRITERIA_HEADING).append(&quot;\n\n&quot;);</span>
-<span class="nc" id="L492">            criteria.forEach(criterion -&gt; body.append(&quot;- &quot;).append(criterion).append('\n'));</span>
-<span class="nc" id="L493">            return new Request(title, TrelloMarkdown.escapeLeadingHashtags(body.toString()), relationship);</span>
+<span class="nc" id="L465">            String title = requiredLine(arguments, &quot;title&quot;, MAX_TITLE_CODE_POINTS);</span>
+<span class="nc" id="L466">            String description = TrelloCardText.description(requiredText(arguments, &quot;description&quot;));</span>
+<span class="nc" id="L467">            List&lt;String&gt; criteria = acceptanceCriteria(arguments);</span>
+<span class="nc" id="L468">            FollowUpRelationship relationship = relationship(arguments);</span>
+<span class="nc" id="L469">            var body = new StringBuilder(description.strip());</span>
+<span class="nc" id="L470">            body.append(&quot;\n\n&quot;).append(ACCEPTANCE_CRITERIA_HEADING).append(&quot;\n\n&quot;);</span>
+<span class="nc" id="L471">            criteria.forEach(criterion -&gt; body.append(&quot;- &quot;).append(criterion).append('\n'));</span>
+<span class="nc" id="L472">            return new Request(title, TrelloMarkdown.escapeLeadingHashtags(body.toString()), relationship);</span>
         }
 
         private static List&lt;String&gt; acceptanceCriteria(JsonNode arguments) {
-<span class="nc" id="L497">            JsonNode node = arguments.path(&quot;acceptance_criteria&quot;);</span>
-<span class="nc" id="L498">            checkArgument(node.isArray(), &quot;acceptance_criteria must be an array of strings&quot;);</span>
-<span class="nc" id="L499">            checkArgument(</span>
-<span class="nc bnc" id="L500" title="All 4 branches missed.">                    !node.isEmpty() &amp;&amp; node.size() &lt;= MAX_ACCEPTANCE_CRITERIA,</span>
+<span class="nc" id="L476">            JsonNode node = arguments.path(&quot;acceptance_criteria&quot;);</span>
+<span class="nc" id="L477">            checkArgument(node.isArray(), &quot;acceptance_criteria must be an array of strings&quot;);</span>
+<span class="nc" id="L478">            checkArgument(</span>
+<span class="nc bnc" id="L479" title="All 4 branches missed.">                    !node.isEmpty() &amp;&amp; node.size() &lt;= MAX_ACCEPTANCE_CRITERIA,</span>
                     &quot;acceptance_criteria must contain between 1 and %s items&quot;,
                     MAX_ACCEPTANCE_CRITERIA);
-<span class="nc" id="L503">            List&lt;String&gt; criteria = new ArrayList&lt;&gt;();</span>
-<span class="nc bnc" id="L504" title="All 2 branches missed.">            for (JsonNode item : node) {</span>
-<span class="nc" id="L505">                checkArgument(item.isTextual(), &quot;acceptance_criteria items must be strings&quot;);</span>
-<span class="nc" id="L506">                criteria.add(</span>
-<span class="nc" id="L507">                        validLine(item.textValue(), &quot;acceptance_criteria item&quot;, MAX_ACCEPTANCE_CRITERION_CODE_POINTS));</span>
-<span class="nc" id="L508">            }</span>
-<span class="nc" id="L509">            return List.copyOf(criteria);</span>
+<span class="nc" id="L482">            List&lt;String&gt; criteria = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">            for (JsonNode item : node) {</span>
+<span class="nc" id="L484">                checkArgument(item.isTextual(), &quot;acceptance_criteria items must be strings&quot;);</span>
+<span class="nc" id="L485">                criteria.add(</span>
+<span class="nc" id="L486">                        validLine(item.textValue(), &quot;acceptance_criteria item&quot;, MAX_ACCEPTANCE_CRITERION_CODE_POINTS));</span>
+<span class="nc" id="L487">            }</span>
+<span class="nc" id="L488">            return List.copyOf(criteria);</span>
         }
 
         private static FollowUpRelationship relationship(JsonNode arguments) {
-<span class="nc" id="L513">            JsonNode node = arguments.path(&quot;relationship&quot;);</span>
-<span class="nc bnc" id="L514" title="All 4 branches missed.">            if (node.isMissingNode() || node.isNull()) {</span>
-<span class="nc" id="L515">                return FollowUpRelationship.RELATED;</span>
+<span class="nc" id="L492">            JsonNode node = arguments.path(&quot;relationship&quot;);</span>
+<span class="nc bnc" id="L493" title="All 4 branches missed.">            if (node.isMissingNode() || node.isNull()) {</span>
+<span class="nc" id="L494">                return FollowUpRelationship.RELATED;</span>
             }
-<span class="nc" id="L517">            checkArgument(node.isTextual(), &quot;relationship must be a string&quot;);</span>
-<span class="nc" id="L518">            return FollowUpRelationship.fromValue(node.textValue())</span>
-<span class="nc" id="L519">                    .orElseThrow(() -&gt; new IllegalArgumentException(</span>
-<span class="nc" id="L520">                            &quot;relationship must be one of &quot; + String.join(&quot;, &quot;, FollowUpRelationship.toolValues())));</span>
+<span class="nc" id="L496">            checkArgument(node.isTextual(), &quot;relationship must be a string&quot;);</span>
+<span class="nc" id="L497">            return FollowUpRelationship.fromValue(node.textValue())</span>
+<span class="nc" id="L498">                    .orElseThrow(() -&gt; new IllegalArgumentException(</span>
+<span class="nc" id="L499">                            &quot;relationship must be one of &quot; + String.join(&quot;, &quot;, FollowUpRelationship.toolValues())));</span>
         }
 
         private static String requiredText(JsonNode arguments, String key) {
-<span class="nc" id="L524">            JsonNode node = arguments.path(key);</span>
-<span class="nc bnc" id="L525" title="All 4 branches missed.">            checkArgument(node.isTextual() &amp;&amp; !node.textValue().isBlank(), &quot;Missing required argument: %s&quot;, key);</span>
-<span class="nc" id="L526">            return node.textValue();</span>
+<span class="nc" id="L503">            JsonNode node = arguments.path(key);</span>
+<span class="nc bnc" id="L504" title="All 4 branches missed.">            checkArgument(node.isTextual() &amp;&amp; !node.textValue().isBlank(), &quot;Missing required argument: %s&quot;, key);</span>
+<span class="nc" id="L505">            return node.textValue();</span>
         }
 
         private static String requiredLine(JsonNode arguments, String key, int maxCodePoints) {
-<span class="nc" id="L530">            return validLine(requiredText(arguments, key), key, maxCodePoints);</span>
+<span class="nc" id="L509">            return validLine(requiredText(arguments, key), key, maxCodePoints);</span>
         }
 
         private static String validLine(String value, String name, int maxCodePoints) {
-<span class="nc" id="L534">            String stripped = Objects.requireNonNull(value).strip();</span>
-<span class="nc bnc" id="L535" title="All 2 branches missed.">            checkArgument(!stripped.isEmpty(), &quot;%s must not be blank&quot;, name);</span>
-<span class="nc" id="L536">            checkArgument(</span>
-<span class="nc" id="L537">                    stripped.codePoints().noneMatch(TrelloFollowUpCardTool::lineBreakOrControl),</span>
-                    &quot;%s must be one line&quot;,
-                    name);
-<span class="nc" id="L540">            checkArgument(</span>
-<span class="nc bnc" id="L541" title="All 2 branches missed.">                    stripped.codePointCount(0, stripped.length()) &lt;= maxCodePoints,</span>
-                    &quot;%s must be at most %s characters&quot;,
-                    name,
-                    maxCodePoints);
-<span class="nc" id="L545">            return stripped;</span>
+<span class="nc" id="L513">            return TrelloCardText.singleLine(value, name, maxCodePoints);</span>
         }
     }
 
     sealed interface Outcome {
         static Outcome success(Map&lt;String, String&gt; payload) {
-<span class="nc" id="L551">            return new Success(payload);</span>
+<span class="nc" id="L519">            return new Success(payload);</span>
         }
 
         static Outcome failure(String code, String message) {
-<span class="nc" id="L555">            return new Failure(code, message);</span>
+<span class="nc" id="L523">            return new Failure(code, message);</span>
         }
 
         record Success(Map&lt;String, String&gt; payload) implements Outcome {
-<span class="nc" id="L559">            public Success {</span>
+<span class="nc" id="L527">            public Success {</span>
                 // A read-only LinkedHashMap copy keeps the insertion order, the model-visible field order.
-<span class="nc" id="L561">                payload = Collections.unmodifiableMap(new LinkedHashMap&lt;&gt;(payload));</span>
-<span class="nc" id="L562">            }</span>
+<span class="nc" id="L529">                payload = Collections.unmodifiableMap(new LinkedHashMap&lt;&gt;(payload));</span>
+<span class="nc" id="L530">            }</span>
         }
 
-<span class="nc" id="L565">        record Failure(String code, String message) implements Outcome {}</span>
+<span class="nc" id="L533">        record Failure(String code, String message) implements Outcome {}</span>
     }
 
     /// A value read from the board, or the structured failure that stops the tool before any write.
-<span class="nc" id="L569">    private record Checked&lt;T&gt;(@Nullable T value, Optional&lt;Outcome&gt; failure) {</span>
+<span class="nc" id="L537">    private record Checked&lt;T&gt;(@Nullable T value, Optional&lt;Outcome&gt; failure) {</span>
         static &lt;T&gt; Checked&lt;T&gt; of(T value) {
-<span class="nc" id="L571">            return new Checked&lt;&gt;(value, Optional.empty());</span>
+<span class="nc" id="L539">            return new Checked&lt;&gt;(value, Optional.empty());</span>
         }
 
         static &lt;T&gt; Checked&lt;T&gt; failed(String code, String message) {
-<span class="nc" id="L575">            return new Checked&lt;&gt;(null, Optional.of(Outcome.failure(code, message)));</span>
+<span class="nc" id="L543">            return new Checked&lt;&gt;(null, Optional.of(Outcome.failure(code, message)));</span>
         }
     }
 
@@ -584,25 +552,25 @@ final class TrelloFollowUpCardTool {
             TrelloClient.BoardList destination,
             Optional&lt;TrelloClient.BoardList&gt; blockedTarget,
             List&lt;TrelloClient.BoardList&gt; openLists) {
-<span class="nc" id="L587">        Plan {</span>
-<span class="nc" id="L588">            openLists = List.copyOf(openLists);</span>
-<span class="nc" id="L589">        }</span>
+<span class="nc" id="L555">        Plan {</span>
+<span class="nc" id="L556">            openLists = List.copyOf(openLists);</span>
+<span class="nc" id="L557">        }</span>
 
         List&lt;String&gt; labelNames() {
-<span class="nc" id="L592">            List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
-<span class="nc bnc" id="L593" title="All 2 branches missed.">            if (!policy.label().isBlank()) {</span>
-<span class="nc" id="L594">                names.add(policy.label());</span>
+<span class="nc" id="L560">            List&lt;String&gt; names = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L561" title="All 2 branches missed.">            if (!policy.label().isBlank()) {</span>
+<span class="nc" id="L562">                names.add(policy.label());</span>
             }
-<span class="nc" id="L596">            String relationshipLabel = policy.relationshipLabels().get(request.relationship());</span>
-<span class="nc bnc" id="L597" title="All 2 branches missed.">            if (relationshipLabel != null) {</span>
-<span class="nc" id="L598">                names.add(relationshipLabel);</span>
+<span class="nc" id="L564">            String relationshipLabel = policy.relationshipLabels().get(request.relationship());</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">            if (relationshipLabel != null) {</span>
+<span class="nc" id="L566">                names.add(relationshipLabel);</span>
             }
-<span class="nc" id="L600">            return List.copyOf(names);</span>
+<span class="nc" id="L568">            return List.copyOf(names);</span>
         }
     }
 
-<span class="nc" id="L604">    private record FollowUpRef(String id, String shortLink) {}</span>
+<span class="nc" id="L572">    private record FollowUpRef(String id, String shortLink) {}</span>
 
-<span class="nc" id="L606">    private record ExistingFollowUp(TrelloClient.BoardCard card, FollowUpCardMetadata metadata) {}</span>
+<span class="nc" id="L574">    private record ExistingFollowUp(TrelloClient.BoardCard card, FollowUpCardMetadata metadata) {}</span>
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

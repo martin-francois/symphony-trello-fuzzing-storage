@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StatusView.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.orchestrator</a> &gt; <span class="el_source">StatusView.java</span></div><h1>StatusView.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.orchestrator;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.tracker.TrackerTarget;
+import ch.fmartin.symphony.trello.workspace.WorkspaceManager;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Predicate;
+import org.jspecify.annotations.Nullable;
+
+/// The orchestrator state that status readers see, as one immutable value.
+///
+/// Operations build a new view under the operation lock and publish it through one volatile
+/// reference, so `snapshot()`, `cardDetails()` and `isStarted()` take no lock and never see a map
+/// while an operation changes it. A view is a copy: values that depend on the read time, such as
+/// the active runtime, are computed when a reader asks. See
+/// docs/adr/0105-orchestrator-published-read-view.md.
+///
+/// @param config the effective config, or `null` before the first workflow load
+/// @param running running cards in dispatch order
+/// @param retrying retry entries in scheduling order
+/// @param dispatchPause the dispatch pause, if any; status readers see it only while it belongs to
+///     the current Codex command
+/// @param rateLimits the latest rate-limit payload of the current Codex command, or `null`
+/// @param polling the adaptive polling status at publication, or `null` before workflow loading
+record StatusView(
+        boolean started,
+        @Nullable EffectiveConfig config,
+        List&lt;RunningCard&gt; running,
+        List&lt;RetryingCard&gt; retrying,
+        CodexTotals codexTotals,
+        Optional&lt;SymphonyOrchestrator.DispatchPause&gt; dispatchPause,
+        @Nullable Object rateLimits,
+        RuntimeSnapshot.@Nullable Polling polling) {
+
+<span class="nc" id="L41">    static final StatusView NOT_STARTED =</span>
+<span class="nc" id="L42">            new StatusView(false, null, List.of(), List.of(), CodexTotals.NONE, Optional.empty(), null, null);</span>
+
+<span class="nc" id="L44">    StatusView {</span>
+<span class="nc" id="L45">        running = List.copyOf(running);</span>
+<span class="nc" id="L46">        retrying = List.copyOf(retrying);</span>
+<span class="nc" id="L47">    }</span>
+
+    /// One running card as it was when the view was published.
+    ///
+    /// @param workspaceRoot the workspace root of the config the card was launched with
+    /// @param handoffCancelledAt when an expired handoff deadline claimed the card, or `null`. Status
+    ///     rows and card details leave a claimed card out while its cleanup finishes, and its
+    ///     runtime stops at the claim.
+    record RunningCard(
+            TrackerTarget trackerTarget,
+            RuntimeSnapshot.RunningRow row,
+            Path workspaceRoot,
+            List&lt;CardDebugDetails.EventInfo&gt; recentEvents,
+            @Nullable Instant handoffCancelledAt) {
+<span class="nc" id="L61">        RunningCard {</span>
+<span class="nc" id="L62">            recentEvents = List.copyOf(recentEvents);</span>
+<span class="nc" id="L63">        }</span>
+
+        boolean visible() {
+<span class="nc bnc" id="L66" title="All 2 branches missed.">            return handoffCancelledAt == null;</span>
+        }
+
+        long runtimeMillis(Instant now) {
+<span class="nc" id="L70">            return Duration.between(row.startedAt(), Objects.requireNonNullElse(handoffCancelledAt, now))</span>
+<span class="nc" id="L71">                    .toMillis();</span>
+        }
+    }
+
+    /// One retry entry as it was when the view was published.
+    record RetryingCard(RetryEntry retry, List&lt;CardDebugDetails.EventInfo&gt; recentEvents) {
+<span class="nc" id="L77">        RetryingCard {</span>
+<span class="nc" id="L78">            recentEvents = List.copyOf(recentEvents);</span>
+<span class="nc" id="L79">        }</span>
+
+        RuntimeSnapshot.RetryRow row() {
+<span class="nc" id="L82">            return new RuntimeSnapshot.RetryRow(</span>
+<span class="nc" id="L83">                    retry.cardId(), retry.identifier(), retry.cardUrl(), retry.attempt(), retry.dueAt(), retry.error());</span>
+        }
+    }
+
+    /// Token counters and the runtime of runs that already ended.
+<span class="nc" id="L88">    record CodexTotals(long inputTokens, long outputTokens, long totalTokens, long endedRuntimeMillis) {</span>
+<span class="nc" id="L89">        static final CodexTotals NONE = new CodexTotals(0, 0, 0, 0);</span>
+    }
+
+    RuntimeSnapshot snapshot(Instant now) {
+<span class="nc" id="L93">        List&lt;RuntimeSnapshot.RunningRow&gt; runningRows = running.stream()</span>
+<span class="nc" id="L94">                .filter(RunningCard::visible)</span>
+<span class="nc" id="L95">                .map(RunningCard::row)</span>
+<span class="nc" id="L96">                .toList();</span>
+<span class="nc" id="L97">        List&lt;RuntimeSnapshot.RetryRow&gt; retryRows =</span>
+<span class="nc" id="L98">                retrying.stream().map(RetryingCard::row).toList();</span>
+        // Hidden claimed cards still count their runtime, which stopped at the claim, until their
+        // cleanup retires them.
+<span class="nc" id="L101">        double activeSeconds =</span>
+<span class="nc" id="L102">                running.stream().mapToLong(card -&gt; card.runtimeMillis(now)).sum() / 1000.0;</span>
+<span class="nc" id="L103">        return new RuntimeSnapshot(</span>
+                now,
+<span class="nc" id="L105">                new RuntimeSnapshot.Counts(runningRows.size(), retryRows.size()),</span>
+<span class="nc" id="L106">                routing(),</span>
+                runningRows,
+                retryRows,
+                new RuntimeSnapshot.TokenTotals(
+<span class="nc" id="L110">                        codexTotals.inputTokens(),</span>
+<span class="nc" id="L111">                        codexTotals.outputTokens(),</span>
+<span class="nc" id="L112">                        codexTotals.totalTokens(),</span>
+<span class="nc" id="L113">                        codexTotals.endedRuntimeMillis() / 1000.0 + activeSeconds),</span>
+<span class="nc" id="L114">                currentCommandPause().orElse(null),</span>
+                rateLimits,
+                polling);
+    }
+
+    private Optional&lt;RuntimeSnapshot.DispatchPause&gt; currentCommandPause() {
+<span class="nc" id="L120">        return dispatchPause</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                .filter(pause -&gt; config != null</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                        &amp;&amp; Objects.equals(pause.command(), config.codex().command()))</span>
+<span class="nc" id="L123">                .map(SymphonyOrchestrator.DispatchPause::status);</span>
+    }
+
+    private RuntimeSnapshot.Routing routing() {
+<span class="nc bnc" id="L127" title="All 2 branches missed.">        if (config == null) {</span>
+<span class="nc" id="L128">            return new RuntimeSnapshot.Routing(List.of(), List.of(), List.of());</span>
+        }
+<span class="nc" id="L130">        return new RuntimeSnapshot.Routing(</span>
+<span class="nc" id="L131">                List.copyOf(config.tracker().activeStates()),</span>
+<span class="nc" id="L132">                List.copyOf(config.tracker().terminalStates()),</span>
+<span class="nc" id="L133">                List.copyOf(config.trelloTools().allowedMoveListNames()));</span>
+    }
+
+    /// Prefers a running card of the current tracker target, then a retry of the current target,
+    /// then the same for any older target, so a card that moved with a reload is found first under
+    /// the target it belongs to now.
+    Optional&lt;CardDebugDetails&gt; cardDetails(String cardIdentifier) {
+<span class="nc bnc" id="L140" title="All 2 branches missed.">        TrackerTarget currentTarget = config == null ? null : TrackerTarget.from(config);</span>
+<span class="nc" id="L141">        Predicate&lt;TrackerTarget&gt; current = target -&gt; Objects.equals(target, currentTarget);</span>
+<span class="nc" id="L142">        Predicate&lt;TrackerTarget&gt; anyTarget = target -&gt; true;</span>
+<span class="nc" id="L143">        return runningDetails(cardIdentifier, current)</span>
+<span class="nc" id="L144">                .or(() -&gt; retryDetails(cardIdentifier, current))</span>
+<span class="nc" id="L145">                .or(() -&gt; runningDetails(cardIdentifier, anyTarget))</span>
+<span class="nc" id="L146">                .or(() -&gt; retryDetails(cardIdentifier, anyTarget));</span>
+    }
+
+    private Optional&lt;CardDebugDetails&gt; runningDetails(String cardIdentifier, Predicate&lt;TrackerTarget&gt; target) {
+<span class="nc" id="L150">        return running.stream()</span>
+<span class="nc" id="L151">                .filter(RunningCard::visible)</span>
+<span class="nc" id="L152">                .filter(card -&gt; target.test(card.trackerTarget()))</span>
+<span class="nc" id="L153">                .filter(card -&gt; card.row().cardIdentifier().equals(cardIdentifier))</span>
+<span class="nc" id="L154">                .findFirst()</span>
+<span class="nc" id="L155">                .map(card -&gt; new CardSelection(</span>
+<span class="nc" id="L156">                                card.row().cardId(),</span>
+                                &quot;running&quot;,
+<span class="nc" id="L158">                                card.workspaceRoot(),</span>
+                                null,
+<span class="nc" id="L160">                                card.row(),</span>
+                                null,
+<span class="nc" id="L162">                                card.recentEvents(),</span>
+                                null)
+<span class="nc" id="L164">                        .details(cardIdentifier));</span>
+    }
+
+    private Optional&lt;CardDebugDetails&gt; retryDetails(String cardIdentifier, Predicate&lt;TrackerTarget&gt; target) {
+<span class="nc" id="L168">        return retrying.stream()</span>
+<span class="nc" id="L169">                .filter(card -&gt; target.test(card.retry().trackerTarget()))</span>
+<span class="nc" id="L170">                .filter(card -&gt; card.retry().identifier().equals(cardIdentifier))</span>
+<span class="nc" id="L171">                .findFirst()</span>
+<span class="nc" id="L172">                .map(card -&gt; new CardSelection(</span>
+<span class="nc" id="L173">                                card.retry().cardId(),</span>
+                                &quot;retrying&quot;,
+<span class="nc" id="L175">                                Objects.requireNonNull(config).workspace().root(),</span>
+<span class="nc" id="L176">                                card.retry().attempt(),</span>
+                                null,
+<span class="nc" id="L178">                                card.row(),</span>
+<span class="nc" id="L179">                                card.recentEvents(),</span>
+<span class="nc" id="L180">                                card.retry().error())</span>
+<span class="nc" id="L181">                        .details(cardIdentifier));</span>
+    }
+
+<span class="nc" id="L184">    private record CardSelection(</span>
+            String cardId,
+            String status,
+            Path workspaceRoot,
+            @Nullable Integer currentRetryAttempt,
+            RuntimeSnapshot.@Nullable RunningRow runningRow,
+            RuntimeSnapshot.@Nullable RetryRow retryRow,
+            List&lt;CardDebugDetails.EventInfo&gt; recentEvents,
+            @Nullable String lastError) {
+        CardDebugDetails details(String cardIdentifier) {
+<span class="nc" id="L194">            return new CardDebugDetails(</span>
+                    cardIdentifier,
+                    cardId,
+                    status,
+                    new CardDebugDetails.WorkspaceInfo(
+<span class="nc" id="L199">                            workspaceRoot.resolve(WorkspaceManager.sanitize(cardIdentifier))),</span>
+                    new CardDebugDetails.AttemptInfo(0, currentRetryAttempt),
+                    runningRow,
+                    retryRow,
+<span class="nc" id="L203">                    new CardDebugDetails.LogInfo(List.of()),</span>
+                    recentEvents,
+                    lastError,
+<span class="nc" id="L206">                    Map.of());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

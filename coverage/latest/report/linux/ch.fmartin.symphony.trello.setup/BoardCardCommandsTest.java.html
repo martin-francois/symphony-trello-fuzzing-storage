@@ -1,0 +1,834 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BoardCardCommandsTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">BoardCardCommandsTest.java</span></div><h1>BoardCardCommandsTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.CliExitCodes;
+import ch.fmartin.symphony.trello.TestHttpExchange;
+import ch.fmartin.symphony.trello.testsupport.CliRunResult;
+import ch.fmartin.symphony.trello.testsupport.CredentialSentinels;
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloBoard;
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import ch.fmartin.symphony.trello.testsupport.TestEnv;
+import ch.fmartin.symphony.trello.tracker.SymphonyCommentFooter;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+<span class="nc" id="L30">final class BoardCardCommandsTest {</span>
+    private static final String BOARD_ID = &quot;board-1&quot;;
+    private static final String TERMINAL_ESCAPE = &quot;\u001B&quot;;
+<span class="nc" id="L33">    private static final Path BOARD_CARDS_SKILL = Path.of(&quot;.codex/skills/symphony-trello-board-cards/SKILL.md&quot;);</span>
+    private static final String DEFAULT_TRELLO_TOOLS =
+            &quot;&quot;&quot;
+            trello_tools:
+              enabled: true
+              allow_writes: true
+              allowed_move_list_names:
+                - In Progress
+                - Blocked
+                - Human Review
+                - Done
+              allow_comments: true
+            &quot;&quot;&quot;;
+
+    @TempDir
+    Path tempDir;
+
+<span class="nc" id="L50">    private final FakeTrelloBoard board = new FakeTrelloBoard(BOARD_ID)</span>
+<span class="nc" id="L51">            .list(&quot;list-inbox&quot;, &quot;Inbox&quot;)</span>
+<span class="nc" id="L52">            .list(&quot;list-ready&quot;, &quot;Ready for Codex&quot;)</span>
+<span class="nc" id="L53">            .list(&quot;list-progress&quot;, &quot;In Progress&quot;)</span>
+<span class="nc" id="L54">            .list(&quot;list-blocked&quot;, &quot;Blocked&quot;)</span>
+<span class="nc" id="L55">            .list(&quot;list-review&quot;, &quot;Human Review&quot;)</span>
+<span class="nc" id="L56">            .list(&quot;list-done&quot;, &quot;Done&quot;);</span>
+<span class="nc" id="L57">    private final FakeTrelloBoard foreignBoard = new FakeTrelloBoard(BOARD_ID).list(&quot;list-inbox&quot;, &quot;Inbox&quot;);</span>
+    private FakeTrelloServer server;
+    private FakeTrelloServer foreignServer;
+
+    @AfterEach
+    void stopServers() {
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        if (server != null) {</span>
+<span class="nc" id="L64">            server.close();</span>
+        }
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (foreignServer != null) {</span>
+<span class="nc" id="L67">            foreignServer.close();</span>
+        }
+<span class="nc" id="L69">    }</span>
+
+    @Test
+    void listShowsEachOpenListWithItsRolesPermissionsAndCards() throws Exception {
+        // given
+<span class="nc" id="L74">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L75">        board.card(&quot;card0002&quot;, &quot;SYNTH102&quot;, &quot;Write the release notes&quot;, &quot;list-review&quot;);</span>
+<span class="nc" id="L76">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L79">        CliRunResult result = runCard(configDir, &quot;list&quot;);</span>
+
+        // then
+<span class="nc" id="L82">        result.assertSuccess();</span>
+<span class="nc" id="L83">        assertThat(result.stdoutLines())</span>
+<span class="nc" id="L84">                .containsSubsequence(</span>
+                        &quot;Board \&quot;Queue\&quot; https://trello.com/b/SYNTH001&quot;,
+                        &quot;&quot;,
+                        &quot;List \&quot;Inbox\&quot;  roles: none  move here: no  create here: yes&quot;,
+                        &quot;  SYNTH101  \&quot;Fix the login redirect\&quot;&quot;,
+                        &quot;&quot;,
+                        &quot;List \&quot;Ready for Codex\&quot;  roles: active  move here: no  create here: no&quot;,
+                        &quot;  (no open cards)&quot;,
+                        &quot;&quot;,
+                        &quot;List \&quot;In Progress\&quot;  roles: in-progress  move here: yes  create here: yes&quot;,
+                        &quot;  (no open cards)&quot;,
+                        &quot;&quot;,
+                        &quot;List \&quot;Blocked\&quot;  roles: blocked  move here: yes  create here: yes&quot;,
+                        &quot;  (no open cards)&quot;,
+                        &quot;&quot;,
+                        &quot;List \&quot;Human Review\&quot;  roles: human-review  move here: yes  create here: yes&quot;,
+                        &quot;  SYNTH102  \&quot;Write the release notes\&quot;&quot;,
+                        &quot;&quot;,
+                        &quot;List \&quot;Done\&quot;  roles: terminal  move here: yes  create here: yes&quot;,
+                        &quot;  (no open cards)&quot;);
+<span class="nc" id="L104">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L105">    }</span>
+
+    @Test
+    void listFallsBackToWorkflowRolesWhenTheProvenanceStoreHoldsConnectedBoards() throws Exception {
+        // given
+<span class="nc" id="L110">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+        // An older setup that used the reserved name as its manifest left connected-board data there.
+<span class="nc" id="L112">        Files.copy(</span>
+<span class="nc" id="L113">                configDir.resolve(ConnectedBoardManifest.FILE_NAME),</span>
+<span class="nc" id="L114">                configDir.resolve(GeneratedWorkflowStore.FILE_NAME));</span>
+
+        // when
+<span class="nc" id="L117">        CliRunResult result = runCard(configDir, &quot;list&quot;, &quot;--list&quot;, &quot;Human Review&quot;);</span>
+
+        // then
+<span class="nc" id="L120">        result.assertSuccess()</span>
+<span class="nc" id="L121">                .stdoutContains(&quot;List \&quot;Human Review\&quot;  roles: human-review  move here: yes  create here: yes&quot;);</span>
+<span class="nc" id="L122">    }</span>
+
+    @Test
+    void listNamesACardWithoutShortLinkByItsId() throws Exception {
+        // given
+<span class="nc" id="L127">        String cardId = &quot;SYNTH0000000000000000201&quot;;</span>
+<span class="nc" id="L128">        board.card(cardId, &quot;&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L129">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L132">        CliRunResult text = runCard(configDir, &quot;list&quot;, &quot;--list&quot;, &quot;Inbox&quot;);</span>
+<span class="nc" id="L133">        CliRunResult json = runCard(configDir, &quot;list&quot;, &quot;--list&quot;, &quot;Inbox&quot;, &quot;--json&quot;);</span>
+
+        // then
+<span class="nc" id="L136">        text.assertSuccess().stdoutContains(&quot;  &quot; + cardId + &quot;  \&quot;Fix the login redirect\&quot;&quot;);</span>
+<span class="nc" id="L137">        json.assertSuccess()</span>
+<span class="nc" id="L138">                .stdoutContains(&quot;\&quot;short_link\&quot;:\&quot;&quot; + cardId + &quot;\&quot;,\&quot;url\&quot;:\&quot;https://trello.com/c/&quot; + cardId + &quot;\&quot;&quot;);</span>
+<span class="nc" id="L139">    }</span>
+
+    @Test
+    void listJsonNamesTheBoardTheListRolesAndTheCards() throws Exception {
+        // given
+<span class="nc" id="L144">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-review&quot;);</span>
+<span class="nc" id="L145">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L148">        CliRunResult result = runCard(configDir, &quot;list&quot;, &quot;--list&quot;, &quot;Human Review&quot;, &quot;--json&quot;);</span>
+
+        // then
+<span class="nc" id="L151">        result.assertSuccess();</span>
+<span class="nc" id="L152">        assertThat(result.stdout().strip())</span>
+<span class="nc" id="L153">                .isEqualTo(</span>
+                        &quot;&quot;&quot;
+                        {&quot;status&quot;:&quot;ok&quot;,&quot;board&quot;:{&quot;name&quot;:&quot;Queue&quot;,&quot;id&quot;:&quot;board-1&quot;,&quot;url&quot;:&quot;https://trello.com/b/SYNTH001&quot;,\
+                        &quot;workflow&quot;:%s},&quot;lists&quot;:[{&quot;list&quot;:{&quot;id&quot;:&quot;list-review&quot;,&quot;name&quot;:&quot;Human Review&quot;,\
+                        &quot;roles&quot;:[&quot;human-review&quot;],&quot;move_allowed&quot;:true,&quot;create_allowed&quot;:true},\
+                        &quot;cards&quot;:[{&quot;id&quot;:&quot;card0001&quot;,&quot;short_link&quot;:&quot;SYNTH101&quot;,&quot;url&quot;:&quot;https://trello.com/c/SYNTH101&quot;,\
+                        &quot;title&quot;:&quot;Fix the login redirect&quot;}]}]}&quot;&quot;&quot;
+<span class="nc" id="L160">                                .formatted(jsonString(workflowPath(configDir).toString())));</span>
+<span class="nc" id="L161">    }</span>
+
+    @Test
+    void listByRoleShowsEveryListWithThatRole() throws Exception {
+        // given
+<span class="nc" id="L166">        board.list(&quot;list-wont&quot;, &quot;Won't Do&quot;);</span>
+<span class="nc" id="L167">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;, &quot;Won't Do&quot;));</span>
+
+        // when
+<span class="nc" id="L170">        CliRunResult result = runCard(configDir, &quot;list&quot;, &quot;--list&quot;, &quot;terminal&quot;);</span>
+
+        // then
+<span class="nc" id="L173">        result.assertSuccess();</span>
+<span class="nc" id="L174">        assertThat(result.stdoutLines())</span>
+<span class="nc" id="L175">                .filteredOn(line -&gt; line.startsWith(&quot;List &quot;))</span>
+<span class="nc" id="L176">                .containsExactly(</span>
+                        &quot;List \&quot;Done\&quot;  roles: terminal  move here: yes  create here: yes&quot;,
+                        &quot;List \&quot;Won't Do\&quot;  roles: terminal  move here: no  create here: no&quot;);
+<span class="nc" id="L179">    }</span>
+
+    @Test
+    void showJsonIncludesDescriptionChecklistsAttachmentsAndComments() throws Exception {
+        // given
+<span class="nc" id="L184">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;)</span>
+<span class="nc" id="L185">                .description(&quot;The redirect drops the query string.&quot;)</span>
+<span class="nc" id="L186">                .checklist(&quot;Acceptance&quot;, &quot;Keeps the query string&quot;)</span>
+<span class="nc" id="L187">                .attachment(&quot;Bug report&quot;, &quot;https://example.com/bug&quot;)</span>
+<span class="nc" id="L188">                .comment(&quot;Seen on staging.&quot;);</span>
+<span class="nc" id="L189">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L192">        CliRunResult result = runCard(configDir, &quot;show&quot;, &quot;https://trello.com/c/SYNTH101/1-slug&quot;, &quot;--json&quot;);</span>
+
+        // then
+<span class="nc" id="L195">        result.assertSuccess();</span>
+<span class="nc" id="L196">        var card = new ObjectMapper().readTree(result.stdout()).path(&quot;card&quot;);</span>
+<span class="nc" id="L197">        assertThat(card.path(&quot;id&quot;).asText()).isEqualTo(&quot;card0001&quot;);</span>
+<span class="nc" id="L198">        assertThat(card.path(&quot;url&quot;).asText()).isEqualTo(&quot;https://trello.com/c/SYNTH101&quot;);</span>
+<span class="nc" id="L199">        assertThat(card.path(&quot;description&quot;).asText()).isEqualTo(&quot;The redirect drops the query string.&quot;);</span>
+<span class="nc" id="L200">        assertThat(card.path(&quot;list&quot;).path(&quot;name&quot;).asText()).isEqualTo(&quot;Inbox&quot;);</span>
+<span class="nc" id="L201">        assertThat(card.path(&quot;archived&quot;))</span>
+<span class="nc" id="L202">                .as(&quot;an open card reports archived as the JSON boolean false&quot;)</span>
+<span class="nc" id="L203">                .isEqualTo(BooleanNode.FALSE);</span>
+<span class="nc" id="L204">        assertThat(card.path(&quot;checklists&quot;).path(0).path(&quot;name&quot;).asText()).isEqualTo(&quot;Acceptance&quot;);</span>
+<span class="nc" id="L205">        assertThat(card.path(&quot;checklists&quot;)</span>
+<span class="nc" id="L206">                        .path(0)</span>
+<span class="nc" id="L207">                        .path(&quot;items&quot;)</span>
+<span class="nc" id="L208">                        .path(0)</span>
+<span class="nc" id="L209">                        .path(&quot;text&quot;)</span>
+<span class="nc" id="L210">                        .asText())</span>
+<span class="nc" id="L211">                .isEqualTo(&quot;Keeps the query string&quot;);</span>
+<span class="nc" id="L212">        assertThat(card.path(&quot;attachments&quot;).path(0).path(&quot;url&quot;).asText()).isEqualTo(&quot;https://example.com/bug&quot;);</span>
+<span class="nc" id="L213">        assertThat(card.path(&quot;comments&quot;).path(0).path(&quot;text&quot;).asText()).isEqualTo(&quot;Seen on staging.&quot;);</span>
+<span class="nc" id="L214">    }</span>
+
+    @Test
+    void showPrintsTheCardAsEscapedText() throws Exception {
+        // given
+<span class="nc" id="L219">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix \&quot;the\&quot; redirect&quot;, &quot;list-inbox&quot;)</span>
+<span class="nc" id="L220">                .description(&quot;First line\nSecond &quot; + TERMINAL_ESCAPE + &quot;[31mline&quot;);</span>
+<span class="nc" id="L221">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L224">        CliRunResult result = runCard(configDir, &quot;show&quot;, &quot;SYNTH101&quot;);</span>
+
+        // then
+<span class="nc" id="L227">        result.assertSuccess();</span>
+<span class="nc" id="L228">        assertThat(result.stdoutLines())</span>
+<span class="nc" id="L229">                .containsSubsequence(</span>
+                        &quot;Card \&quot;Fix \\\&quot;the\\\&quot; redirect\&quot;&quot;,
+                        &quot;  URL: https://trello.com/c/SYNTH101&quot;,
+                        &quot;  List: \&quot;Inbox\&quot;&quot;,
+                        &quot;  Archived: no&quot;,
+                        &quot;Description:&quot;,
+                        &quot;  First line&quot;,
+                        &quot;  Second \\u001B[31mline&quot;);
+<span class="nc" id="L237">    }</span>
+
+    @Test
+    void createPutsTheCardInTheListOfTheRequestedRole() throws Exception {
+        // given
+<span class="nc" id="L242">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L245">        CliRunResult result = runCard(</span>
+                configDir,
+                &quot;create&quot;,
+                &quot;--title&quot;,
+                &quot;  Add a dark mode  &quot;,
+                &quot;--description&quot;,
+                &quot;#2076: needs it&quot;,
+                &quot;--list&quot;,
+                &quot;Human_Review&quot;,
+                &quot;--json&quot;);
+
+        // then
+<span class="nc" id="L257">        result.assertSuccess();</span>
+<span class="nc" id="L258">        FakeTrelloBoard.FakeCard created = board.createdCards().getFirst();</span>
+<span class="nc" id="L259">        assertThat(created.name()).isEqualTo(&quot;Add a dark mode&quot;);</span>
+<span class="nc" id="L260">        assertThat(created.listId()).isEqualTo(&quot;list-review&quot;);</span>
+<span class="nc" id="L261">        assertThat(created.description()).isEqualTo(&quot;\\#2076: needs it&quot;);</span>
+<span class="nc" id="L262">        var json = new ObjectMapper().readTree(result.stdout());</span>
+<span class="nc" id="L263">        assertThat(json.path(&quot;status&quot;).asText()).isEqualTo(&quot;card_created&quot;);</span>
+<span class="nc" id="L264">        assertThat(json.path(&quot;card&quot;).path(&quot;id&quot;).asText()).isEqualTo(created.id());</span>
+<span class="nc" id="L265">        assertThat(json.path(&quot;card&quot;).path(&quot;url&quot;).asText()).isEqualTo(&quot;https://trello.com/c/%s&quot;, created.shortLink());</span>
+<span class="nc" id="L266">        assertThat(json.path(&quot;list&quot;).path(&quot;name&quot;).asText()).isEqualTo(&quot;Human Review&quot;);</span>
+<span class="nc" id="L267">    }</span>
+
+    @Test
+    void createRefusesAnActiveListThatTheMoveAllowlistLeavesOut() throws Exception {
+        // given
+<span class="nc" id="L272">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L275">        CliRunResult result = runCard(configDir, &quot;create&quot;, &quot;--title&quot;, &quot;Start now&quot;, &quot;--list&quot;, &quot;Ready for Codex&quot;);</span>
+
+        // then
+<span class="nc" id="L278">        assertPolicyRefusal(result, &quot;trello_create_list_not_allowed&quot;);</span>
+<span class="nc" id="L279">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L280">    }</span>
+
+    @Test
+    void createRefusesATitleWithALineBreak() throws Exception {
+        // given
+<span class="nc" id="L285">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L288">        CliRunResult result = runCard(configDir, &quot;create&quot;, &quot;--title&quot;, &quot;One\nTwo&quot;, &quot;--list&quot;, &quot;Inbox&quot;);</span>
+
+        // then
+<span class="nc" id="L291">        assertFailure(result, &quot;invalid_card_text&quot;);</span>
+<span class="nc" id="L292">        result.stderrContains(&quot;title must be one line&quot;);</span>
+<span class="nc" id="L293">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L294">    }</span>
+
+    @Test
+    void moveResolvesARoleToItsListAndReportsTheMove() throws Exception {
+        // given
+<span class="nc" id="L299">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-progress&quot;);</span>
+<span class="nc" id="L300">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L303">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;human-review&quot;, &quot;--json&quot;);</span>
+
+        // then
+<span class="nc" id="L306">        result.assertSuccess();</span>
+<span class="nc" id="L307">        assertThat(card.listId()).isEqualTo(&quot;list-review&quot;);</span>
+<span class="nc" id="L308">        assertThat(result.stdout().strip())</span>
+<span class="nc" id="L309">                .isEqualTo(</span>
+                        &quot;&quot;&quot;
+                        {&quot;status&quot;:&quot;card_moved&quot;,&quot;board&quot;:{&quot;name&quot;:&quot;Queue&quot;,&quot;id&quot;:&quot;board-1&quot;,&quot;url&quot;:&quot;https://trello.com/b/SYNTH001&quot;,\
+                        &quot;workflow&quot;:%s},&quot;card&quot;:{&quot;id&quot;:&quot;card0001&quot;,&quot;short_link&quot;:&quot;SYNTH101&quot;,\
+                        &quot;url&quot;:&quot;https://trello.com/c/SYNTH101&quot;,&quot;title&quot;:&quot;Fix the login redirect&quot;},\
+                        &quot;list&quot;:{&quot;id&quot;:&quot;list-review&quot;,&quot;name&quot;:&quot;Human Review&quot;,&quot;roles&quot;:[&quot;human-review&quot;],\
+                        &quot;move_allowed&quot;:true,&quot;create_allowed&quot;:true}}&quot;&quot;&quot;
+<span class="nc" id="L316">                                .formatted(jsonString(workflowPath(configDir).toString())));</span>
+<span class="nc" id="L317">    }</span>
+
+    @Test
+    void moveTakesAListNameBeforeARoleName() throws Exception {
+        // given
+<span class="nc" id="L322">        board.list(&quot;list-active&quot;, &quot;Active&quot;);</span>
+<span class="nc" id="L323">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L324">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS.replace(&quot;- Done&quot;, &quot;- Done\n    - Active&quot;));</span>
+
+        // when
+<span class="nc" id="L327">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;active&quot;);</span>
+
+        // then
+<span class="nc" id="L330">        result.assertSuccess().stdoutContains(&quot;Moved card \&quot;Fix the login redirect\&quot; to \&quot;Active\&quot;.&quot;);</span>
+<span class="nc" id="L331">        assertThat(card.listId()).isEqualTo(&quot;list-active&quot;);</span>
+<span class="nc" id="L332">    }</span>
+
+    @Test
+    void moveRequiresAMoveAllowlist() throws Exception {
+        // given
+<span class="nc" id="L337">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L338">        Path configDir = connectBoard(</span>
+                &quot;&quot;&quot;
+                trello_tools:
+                  enabled: true
+                  allow_writes: true
+                &quot;&quot;&quot;);
+
+        // when
+<span class="nc" id="L346">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;Done&quot;);</span>
+
+        // then
+<span class="nc" id="L349">        assertPolicyRefusal(result, &quot;trello_move_allowlist_required&quot;);</span>
+<span class="nc" id="L350">        assertThat(card.listId()).isEqualTo(&quot;list-inbox&quot;);</span>
+<span class="nc" id="L351">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L352">    }</span>
+
+    @Test
+    void moveRefusesAListThatTheWorkflowDoesNotAllow() throws Exception {
+        // given
+<span class="nc" id="L357">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L358">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L361">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;active&quot;);</span>
+
+        // then
+<span class="nc" id="L364">        assertPolicyRefusal(result, &quot;trello_move_not_allowed&quot;);</span>
+<span class="nc" id="L365">        assertThat(card.listId()).isEqualTo(&quot;list-inbox&quot;);</span>
+<span class="nc" id="L366">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L367">    }</span>
+
+    @Test
+    void moveReportsARoleThatNoOpenListHas() throws Exception {
+        // given
+<span class="nc" id="L372">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L373">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L376">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;merging&quot;);</span>
+
+        // then
+<span class="nc" id="L379">        assertFailure(result, &quot;setup_card_list_role_unset&quot;);</span>
+<span class="nc" id="L380">        result.stderrContains(&quot;The workflow gives no open list the merging role.&quot;);</span>
+<span class="nc" id="L381">    }</span>
+
+    @Test
+    void moveReportsARoleThatCoversSeveralLists() throws Exception {
+        // given
+<span class="nc" id="L386">        board.list(&quot;list-wont&quot;, &quot;Won't Do&quot;);</span>
+<span class="nc" id="L387">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L388">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;, &quot;Won't Do&quot;));</span>
+
+        // when
+<span class="nc" id="L391">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;terminal&quot;);</span>
+
+        // then
+<span class="nc" id="L394">        assertFailure(result, &quot;setup_card_list_role_ambiguous&quot;);</span>
+<span class="nc" id="L395">        result.stderrContains(&quot;The terminal role covers several open lists: \&quot;Done\&quot;, \&quot;Won't Do\&quot;.&quot;);</span>
+<span class="nc" id="L396">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L397">    }</span>
+
+    @Test
+    void moveReportsAnUnknownListWithTheOpenListsAndRoles() throws Exception {
+        // given
+<span class="nc" id="L402">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L403">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L406">        CliRunResult result = runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;Backlog&quot;);</span>
+
+        // then
+<span class="nc" id="L409">        assertFailure(result, &quot;setup_card_list_not_found&quot;);</span>
+<span class="nc" id="L410">        result.stderrContains(</span>
+                &quot;No open list or list role matches \&quot;Backlog\&quot;.&quot;,
+                &quot;Roles: active, in-progress, human-review, blocked, merging, terminal.&quot;);
+<span class="nc" id="L413">    }</span>
+
+    @Test
+    void commentAppendsTheSymphonyFooter() throws Exception {
+        // given
+<span class="nc" id="L418">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L419">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L422">        CliRunResult result = runCard(configDir, &quot;comment&quot;, &quot;card0001&quot;, &quot;--text&quot;, &quot;Waiting for the API key.&quot;);</span>
+
+        // then
+<span class="nc" id="L425">        result.assertSuccess().stdoutContains(&quot;Added a comment to card \&quot;Fix the login redirect\&quot;.&quot;);</span>
+<span class="nc" id="L426">        assertThat(card.comments()).containsExactly(SymphonyCommentFooter.append(&quot;Waiting for the API key.&quot;));</span>
+<span class="nc" id="L427">    }</span>
+
+    @Test
+    void commentJsonNamesTheCardAndNoList() throws Exception {
+        // given
+<span class="nc" id="L432">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L433">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L436">        CliRunResult result = runCard(configDir, &quot;comment&quot;, &quot;SYNTH101&quot;, &quot;--text&quot;, &quot;Hello&quot;, &quot;--json&quot;);</span>
+
+        // then
+<span class="nc" id="L439">        result.assertSuccess();</span>
+<span class="nc" id="L440">        var json = new ObjectMapper().readTree(result.stdout());</span>
+<span class="nc" id="L441">        assertThat(json.path(&quot;status&quot;).asText()).isEqualTo(&quot;comment_added&quot;);</span>
+<span class="nc" id="L442">        assertThat(json.path(&quot;card&quot;).path(&quot;short_link&quot;).asText()).isEqualTo(&quot;SYNTH101&quot;);</span>
+<span class="nc" id="L443">        assertThat(json.path(&quot;list&quot;).isNull()).as(&quot;a comment names no list&quot;).isTrue();</span>
+<span class="nc" id="L444">    }</span>
+
+    @Test
+    void commentFollowsTheWorkflowCommentSetting() throws Exception {
+        // given
+<span class="nc" id="L449">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L450">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS.replace(&quot;allow_comments: true&quot;, &quot;allow_comments: false&quot;));</span>
+
+        // when
+<span class="nc" id="L453">        CliRunResult result = runCard(configDir, &quot;comment&quot;, &quot;SYNTH101&quot;, &quot;--text&quot;, &quot;Hello&quot;);</span>
+
+        // then
+<span class="nc" id="L456">        assertPolicyRefusal(result, &quot;trello_comments_disabled&quot;);</span>
+<span class="nc" id="L457">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L458">    }</span>
+
+    @CsvSource({
+        &quot;enabled: true, enabled: false, trello_tools_disabled&quot;,
+        &quot;allow_writes: true, allow_writes: false, trello_writes_disabled&quot;
+    })
+    @ParameterizedTest(name = &quot;{1}&quot;)
+    void writesFollowTheWorkflowWriteSwitches(String granted, String refused, String code) throws Exception {
+        // given
+<span class="nc" id="L467">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L468">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS.replace(granted, refused));</span>
+
+        // when
+<span class="nc" id="L471">        CliRunResult archive = runCard(configDir, &quot;archive&quot;, &quot;SYNTH101&quot;, &quot;--confirm-title&quot;, &quot;Fix the login redirect&quot;);</span>
+<span class="nc" id="L472">        CliRunResult list = runCard(configDir, &quot;list&quot;);</span>
+
+        // then
+<span class="nc" id="L475">        assertPolicyRefusal(archive, code);</span>
+<span class="nc" id="L476">        list.assertSuccess().stdoutContains(&quot;List \&quot;Inbox\&quot;  roles: none  move here: no  create here: no&quot;);</span>
+<span class="nc" id="L477">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L478">    }</span>
+
+    @Test
+    void archiveArchivesACardOfTheSelectedBoard() throws Exception {
+        // given
+<span class="nc" id="L483">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L484">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L487">        CliRunResult result =</span>
+<span class="nc" id="L488">                runCard(configDir, &quot;archive&quot;, &quot;SYNTH101&quot;, &quot;--confirm-title&quot;, &quot;Fix the login redirect&quot;, &quot;--json&quot;);</span>
+
+        // then
+<span class="nc" id="L491">        result.assertSuccess();</span>
+<span class="nc" id="L492">        assertThat(card.archived()).as(&quot;the fake board archived the card&quot;).isTrue();</span>
+<span class="nc" id="L493">        assertThat(new ObjectMapper().readTree(result.stdout()).path(&quot;status&quot;).asText())</span>
+<span class="nc" id="L494">                .isEqualTo(&quot;card_archived&quot;);</span>
+<span class="nc" id="L495">    }</span>
+
+    @Test
+    void archiveNeedsTheCurrentCardTitle() throws Exception {
+        // given
+<span class="nc" id="L500">        FakeTrelloBoard.FakeCard card = board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L501">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L504">        CliRunResult result = runCard(configDir, &quot;archive&quot;, &quot;SYNTH101&quot;, &quot;--confirm-title&quot;, &quot;Fix the login&quot;);</span>
+
+        // then
+<span class="nc" id="L507">        assertFailure(result, &quot;setup_card_archive_title_mismatch&quot;);</span>
+<span class="nc" id="L508">        result.stderrContains(&quot;\&quot;Fix the login redirect\&quot;&quot;);</span>
+<span class="nc" id="L509">        assertThat(card.archived())</span>
+<span class="nc" id="L510">                .as(&quot;a mismatched title leaves the card open&quot;)</span>
+<span class="nc" id="L511">                .isFalse();</span>
+<span class="nc" id="L512">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L513">    }</span>
+
+    @Test
+    void archiveRefusesACardOnAnotherBoard() throws Exception {
+        // given
+<span class="nc" id="L518">        FakeTrelloBoard.FakeCard foreign = board.foreignCard(&quot;card0009&quot;, &quot;SYNTH999&quot;, &quot;Other team card&quot;, &quot;board-2&quot;);</span>
+<span class="nc" id="L519">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L522">        CliRunResult result = runCard(configDir, &quot;archive&quot;, &quot;SYNTH999&quot;, &quot;--confirm-title&quot;, &quot;Other team card&quot;);</span>
+
+        // then
+<span class="nc" id="L525">        assertFailure(result, &quot;setup_card_not_on_board&quot;);</span>
+<span class="nc" id="L526">        assertThat(foreign.archived())</span>
+<span class="nc" id="L527">                .as(&quot;the card on the other board stays open&quot;)</span>
+<span class="nc" id="L528">                .isFalse();</span>
+<span class="nc" id="L529">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L530">    }</span>
+
+    @Test
+    void archiveRefusesACardThatIsAlreadyArchived() throws Exception {
+        // given
+<span class="nc" id="L535">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;)</span>
+<span class="nc" id="L536">                .archive();</span>
+<span class="nc" id="L537">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L540">        CliRunResult result = runCard(configDir, &quot;archive&quot;, &quot;SYNTH101&quot;, &quot;--confirm-title&quot;, &quot;Fix the login redirect&quot;);</span>
+
+        // then
+<span class="nc" id="L543">        assertFailure(result, &quot;setup_card_archived&quot;);</span>
+<span class="nc" id="L544">        assertThat(board.writeRequests()).isEmpty();</span>
+<span class="nc" id="L545">    }</span>
+
+    @Test
+    void cardArgumentsMustNameACard() throws Exception {
+        // given
+<span class="nc" id="L550">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L553">        CliRunResult invalid = runCard(configDir, &quot;show&quot;, &quot;https://example.com/c/SYNTH101&quot;);</span>
+<span class="nc" id="L554">        CliRunResult missing = runCard(configDir, &quot;show&quot;, &quot;nope0000&quot;);</span>
+
+        // then
+<span class="nc" id="L557">        assertFailure(invalid, &quot;setup_card_invalid_reference&quot;);</span>
+<span class="nc" id="L558">        assertFailure(missing, &quot;setup_card_not_found&quot;);</span>
+<span class="nc" id="L559">    }</span>
+
+    @Test
+    void severalConnectedBoardsNeedASelector() throws Exception {
+        // given
+<span class="nc" id="L564">        Path configDir = connectBoards(DEFAULT_TRELLO_TOOLS, &quot;Queue&quot;, &quot;Other&quot;);</span>
+
+        // when
+<span class="nc" id="L567">        CliRunResult unselected = runCard(configDir, &quot;list&quot;);</span>
+<span class="nc" id="L568">        CliRunResult selected = runCard(configDir, &quot;list&quot;, &quot;--board&quot;, &quot;Queue&quot;);</span>
+<span class="nc" id="L569">        CliRunResult byWorkflow =</span>
+<span class="nc" id="L570">                runCard(configDir, &quot;list&quot;, &quot;--workflow&quot;, workflowPath(configDir).toString());</span>
+<span class="nc" id="L571">        CliRunResult conflicting = runCard(</span>
+                configDir,
+                &quot;list&quot;,
+                &quot;--board&quot;,
+                &quot;Queue&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L577">                workflowPath(configDir).toString());</span>
+<span class="nc" id="L578">        CliRunResult unknown = runCard(configDir, &quot;list&quot;, &quot;--board&quot;, &quot;Missing&quot;);</span>
+<span class="nc" id="L579">        CliRunResult byId = runCard(configDir, &quot;list&quot;, &quot;--board&quot;, BOARD_ID);</span>
+<span class="nc" id="L580">        CliRunResult byShortLink = runCard(configDir, &quot;list&quot;, &quot;--board&quot;, &quot;SYNTH001&quot;);</span>
+<span class="nc" id="L581">        CliRunResult byUrl = runCard(configDir, &quot;list&quot;, &quot;--board&quot;, &quot;https://trello.com/b/SYNTH001/queue&quot;);</span>
+
+        // then
+<span class="nc" id="L584">        assertFailure(unselected, &quot;setup_worker_board_required&quot;);</span>
+<span class="nc" id="L585">        unselected.stderrContains(</span>
+                &quot;Multiple Trello boards are connected. Re-run with --board NAME or --workflow PATH for card list.&quot;);
+<span class="nc" id="L587">        selected.assertSuccess().stdoutContains(&quot;Board \&quot;Queue\&quot;&quot;);</span>
+<span class="nc" id="L588">        byWorkflow.assertSuccess().stdoutContains(&quot;Board \&quot;Queue\&quot;&quot;);</span>
+<span class="nc" id="L589">        assertFailure(conflicting, &quot;setup_worker_selection_conflict&quot;);</span>
+<span class="nc" id="L590">        assertFailure(unknown, &quot;setup_worker_board_not_found&quot;);</span>
+<span class="nc" id="L591">        assertThat(List.of(byId, byShortLink, byUrl))</span>
+<span class="nc" id="L592">                .allSatisfy(result -&gt; result.assertSuccess().stdoutContains(&quot;Board \&quot;Queue\&quot;&quot;));</span>
+<span class="nc" id="L593">    }</span>
+
+    @Test
+    void anUnconnectedWorkflowWithAnotherEndpointIsRefusedBeforeAnyRequest() throws Exception {
+        // given
+<span class="nc" id="L598">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+<span class="nc" id="L599">        Path unconnected = configDir.resolve(&quot;WORKFLOW.unconnected.md&quot;);</span>
+<span class="nc" id="L600">        Files.writeString(unconnected, workflow(startForeignServer(), BOARD_ID, DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;)));</span>
+
+        // when
+<span class="nc" id="L603">        CliRunResult result = runCard(configDir, &quot;list&quot;, &quot;--workflow&quot;, unconnected.toString());</span>
+
+        // then
+<span class="nc" id="L606">        assertFailure(result, &quot;setup_card_workflow_not_connected&quot;);</span>
+<span class="nc" id="L607">        assertThat(foreignBoard.requests()).isEmpty();</span>
+<span class="nc" id="L608">        assertThat(board.requests()).isEmpty();</span>
+<span class="nc" id="L609">    }</span>
+
+    @Test
+    void anUnconnectedWorkflowIsRefusedBeforeTheCredentialsAreRead() throws Exception {
+        // given
+<span class="nc" id="L614">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+<span class="nc" id="L615">        Path unconnected = configDir.resolve(&quot;WORKFLOW.unconnected.md&quot;);</span>
+<span class="nc" id="L616">        Files.writeString(unconnected, workflow(BOARD_ID, DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;)));</span>
+<span class="nc" id="L617">        Files.delete(configDir.resolve(&quot;.env&quot;));</span>
+
+        // when
+<span class="nc" id="L620">        CliRunResult result = runCard(configDir, &quot;list&quot;, &quot;--workflow&quot;, unconnected.toString());</span>
+
+        // then
+<span class="nc" id="L623">        assertFailure(result, &quot;setup_card_workflow_not_connected&quot;);</span>
+<span class="nc" id="L624">        assertThat(board.requests()).isEmpty();</span>
+<span class="nc" id="L625">    }</span>
+
+    @Test
+    void aConnectedWorkflowWithAnotherEndpointIsRefusedBeforeAnyRequest() throws Exception {
+        // given
+<span class="nc" id="L630">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+<span class="nc" id="L631">        Files.writeString(</span>
+<span class="nc" id="L632">                workflowPath(configDir),</span>
+<span class="nc" id="L633">                workflow(startForeignServer(), BOARD_ID, DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;)));</span>
+
+        // when
+<span class="nc" id="L636">        CliRunResult result = runCard(configDir, &quot;list&quot;);</span>
+
+        // then
+<span class="nc" id="L639">        assertFailure(result, &quot;setup_card_endpoint_not_trello&quot;);</span>
+<span class="nc" id="L640">        assertThat(foreignBoard.requests()).isEmpty();</span>
+<span class="nc" id="L641">        assertThat(board.requests()).isEmpty();</span>
+<span class="nc" id="L642">    }</span>
+
+    @Test
+    void aWorkflowThatNamesAnotherBoardIsRefusedBeforeAnyRequest() throws Exception {
+        // given
+<span class="nc" id="L647">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+<span class="nc" id="L648">        Files.writeString(</span>
+<span class="nc" id="L649">                workflowPath(configDir), workflow(server.endpoint(), &quot;board-9&quot;, DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;)));</span>
+
+        // when
+<span class="nc" id="L652">        CliRunResult result = runCard(configDir, &quot;list&quot;);</span>
+
+        // then
+<span class="nc" id="L655">        assertFailure(result, &quot;setup_card_workflow_board_mismatch&quot;);</span>
+<span class="nc" id="L656">        result.stderrContains(&quot;\&quot;Queue\&quot;&quot;);</span>
+<span class="nc" id="L657">        assertThat(board.requests()).isEmpty();</span>
+<span class="nc" id="L658">    }</span>
+
+    @Test
+    void outputNeverContainsTheTrelloCredentials() throws Exception {
+        // given
+<span class="nc" id="L663">        board.card(&quot;card0001&quot;, &quot;SYNTH101&quot;, &quot;Fix the login redirect&quot;, &quot;list-inbox&quot;);</span>
+<span class="nc" id="L664">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+
+        // when
+<span class="nc" id="L667">        List&lt;CliRunResult&gt; results = List.of(</span>
+<span class="nc" id="L668">                runCard(configDir, &quot;list&quot;),</span>
+<span class="nc" id="L669">                runCard(configDir, &quot;list&quot;, &quot;--json&quot;),</span>
+<span class="nc" id="L670">                runCard(configDir, &quot;show&quot;, &quot;SYNTH101&quot;),</span>
+<span class="nc" id="L671">                runCard(configDir, &quot;show&quot;, &quot;SYNTH101&quot;, &quot;--json&quot;),</span>
+<span class="nc" id="L672">                runCard(configDir, &quot;create&quot;, &quot;--title&quot;, &quot;New card&quot;, &quot;--list&quot;, &quot;Inbox&quot;, &quot;--json&quot;),</span>
+<span class="nc" id="L673">                runCard(configDir, &quot;move&quot;, &quot;SYNTH101&quot;, &quot;--to&quot;, &quot;active&quot;),</span>
+<span class="nc" id="L674">                runCard(configDir, &quot;comment&quot;, &quot;SYNTH101&quot;, &quot;--text&quot;, &quot;Done.&quot;),</span>
+<span class="nc" id="L675">                runCard(configDir, &quot;archive&quot;, &quot;SYNTH101&quot;, &quot;--confirm-title&quot;, &quot;Wrong title&quot;),</span>
+<span class="nc" id="L676">                runCard(configDir, &quot;archive&quot;, &quot;SYNTH101&quot;, &quot;--confirm-title&quot;, &quot;Fix the login redirect&quot;));</span>
+
+        // then
+<span class="nc" id="L679">        assertThat(results).allSatisfy(result -&gt; assertThat(result.stdout() + result.stderr())</span>
+<span class="nc" id="L680">                .doesNotContain(CredentialSentinels.TRELLO_API_KEY, CredentialSentinels.TRELLO_API_TOKEN));</span>
+<span class="nc" id="L681">    }</span>
+
+    @Test
+    void rejectedCredentialsNameTheCredentialFileButNotTheValues() throws Exception {
+        // given
+<span class="nc" id="L686">        server = new FakeTrelloServer()</span>
+<span class="nc" id="L687">                .on(&quot;/1/&quot;, exchange -&gt; TestHttpExchange.respond(exchange, 401, &quot;{\&quot;message\&quot;:\&quot;invalid key\&quot;}&quot;))</span>
+<span class="nc" id="L688">                .startEmpty();</span>
+<span class="nc" id="L689">        Path configDir = writeConnectedBoards(DEFAULT_TRELLO_TOOLS, List.of(&quot;Done&quot;), &quot;Queue&quot;);</span>
+
+        // when
+<span class="nc" id="L692">        CliRunResult result = runCard(configDir, &quot;list&quot;);</span>
+
+        // then
+<span class="nc" id="L695">        assertFailure(result, &quot;trello_auth_failed&quot;);</span>
+<span class="nc" id="L696">        result.stderrDoesNotContain(CredentialSentinels.TRELLO_API_KEY, CredentialSentinels.TRELLO_API_TOKEN);</span>
+<span class="nc" id="L697">    }</span>
+
+    @Test
+    void missingCredentialsNameTheCardCommand() throws Exception {
+        // given
+<span class="nc" id="L702">        Path configDir = connectBoard(DEFAULT_TRELLO_TOOLS);</span>
+<span class="nc" id="L703">        Files.delete(configDir.resolve(&quot;.env&quot;));</span>
+
+        // when
+<span class="nc" id="L706">        CliRunResult result = runCard(configDir, &quot;list&quot;);</span>
+
+        // then
+<span class="nc" id="L709">        assertFailure(result, &quot;setup_worker_missing_trello_credentials&quot;);</span>
+<span class="nc" id="L710">        result.stderrContains(&quot;Missing Trello credentials for card list.&quot;);</span>
+<span class="nc" id="L711">        assertThat(board.requests()).isEmpty();</span>
+<span class="nc" id="L712">    }</span>
+
+    private Path connectBoard(String trelloTools) throws Exception {
+<span class="nc" id="L715">        return connectBoard(trelloTools, List.of(&quot;Done&quot;));</span>
+    }
+
+    private Path connectBoard(String trelloTools, List&lt;String&gt; terminalStates) throws Exception {
+<span class="nc" id="L719">        server = new FakeTrelloServer().on(&quot;/1/&quot;, board).startEmpty();</span>
+<span class="nc" id="L720">        return writeConnectedBoards(trelloTools, terminalStates, &quot;Queue&quot;);</span>
+    }
+
+    private Path connectBoards(String trelloTools, String... boardNames) throws Exception {
+<span class="nc" id="L724">        server = new FakeTrelloServer().on(&quot;/1/&quot;, board).startEmpty();</span>
+<span class="nc" id="L725">        return writeConnectedBoards(trelloTools, List.of(&quot;Done&quot;), boardNames);</span>
+    }
+
+    private Path writeConnectedBoards(String trelloTools, List&lt;String&gt; terminalStates, String... boardNames)
+            throws Exception {
+<span class="nc" id="L730">        Path configDir = tempDir.resolve(&quot;config&quot;);</span>
+<span class="nc" id="L731">        Files.createDirectories(configDir);</span>
+<span class="nc" id="L732">        Path env = configDir.resolve(&quot;.env&quot;);</span>
+<span class="nc" id="L733">        Files.writeString(</span>
+                env,
+<span class="nc" id="L735">                TestEnv.trelloCredentials(CredentialSentinels.TRELLO_API_KEY, CredentialSentinels.TRELLO_API_TOKEN));</span>
+<span class="nc" id="L736">        List&lt;ConnectedBoard&gt; boards = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">        for (int index = 0; index &lt; boardNames.length; index++) {</span>
+<span class="nc" id="L738">            String name = boardNames[index];</span>
+<span class="nc" id="L739">            Path workflow = configDir.resolve(&quot;WORKFLOW.&quot; + name.toLowerCase(Locale.ROOT) + &quot;.md&quot;);</span>
+<span class="nc" id="L740">            Files.writeString(</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">                    workflow, workflow(index == 0 ? BOARD_ID : &quot;board-&quot; + (index + 1), trelloTools, terminalStates));</span>
+<span class="nc" id="L742">            boards.add(ConnectedBoardBuilder.connectedBoard(</span>
+<span class="nc" id="L743">                            workflow.toAbsolutePath().normalize())</span>
+<span class="nc bnc" id="L744" title="All 2 branches missed.">                    .withBoardId(index == 0 ? BOARD_ID : &quot;board-&quot; + (index + 1))</span>
+<span class="nc bnc" id="L745" title="All 2 branches missed.">                    .withBoardKey(index == 0 ? &quot;SYNTH001&quot; : &quot;SYNTH00&quot; + (index + 1))</span>
+<span class="nc" id="L746">                    .withBoardName(name)</span>
+<span class="nc bnc" id="L747" title="All 2 branches missed.">                    .withBoardUrl(&quot;https://trello.com/b/&quot; + (index == 0 ? &quot;SYNTH001&quot; : &quot;SYNTH00&quot; + (index + 1)))</span>
+<span class="nc" id="L748">                    .withEnvPath(env)</span>
+<span class="nc" id="L749">                    .withServerPort(8080 + index)</span>
+<span class="nc" id="L750">                    .build());</span>
+        }
+<span class="nc" id="L752">        new ConnectedBoardRepository(configDir.resolve(ConnectedBoardManifest.FILE_NAME))</span>
+<span class="nc" id="L753">                .save(new ConnectedBoardManifest(boards));</span>
+<span class="nc" id="L754">        return configDir;</span>
+    }
+
+    private String workflow(String boardId, String trelloTools, List&lt;String&gt; terminalStates) {
+<span class="nc" id="L758">        return workflow(server.endpoint(), boardId, trelloTools, terminalStates);</span>
+    }
+
+    private static String workflow(String endpoint, String boardId, String trelloTools, List&lt;String&gt; terminalStates) {
+<span class="nc" id="L762">        var terminal = new StringBuilder();</span>
+<span class="nc bnc" id="L763" title="All 2 branches missed.">        for (String state : terminalStates) {</span>
+<span class="nc" id="L764">            terminal.append(&quot;    - \&quot;&quot;).append(state).append(&quot;\&quot;\n&quot;);</span>
+<span class="nc" id="L765">        }</span>
+<span class="nc" id="L766">        return &quot;&quot;&quot;</span>
+                ---
+                tracker:
+                  kind: trello
+                  endpoint: %s
+                  board_id: %s
+                  active_states:
+                    - Ready for Codex
+                    - In Progress
+                  in_progress_state: In Progress
+                  blocked_state: Blocked
+                  terminal_states:
+                %s%s---
+                # Queue
+                &quot;&quot;&quot;
+<span class="nc" id="L781">                .formatted(endpoint, boardId, terminal, trelloTools);</span>
+    }
+
+    /// Starts a second Trello API that the card commands must never call, and returns its endpoint.
+    private String startForeignServer() throws Exception {
+<span class="nc" id="L786">        foreignServer = new FakeTrelloServer().on(&quot;/1/&quot;, foreignBoard).startEmpty();</span>
+<span class="nc" id="L787">        return foreignServer.endpoint();</span>
+    }
+
+    private static Path workflowPath(Path configDir) {
+<span class="nc" id="L791">        return configDir.resolve(&quot;WORKFLOW.queue.md&quot;).toAbsolutePath().normalize();</span>
+    }
+
+    private static String jsonString(String value) throws Exception {
+<span class="nc" id="L795">        return new ObjectMapper().writeValueAsString(value);</span>
+    }
+
+    private static void assertFailure(CliRunResult result, String code) {
+<span class="nc" id="L799">        result.assertFailure(CliExitCodes.SETUP_FAILURE).stderrContains(&quot;setup_failed code=&quot; + code + &quot; message=&quot;);</span>
+<span class="nc" id="L800">    }</span>
+
+    /// Asserts a refusal by a `trello_tools` setting. The board-cards skill must name the code, so
+    /// Codex tells the user which setting refused the write instead of relaying an unknown failure.
+    private static void assertPolicyRefusal(CliRunResult result, String code) {
+<span class="nc" id="L805">        assertFailure(result, code);</span>
+<span class="nc" id="L806">        assertThat(BOARD_CARDS_SKILL).content(StandardCharsets.UTF_8).contains(&quot;`&quot; + code + &quot;`&quot;);</span>
+<span class="nc" id="L807">    }</span>
+
+    private CliRunResult runCard(Path configDir, String... args) {
+<span class="nc" id="L810">        List&lt;String&gt; command = new ArrayList&lt;&gt;(List.of(&quot;card&quot;));</span>
+<span class="nc" id="L811">        command.add(args[0]);</span>
+<span class="nc" id="L812">        command.add(&quot;--config-dir&quot;);</span>
+<span class="nc" id="L813">        command.add(configDir.toString());</span>
+<span class="nc" id="L814">        command.addAll(List.of(args).subList(1, args.length));</span>
+<span class="nc" id="L815">        Map&lt;String, String&gt; environment = Map.of();</span>
+<span class="nc" id="L816">        var setup = new TrelloBoardSetup(</span>
+                new ObjectMapper(),
+<span class="nc" id="L818">                () -&gt; CodexModelSelectionDefaults.of(TrelloBoardSetup.CodexModelDefaults.fallback()));</span>
+<span class="nc" id="L819">        var workerManager = new LocalWorkerManager(environment);</span>
+<span class="nc" id="L820">        var stdout = new ByteArrayOutputStream();</span>
+<span class="nc" id="L821">        var stderr = new ByteArrayOutputStream();</span>
+<span class="nc" id="L822">        int exitCode = TrelloBoardSetupMain.run(</span>
+<span class="nc" id="L823">                command.toArray(String[]::new),</span>
+                new TrelloBoardSetupService(setup, workerManager, environment),
+                new LocalSetup(setup, new ProcessCommandRunner()),
+                workerManager,
+<span class="nc" id="L827">                new BoardCardCommands(workerManager, environment, server.endpointUri()),</span>
+                new PrintStream(stdout, true, StandardCharsets.UTF_8),
+                new PrintStream(stderr, true, StandardCharsets.UTF_8));
+<span class="nc" id="L830">        return new CliRunResult(</span>
+<span class="nc" id="L831">                exitCode, stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

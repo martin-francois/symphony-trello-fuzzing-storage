@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrelloCardWrites.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.tracker</a> &gt; <span class="el_source">TrelloCardWrites.java</span></div><h1>TrelloCardWrites.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.tracker;
+
+import static ch.fmartin.symphony.trello.tracker.TrelloWritePermission.COMMENTS;
+import static ch.fmartin.symphony.trello.tracker.TrelloWritePermission.TOOLS;
+import static ch.fmartin.symphony.trello.tracker.TrelloWritePermission.WRITES;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.config.StateNames;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/// Card writes that the worker's Trello tools and the `symphony-trello card` commands share. Both
+/// add comments, check move destinations against the `trello_tools` policy, and match open lists by
+/// name through this class, so a write that one path refuses cannot succeed through the other.
+/// Creating and archiving a chosen card are only reachable from the card commands; the worker
+/// creates follow-up cards through its own tool, which adds relationship metadata.
+///
+/// A refused write throws [TrelloException] with the same code and message on both paths.
+@NullMarked
+public final class TrelloCardWrites {
+    private static final String LIST_NOT_OPEN = &quot;Destination list is not open on the configured board.&quot;;
+    private static final String LIST_NOT_ALLOWED =
+            &quot;Destination list is not included in the configured Trello move allowlist.&quot;;
+
+    private final TrelloClient trello;
+
+<span class="fc" id="L31">    public TrelloCardWrites(TrelloClient trello) {</span>
+<span class="fc" id="L32">        this.trello = trello;</span>
+<span class="fc" id="L33">    }</span>
+
+    /// Adds `text` as a comment. Symphony escapes leading hashtags and appends its attribution
+    /// footer, replacing any footer at the end of `text`.
+    public void addComment(EffectiveConfig config, String cardId, String text) {
+<span class="fc" id="L38">        TrelloWritePermission.requireGranted(config, TOOLS, WRITES, COMMENTS);</span>
+<span class="fc bfc" id="L39" title="All 2 branches covered.">        if (SymphonyCommentFooter.isFooterOnly(text)) {</span>
+<span class="fc" id="L40">            throw new TrelloException(</span>
+                    &quot;invalid_comment_text&quot;, &quot;Comment text must contain more than the Symphony footer.&quot;);
+        }
+<span class="fc" id="L43">        String body = SymphonyCommentFooter.withoutTrailingFooters(text.stripTrailing());</span>
+<span class="fc" id="L44">        trello.addComment(config, cardId, SymphonyCommentFooter.append(TrelloMarkdown.escapeLeadingHashtags(body)));</span>
+<span class="fc" id="L45">    }</span>
+
+    /// Creates a card at the bottom of `list`. A card may start in a list that the move allowlist
+    /// names, or in a list that is neither active nor terminal, so creating a card cannot start or
+    /// finish work that a move would not be allowed to.
+    public TrelloClient.CreatedCard createCard(
+            EffectiveConfig config, TrelloClient.BoardList list, String title, String description) {
+<span class="nc" id="L52">        TrelloWritePermission.requireGranted(config, TOOLS, WRITES);</span>
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if (!startListAllowed(config, list)) {</span>
+<span class="nc" id="L54">            throw new TrelloException(</span>
+                    &quot;trello_create_list_not_allowed&quot;,
+                    &quot;New cards can start only in a list that trello_tools allows moves to, or in a list that is&quot;
+                            + &quot; neither active nor terminal.&quot;);
+        }
+<span class="nc" id="L59">        String name =</span>
+<span class="nc" id="L60">                checkedText(() -&gt; TrelloCardText.singleLine(title, &quot;title&quot;, TrelloCardText.MAX_TITLE_CODE_POINTS));</span>
+<span class="nc" id="L61">        String body = checkedText(() -&gt; TrelloCardText.description(description));</span>
+<span class="nc" id="L62">        return trello.createCard(config, list.id(), name, TrelloMarkdown.escapeLeadingHashtags(body), List.of());</span>
+    }
+
+    private static boolean startListAllowed(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        return allowedById(config, list)</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                || allowedByName(config, list)</span>
+<span class="nc bnc" id="L68" title="All 4 branches missed.">                || !(TrelloClient.isActiveList(config, list) || TrelloClient.isTerminalList(config, list));</span>
+    }
+
+    /// Moves a card to `list` after the same allowlist check as the worker's move tool, by list id.
+    public void moveCard(EffectiveConfig config, String cardId, TrelloClient.BoardList list) {
+<span class="nc" id="L73">        TrelloClient.BoardList target = allowedMoveTarget(config, list.id(), null);</span>
+<span class="nc" id="L74">        trello.moveCardToList(config, cardId, target.id());</span>
+<span class="nc" id="L75">    }</span>
+
+    /// Archives a card. Trello keeps archived cards and can restore them, so archiving needs the
+    /// write permission but not `allow_destructive_operations`, which covers deletes.
+    public void archiveCard(EffectiveConfig config, String cardId) {
+<span class="nc" id="L80">        TrelloWritePermission.requireGranted(config, TOOLS, WRITES);</span>
+<span class="nc" id="L81">        trello.archiveCard(config, cardId);</span>
+<span class="nc" id="L82">    }</span>
+
+    public static boolean moveAllowlistConfigured(EffectiveConfig config) {
+<span class="fc bfc" id="L85" title="All 2 branches covered.">        return !config.trelloTools().allowedMoveListIds().isEmpty()</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">                || !config.trelloTools().allowedMoveListNames().isEmpty();</span>
+    }
+
+    /// The open list that a card may move to, chosen by `listId` when present, otherwise by
+    /// `listName`. Throws the refusal when the workflow does not allow the move.
+    public TrelloClient.BoardList allowedMoveTarget(
+            EffectiveConfig config, @Nullable String listId, @Nullable String listName) {
+<span class="fc" id="L93">        TrelloWritePermission.requireGranted(config, TOOLS, WRITES);</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">        if (!moveAllowlistConfigured(config)) {</span>
+<span class="fc" id="L95">            throw new TrelloException(</span>
+                    &quot;trello_move_allowlist_required&quot;,
+                    &quot;Trello card moves require trello_tools.allowed_move_list_ids or allowed_move_list_names.&quot;);
+        }
+<span class="fc bfc" id="L99" title="All 4 branches covered.">        if (blank(listId) &amp;&amp; blank(listName)) {</span>
+<span class="fc" id="L100">            throw new TrelloException(</span>
+                    &quot;missing_destination_list&quot;, &quot;Provide list_name or list_id for the destination list.&quot;);
+        }
+<span class="fc bfc" id="L103" title="All 2 branches covered.">        return switch (resolveMoveTarget(config, listId, listName)) {</span>
+<span class="fc" id="L104">            case MoveTarget.Allowed allowed -&gt; allowed.list();</span>
+<span class="fc" id="L105">            case MoveTarget.Refused refused -&gt; throw new TrelloException(&quot;trello_move_not_allowed&quot;, refused.reason());</span>
+        };
+    }
+
+    /// Checks a destination against the open lists of the configured board and the move
+    /// allowlist. Name matches fail closed when several open lists share the requested name.
+    public MoveTarget resolveMoveTarget(EffectiveConfig config, @Nullable String listId, @Nullable String listName) {
+<span class="fc" id="L112">        return moveTarget(config, openLists(trello.fetchBoardLists(config)), listId, listName);</span>
+    }
+
+    /// Whether a card may move to `list`, one of `openLists`, under every rule that [#moveCard]
+    /// checks.
+    public static boolean movableTo(
+            EffectiveConfig config, List&lt;TrelloClient.BoardList&gt; openLists, TrelloClient.BoardList list) {
+<span class="nc bnc" id="L119" title="All 2 branches missed.">        return TrelloWritePermission.allGranted(config, TOOLS, WRITES)</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">                &amp;&amp; moveAllowlistConfigured(config)</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">                &amp;&amp; moveTarget(config, openLists, list.id(), null) instanceof MoveTarget.Allowed;</span>
+    }
+
+    /// Whether a new card may start in `list` under every rule that [#createCard] checks.
+    public static boolean creatableIn(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="nc bnc" id="L126" title="All 4 branches missed.">        return TrelloWritePermission.allGranted(config, TOOLS, WRITES) &amp;&amp; startListAllowed(config, list);</span>
+    }
+
+    private static MoveTarget moveTarget(
+            EffectiveConfig config,
+            List&lt;TrelloClient.BoardList&gt; openLists,
+            @Nullable String listId,
+            @Nullable String listName) {
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        if (!blank(listId)) {</span>
+<span class="fc" id="L135">            return openLists.stream()</span>
+<span class="fc" id="L136">                    .filter(list -&gt; list.id().equals(listId))</span>
+<span class="fc" id="L137">                    .findAny()</span>
+<span class="fc" id="L138">                    .map(list -&gt; allowedTargetById(config, list, openLists))</span>
+<span class="fc" id="L139">                    .orElseGet(() -&gt; new MoveTarget.Refused(LIST_NOT_OPEN));</span>
+        }
+<span class="fc bfc" id="L141" title="All 3 branches covered.">        return switch (matchOpenList(openLists, null, listName)) {</span>
+<span class="fc" id="L142">            case OpenListMatch.Found found -&gt; allowedTarget(config, found.list());</span>
+<span class="fc" id="L143">            case OpenListMatch.Missing _ -&gt; new MoveTarget.Refused(LIST_NOT_OPEN);</span>
+            case OpenListMatch.Ambiguous _ -&gt;
+<span class="fc" id="L145">                new MoveTarget.Refused(</span>
+                        &quot;Destination list name matches multiple open Trello lists. Rename the duplicate lists or move by list_id.&quot;);
+        };
+    }
+
+    private static MoveTarget allowedTargetById(
+            EffectiveConfig config, TrelloClient.BoardList list, List&lt;TrelloClient.BoardList&gt; openLists) {
+<span class="fc bfc" id="L152" title="All 2 branches covered.">        if (allowedById(config, list)) {</span>
+<span class="fc" id="L153">            return new MoveTarget.Allowed(list);</span>
+        }
+<span class="fc" id="L155">        boolean uniqueName = matchOpenList(openLists, null, list.name()) instanceof OpenListMatch.Found;</span>
+<span class="fc bfc" id="L156" title="All 4 branches covered.">        if (allowedByName(config, list) &amp;&amp; uniqueName) {</span>
+<span class="fc" id="L157">            return new MoveTarget.Allowed(list);</span>
+        }
+<span class="fc bfc" id="L159" title="All 2 branches covered.">        if (allowedByName(config, list)) {</span>
+<span class="fc" id="L160">            return new MoveTarget.Refused(</span>
+                    &quot;Destination list name matches multiple open Trello lists. Allow the exact list_id before moving by list_id.&quot;);
+        }
+<span class="fc" id="L163">        return new MoveTarget.Refused(LIST_NOT_ALLOWED);</span>
+    }
+
+    private static MoveTarget allowedTarget(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="fc bfc" id="L167" title="All 4 branches covered.">        return allowedById(config, list) || allowedByName(config, list)</span>
+<span class="fc" id="L168">                ? new MoveTarget.Allowed(list)</span>
+<span class="fc" id="L169">                : new MoveTarget.Refused(LIST_NOT_ALLOWED);</span>
+    }
+
+    private static boolean allowedById(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="fc" id="L173">        return config.trelloTools().allowedMoveListIds().contains(list.id());</span>
+    }
+
+    private static boolean allowedByName(EffectiveConfig config, TrelloClient.BoardList list) {
+<span class="fc" id="L177">        return config.trelloTools().allowedMoveListNames().contains(StateNames.normalize(list.name()));</span>
+    }
+
+    public static List&lt;TrelloClient.BoardList&gt; openLists(List&lt;TrelloClient.BoardList&gt; lists) {
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        return lists.stream().filter(list -&gt; !list.closed()).toList();</span>
+    }
+
+    /// Finds the open list with `listId` when it is present, otherwise the open list whose
+    /// normalized name equals `listName`.
+    public static OpenListMatch matchOpenList(
+            List&lt;TrelloClient.BoardList&gt; openLists, @Nullable String listId, @Nullable String listName) {
+        Predicate&lt;TrelloClient.BoardList&gt; selected =
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">                listId == null ? namedList(listName) : list -&gt; list.id().equals(listId);</span>
+<span class="fc" id="L190">        List&lt;TrelloClient.BoardList&gt; matches =</span>
+<span class="fc" id="L191">                openLists.stream().filter(selected).limit(2).toList();</span>
+<span class="fc bfc" id="L192" title="All 3 branches covered.">        return switch (matches.size()) {</span>
+<span class="fc" id="L193">            case 0 -&gt; new OpenListMatch.Missing();</span>
+<span class="fc" id="L194">            case 1 -&gt; new OpenListMatch.Found(matches.getFirst());</span>
+<span class="fc" id="L195">            default -&gt; new OpenListMatch.Ambiguous();</span>
+        };
+    }
+
+    private static Predicate&lt;TrelloClient.BoardList&gt; namedList(@Nullable String listName) {
+<span class="fc" id="L200">        String normalizedName = StateNames.normalize(listName);</span>
+<span class="fc" id="L201">        return list -&gt; StateNames.normalize(list.name()).equals(normalizedName);</span>
+    }
+
+    private static String checkedText(Supplier&lt;String&gt; check) {
+        try {
+<span class="nc" id="L206">            return check.get();</span>
+<span class="nc" id="L207">        } catch (IllegalArgumentException e) {</span>
+<span class="nc" id="L208">            throw new TrelloException(&quot;invalid_card_text&quot;, e.getMessage(), e);</span>
+        }
+    }
+
+    private static boolean blank(@Nullable String value) {
+<span class="fc bfc" id="L213" title="All 4 branches covered.">        return value == null || value.isBlank();</span>
+    }
+
+    /// A move destination the workflow allows, or the reason it refuses one.
+    public sealed interface MoveTarget {
+        default Optional&lt;TrelloClient.BoardList&gt; allowedList() {
+<span class="nc bnc" id="L219" title="All 2 branches missed.">            return this instanceof Allowed allowed ? Optional.of(allowed.list()) : Optional.empty();</span>
+        }
+
+<span class="fc" id="L222">        record Allowed(TrelloClient.BoardList list) implements MoveTarget {}</span>
+
+<span class="fc" id="L224">        record Refused(String reason) implements MoveTarget {}</span>
+    }
+
+    /// The result of looking up one open list: exactly one match, none, or several.
+    public sealed interface OpenListMatch {
+<span class="fc" id="L229">        record Found(TrelloClient.BoardList list) implements OpenListMatch {}</span>
+
+<span class="fc" id="L231">        record Missing() implements OpenListMatch {}</span>
+
+<span class="fc" id="L233">        record Ambiguous() implements OpenListMatch {}</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

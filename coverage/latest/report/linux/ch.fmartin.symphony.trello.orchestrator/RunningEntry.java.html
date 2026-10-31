@@ -8,6 +8,8 @@ import java.time.Instant;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.jspecify.annotations.Nullable;
 
 final class RunningEntry {
     final String cardId;
@@ -33,16 +35,19 @@ final class RunningEntry {
     long lastReportedTotalTokens;
     Future&lt;?&gt; workerTask;
     volatile boolean workerExited;
-<span class="nc" id="L36">    volatile boolean workspaceReleased = true;</span>
+<span class="nc" id="L38">    volatile boolean workspaceReleased = true;</span>
     boolean removeWorkspaceAfterExit;
     int turnCount;
+    ScheduledFuture&lt;?&gt; handoffTimer;
     CardHandoffMove handoffMove;
     Instant handoffDeadline;
-    ScheduledFuture&lt;?&gt; handoffTimer;
     boolean handoffSucceeded;
-    Instant handoffCancelledAt;
-    volatile boolean handoffCancellationRequested;
 <span class="nc" id="L45">    final AtomicBoolean handoffRunnerCancellationStarted = new AtomicBoolean();</span>
+    /// One atomic orders the handoff deadline's claim against every removal from the
+    /// orchestrator's running map and against a failed move that ends the handoff protection:
+    /// whichever comes first wins. The deadline claims without the operation lock (ADR 0119), so
+    /// separate fields read one after the other could not give that order.
+<span class="nc" id="L50">    private final AtomicReference&lt;Lifecycle&gt; lifecycle = new AtomicReference&lt;&gt;(Lifecycle.RUNNING);</span>
 
     RunningEntry(
             Card card,
@@ -50,21 +55,86 @@ final class RunningEntry {
             String workerIdentity,
             Integer retryAttempt,
             Instant startedAt,
-<span class="nc" id="L53">            EffectiveConfig launchConfig) {</span>
-<span class="nc" id="L54">        this.card = card;</span>
-<span class="nc" id="L55">        this.dispatchSource = dispatchSource;</span>
-<span class="nc" id="L56">        this.cardId = card.id();</span>
-<span class="nc" id="L57">        this.workerIdentity = workerIdentity;</span>
-<span class="nc" id="L58">        this.retryAttempt = retryAttempt;</span>
-<span class="nc" id="L59">        this.startedAt = startedAt;</span>
-<span class="nc" id="L60">        this.launchConfig = launchConfig;</span>
-<span class="nc" id="L61">        this.launchTarget = TrackerTarget.from(launchConfig);</span>
-<span class="nc" id="L62">        this.launchCommand = launchConfig.codex().command();</span>
-<span class="nc" id="L63">        this.lastEventAt = this.startedAt;</span>
-<span class="nc" id="L64">    }</span>
+<span class="nc" id="L58">            EffectiveConfig launchConfig) {</span>
+<span class="nc" id="L59">        this.card = card;</span>
+<span class="nc" id="L60">        this.dispatchSource = dispatchSource;</span>
+<span class="nc" id="L61">        this.cardId = card.id();</span>
+<span class="nc" id="L62">        this.workerIdentity = workerIdentity;</span>
+<span class="nc" id="L63">        this.retryAttempt = retryAttempt;</span>
+<span class="nc" id="L64">        this.startedAt = startedAt;</span>
+<span class="nc" id="L65">        this.launchConfig = launchConfig;</span>
+<span class="nc" id="L66">        this.launchTarget = TrackerTarget.from(launchConfig);</span>
+<span class="nc" id="L67">        this.launchCommand = launchConfig.codex().command();</span>
+<span class="nc" id="L68">        this.lastEventAt = this.startedAt;</span>
+<span class="nc" id="L69">    }</span>
 
     String identifier() {
-<span class="nc" id="L67">        return card.identifier();</span>
+<span class="nc" id="L72">        return card.identifier();</span>
+    }
+
+    boolean handoffCancellationRequested() {
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        return lifecycle.get().handoffCancelledAt() != null;</span>
+    }
+
+    /// When an expired handoff deadline claimed this entry, or `null` while none did; its runtime
+    /// stops there.
+    @Nullable
+    Instant handoffCancelledAt() {
+<span class="nc" id="L83">        return lifecycle.get().handoffCancelledAt();</span>
+    }
+
+    /// Succeeds once, and only while the entry is running, its handoff protection holds and no
+    /// deadline claimed it.
+    boolean claimHandoffCancellation(Instant cancelledAt) {
+<span class="nc" id="L89">        return lifecycle</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                .getAndUpdate(state -&gt; state.claimable() ? state.claimedAt(cancelledAt) : state)</span>
+<span class="nc" id="L91">                .claimable();</span>
+    }
+
+    /// Call when a handoff move starts protecting the current turn again.
+    void protectHandoff() {
+<span class="nc" id="L96">        lifecycle.updateAndGet(state -&gt; state.withHandoffProtected(true));</span>
+<span class="nc" id="L97">    }</span>
+
+    /// Call when a failed move leaves no handoff to protect. A deadline task that already started
+    /// can then no longer claim the entry.
+    void endHandoffProtection() {
+<span class="nc" id="L102">        lifecycle.updateAndGet(state -&gt; state.withHandoffProtected(false));</span>
+<span class="nc" id="L103">    }</span>
+
+    /// Call when the entry leaves the running map. A later deadline can no longer claim it.
+    void markRemovedFromRunning() {
+<span class="nc" id="L107">        lifecycle.updateAndGet(Lifecycle::removed);</span>
+<span class="nc" id="L108">    }</span>
+
+    /// Marks the entry removed from the running map and returns `true`, or returns `false` and
+    /// leaves it alone when a deadline claimed it first.
+    boolean markRemovedUnlessHandoffClaimed() {
+<span class="nc" id="L113">        return lifecycle</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                        .getAndUpdate(state -&gt; state.handoffCancelledAt() == null ? state.removed() : state)</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                        .handoffCancelledAt()</span>
+                == null;
+    }
+
+<span class="nc" id="L119">    private record Lifecycle(</span>
+            boolean removedFromRunning, boolean handoffProtected, @Nullable Instant handoffCancelledAt) {
+<span class="nc" id="L121">        static final Lifecycle RUNNING = new Lifecycle(false, true, null);</span>
+
+        boolean claimable() {
+<span class="nc bnc" id="L124" title="All 6 branches missed.">            return !removedFromRunning &amp;&amp; handoffProtected &amp;&amp; handoffCancelledAt == null;</span>
+        }
+
+        Lifecycle claimedAt(Instant cancelledAt) {
+<span class="nc" id="L128">            return new Lifecycle(false, true, cancelledAt);</span>
+        }
+
+        Lifecycle withHandoffProtected(boolean value) {
+<span class="nc" id="L132">            return new Lifecycle(removedFromRunning, value, handoffCancelledAt);</span>
+        }
+
+        Lifecycle removed() {
+<span class="nc" id="L136">            return new Lifecycle(true, handoffProtected, handoffCancelledAt);</span>
+        }
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

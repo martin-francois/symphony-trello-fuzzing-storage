@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TurnSilenceTimeout.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">TurnSilenceTimeout.java</span></div><h1>TurnSilenceTimeout.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import java.time.Duration;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
+import org.jspecify.annotations.NullMarked;
+
+/// Applies `codex.turn_timeout_ms` the way upstream Symphony defines it: as the longest time a
+/// running turn may go without app-server output. Every output line resets the interval, so a turn
+/// that keeps streaming is never cut off, however long it runs (ADR 0136).
+///
+/// Reader threads call [#outputReceived()]; the session owner calls [#await]. The last output time
+/// is one atomic value that only moves forward, so a thread that read the clock earlier but writes
+/// later cannot pull the deadline back. The owner measures the silence again after every bounded
+/// wait, so output that arrives while the owner waits always moves the deadline.
+@NullMarked
+final class TurnSilenceTimeout {
+    private final LongSupplier nanoTime;
+    private final AtomicLong lastOutputNanos;
+
+    /// `nanoTime` is a monotonic time source in nanoseconds, such as [System#nanoTime()].
+<span class="nc" id="L24">    TurnSilenceTimeout(LongSupplier nanoTime) {</span>
+<span class="nc" id="L25">        this.nanoTime = nanoTime;</span>
+<span class="nc" id="L26">        this.lastOutputNanos = new AtomicLong(nanoTime.getAsLong());</span>
+<span class="nc" id="L27">    }</span>
+
+    /// Records one line of app-server output.
+    void outputReceived() {
+<span class="nc" id="L31">        lastOutputNanos.accumulateAndGet(nanoTime.getAsLong(), TurnSilenceTimeout::later);</span>
+<span class="nc" id="L32">    }</span>
+
+    /// The later of two [System#nanoTime()] readings; the difference stays correct across overflow.
+    private static long later(long first, long second) {
+<span class="nc bnc" id="L36" title="All 2 branches missed.">        return second - first &gt; 0 ? second : first;</span>
+    }
+
+    /// Waits for `wait` to finish and fails once `limit` passes without app-server output. The
+    /// interval starts when this method is called.
+    &lt;T&gt; T await(BoundedWait&lt;T&gt; wait, Duration limit) throws InterruptedException, ExecutionException, TimeoutException {
+        // The interval starts with the wait, as if the turn had just written output.
+<span class="nc" id="L43">        outputReceived();</span>
+<span class="nc" id="L44">        long limitNanos = limit.toNanos();</span>
+<span class="nc" id="L45">        long remainingNanos = remainingNanos(limitNanos);</span>
+<span class="nc bnc" id="L46" title="All 2 branches missed.">        while (remainingNanos &gt; 0) {</span>
+            try {
+<span class="nc" id="L48">                return wait.get(remainingNanos);</span>
+<span class="nc" id="L49">            } catch (TimeoutException ignored) {</span>
+                // Output during the wait moved the deadline, so the silence is measured again.
+<span class="nc" id="L51">                remainingNanos = remainingNanos(limitNanos);</span>
+<span class="nc" id="L52">            }</span>
+        }
+<span class="nc" id="L54">        throw new TimeoutException(&quot;no app-server output for &quot; + limit.toMillis() + &quot; ms&quot;);</span>
+    }
+
+    private long remainingNanos(long limitNanos) {
+<span class="nc" id="L58">        return limitNanos - (nanoTime.getAsLong() - lastOutputNanos.get());</span>
+    }
+
+    /// A wait that returns the result or throws [TimeoutException] after at most `timeoutNanos`.
+    @FunctionalInterface
+    interface BoundedWait&lt;T&gt; {
+        T get(long timeoutNanos) throws InterruptedException, ExecutionException, TimeoutException;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

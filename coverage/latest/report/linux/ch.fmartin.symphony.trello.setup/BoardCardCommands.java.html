@@ -1,0 +1,432 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BoardCardCommands.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">BoardCardCommands.java</span></div><h1>BoardCardCommands.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import ch.fmartin.symphony.trello.domain.Card;
+import ch.fmartin.symphony.trello.tracker.CardLookupResult;
+import ch.fmartin.symphony.trello.tracker.TrelloCardSelectors;
+import ch.fmartin.symphony.trello.tracker.TrelloCardWrites;
+import ch.fmartin.symphony.trello.tracker.TrelloClient;
+import ch.fmartin.symphony.trello.tracker.TrelloException;
+import ch.fmartin.symphony.trello.tracker.TrelloListRoles;
+import ch.fmartin.symphony.trello.workflow.WorkflowException;
+import ch.fmartin.symphony.trello.workflow.WorkflowLoader;
+import com.fasterxml.jackson.annotation.JsonValue;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.google.common.base.Ascii;
+import com.google.common.base.Strings;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.URI;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/// Runs the `symphony-trello card` commands against one connected board. The commands resolve the
+/// board and its Trello credentials like `start` does, so an agent that runs them never handles
+/// the key or token, and they write through [TrelloCardWrites], so the workflow's `trello_tools`
+/// policy refuses the same writes it refuses for the worker.
+@NullMarked
+final class BoardCardCommands {
+<span class="nc" id="L37">    private static final Set&lt;String&gt; CREDENTIAL_FAILURE_CODES =</span>
+<span class="nc" id="L38">            Set.of(&quot;trello_auth_failed&quot;, &quot;trello_permission_denied&quot;);</span>
+
+    private final LocalWorkerManager workerManager;
+    private final Map&lt;String, String&gt; environment;
+    private final URI trelloApi;
+    private final TrelloClient trello;
+    private final TrelloCardWrites writes;
+    private final ObjectMapper json;
+
+    BoardCardCommands(LocalWorkerManager workerManager, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L48">        this(workerManager, environment, TrelloBoardSetup.DEFAULT_ENDPOINT);</span>
+<span class="nc" id="L49">    }</span>
+
+    /// `trelloApi` is the only endpoint that may receive the Trello key and token. The CLI passes the
+    /// official Trello API, so no workflow setting can send the credentials anywhere else; tests pass
+    /// a fake Trello API.
+<span class="nc" id="L54">    BoardCardCommands(LocalWorkerManager workerManager, Map&lt;String, String&gt; environment, URI trelloApi) {</span>
+<span class="nc" id="L55">        this.workerManager = workerManager;</span>
+<span class="nc" id="L56">        this.environment = Map.copyOf(environment);</span>
+<span class="nc" id="L57">        this.trelloApi = trelloApi;</span>
+<span class="nc" id="L58">        this.trello = new TrelloClient(new ObjectMapper());</span>
+<span class="nc" id="L59">        this.writes = new TrelloCardWrites(trello);</span>
+<span class="nc" id="L60">        this.json = new ObjectMapper().setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);</span>
+<span class="nc" id="L61">    }</span>
+
+    int run(CardCommandRequest request, PrintStream out) throws IOException {
+<span class="nc" id="L64">        LocalWorkerPaths paths = LocalWorkerPaths.from(</span>
+<span class="nc" id="L65">                Optional.empty(), request.configDir(), Optional.empty(), Optional.empty(), environment);</span>
+<span class="nc" id="L66">        CardCommandTarget target = workerManager.cardCommandTarget(</span>
+<span class="nc" id="L67">                paths, request.board(), request.workflow(), request.operation().commandName(), trelloApi);</span>
+        Result result;
+        try {
+<span class="nc" id="L70">            result = execute(request.operation(), session(paths, target));</span>
+<span class="nc" id="L71">        } catch (TrelloException e) {</span>
+<span class="nc" id="L72">            throw failure(target, e);</span>
+<span class="nc" id="L73">        }</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        out.println(request.json() ? json.writeValueAsString(result) : CardCommandText.render(result));</span>
+<span class="nc" id="L75">        return 0;</span>
+    }
+
+    private Session session(LocalWorkerPaths paths, CardCommandTarget target) {
+<span class="nc" id="L79">        EffectiveConfig config = target.config().withResolvedBoardId(trello.resolveBoardId(target.config()));</span>
+<span class="nc" id="L80">        ConnectedBoard board = target.board();</span>
+<span class="nc" id="L81">        return new Session(</span>
+                config,
+                new BoardView(
+<span class="nc" id="L84">                        board.boardName(),</span>
+<span class="nc" id="L85">                        config.tracker().resolvedBoardId(),</span>
+<span class="nc" id="L86">                        board.boardUrl(),</span>
+<span class="nc" id="L87">                        board.workflowPath().toString()),</span>
+<span class="nc" id="L88">                trello.fetchBoardLists(config),</span>
+<span class="nc" id="L89">                listRoles(paths, board, config));</span>
+    }
+
+    private Result execute(CardCommandRequest.Operation operation, Session session) {
+<span class="nc bnc" id="L93" title="All 6 branches missed.">        return switch (operation) {</span>
+<span class="nc" id="L94">            case CardCommandRequest.ListCards list -&gt; listCards(session, list.listOrRole());</span>
+<span class="nc" id="L95">            case CardCommandRequest.ShowCard show -&gt; showCard(session, show.card());</span>
+<span class="nc" id="L96">            case CardCommandRequest.CreateCard create -&gt; createCard(session, create);</span>
+<span class="nc" id="L97">            case CardCommandRequest.MoveCard move -&gt; moveCard(session, move);</span>
+<span class="nc" id="L98">            case CardCommandRequest.CommentOnCard comment -&gt; commentOnCard(session, comment);</span>
+<span class="nc" id="L99">            case CardCommandRequest.ArchiveCard archive -&gt; archiveCard(session, archive);</span>
+        };
+    }
+
+    private Result listCards(Session session, Optional&lt;String&gt; listOrRole) {
+<span class="nc" id="L104">        List&lt;TrelloClient.BoardList&gt; lists =</span>
+<span class="nc" id="L105">                listOrRole.map(selector -&gt; listsMatching(session, selector)).orElseGet(session::openLists);</span>
+<span class="nc" id="L106">        List&lt;TrelloClient.BoardCard&gt; cards = trello.fetchOpenBoardCards(session.config());</span>
+<span class="nc" id="L107">        List&lt;ListWithCards&gt; listed = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        for (TrelloClient.BoardList list : lists) {</span>
+<span class="nc" id="L109">            List&lt;CardSummary&gt; inList = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">            for (TrelloClient.BoardCard card : cards) {</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                if (list.id().equals(card.listId())) {</span>
+<span class="nc" id="L112">                    inList.add(summary(card.id(), card.shortLink(), card.name()));</span>
+                }
+<span class="nc" id="L114">            }</span>
+<span class="nc" id="L115">            listed.add(new ListWithCards(listView(session, list), inList));</span>
+<span class="nc" id="L116">        }</span>
+<span class="nc" id="L117">        return new Listed(ReadStatus.OK, session.board(), listed);</span>
+    }
+
+    private Result showCard(Session session, String selector) {
+<span class="nc" id="L121">        Card card = card(session, selector);</span>
+<span class="nc" id="L122">        return new Shown(ReadStatus.OK, session.board(), CardDetails.of(card, cardList(session, card)));</span>
+    }
+
+    private Result createCard(Session session, CardCommandRequest.CreateCard create) {
+<span class="nc" id="L126">        TrelloClient.BoardList list = destination(session, create.listOrRole());</span>
+<span class="nc" id="L127">        TrelloClient.CreatedCard created =</span>
+<span class="nc" id="L128">                writes.createCard(session.config(), list, create.title(), create.description());</span>
+<span class="nc" id="L129">        return new Changed(</span>
+                Change.CARD_CREATED,
+<span class="nc" id="L131">                session.board(),</span>
+<span class="nc" id="L132">                summary(created.id(), created.shortLink(), create.title().strip()),</span>
+<span class="nc" id="L133">                listView(session, list));</span>
+    }
+
+    private Result moveCard(Session session, CardCommandRequest.MoveCard move) {
+<span class="nc" id="L137">        Card card = changeableCard(session, move.card());</span>
+<span class="nc" id="L138">        TrelloClient.BoardList list = destination(session, move.listOrRole());</span>
+<span class="nc" id="L139">        writes.moveCard(session.config(), card.id(), list);</span>
+<span class="nc" id="L140">        return new Changed(Change.CARD_MOVED, session.board(), summary(card), listView(session, list));</span>
+    }
+
+    private Result commentOnCard(Session session, CardCommandRequest.CommentOnCard comment) {
+<span class="nc" id="L144">        Card card = changeableCard(session, comment.card());</span>
+<span class="nc" id="L145">        writes.addComment(session.config(), card.id(), comment.text());</span>
+<span class="nc" id="L146">        return new Changed(Change.COMMENT_ADDED, session.board(), summary(card), null);</span>
+    }
+
+    private Result archiveCard(Session session, CardCommandRequest.ArchiveCard archive) {
+<span class="nc" id="L150">        Card card = changeableCard(session, archive.card());</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        if (!card.title().equals(archive.confirmTitle())) {</span>
+<span class="nc" id="L152">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_card_archive_title_mismatch&quot;,
+<span class="nc" id="L154">                    &quot;--confirm-title does not match the card title &quot; + DisplayNames.quotedName(card.title())</span>
+                            + &quot;. Show the person you work for this title and ask again before archiving.&quot;);
+        }
+<span class="nc" id="L157">        writes.archiveCard(session.config(), card.id());</span>
+<span class="nc" id="L158">        return new Changed(Change.CARD_ARCHIVED, session.board(), summary(card), null);</span>
+    }
+
+    private Card changeableCard(Session session, String selector) {
+<span class="nc" id="L162">        Card card = card(session, selector);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (card.closed()) {</span>
+<span class="nc" id="L164">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_card_archived&quot;, &quot;The card is archived. Restore it in Trello before changing it.&quot;);
+        }
+<span class="nc" id="L167">        return card;</span>
+    }
+
+    private Card card(Session session, String selector) {
+<span class="nc" id="L171">        String lookupId = TrelloCardSelectors.lookupId(selector)</span>
+<span class="nc" id="L172">                .orElseThrow(() -&gt; new TrelloBoardSetupException(</span>
+                        &quot;setup_card_invalid_reference&quot;,
+                        &quot;CARD must be a Trello card id, a short link, or a https://trello.com/c/ URL.&quot;));
+<span class="nc bnc" id="L175" title="All 3 branches missed.">        return switch (trello.fetchCardDetails(session.config(), lookupId)) {</span>
+<span class="nc" id="L176">            case CardLookupResult.Found found -&gt; onSelectedBoard(session, found.card());</span>
+            case CardLookupResult.Missing _ -&gt;
+<span class="nc" id="L178">                throw new TrelloBoardSetupException(</span>
+<span class="nc" id="L179">                        &quot;setup_card_not_found&quot;, &quot;No Trello card matches &quot; + DisplayNames.quotedName(selector) + &quot;.&quot;);</span>
+<span class="nc" id="L180">            case CardLookupResult.Failed failed -&gt; throw new TrelloException(failed.code(), failed.message());</span>
+        };
+    }
+
+    private static Card onSelectedBoard(Session session, Card card) {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (!session.board().id().equals(card.boardId())) {</span>
+<span class="nc" id="L186">            throw new TrelloBoardSetupException(</span>
+                    &quot;setup_card_not_on_board&quot;,
+                    &quot;The card belongs to another Trello board. Card commands only work on cards of the selected board &quot;
+<span class="nc" id="L189">                            + DisplayNames.quotedName(session.board().name()) + &quot;.&quot;);</span>
+        }
+<span class="nc" id="L191">        return card;</span>
+    }
+
+    private static TrelloClient.BoardList destination(Session session, String listOrRole) {
+<span class="nc bnc" id="L195" title="All 3 branches missed.">        return switch (session.roles().resolve(session.openLists(), listOrRole)) {</span>
+<span class="nc" id="L196">            case TrelloListRoles.Destination.Found found -&gt; found.list();</span>
+<span class="nc" id="L197">            case TrelloListRoles.Destination.RoleWithSeveralLists several -&gt;</span>
+<span class="nc" id="L198">                throw new TrelloBoardSetupException(</span>
+                        &quot;setup_card_list_role_ambiguous&quot;,
+<span class="nc" id="L200">                        &quot;The &quot; + several.role().key() + &quot; role covers several open lists: &quot;</span>
+<span class="nc" id="L201">                                + quotedListNames(several.lists()) + &quot;. Name one of these lists instead.&quot;);</span>
+<span class="nc" id="L202">            case TrelloListRoles.Destination other -&gt; throw unresolvedList(session, listOrRole, other);</span>
+        };
+    }
+
+    /// The lists that `card list --list` shows: one list by name, or every open list with a role.
+    private static List&lt;TrelloClient.BoardList&gt; listsMatching(Session session, String listOrRole) {
+<span class="nc bnc" id="L208" title="All 3 branches missed.">        return switch (session.roles().resolve(session.openLists(), listOrRole)) {</span>
+<span class="nc" id="L209">            case TrelloListRoles.Destination.Found found -&gt; List.of(found.list());</span>
+<span class="nc" id="L210">            case TrelloListRoles.Destination.RoleWithSeveralLists several -&gt; several.lists();</span>
+<span class="nc" id="L211">            case TrelloListRoles.Destination other -&gt; throw unresolvedList(session, listOrRole, other);</span>
+        };
+    }
+
+    private static TrelloBoardSetupException unresolvedList(
+            Session session, String listOrRole, TrelloListRoles.Destination destination) {
+<span class="nc" id="L217">        String requested = DisplayNames.quotedName(listOrRole);</span>
+<span class="nc bnc" id="L218" title="All 3 branches missed.">        return switch (destination) {</span>
+            case TrelloListRoles.Destination.AmbiguousListName _ -&gt;
+<span class="nc" id="L220">                new TrelloBoardSetupException(</span>
+                        &quot;setup_card_list_ambiguous&quot;,
+                        &quot;Several open lists are named &quot; + requested + &quot;. Rename the duplicates in Trello.&quot;);
+<span class="nc" id="L223">            case TrelloListRoles.Destination.RoleWithoutList withoutList -&gt;</span>
+<span class="nc" id="L224">                new TrelloBoardSetupException(</span>
+                        &quot;setup_card_list_role_unset&quot;,
+                        &quot;The workflow gives no open list the &quot;
+<span class="nc" id="L227">                                + withoutList.role().key() + &quot; role. Name a list instead: &quot;</span>
+<span class="nc" id="L228">                                + quotedListNames(session.openLists()) + &quot;.&quot;);</span>
+            default -&gt;
+<span class="nc" id="L230">                new TrelloBoardSetupException(</span>
+                        &quot;setup_card_list_not_found&quot;,
+                        &quot;No open list or list role matches &quot; + requested + &quot;. Open lists: &quot;
+<span class="nc" id="L233">                                + quotedListNames(session.openLists()) + &quot;. Roles: &quot; + TrelloListRoles.ROLE_NAMES</span>
+                                + &quot;.&quot;);
+        };
+    }
+
+    private static String quotedListNames(List&lt;TrelloClient.BoardList&gt; lists) {
+<span class="nc" id="L239">        return DisplayNames.quotedList(</span>
+<span class="nc" id="L240">                lists.stream().map(TrelloClient.BoardList::name).toList());</span>
+    }
+
+    private static @Nullable ListView cardList(Session session, Card card) {
+<span class="nc" id="L244">        return session.lists().stream()</span>
+<span class="nc" id="L245">                .filter(list -&gt; list.id().equals(card.listId()))</span>
+<span class="nc" id="L246">                .findAny()</span>
+<span class="nc" id="L247">                .map(list -&gt; listView(session, list))</span>
+<span class="nc" id="L248">                .orElse(null);</span>
+    }
+
+    private static ListView listView(Session session, TrelloClient.BoardList list) {
+<span class="nc" id="L252">        List&lt;String&gt; roles = session.roles().rolesOf(list).stream()</span>
+<span class="nc" id="L253">                .map(TrelloListRoles.Role::key)</span>
+<span class="nc" id="L254">                .toList();</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">        boolean open = !list.closed();</span>
+<span class="nc" id="L256">        return new ListView(</span>
+<span class="nc" id="L257">                list.id(),</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                list.name(),</span>
+                roles,
+<span class="nc bnc" id="L260" title="All 4 branches missed.">                open &amp;&amp; TrelloCardWrites.movableTo(session.config(), session.openLists(), list),</span>
+<span class="nc bnc" id="L261" title="All 2 branches missed.">                open &amp;&amp; TrelloCardWrites.creatableIn(session.config(), list));</span>
+    }
+
+    private static CardSummary summary(Card card) {
+<span class="nc" id="L265">        return summary(card.id(), card.shortLink(), card.title());</span>
+    }
+
+    private static CardSummary summary(String id, @Nullable String shortLink, String title) {
+<span class="nc" id="L269">        return new CardSummary(id, reference(id, shortLink), cardUrl(id, shortLink), title);</span>
+    }
+
+    /// The card's short link, or its id when Trello sent no short link. `card show` and the other
+    /// commands accept both, and Trello resolves a card URL with either.
+    private static String reference(String id, @Nullable String shortLink) {
+<span class="nc bnc" id="L275" title="All 2 branches missed.">        return Strings.isNullOrEmpty(shortLink) ? id : shortLink;</span>
+    }
+
+    private static String cardUrl(String id, @Nullable String shortLink) {
+<span class="nc" id="L279">        return TrelloCardSelectors.cardUrl(reference(id, shortLink));</span>
+    }
+
+    /// The list roles of the selected workflow. Active, in-progress, blocked, and terminal lists are
+    /// workflow settings; the human-review and merging lists come from what setup recorded when it
+    /// generated the workflow, or from the shape setup writes when no record exists.
+    private static TrelloListRoles listRoles(LocalWorkerPaths paths, ConnectedBoard board, EffectiveConfig config) {
+<span class="nc" id="L286">        Optional&lt;GeneratedWorkflowBodyInputs&gt; inputs =</span>
+<span class="nc" id="L287">                recordedInputs(paths, board).or(() -&gt; metadataInputs(board));</span>
+<span class="nc" id="L288">        return TrelloListRoles.of(</span>
+                config,
+<span class="nc" id="L290">                inputs.map(GeneratedWorkflowBodyInputs::reviewState).orElse(null),</span>
+<span class="nc" id="L291">                inputs.map(GeneratedWorkflowBodyInputs::mergingState).orElse(null));</span>
+    }
+
+    private static Optional&lt;GeneratedWorkflowBodyInputs&gt; recordedInputs(LocalWorkerPaths paths, ConnectedBoard board) {
+        try {
+<span class="nc" id="L296">            return GeneratedWorkflowStore.find(</span>
+<span class="nc" id="L297">                            GeneratedWorkflowStore.besideManifest(paths.manifestPath())</span>
+<span class="nc" id="L298">                                    .records(),</span>
+<span class="nc" id="L299">                            board.workflowPath())</span>
+<span class="nc" id="L300">                    .map(GeneratedWorkflowRecord::inputs);</span>
+<span class="nc" id="L301">        } catch (IOException | TrelloBoardSetupException e) {</span>
+            // Without a readable record the roles fall back to the workflow's own settings. A store
+            // that holds connected-board data from an older setup is unreadable too; migration reports it.
+<span class="nc" id="L304">            return Optional.empty();</span>
+        }
+    }
+
+    private static Optional&lt;GeneratedWorkflowBodyInputs&gt; metadataInputs(ConnectedBoard board) {
+        try {
+<span class="nc" id="L310">            return GeneratedWorkflowBodyInputs.fromMetadata(</span>
+<span class="nc" id="L311">                    new WorkflowLoader().load(board.workflowPath()).config(), Optional.of(board.githubEnabled()));</span>
+<span class="nc" id="L312">        } catch (WorkflowException e) {</span>
+            // cardCommandTarget already loaded and checked this workflow and reports its errors; here
+            // unusable metadata only leaves the review and merging roles unset.
+<span class="nc" id="L315">            return Optional.empty();</span>
+        }
+    }
+
+    private static TrelloBoardSetupException failure(CardCommandTarget target, TrelloException e) {
+<span class="nc" id="L320">        var failure = new TrelloBoardSetupException(e.code(), e.getMessage(), e);</span>
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        return CREDENTIAL_FAILURE_CODES.contains(e.code())</span>
+<span class="nc" id="L322">                ? target.credentialContext().apply(failure)</span>
+<span class="nc" id="L323">                : failure;</span>
+    }
+
+<span class="nc" id="L326">    private record Session(</span>
+            EffectiveConfig config, BoardView board, List&lt;TrelloClient.BoardList&gt; lists, TrelloListRoles roles) {
+        List&lt;TrelloClient.BoardList&gt; openLists() {
+<span class="nc" id="L329">            return TrelloCardWrites.openLists(lists);</span>
+        }
+    }
+
+    /// What one card command prints, as JSON with `--json` and as text otherwise. The JSON field
+    /// names are part of the command's output contract.
+    sealed interface Result {
+        BoardView board();
+    }
+
+<span class="nc" id="L339">    record Listed(ReadStatus status, BoardView board, List&lt;ListWithCards&gt; lists) implements Result {}</span>
+
+<span class="nc" id="L341">    record Shown(ReadStatus status, BoardView board, CardDetails card) implements Result {}</span>
+
+    /// The status of a read. Its JSON form is `ok`.
+<span class="nc" id="L344">    enum ReadStatus {</span>
+<span class="nc" id="L345">        OK;</span>
+
+        @JsonValue
+        String status() {
+<span class="nc" id="L349">            return Ascii.toLowerCase(name());</span>
+        }
+    }
+
+<span class="nc" id="L353">    record Changed(Change status, BoardView board, CardSummary card, @Nullable ListView list) implements Result {}</span>
+
+    /// The write a [Changed] result reports. Its JSON form is the lower-case name, such as
+    /// `card_moved`.
+<span class="nc" id="L357">    enum Change {</span>
+<span class="nc" id="L358">        CARD_CREATED,</span>
+<span class="nc" id="L359">        CARD_MOVED,</span>
+<span class="nc" id="L360">        COMMENT_ADDED,</span>
+<span class="nc" id="L361">        CARD_ARCHIVED;</span>
+
+        @JsonValue
+        String status() {
+<span class="nc" id="L365">            return Ascii.toLowerCase(name());</span>
+        }
+    }
+
+<span class="nc" id="L369">    record BoardView(String name, String id, String url, String workflow) {}</span>
+
+<span class="nc" id="L371">    record ListView(String id, String name, List&lt;String&gt; roles, boolean moveAllowed, boolean createAllowed) {}</span>
+
+<span class="nc" id="L373">    record ListWithCards(ListView list, List&lt;CardSummary&gt; cards) {}</span>
+
+<span class="nc" id="L375">    record CardSummary(String id, String shortLink, String url, String title) {}</span>
+
+<span class="nc" id="L377">    record CardDetails(</span>
+            String id,
+            @Nullable String shortLink,
+            String url,
+            String title,
+            String description,
+            @Nullable ListView list,
+            boolean archived,
+            List&lt;String&gt; labels,
+            List&lt;ChecklistView&gt; checklists,
+            List&lt;AttachmentView&gt; attachments,
+            List&lt;CommentView&gt; comments) {
+        static CardDetails of(Card card, @Nullable ListView list) {
+<span class="nc" id="L390">            return new CardDetails(</span>
+<span class="nc" id="L391">                    card.id(),</span>
+<span class="nc" id="L392">                    card.shortLink(),</span>
+<span class="nc" id="L393">                    cardUrl(card.id(), card.shortLink()),</span>
+<span class="nc" id="L394">                    card.title(),</span>
+<span class="nc" id="L395">                    Objects.requireNonNullElse(card.description(), &quot;&quot;),</span>
+                    list,
+<span class="nc" id="L397">                    card.closed(),</span>
+<span class="nc" id="L398">                    card.labels(),</span>
+<span class="nc" id="L399">                    card.checklists().stream().map(ChecklistView::of).toList(),</span>
+<span class="nc" id="L400">                    card.attachments().stream().map(AttachmentView::of).toList(),</span>
+<span class="nc" id="L401">                    card.comments().stream().map(CommentView::of).toList());</span>
+        }
+    }
+
+<span class="nc" id="L405">    record ChecklistView(@Nullable String name, List&lt;ChecklistItemView&gt; items) {</span>
+        static ChecklistView of(Card.Checklist checklist) {
+<span class="nc" id="L407">            return new ChecklistView(</span>
+<span class="nc" id="L408">                    checklist.name(),</span>
+<span class="nc" id="L409">                    checklist.items().stream().map(ChecklistItemView::of).toList());</span>
+        }
+    }
+
+<span class="nc" id="L413">    record ChecklistItemView(@Nullable String text, boolean complete) {</span>
+        static ChecklistItemView of(Card.ChecklistItem item) {
+<span class="nc" id="L415">            return new ChecklistItemView(item.text(), item.complete());</span>
+        }
+    }
+
+<span class="nc" id="L419">    record AttachmentView(@Nullable String name, @Nullable String url) {</span>
+        static AttachmentView of(Card.Attachment attachment) {
+<span class="nc" id="L421">            return new AttachmentView(attachment.name(), attachment.url());</span>
+        }
+    }
+
+<span class="nc" id="L425">    record CommentView(@Nullable String author, @Nullable String createdAt, String text) {</span>
+        static CommentView of(Card.Comment comment) {
+<span class="nc" id="L427">            Instant createdAt = comment.createdAt();</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">            return new CommentView(comment.author(), createdAt == null ? null : createdAt.toString(), comment.text());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

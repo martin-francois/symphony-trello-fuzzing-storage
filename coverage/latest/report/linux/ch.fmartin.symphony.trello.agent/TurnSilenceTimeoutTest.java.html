@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TurnSilenceTimeoutTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.agent</a> &gt; <span class="el_source">TurnSilenceTimeoutTest.java</span></div><h1>TurnSilenceTimeoutTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.agent;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+
+<span class="nc" id="L16">final class TurnSilenceTimeoutTest {</span>
+<span class="nc" id="L17">    private static final Duration LIMIT = Duration.ofSeconds(10);</span>
+<span class="nc" id="L18">    private static final Duration OUTPUT_GAP = Duration.ofSeconds(9);</span>
+<span class="nc" id="L19">    private static final Duration OUTPUT_DURING_FIRST_WAIT = Duration.ofSeconds(8);</span>
+<span class="nc" id="L20">    private static final Duration STALE_READING = Duration.ofSeconds(5);</span>
+    private static final long THREAD_WAIT_SECONDS = 10;
+<span class="nc" id="L22">    private static final Duration STREAMING_TURN_LENGTH = LIMIT.multipliedBy(10);</span>
+
+<span class="nc" id="L24">    private final AtomicLong now = new AtomicLong();</span>
+<span class="nc" id="L25">    private final AtomicReference&lt;Thread&gt; staleReader = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L26">    private final CountDownLatch freshOutputRecorded = new CountDownLatch(1);</span>
+<span class="nc" id="L27">    private final TurnSilenceTimeout silence = new TurnSilenceTimeout(this::nanoTime);</span>
+<span class="nc" id="L28">    private final List&lt;Duration&gt; requestedWaits = new ArrayList&lt;&gt;();</span>
+
+    @Test
+    void failsOnceTheLimitPassesWithoutOutput() {
+        // given
+<span class="nc" id="L33">        TurnSilenceTimeout.BoundedWait&lt;String&gt; silentTurn = this::silentTurn;</span>
+
+        // when
+<span class="nc" id="L36">        TimeoutException failure = catchThrowableOfType(TimeoutException.class, () -&gt; silence.await(silentTurn, LIMIT));</span>
+
+        // then
+<span class="nc" id="L39">        assertThat(failure).hasMessage(&quot;no app-server output for 10000 ms&quot;);</span>
+<span class="nc" id="L40">        assertThat(requestedWaits).containsExactly(LIMIT);</span>
+<span class="nc" id="L41">    }</span>
+
+    @Test
+    void outputDuringTheWaitMovesTheDeadline() throws Exception {
+        // given
+<span class="nc" id="L46">        TurnSilenceTimeout.BoundedWait&lt;String&gt; turn = this::outputAfterEightSecondsThenCompletion;</span>
+
+        // when
+<span class="nc" id="L49">        String result = silence.await(turn, LIMIT);</span>
+
+        // then
+<span class="nc" id="L52">        assertThat(result).isEqualTo(&quot;completed&quot;);</span>
+<span class="nc" id="L53">        assertThat(requestedWaits).containsExactly(LIMIT, OUTPUT_DURING_FIRST_WAIT);</span>
+<span class="nc" id="L54">    }</span>
+
+    @Test
+    void aReaderThatReadTheClockEarlierCannotMoveTheDeadlineBack() throws Exception {
+        // given
+<span class="nc" id="L59">        TurnSilenceTimeout.BoundedWait&lt;String&gt; turn = this::staleAndFreshOutputFromTwoReaders;</span>
+
+        // when
+<span class="nc" id="L62">        String result = silence.await(turn, LIMIT);</span>
+
+        // then
+<span class="nc" id="L65">        assertThat(result).isEqualTo(&quot;completed&quot;);</span>
+<span class="nc" id="L66">        assertThat(requestedWaits)</span>
+<span class="nc" id="L67">                .as(&quot;the second wait must count from the newer output at 8 s, not the stale reading at 5 s&quot;)</span>
+<span class="nc" id="L68">                .containsExactly(LIMIT, OUTPUT_DURING_FIRST_WAIT);</span>
+<span class="nc" id="L69">    }</span>
+
+    @Test
+    void aTurnThatKeepsStreamingRunsFarPastTheLimit() throws Exception {
+        // given
+<span class="nc" id="L74">        TurnSilenceTimeout.BoundedWait&lt;String&gt; streamingTurn = this::streamingTurn;</span>
+
+        // when
+<span class="nc" id="L77">        String result = silence.await(streamingTurn, LIMIT);</span>
+
+        // then
+<span class="nc" id="L80">        assertThat(result).isEqualTo(&quot;completed&quot;);</span>
+<span class="nc" id="L81">        assertThat(Duration.ofNanos(now.get())).isGreaterThanOrEqualTo(STREAMING_TURN_LENGTH);</span>
+<span class="nc" id="L82">    }</span>
+
+    @Test
+    void theIntervalStartsWhenTheWaitStarts() throws Exception {
+        // given
+<span class="nc" id="L87">        now.addAndGet(Duration.ofMinutes(5).toNanos());</span>
+<span class="nc" id="L88">        TurnSilenceTimeout.BoundedWait&lt;String&gt; turn = this::immediateCompletion;</span>
+
+        // when
+<span class="nc" id="L91">        String result = silence.await(turn, LIMIT);</span>
+
+        // then
+<span class="nc" id="L94">        assertThat(result).isEqualTo(&quot;completed&quot;);</span>
+<span class="nc" id="L95">        assertThat(requestedWaits).containsExactly(LIMIT);</span>
+<span class="nc" id="L96">    }</span>
+
+    /// Lets the whole requested time pass without output.
+    private String silentTurn(long timeoutNanos) throws TimeoutException {
+<span class="nc" id="L100">        requestedWaits.add(Duration.ofNanos(timeoutNanos));</span>
+<span class="nc" id="L101">        now.addAndGet(timeoutNanos);</span>
+<span class="nc" id="L102">        throw new TimeoutException();</span>
+    }
+
+    /// Prints output 8 seconds into the first wait, then completes during the second wait.
+    private String outputAfterEightSecondsThenCompletion(long timeoutNanos) throws TimeoutException {
+<span class="nc" id="L107">        requestedWaits.add(Duration.ofNanos(timeoutNanos));</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (requestedWaits.size() &gt; 1) {</span>
+<span class="nc" id="L109">            return &quot;completed&quot;;</span>
+        }
+<span class="nc" id="L111">        now.set(OUTPUT_DURING_FIRST_WAIT.toNanos());</span>
+<span class="nc" id="L112">        silence.outputReceived();</span>
+<span class="nc" id="L113">        now.set(LIMIT.toNanos());</span>
+<span class="nc" id="L114">        throw new TimeoutException();</span>
+    }
+
+    /// During the first wait, one reader reads the clock at 5 s and is held before it records the
+    /// output, while a second reader records output at 8 s. The held reader then records its older
+    /// reading. The second wait completes.
+    private String staleAndFreshOutputFromTwoReaders(long timeoutNanos) throws InterruptedException, TimeoutException {
+<span class="nc" id="L121">        requestedWaits.add(Duration.ofNanos(timeoutNanos));</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (requestedWaits.size() &gt; 1) {</span>
+<span class="nc" id="L123">            return &quot;completed&quot;;</span>
+        }
+        // Own platform threads, so the held reader cannot block the fresh one on a shared pool.
+<span class="nc" id="L126">        Thread stale = Thread.ofPlatform().unstarted(silence::outputReceived);</span>
+<span class="nc" id="L127">        staleReader.set(stale);</span>
+<span class="nc" id="L128">        stale.start();</span>
+<span class="nc" id="L129">        now.set(OUTPUT_DURING_FIRST_WAIT.toNanos());</span>
+<span class="nc" id="L130">        Thread fresh = Thread.ofPlatform().start(this::recordFreshOutput);</span>
+<span class="nc" id="L131">        assertThat(fresh.join(Duration.ofSeconds(THREAD_WAIT_SECONDS)))</span>
+<span class="nc" id="L132">                .as(&quot;the fresh reader finished&quot;)</span>
+<span class="nc" id="L133">                .isTrue();</span>
+<span class="nc" id="L134">        assertThat(stale.join(Duration.ofSeconds(THREAD_WAIT_SECONDS)))</span>
+<span class="nc" id="L135">                .as(&quot;the stale reader finished&quot;)</span>
+<span class="nc" id="L136">                .isTrue();</span>
+<span class="nc" id="L137">        now.set(LIMIT.toNanos());</span>
+<span class="nc" id="L138">        throw new TimeoutException();</span>
+    }
+
+    private void recordFreshOutput() {
+<span class="nc" id="L142">        silence.outputReceived();</span>
+<span class="nc" id="L143">        freshOutputRecorded.countDown();</span>
+<span class="nc" id="L144">    }</span>
+
+    /// The fake monotonic clock. The held reader gets the stale reading and returns it only after the
+    /// fresh output is recorded, which forces the late write of an early reading.
+    private long nanoTime() {
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (!Thread.currentThread().equals(staleReader.get())) {</span>
+<span class="nc" id="L150">            return now.get();</span>
+        }
+        try {
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            if (!freshOutputRecorded.await(THREAD_WAIT_SECONDS, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L154">                throw new IllegalStateException(&quot;the fresh reader never recorded its output&quot;);</span>
+            }
+<span class="nc" id="L156">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L157">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L158">            throw new IllegalStateException(&quot;interrupted while holding the stale reader&quot;, e);</span>
+<span class="nc" id="L159">        }</span>
+<span class="nc" id="L160">        return STALE_READING.toNanos();</span>
+    }
+
+    /// Prints output every 9 seconds and completes after ten times the limit.
+    private String streamingTurn(long timeoutNanos) throws TimeoutException {
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        if (now.get() &gt;= STREAMING_TURN_LENGTH.toNanos()) {</span>
+<span class="nc" id="L166">            return &quot;completed&quot;;</span>
+        }
+<span class="nc" id="L168">        now.addAndGet(Math.min(timeoutNanos, OUTPUT_GAP.toNanos()));</span>
+<span class="nc" id="L169">        silence.outputReceived();</span>
+<span class="nc" id="L170">        throw new TimeoutException();</span>
+    }
+
+    private String immediateCompletion(long timeoutNanos) {
+<span class="nc" id="L174">        requestedWaits.add(Duration.ofNanos(timeoutNanos));</span>
+<span class="nc" id="L175">        return &quot;completed&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

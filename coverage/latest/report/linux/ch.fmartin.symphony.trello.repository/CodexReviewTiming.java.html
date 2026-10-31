@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodexReviewTiming.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.repository</a> &gt; <span class="el_source">CodexReviewTiming.java</span></div><h1>CodexReviewTiming.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.repository;
+
+import ch.fmartin.symphony.trello.config.EffectiveConfig;
+import java.time.Duration;
+import org.jspecify.annotations.NullMarked;
+
+/// Every time-dependent part of the review section: the loop budget, the limit on each review run,
+/// what a run that the limit stops means, and the handoff note after the budget runs out. The
+/// rest of [CodexReviewPrompt] only says &quot;time budget&quot;, so changing how the review is timed means
+/// changing this class. See ADR 0121.
+@NullMarked
+final class CodexReviewTiming {
+    /// Wraps each `codex review` run so it ends when the loop budget does.
+    static final String COMMAND_PREFIX = &quot;timeout &lt;remaining&gt;s &quot;;
+
+    /// How to fill in `&lt;remaining&gt;` in the command.
+    static final String COMMAND_TIME_LIMIT = &quot;with the time left in the budget rounded up to whole seconds&quot;;
+
+    /// The longest wait per poll on a running review. Each poll ends in an app-server event, so waits at
+    /// most this long, and at most half of `codex.stall_timeout_ms`, keep the stall check from taking
+    /// the wait for a stuck turn.
+<span class="nc" id="L22">    static final Duration MAX_POLL_WAIT = Duration.ofMinutes(2);</span>
+
+    private CodexReviewTiming() {}
+
+    /// The &quot;Before round 1&quot; bullet that starts the clock.
+    static String budgetBullet(EffectiveConfig.CodexReviewConfig codexReview) {
+<span class="nc" id="L28">        return &quot;&quot;&quot;</span>
+                the loop start time, for example with `date +%%s`. The whole loop, every round included, has %d
+                  seconds. Do not start a round when no whole second of the budget is left, because `timeout 0s`
+                  runs without a limit; that means the time budget ran out.&quot;&quot;&quot;
+<span class="nc" id="L32">                .formatted(budgetSeconds(codexReview));</span>
+    }
+
+    /// Agents stopped slow review runs themselves, sometimes after acting on partial output, so only
+    /// the wrapper may end a run early.
+    static String waitRule(EffectiveConfig.CodexConfig codex) {
+<span class="nc" id="L38">        return &quot;&quot;&quot;</span>
+                A `codex review` run often prints little for many minutes. Never cancel, interrupt, or kill a
+                   running `codex review`: not with Ctrl-C, not by ending its session, and not by starting another
+                   review, even when it looks stuck, prints nothing for a long time, or seems slow. Only the
+                   `timeout` wrapper ends a run early. Keep polling until the command exits on its own or the
+                   wrapper stops it, and do not act on findings until then. Wait at most %d seconds per poll, so
+                   the stall check (`codex.stall_timeout_ms`) and the turn's silence timeout never see the wait as
+                   silence.
+                   A run the wrapper stopped means the time budget ran out: the loop ends, and the rule below for an
+                   unfinished review applies.&quot;&quot;&quot;
+<span class="nc" id="L48">                .formatted(pollWaitSeconds(codex.stallTimeout()));</span>
+    }
+
+    /// The handoff note when the budget, not a clean round or the round limit, ended the loop.
+    static String budgetEndedNote(EffectiveConfig.CodexReviewConfig codexReview) {
+<span class="nc" id="L53">        return &quot;&quot;&quot;</span>
+                When the time budget ended it, say plainly in the handoff comment and the workpad that the review
+                stopped because its time budget ran out, and suggest raising `%s` in the workflow file, which is now
+                `%d`.&quot;&quot;&quot;
+<span class="nc" id="L57">                .formatted(</span>
+                        EffectiveConfig.CodexReviewConfig.TIMEOUT_MS_PATH,
+<span class="nc" id="L59">                        codexReview.timeout().toMillis());</span>
+    }
+
+    private static long pollWaitSeconds(Duration stallTimeout) {
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        if (!stallTimeout.isPositive()) {</span>
+<span class="nc" id="L64">            return MAX_POLL_WAIT.toSeconds();</span>
+        }
+<span class="nc" id="L66">        return Math.clamp(stallTimeout.dividedBy(2).toSeconds(), 1L, MAX_POLL_WAIT.toSeconds());</span>
+    }
+
+    /// `timeout` takes whole seconds; rounding up keeps a sub-second remainder from shortening the budget.
+    private static long budgetSeconds(EffectiveConfig.CodexReviewConfig codexReview) {
+<span class="nc" id="L71">        return Math.ceilDiv(codexReview.timeout().toMillis(), 1000L);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

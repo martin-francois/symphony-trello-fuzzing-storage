@@ -369,6 +369,7 @@ public class CodexAppServerClient {
 <span class="nc" id="L369">        private final Object turnCompletionLock = new Object();</span>
 <span class="nc" id="L370">        private final Object writerLock = new Object();</span>
 <span class="nc" id="L371">        private final AtomicReference&lt;Throwable&gt; readerFailure = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L372">        private final TurnSilenceTimeout turnSilence = new TurnSilenceTimeout(System::nanoTime);</span>
         private final RateLimitState rateLimitState;
         private final BufferedWriter writer;
 
@@ -377,472 +378,477 @@ public class CodexAppServerClient {
                 EffectiveConfig config,
                 Card card,
                 String workerIdentity,
-<span class="nc" id="L380">                AgentEventListener listener) {</span>
-<span class="nc" id="L381">            this.process = process;</span>
-<span class="nc" id="L382">            this.config = config;</span>
-<span class="nc" id="L383">            this.card = card;</span>
-<span class="nc" id="L384">            this.workerIdentity = workerIdentity;</span>
-<span class="nc" id="L385">            this.listener = listener;</span>
-<span class="nc" id="L386">            this.rateLimitState =</span>
-<span class="nc" id="L387">                    rateLimitsByCodexCommand.computeIfAbsent(config.codex().command(), ignored -&gt; new RateLimitState());</span>
-<span class="nc" id="L388">            this.writer = process.outputWriter(StandardCharsets.UTF_8);</span>
-<span class="nc" id="L389">        }</span>
+<span class="nc" id="L381">                AgentEventListener listener) {</span>
+<span class="nc" id="L382">            this.process = process;</span>
+<span class="nc" id="L383">            this.config = config;</span>
+<span class="nc" id="L384">            this.card = card;</span>
+<span class="nc" id="L385">            this.workerIdentity = workerIdentity;</span>
+<span class="nc" id="L386">            this.listener = listener;</span>
+<span class="nc" id="L387">            this.rateLimitState =</span>
+<span class="nc" id="L388">                    rateLimitsByCodexCommand.computeIfAbsent(config.codex().command(), ignored -&gt; new RateLimitState());</span>
+<span class="nc" id="L389">            this.writer = process.outputWriter(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L390">        }</span>
 
         void start() {
-<span class="nc" id="L392">            Thread.ofVirtual().name(&quot;codex-app-server-stdout&quot;).start(this::readStdout);</span>
-<span class="nc" id="L393">            Thread.ofVirtual().name(&quot;codex-app-server-stderr&quot;).start(this::readStderr);</span>
-<span class="nc" id="L394">        }</span>
+<span class="nc" id="L393">            Thread.ofVirtual().name(&quot;codex-app-server-stdout&quot;).start(this::readStdout);</span>
+<span class="nc" id="L394">            Thread.ofVirtual().name(&quot;codex-app-server-stderr&quot;).start(this::readStderr);</span>
+<span class="nc" id="L395">        }</span>
 
         JsonNode request(String method, ObjectNode params, Duration timeout) throws Exception {
-<span class="nc" id="L397">            Throwable failure = readerFailure.get();</span>
-<span class="nc bnc" id="L398" title="All 2 branches missed.">            if (failure != null) {</span>
-<span class="nc" id="L399">                throw unwrapReaderFailure(failure);</span>
+<span class="nc" id="L398">            Throwable failure = readerFailure.get();</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">            if (failure != null) {</span>
+<span class="nc" id="L400">                throw unwrapReaderFailure(failure);</span>
             }
-<span class="nc" id="L401">            nextRequestId++;</span>
-<span class="nc" id="L402">            int id = nextRequestId;</span>
-<span class="nc" id="L403">            var future = new CompletableFuture&lt;JsonNode&gt;();</span>
-<span class="nc" id="L404">            responses.put(id, future);</span>
-<span class="nc" id="L405">            ObjectNode request = object(&quot;id&quot;, id, &quot;method&quot;, method, &quot;params&quot;, params);</span>
-<span class="nc" id="L406">            write(request);</span>
-<span class="nc" id="L407">            failure = readerFailure.get();</span>
-<span class="nc bnc" id="L408" title="All 4 branches missed.">            if (failure != null &amp;&amp; !future.isDone()) {</span>
-<span class="nc" id="L409">                responses.remove(id);</span>
-<span class="nc" id="L410">                throw unwrapReaderFailure(failure);</span>
+<span class="nc" id="L402">            nextRequestId++;</span>
+<span class="nc" id="L403">            int id = nextRequestId;</span>
+<span class="nc" id="L404">            var future = new CompletableFuture&lt;JsonNode&gt;();</span>
+<span class="nc" id="L405">            responses.put(id, future);</span>
+<span class="nc" id="L406">            ObjectNode request = object(&quot;id&quot;, id, &quot;method&quot;, method, &quot;params&quot;, params);</span>
+<span class="nc" id="L407">            write(request);</span>
+<span class="nc" id="L408">            failure = readerFailure.get();</span>
+<span class="nc bnc" id="L409" title="All 4 branches missed.">            if (failure != null &amp;&amp; !future.isDone()) {</span>
+<span class="nc" id="L410">                responses.remove(id);</span>
+<span class="nc" id="L411">                throw unwrapReaderFailure(failure);</span>
             }
             try {
-<span class="nc" id="L413">                return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
-<span class="nc" id="L414">            } catch (ExecutionException e) {</span>
-<span class="nc" id="L415">                throw unwrapResponseFailure(e);</span>
+<span class="nc" id="L414">                return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L415">            } catch (ExecutionException e) {</span>
+<span class="nc" id="L416">                throw unwrapResponseFailure(e);</span>
             } finally {
-<span class="nc" id="L417">                responses.remove(id);</span>
+<span class="nc" id="L418">                responses.remove(id);</span>
             }
         }
 
         void notify(String method) throws IOException {
-<span class="nc" id="L422">            write(object(&quot;method&quot;, method));</span>
-<span class="nc" id="L423">        }</span>
+<span class="nc" id="L423">            write(object(&quot;method&quot;, method));</span>
+<span class="nc" id="L424">        }</span>
 
-        JsonNode awaitTurnCompleted(String turnId, Duration timeout) throws Exception {
+        /// Waits for the turn to end. `silenceTimeout` is the longest time without app-server output,
+        /// not a cap on the whole turn.
+        JsonNode awaitTurnCompleted(String turnId, Duration silenceTimeout) throws Exception {
             CompletableFuture&lt;JsonNode&gt; future;
-<span class="nc" id="L427">            synchronized (turnCompletionLock) {</span>
-<span class="nc" id="L428">                Throwable terminalFailure = terminalTurnFailures.remove(turnId);</span>
-<span class="nc bnc" id="L429" title="All 2 branches missed.">                if (terminalFailure != null) {</span>
-<span class="nc" id="L430">                    throw unwrapReaderFailure(terminalFailure);</span>
+<span class="nc" id="L430">            synchronized (turnCompletionLock) {</span>
+<span class="nc" id="L431">                Throwable terminalFailure = terminalTurnFailures.remove(turnId);</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">                if (terminalFailure != null) {</span>
+<span class="nc" id="L433">                    throw unwrapReaderFailure(terminalFailure);</span>
                 }
-<span class="nc" id="L432">                JsonNode completed = completedTurns.remove(turnId);</span>
-<span class="nc bnc" id="L433" title="All 2 branches missed.">                if (completed != null) {</span>
-<span class="nc" id="L434">                    return completed;</span>
+<span class="nc" id="L435">                JsonNode completed = completedTurns.remove(turnId);</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">                if (completed != null) {</span>
+<span class="nc" id="L437">                    return completed;</span>
                 }
-<span class="nc" id="L436">                Throwable failure = readerFailure.get();</span>
-<span class="nc bnc" id="L437" title="All 2 branches missed.">                if (failure != null) {</span>
-<span class="nc" id="L438">                    throw unwrapReaderFailure(failure);</span>
+<span class="nc" id="L439">                Throwable failure = readerFailure.get();</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">                if (failure != null) {</span>
+<span class="nc" id="L441">                    throw unwrapReaderFailure(failure);</span>
                 }
-<span class="nc" id="L440">                future = new CompletableFuture&lt;&gt;();</span>
-<span class="nc" id="L441">                turnCompletions.put(turnId, future);</span>
-<span class="nc" id="L442">            }</span>
+<span class="nc" id="L443">                future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L444">                turnCompletions.put(turnId, future);</span>
+<span class="nc" id="L445">            }</span>
             try {
-<span class="nc" id="L444">                return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
-<span class="nc" id="L445">            } catch (ExecutionException e) {</span>
-<span class="nc" id="L446">                throw unwrapReaderFailure(e);</span>
+<span class="nc" id="L447">                return turnSilence.await(nanos -&gt; future.get(nanos, TimeUnit.NANOSECONDS), silenceTimeout);</span>
+<span class="nc" id="L448">            } catch (ExecutionException e) {</span>
+<span class="nc" id="L449">                throw unwrapReaderFailure(e);</span>
             } finally {
-<span class="nc" id="L448">                synchronized (turnCompletionLock) {</span>
-<span class="nc" id="L449">                    turnCompletions.remove(turnId);</span>
-<span class="nc" id="L450">                }</span>
+<span class="nc" id="L451">                synchronized (turnCompletionLock) {</span>
+<span class="nc" id="L452">                    turnCompletions.remove(turnId);</span>
+<span class="nc" id="L453">                }</span>
             }
         }
 
         private void write(ObjectNode message) throws IOException {
-<span class="nc" id="L455">            synchronized (writerLock) {</span>
-<span class="nc" id="L456">                writer.write(json.writeValueAsString(message));</span>
-<span class="nc" id="L457">                writer.newLine();</span>
-<span class="nc" id="L458">                writer.flush();</span>
-<span class="nc" id="L459">            }</span>
-<span class="nc" id="L460">        }</span>
+<span class="nc" id="L458">            synchronized (writerLock) {</span>
+<span class="nc" id="L459">                writer.write(json.writeValueAsString(message));</span>
+<span class="nc" id="L460">                writer.newLine();</span>
+<span class="nc" id="L461">                writer.flush();</span>
+<span class="nc" id="L462">            }</span>
+<span class="nc" id="L463">        }</span>
 
         private void readStdout() {
-<span class="nc" id="L463">            try (var reader = new BufferedReader(</span>
-<span class="nc" id="L464">                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8), 10 * 1024 * 1024)) {</span>
-<span class="nc" id="L465">                String line = reader.readLine();</span>
-<span class="nc bnc" id="L466" title="All 2 branches missed.">                while (line != null) {</span>
-<span class="nc" id="L467">                    handleMessage(json.readTree(line));</span>
-<span class="nc" id="L468">                    line = reader.readLine();</span>
+<span class="nc" id="L466">            try (var reader = new BufferedReader(</span>
+<span class="nc" id="L467">                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8), 10 * 1024 * 1024)) {</span>
+<span class="nc" id="L468">                String line = reader.readLine();</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">                while (line != null) {</span>
+<span class="nc" id="L470">                    turnSilence.outputReceived();</span>
+<span class="nc" id="L471">                    handleMessage(json.readTree(line));</span>
+<span class="nc" id="L472">                    line = reader.readLine();</span>
                 }
-<span class="nc" id="L470">                failPending(new CodexAppServerTerminalException(</span>
+<span class="nc" id="L474">                failPending(new CodexAppServerTerminalException(</span>
                         &quot;process_exit&quot;, &quot;codex app-server stdout closed before active turn completed&quot;));
-<span class="nc" id="L472">            } catch (Exception e) {</span>
-<span class="nc" id="L473">                failPending(e);</span>
-<span class="nc" id="L474">            }</span>
-<span class="nc" id="L475">        }</span>
+<span class="nc" id="L476">            } catch (Exception e) {</span>
+<span class="nc" id="L477">                failPending(e);</span>
+<span class="nc" id="L478">            }</span>
+<span class="nc" id="L479">        }</span>
 
         private void readStderr() {
-<span class="nc" id="L478">            try (var reader =</span>
-<span class="nc" id="L479">                    new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {</span>
-<span class="nc" id="L480">                String line = reader.readLine();</span>
-<span class="nc bnc" id="L481" title="All 2 branches missed.">                while (line != null) {</span>
-<span class="nc" id="L482">                    LOG.debugf(&quot;codex_stderr pid=%d message=%s&quot;, process.pid(), line);</span>
-<span class="nc" id="L483">                    line = reader.readLine();</span>
+<span class="nc" id="L482">            try (var reader =</span>
+<span class="nc" id="L483">                    new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {</span>
+<span class="nc" id="L484">                String line = reader.readLine();</span>
+<span class="nc bnc" id="L485" title="All 2 branches missed.">                while (line != null) {</span>
+                    // Upstream Symphony reads stderr on the same stream as stdout, so it counts as output.
+<span class="nc" id="L487">                    turnSilence.outputReceived();</span>
+<span class="nc" id="L488">                    LOG.debugf(&quot;codex_stderr pid=%d message=%s&quot;, process.pid(), line);</span>
+<span class="nc" id="L489">                    line = reader.readLine();</span>
                 }
-<span class="nc" id="L485">            } catch (IOException e) {</span>
-<span class="nc" id="L486">                LOG.debugf(&quot;codex_stderr pid=%d outcome=reader_failed reason=%s&quot;, process.pid(), e.getMessage());</span>
-<span class="nc" id="L487">            }</span>
-<span class="nc" id="L488">        }</span>
+<span class="nc" id="L491">            } catch (IOException e) {</span>
+<span class="nc" id="L492">                LOG.debugf(&quot;codex_stderr pid=%d outcome=reader_failed reason=%s&quot;, process.pid(), e.getMessage());</span>
+<span class="nc" id="L493">            }</span>
+<span class="nc" id="L494">        }</span>
 
         private void handleMessage(JsonNode message) throws IOException {
-<span class="nc bnc" id="L491" title="All 8 branches missed.">            if (message.has(&quot;id&quot;) &amp;&amp; (message.has(&quot;result&quot;) || message.has(&quot;error&quot;)) &amp;&amp; !message.has(&quot;method&quot;)) {</span>
-<span class="nc" id="L492">                CompletableFuture&lt;JsonNode&gt; future =</span>
-<span class="nc" id="L493">                        responses.remove(message.path(&quot;id&quot;).asInt());</span>
-<span class="nc bnc" id="L494" title="All 2 branches missed.">                if (future != null) {</span>
-<span class="nc bnc" id="L495" title="All 2 branches missed.">                    if (message.has(&quot;error&quot;)) {</span>
-<span class="nc" id="L496">                        future.completeExceptionally(</span>
-<span class="nc" id="L497">                                new IOException(message.path(&quot;error&quot;).toString()));</span>
+<span class="nc bnc" id="L497" title="All 8 branches missed.">            if (message.has(&quot;id&quot;) &amp;&amp; (message.has(&quot;result&quot;) || message.has(&quot;error&quot;)) &amp;&amp; !message.has(&quot;method&quot;)) {</span>
+<span class="nc" id="L498">                CompletableFuture&lt;JsonNode&gt; future =</span>
+<span class="nc" id="L499">                        responses.remove(message.path(&quot;id&quot;).asInt());</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">                if (future != null) {</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">                    if (message.has(&quot;error&quot;)) {</span>
+<span class="nc" id="L502">                        future.completeExceptionally(</span>
+<span class="nc" id="L503">                                new IOException(message.path(&quot;error&quot;).toString()));</span>
                     } else {
-<span class="nc" id="L499">                        future.complete(message.path(&quot;result&quot;));</span>
+<span class="nc" id="L505">                        future.complete(message.path(&quot;result&quot;));</span>
                     }
                 }
-<span class="nc" id="L502">                return;</span>
+<span class="nc" id="L508">                return;</span>
             }
-<span class="nc bnc" id="L504" title="All 4 branches missed.">            if (message.has(&quot;id&quot;) &amp;&amp; message.has(&quot;method&quot;)) {</span>
-<span class="nc" id="L505">                respondToServerRequest(message);</span>
-<span class="nc" id="L506">                return;</span>
+<span class="nc bnc" id="L510" title="All 4 branches missed.">            if (message.has(&quot;id&quot;) &amp;&amp; message.has(&quot;method&quot;)) {</span>
+<span class="nc" id="L511">                respondToServerRequest(message);</span>
+<span class="nc" id="L512">                return;</span>
             }
-<span class="nc bnc" id="L508" title="All 2 branches missed.">            if (message.has(&quot;method&quot;)) {</span>
-<span class="nc" id="L509">                handleNotification(message);</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">            if (message.has(&quot;method&quot;)) {</span>
+<span class="nc" id="L515">                handleNotification(message);</span>
             }
-<span class="nc" id="L511">        }</span>
+<span class="nc" id="L517">        }</span>
 
         private void respondToServerRequest(JsonNode request) throws IOException {
-<span class="nc" id="L514">            int id = request.path(&quot;id&quot;).asInt();</span>
-<span class="nc" id="L515">            String method = request.path(&quot;method&quot;).asText();</span>
+<span class="nc" id="L520">            int id = request.path(&quot;id&quot;).asInt();</span>
+<span class="nc" id="L521">            String method = request.path(&quot;method&quot;).asText();</span>
             ObjectNode result =
-<span class="nc bnc" id="L517" title="All 6 branches missed.">                    switch (method) {</span>
-<span class="nc" id="L518">                        case &quot;item/commandExecution/requestApproval&quot; -&gt; object(&quot;decision&quot;, &quot;acceptForSession&quot;);</span>
-<span class="nc" id="L519">                        case &quot;item/fileChange/requestApproval&quot; -&gt; object(&quot;decision&quot;, &quot;acceptForSession&quot;);</span>
-<span class="nc" id="L520">                        case &quot;item/permissions/requestApproval&quot; -&gt; object(&quot;decision&quot;, &quot;cancel&quot;);</span>
+<span class="nc bnc" id="L523" title="All 6 branches missed.">                    switch (method) {</span>
+<span class="nc" id="L524">                        case &quot;item/commandExecution/requestApproval&quot; -&gt; object(&quot;decision&quot;, &quot;acceptForSession&quot;);</span>
+<span class="nc" id="L525">                        case &quot;item/fileChange/requestApproval&quot; -&gt; object(&quot;decision&quot;, &quot;acceptForSession&quot;);</span>
+<span class="nc" id="L526">                        case &quot;item/permissions/requestApproval&quot; -&gt; object(&quot;decision&quot;, &quot;cancel&quot;);</span>
                         case &quot;item/tool/requestUserInput&quot;, &quot;mcpServer/elicitation/request&quot; -&gt;
-<span class="nc" id="L522">                            object(&quot;answers&quot;, object());</span>
-<span class="nc" id="L523">                        case &quot;item/tool/call&quot; -&gt; handleToolCall(request.path(&quot;params&quot;));</span>
-<span class="nc" id="L524">                        default -&gt; null;</span>
+<span class="nc" id="L528">                            object(&quot;answers&quot;, object());</span>
+<span class="nc" id="L529">                        case &quot;item/tool/call&quot; -&gt; handleToolCall(request.path(&quot;params&quot;));</span>
+<span class="nc" id="L530">                        default -&gt; null;</span>
                     };
-<span class="nc bnc" id="L526" title="All 2 branches missed.">            if (result == null) {</span>
-<span class="nc" id="L527">                write(object(</span>
-<span class="nc" id="L528">                        &quot;id&quot;, id, &quot;error&quot;, object(&quot;code&quot;, -32601, &quot;message&quot;, &quot;Unsupported client request: &quot; + method)));</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">            if (result == null) {</span>
+<span class="nc" id="L533">                write(object(</span>
+<span class="nc" id="L534">                        &quot;id&quot;, id, &quot;error&quot;, object(&quot;code&quot;, -32601, &quot;message&quot;, &quot;Unsupported client request: &quot; + method)));</span>
             } else {
-<span class="nc" id="L530">                write(object(&quot;id&quot;, id, &quot;result&quot;, result));</span>
+<span class="nc" id="L536">                write(object(&quot;id&quot;, id, &quot;result&quot;, result));</span>
             }
-<span class="nc" id="L532">        }</span>
+<span class="nc" id="L538">        }</span>
 
         private ObjectNode handleToolCall(JsonNode params) {
-<span class="nc" id="L535">            return trelloTools.handle(config, card, params, new TrelloHandoffToolHandler.HandoffMoveObserver() {</span>
+<span class="nc" id="L541">            return trelloTools.handle(config, card, params, new TrelloHandoffToolHandler.HandoffMoveObserver() {</span>
                 private CardHandoffMove move;
 
                 @Override
                 public boolean beforeMove(String boardId, String listId) {
                     TurnIdentity owner;
                     try {
-<span class="nc" id="L542">                        owner = currentTurn.get(config.codex().readTimeout().toMillis(), TimeUnit.MILLISECONDS);</span>
-<span class="nc" id="L543">                    } catch (InterruptedException e) {</span>
-<span class="nc" id="L544">                        Thread.currentThread().interrupt();</span>
-<span class="nc" id="L545">                        return false;</span>
-<span class="nc" id="L546">                    } catch (ExecutionException | TimeoutException e) {</span>
-<span class="nc" id="L547">                        return false;</span>
-<span class="nc" id="L548">                    }</span>
-<span class="nc bnc" id="L549" title="All 2 branches missed.">                    if (owner.turnId().equals(endedTurnId)</span>
-<span class="nc bnc" id="L550" title="All 2 branches missed.">                            || !owner.threadId().equals(params.path(&quot;threadId&quot;).asText())</span>
-<span class="nc bnc" id="L551" title="All 2 branches missed.">                            || !owner.turnId().equals(params.path(&quot;turnId&quot;).asText())) {</span>
-<span class="nc" id="L552">                        return false;</span>
+<span class="nc" id="L548">                        owner = currentTurn.get(config.codex().readTimeout().toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L549">                    } catch (InterruptedException e) {</span>
+<span class="nc" id="L550">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L551">                        return false;</span>
+<span class="nc" id="L552">                    } catch (ExecutionException | TimeoutException e) {</span>
+<span class="nc" id="L553">                        return false;</span>
+<span class="nc" id="L554">                    }</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">                    if (owner.turnId().equals(endedTurnId)</span>
+<span class="nc bnc" id="L556" title="All 2 branches missed.">                            || !owner.threadId().equals(params.path(&quot;threadId&quot;).asText())</span>
+<span class="nc bnc" id="L557" title="All 2 branches missed.">                            || !owner.turnId().equals(params.path(&quot;turnId&quot;).asText())) {</span>
+<span class="nc" id="L558">                        return false;</span>
                     }
-<span class="nc" id="L554">                    move = new CardHandoffMove(</span>
-<span class="nc" id="L555">                            UUID.randomUUID().toString(),</span>
+<span class="nc" id="L560">                    move = new CardHandoffMove(</span>
+<span class="nc" id="L561">                            UUID.randomUUID().toString(),</span>
                             workerIdentity,
-<span class="nc" id="L557">                            owner.threadId(),</span>
-<span class="nc" id="L558">                            owner.turnId(),</span>
-<span class="nc" id="L559">                            card.id(),</span>
+<span class="nc" id="L563">                            owner.threadId(),</span>
+<span class="nc" id="L564">                            owner.turnId(),</span>
+<span class="nc" id="L565">                            card.id(),</span>
                             boardId,
                             listId);
-<span class="nc" id="L562">                    return listener.beforeHandoffMove(move);</span>
+<span class="nc" id="L568">                    return listener.beforeHandoffMove(move);</span>
                 }
 
                 @Override
                 public void afterMove(boolean succeeded) {
-<span class="nc bnc" id="L567" title="All 2 branches missed.">                    if (succeeded) {</span>
-<span class="nc" id="L568">                        handoffSucceeded = true;</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">                    if (succeeded) {</span>
+<span class="nc" id="L574">                        handoffSucceeded = true;</span>
                     }
-<span class="nc" id="L570">                    listener.afterHandoffMove(move, succeeded);</span>
-<span class="nc" id="L571">                }</span>
+<span class="nc" id="L576">                    listener.afterHandoffMove(move, succeeded);</span>
+<span class="nc" id="L577">                }</span>
             });
         }
 
         private void handleNotification(JsonNode message) {
-<span class="nc" id="L576">            String method = message.path(&quot;method&quot;).asText();</span>
-<span class="nc" id="L577">            JsonNode params = message.path(&quot;params&quot;);</span>
-<span class="nc" id="L578">            String threadId = params.path(&quot;threadId&quot;).asText(null);</span>
-<span class="nc" id="L579">            String turnId = turnId(params);</span>
-<span class="nc" id="L580">            Map&lt;String, Long&gt; usage = extractUsage(method, params);</span>
-<span class="nc bnc" id="L581" title="All 2 branches missed.">            if (turnId != null</span>
-<span class="nc bnc" id="L582" title="All 2 branches missed.">                    &amp;&amp; (Objects.equals(method, &quot;turn/completed&quot;)</span>
-<span class="nc bnc" id="L583" title="All 2 branches missed.">                            || isTurnFailure(method)</span>
-<span class="nc bnc" id="L584" title="All 2 branches missed.">                            || isTurnCancellation(method)</span>
-<span class="nc bnc" id="L585" title="All 2 branches missed.">                            || isTerminalError(method, params))) {</span>
-<span class="nc" id="L586">                endedTurnId = turnId;</span>
+<span class="nc" id="L582">            String method = message.path(&quot;method&quot;).asText();</span>
+<span class="nc" id="L583">            JsonNode params = message.path(&quot;params&quot;);</span>
+<span class="nc" id="L584">            String threadId = params.path(&quot;threadId&quot;).asText(null);</span>
+<span class="nc" id="L585">            String turnId = turnId(params);</span>
+<span class="nc" id="L586">            Map&lt;String, Long&gt; usage = extractUsage(method, params);</span>
+<span class="nc bnc" id="L587" title="All 2 branches missed.">            if (turnId != null</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">                    &amp;&amp; (Objects.equals(method, &quot;turn/completed&quot;)</span>
+<span class="nc bnc" id="L589" title="All 2 branches missed.">                            || isTurnFailure(method)</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">                            || isTurnCancellation(method)</span>
+<span class="nc bnc" id="L591" title="All 2 branches missed.">                            || isTerminalError(method, params))) {</span>
+<span class="nc" id="L592">                endedTurnId = turnId;</span>
             }
-<span class="nc bnc" id="L588" title="All 2 branches missed.">            if (Objects.equals(method, &quot;account/rateLimits/updated&quot;)) {</span>
-<span class="nc" id="L589">                synchronized (rateLimitState) {</span>
-<span class="nc" id="L590">                    JsonNode update = params.path(&quot;rateLimits&quot;);</span>
-<span class="nc" id="L591">                    JsonNode payload = mergedRateLimits(update);</span>
-<span class="nc" id="L592">                    boolean accepted = listener.onEventAndReportAccepted(event(</span>
+<span class="nc bnc" id="L594" title="All 2 branches missed.">            if (Objects.equals(method, &quot;account/rateLimits/updated&quot;)) {</span>
+<span class="nc" id="L595">                synchronized (rateLimitState) {</span>
+<span class="nc" id="L596">                    JsonNode update = params.path(&quot;rateLimits&quot;);</span>
+<span class="nc" id="L597">                    JsonNode payload = mergedRateLimits(update);</span>
+<span class="nc" id="L598">                    boolean accepted = listener.onEventAndReportAccepted(event(</span>
                             method,
                             workerIdentity,
-<span class="nc" id="L595">                            process.pid(),</span>
+<span class="nc" id="L601">                            process.pid(),</span>
                             threadId,
                             turnId,
-<span class="nc" id="L598">                            summarize(params),</span>
+<span class="nc" id="L604">                            summarize(params),</span>
                             usage,
                             payload));
-<span class="nc bnc" id="L601" title="All 4 branches missed.">                    if (accepted &amp;&amp; update.isObject()) {</span>
-<span class="nc" id="L602">                        rateLimitState.latest = payload.deepCopy();</span>
+<span class="nc bnc" id="L607" title="All 4 branches missed.">                    if (accepted &amp;&amp; update.isObject()) {</span>
+<span class="nc" id="L608">                        rateLimitState.latest = payload.deepCopy();</span>
                     }
-<span class="nc" id="L604">                }</span>
-<span class="nc" id="L605">                return;</span>
+<span class="nc" id="L610">                }</span>
+<span class="nc" id="L611">                return;</span>
             }
-<span class="nc" id="L607">            listener.onEvent(event(</span>
+<span class="nc" id="L613">            listener.onEvent(event(</span>
                     method,
                     workerIdentity,
-<span class="nc" id="L610">                    process.pid(),</span>
+<span class="nc" id="L616">                    process.pid(),</span>
                     threadId,
                     turnId,
-<span class="nc" id="L613">                    notificationSummary(method, params),</span>
+<span class="nc" id="L619">                    notificationSummary(method, params),</span>
                     usage,
                     params));
-<span class="nc bnc" id="L616" title="All 4 branches missed.">            if (Objects.equals(method, &quot;turn/completed&quot;) &amp;&amp; turnId != null) {</span>
+<span class="nc bnc" id="L622" title="All 4 branches missed.">            if (Objects.equals(method, &quot;turn/completed&quot;) &amp;&amp; turnId != null) {</span>
                 CompletableFuture&lt;JsonNode&gt; future;
-<span class="nc" id="L618">                synchronized (turnCompletionLock) {</span>
-<span class="nc" id="L619">                    future = turnCompletions.remove(turnId);</span>
-<span class="nc bnc" id="L620" title="All 2 branches missed.">                    if (future == null) {</span>
-<span class="nc" id="L621">                        completedTurns.put(turnId, params);</span>
-<span class="nc" id="L622">                        return;</span>
+<span class="nc" id="L624">                synchronized (turnCompletionLock) {</span>
+<span class="nc" id="L625">                    future = turnCompletions.remove(turnId);</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">                    if (future == null) {</span>
+<span class="nc" id="L627">                        completedTurns.put(turnId, params);</span>
+<span class="nc" id="L628">                        return;</span>
                     }
-<span class="nc" id="L624">                }</span>
-<span class="nc" id="L625">                future.complete(params);</span>
-<span class="nc bnc" id="L626" title="All 4 branches missed.">            } else if (isTurnFailure(method) &amp;&amp; turnId != null) {</span>
-<span class="nc" id="L627">                completeTurnExceptionally(turnId, terminalTurnFailure(&quot;turn_failed&quot;, turnError(params), params));</span>
-<span class="nc bnc" id="L628" title="All 4 branches missed.">            } else if (isTurnCancellation(method) &amp;&amp; turnId != null) {</span>
-<span class="nc" id="L629">                completeTurnExceptionally(</span>
-<span class="nc" id="L630">                        turnId, new CodexAppServerTerminalException(&quot;turn_cancelled&quot;, summarize(params)));</span>
-<span class="nc bnc" id="L631" title="All 4 branches missed.">            } else if (isTerminalError(method, params) &amp;&amp; turnId != null) {</span>
-<span class="nc" id="L632">                completeTurnExceptionally(</span>
-<span class="nc" id="L633">                        turnId, terminalTurnFailure(&quot;turn_failed&quot;, params.path(&quot;error&quot;), params.path(&quot;error&quot;)));</span>
+<span class="nc" id="L630">                }</span>
+<span class="nc" id="L631">                future.complete(params);</span>
+<span class="nc bnc" id="L632" title="All 4 branches missed.">            } else if (isTurnFailure(method) &amp;&amp; turnId != null) {</span>
+<span class="nc" id="L633">                completeTurnExceptionally(turnId, terminalTurnFailure(&quot;turn_failed&quot;, turnError(params), params));</span>
+<span class="nc bnc" id="L634" title="All 4 branches missed.">            } else if (isTurnCancellation(method) &amp;&amp; turnId != null) {</span>
+<span class="nc" id="L635">                completeTurnExceptionally(</span>
+<span class="nc" id="L636">                        turnId, new CodexAppServerTerminalException(&quot;turn_cancelled&quot;, summarize(params)));</span>
+<span class="nc bnc" id="L637" title="All 4 branches missed.">            } else if (isTerminalError(method, params) &amp;&amp; turnId != null) {</span>
+<span class="nc" id="L638">                completeTurnExceptionally(</span>
+<span class="nc" id="L639">                        turnId, terminalTurnFailure(&quot;turn_failed&quot;, params.path(&quot;error&quot;), params.path(&quot;error&quot;)));</span>
             }
-<span class="nc" id="L635">        }</span>
+<span class="nc" id="L641">        }</span>
 
         private JsonNode mergedRateLimits(JsonNode update) {
-<span class="nc bnc" id="L638" title="All 2 branches missed.">            if (!update.isObject()) {</span>
-<span class="nc" id="L639">                JsonNode latest = rateLimitState.latest;</span>
-<span class="nc bnc" id="L640" title="All 2 branches missed.">                return latest == null ? json.getNodeFactory().nullNode() : latest.deepCopy();</span>
+<span class="nc bnc" id="L644" title="All 2 branches missed.">            if (!update.isObject()) {</span>
+<span class="nc" id="L645">                JsonNode latest = rateLimitState.latest;</span>
+<span class="nc bnc" id="L646" title="All 2 branches missed.">                return latest == null ? json.getNodeFactory().nullNode() : latest.deepCopy();</span>
             }
-<span class="nc" id="L642">            JsonNode previous = rateLimitState.latest;</span>
-<span class="nc bnc" id="L643" title="All 4 branches missed.">            ObjectNode merged = previous != null &amp;&amp; previous.isObject() ? ((ObjectNode) previous).deepCopy() : object();</span>
-<span class="nc" id="L644">            mergeAvailableRateLimitMetadata(merged, update);</span>
-<span class="nc" id="L645">            mergeRateLimitWindow(merged, update, &quot;primary&quot;);</span>
-<span class="nc" id="L646">            mergeRateLimitWindow(merged, update, &quot;secondary&quot;);</span>
-<span class="nc" id="L647">            return merged;</span>
+<span class="nc" id="L648">            JsonNode previous = rateLimitState.latest;</span>
+<span class="nc bnc" id="L649" title="All 4 branches missed.">            ObjectNode merged = previous != null &amp;&amp; previous.isObject() ? ((ObjectNode) previous).deepCopy() : object();</span>
+<span class="nc" id="L650">            mergeAvailableRateLimitMetadata(merged, update);</span>
+<span class="nc" id="L651">            mergeRateLimitWindow(merged, update, &quot;primary&quot;);</span>
+<span class="nc" id="L652">            mergeRateLimitWindow(merged, update, &quot;secondary&quot;);</span>
+<span class="nc" id="L653">            return merged;</span>
         }
 
         private void mergeAvailableRateLimitMetadata(ObjectNode merged, JsonNode update) {
-<span class="nc" id="L651">            update.fieldNames().forEachRemaining(name -&gt; {</span>
-<span class="nc bnc" id="L652" title="All 4 branches missed.">                if (!Objects.equals(name, &quot;primary&quot;) &amp;&amp; !Objects.equals(name, &quot;secondary&quot;)) {</span>
-<span class="nc" id="L653">                    mergeAvailableField(merged, update, name);</span>
+<span class="nc" id="L657">            update.fieldNames().forEachRemaining(name -&gt; {</span>
+<span class="nc bnc" id="L658" title="All 4 branches missed.">                if (!Objects.equals(name, &quot;primary&quot;) &amp;&amp; !Objects.equals(name, &quot;secondary&quot;)) {</span>
+<span class="nc" id="L659">                    mergeAvailableField(merged, update, name);</span>
                 }
-<span class="nc" id="L655">            });</span>
-<span class="nc" id="L656">        }</span>
+<span class="nc" id="L661">            });</span>
+<span class="nc" id="L662">        }</span>
 
         private void mergeRateLimitWindow(ObjectNode merged, JsonNode update, String name) {
-<span class="nc" id="L659">            JsonNode incoming = update.get(name);</span>
-<span class="nc bnc" id="L660" title="All 6 branches missed.">            if (incoming == null || incoming.isNull() || !incoming.isObject()) {</span>
-<span class="nc" id="L661">                return;</span>
+<span class="nc" id="L665">            JsonNode incoming = update.get(name);</span>
+<span class="nc bnc" id="L666" title="All 6 branches missed.">            if (incoming == null || incoming.isNull() || !incoming.isObject()) {</span>
+<span class="nc" id="L667">                return;</span>
             }
-<span class="nc" id="L663">            JsonNode previous = merged.get(name);</span>
-<span class="nc bnc" id="L664" title="All 4 branches missed.">            ObjectNode window = previous != null &amp;&amp; previous.isObject() ? ((ObjectNode) previous).deepCopy() : object();</span>
-<span class="nc" id="L665">            incoming.fieldNames().forEachRemaining(field -&gt; mergeAvailableField(window, incoming, field));</span>
-<span class="nc" id="L666">            merged.set(name, window);</span>
-<span class="nc" id="L667">        }</span>
+<span class="nc" id="L669">            JsonNode previous = merged.get(name);</span>
+<span class="nc bnc" id="L670" title="All 4 branches missed.">            ObjectNode window = previous != null &amp;&amp; previous.isObject() ? ((ObjectNode) previous).deepCopy() : object();</span>
+<span class="nc" id="L671">            incoming.fieldNames().forEachRemaining(field -&gt; mergeAvailableField(window, incoming, field));</span>
+<span class="nc" id="L672">            merged.set(name, window);</span>
+<span class="nc" id="L673">        }</span>
 
         private void mergeAvailableField(ObjectNode merged, JsonNode update, String name) {
-<span class="nc" id="L670">            JsonNode available = update.get(name);</span>
-<span class="nc bnc" id="L671" title="All 4 branches missed.">            if (available != null &amp;&amp; !available.isNull()) {</span>
-<span class="nc" id="L672">                merged.set(name, available.deepCopy());</span>
+<span class="nc" id="L676">            JsonNode available = update.get(name);</span>
+<span class="nc bnc" id="L677" title="All 4 branches missed.">            if (available != null &amp;&amp; !available.isNull()) {</span>
+<span class="nc" id="L678">                merged.set(name, available.deepCopy());</span>
             }
-<span class="nc" id="L674">        }</span>
+<span class="nc" id="L680">        }</span>
 
         private CodexAppServerTerminalException terminalTurnFailure(
                 String code, JsonNode error, JsonNode messageFallback) {
-<span class="nc bnc" id="L678" title="All 2 branches missed.">            if (isUsageLimitError(error)) {</span>
-<span class="nc" id="L679">                return new CodexAppServerTerminalException(</span>
+<span class="nc bnc" id="L684" title="All 2 branches missed.">            if (isUsageLimitError(error)) {</span>
+<span class="nc" id="L685">                return new CodexAppServerTerminalException(</span>
                         code,
-<span class="nc" id="L681">                        turnErrorMessage(error),</span>
+<span class="nc" id="L687">                        turnErrorMessage(error),</span>
                         AgentRunResult.FailureCategory.CODEX_USAGE_LIMIT,
-<span class="nc" id="L683">                        usageLimitRetryNotBefore());</span>
+<span class="nc" id="L689">                        usageLimitRetryNotBefore());</span>
             }
-<span class="nc" id="L685">            return new CodexAppServerTerminalException(code, summarize(messageFallback));</span>
+<span class="nc" id="L691">            return new CodexAppServerTerminalException(code, summarize(messageFallback));</span>
         }
 
         private JsonNode turnError(JsonNode params) {
-<span class="nc" id="L689">            JsonNode error = params.path(&quot;turn&quot;).path(&quot;error&quot;);</span>
-<span class="nc bnc" id="L690" title="All 4 branches missed.">            return error.isMissingNode() || error.isNull() ? params : error;</span>
+<span class="nc" id="L695">            JsonNode error = params.path(&quot;turn&quot;).path(&quot;error&quot;);</span>
+<span class="nc bnc" id="L696" title="All 4 branches missed.">            return error.isMissingNode() || error.isNull() ? params : error;</span>
         }
 
         private String notificationSummary(String method, JsonNode params) {
             JsonNode error =
-<span class="nc bnc" id="L695" title="All 3 branches missed.">                    switch (method) {</span>
-<span class="nc" id="L696">                        case &quot;turn/completed&quot;, &quot;turn/failed&quot; -&gt; turnError(params);</span>
-<span class="nc" id="L697">                        case &quot;error&quot; -&gt; params.path(&quot;error&quot;);</span>
-<span class="nc" id="L698">                        default -&gt; json.getNodeFactory().missingNode();</span>
+<span class="nc bnc" id="L701" title="All 3 branches missed.">                    switch (method) {</span>
+<span class="nc" id="L702">                        case &quot;turn/completed&quot;, &quot;turn/failed&quot; -&gt; turnError(params);</span>
+<span class="nc" id="L703">                        case &quot;error&quot; -&gt; params.path(&quot;error&quot;);</span>
+<span class="nc" id="L704">                        default -&gt; json.getNodeFactory().missingNode();</span>
                     };
-<span class="nc bnc" id="L700" title="All 2 branches missed.">            return isUsageLimitError(error) ? turnErrorMessage(error) : summarize(params);</span>
+<span class="nc bnc" id="L706" title="All 2 branches missed.">            return isUsageLimitError(error) ? turnErrorMessage(error) : summarize(params);</span>
         }
 
         private Optional&lt;Instant&gt; usageLimitRetryNotBefore() {
             JsonNode snapshot;
-<span class="nc" id="L705">            synchronized (rateLimitState) {</span>
-<span class="nc" id="L706">                snapshot = rateLimitState.latest;</span>
-<span class="nc" id="L707">            }</span>
-<span class="nc bnc" id="L708" title="All 4 branches missed.">            if (snapshot == null || !snapshot.isObject()) {</span>
-<span class="nc" id="L709">                return Optional.empty();</span>
+<span class="nc" id="L711">            synchronized (rateLimitState) {</span>
+<span class="nc" id="L712">                snapshot = rateLimitState.latest;</span>
+<span class="nc" id="L713">            }</span>
+<span class="nc bnc" id="L714" title="All 4 branches missed.">            if (snapshot == null || !snapshot.isObject()) {</span>
+<span class="nc" id="L715">                return Optional.empty();</span>
             }
-<span class="nc" id="L711">            Instant now = clock.instant();</span>
-<span class="nc" id="L712">            return Stream.of(snapshot.path(&quot;primary&quot;), snapshot.path(&quot;secondary&quot;))</span>
-<span class="nc" id="L713">                    .map(window -&gt; exhaustedWindowReset(window, now))</span>
-<span class="nc" id="L714">                    .flatMap(Optional::stream)</span>
-<span class="nc" id="L715">                    .max(Instant::compareTo);</span>
+<span class="nc" id="L717">            Instant now = clock.instant();</span>
+<span class="nc" id="L718">            return Stream.of(snapshot.path(&quot;primary&quot;), snapshot.path(&quot;secondary&quot;))</span>
+<span class="nc" id="L719">                    .map(window -&gt; exhaustedWindowReset(window, now))</span>
+<span class="nc" id="L720">                    .flatMap(Optional::stream)</span>
+<span class="nc" id="L721">                    .max(Instant::compareTo);</span>
         }
 
         private Optional&lt;Instant&gt; exhaustedWindowReset(JsonNode window, Instant now) {
-<span class="nc" id="L719">            JsonNode usedPercent = window.path(&quot;usedPercent&quot;);</span>
-<span class="nc" id="L720">            JsonNode resetsAt = window.path(&quot;resetsAt&quot;);</span>
-<span class="nc bnc" id="L721" title="All 2 branches missed.">            if (!window.isObject()</span>
-<span class="nc bnc" id="L722" title="All 2 branches missed.">                    || !usedPercent.isIntegralNumber()</span>
-<span class="nc bnc" id="L723" title="All 2 branches missed.">                    || !usedPercent.canConvertToInt()</span>
-<span class="nc bnc" id="L724" title="All 2 branches missed.">                    || usedPercent.intValue() &lt; 100</span>
-<span class="nc bnc" id="L725" title="All 2 branches missed.">                    || !resetsAt.isIntegralNumber()</span>
-<span class="nc bnc" id="L726" title="All 2 branches missed.">                    || !resetsAt.canConvertToLong()) {</span>
-<span class="nc" id="L727">                return Optional.empty();</span>
+<span class="nc" id="L725">            JsonNode usedPercent = window.path(&quot;usedPercent&quot;);</span>
+<span class="nc" id="L726">            JsonNode resetsAt = window.path(&quot;resetsAt&quot;);</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">            if (!window.isObject()</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">                    || !usedPercent.isIntegralNumber()</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">                    || !usedPercent.canConvertToInt()</span>
+<span class="nc bnc" id="L730" title="All 2 branches missed.">                    || usedPercent.intValue() &lt; 100</span>
+<span class="nc bnc" id="L731" title="All 2 branches missed.">                    || !resetsAt.isIntegralNumber()</span>
+<span class="nc bnc" id="L732" title="All 2 branches missed.">                    || !resetsAt.canConvertToLong()) {</span>
+<span class="nc" id="L733">                return Optional.empty();</span>
             }
             try {
-<span class="nc" id="L730">                Instant reset = Instant.ofEpochSecond(resetsAt.longValue());</span>
-<span class="nc bnc" id="L731" title="All 2 branches missed.">                return reset.isAfter(now) ? Optional.of(reset) : Optional.empty();</span>
-<span class="nc" id="L732">            } catch (DateTimeException | ArithmeticException e) {</span>
-<span class="nc" id="L733">                return Optional.empty();</span>
+<span class="nc" id="L736">                Instant reset = Instant.ofEpochSecond(resetsAt.longValue());</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">                return reset.isAfter(now) ? Optional.of(reset) : Optional.empty();</span>
+<span class="nc" id="L738">            } catch (DateTimeException | ArithmeticException e) {</span>
+<span class="nc" id="L739">                return Optional.empty();</span>
             }
         }
 
         private boolean isTurnFailure(String method) {
-<span class="nc" id="L738">            return Objects.equals(method, &quot;turn/failed&quot;);</span>
+<span class="nc" id="L744">            return Objects.equals(method, &quot;turn/failed&quot;);</span>
         }
 
         private boolean isTurnCancellation(String method) {
-<span class="nc bnc" id="L742" title="All 4 branches missed.">            return Objects.equals(method, &quot;turn/cancelled&quot;) || Objects.equals(method, &quot;turn/canceled&quot;);</span>
+<span class="nc bnc" id="L748" title="All 4 branches missed.">            return Objects.equals(method, &quot;turn/cancelled&quot;) || Objects.equals(method, &quot;turn/canceled&quot;);</span>
         }
 
         private boolean isTerminalError(String method, JsonNode params) {
-<span class="nc bnc" id="L746" title="All 4 branches missed.">            return Objects.equals(method, &quot;error&quot;) &amp;&amp; !params.path(&quot;willRetry&quot;).asBoolean(false);</span>
+<span class="nc bnc" id="L752" title="All 4 branches missed.">            return Objects.equals(method, &quot;error&quot;) &amp;&amp; !params.path(&quot;willRetry&quot;).asBoolean(false);</span>
         }
 
         private void completeTurnExceptionally(String turnId, Throwable failure) {
             CompletableFuture&lt;JsonNode&gt; future;
-<span class="nc" id="L751">            synchronized (turnCompletionLock) {</span>
-<span class="nc" id="L752">                future = turnCompletions.remove(turnId);</span>
-<span class="nc bnc" id="L753" title="All 2 branches missed.">                if (future == null) {</span>
-<span class="nc" id="L754">                    terminalTurnFailures.put(turnId, failure);</span>
-<span class="nc" id="L755">                    return;</span>
+<span class="nc" id="L757">            synchronized (turnCompletionLock) {</span>
+<span class="nc" id="L758">                future = turnCompletions.remove(turnId);</span>
+<span class="nc bnc" id="L759" title="All 2 branches missed.">                if (future == null) {</span>
+<span class="nc" id="L760">                    terminalTurnFailures.put(turnId, failure);</span>
+<span class="nc" id="L761">                    return;</span>
                 }
-<span class="nc" id="L757">            }</span>
-<span class="nc" id="L758">            future.completeExceptionally(failure);</span>
-<span class="nc" id="L759">        }</span>
+<span class="nc" id="L763">            }</span>
+<span class="nc" id="L764">            future.completeExceptionally(failure);</span>
+<span class="nc" id="L765">        }</span>
 
         private void failPending(Throwable failure) {
-<span class="nc" id="L762">            readerFailure.compareAndSet(null, failure);</span>
-<span class="nc" id="L763">            responses.values().forEach(future -&gt; future.completeExceptionally(failure));</span>
-<span class="nc" id="L764">            synchronized (turnCompletionLock) {</span>
-<span class="nc" id="L765">                turnCompletions.values().forEach(future -&gt; future.completeExceptionally(failure));</span>
-<span class="nc" id="L766">                turnCompletions.clear();</span>
-<span class="nc" id="L767">            }</span>
-<span class="nc" id="L768">        }</span>
+<span class="nc" id="L768">            readerFailure.compareAndSet(null, failure);</span>
+<span class="nc" id="L769">            responses.values().forEach(future -&gt; future.completeExceptionally(failure));</span>
+<span class="nc" id="L770">            synchronized (turnCompletionLock) {</span>
+<span class="nc" id="L771">                turnCompletions.values().forEach(future -&gt; future.completeExceptionally(failure));</span>
+<span class="nc" id="L772">                turnCompletions.clear();</span>
+<span class="nc" id="L773">            }</span>
+<span class="nc" id="L774">        }</span>
 
         private String turnId(JsonNode params) {
-<span class="nc" id="L771">            String nestedTurnId = params.at(&quot;/turn/id&quot;).asText(null);</span>
-<span class="nc bnc" id="L772" title="All 2 branches missed.">            return nestedTurnId == null ? params.path(&quot;turnId&quot;).asText(null) : nestedTurnId;</span>
+<span class="nc" id="L777">            String nestedTurnId = params.at(&quot;/turn/id&quot;).asText(null);</span>
+<span class="nc bnc" id="L778" title="All 2 branches missed.">            return nestedTurnId == null ? params.path(&quot;turnId&quot;).asText(null) : nestedTurnId;</span>
         }
 
         private Exception unwrapReaderFailure(ExecutionException failure) {
-<span class="nc" id="L776">            return unwrapReaderFailure(failure.getCause(), failure);</span>
+<span class="nc" id="L782">            return unwrapReaderFailure(failure.getCause(), failure);</span>
         }
 
         private Exception unwrapReaderFailure(Throwable failure) {
-<span class="nc" id="L780">            return unwrapReaderFailure(failure, null);</span>
+<span class="nc" id="L786">            return unwrapReaderFailure(failure, null);</span>
         }
 
         private Exception unwrapReaderFailure(Throwable failure, Throwable wrapper) {
-<span class="nc bnc" id="L784" title="All 2 branches missed.">            if (failure instanceof CodexAppServerTerminalException terminalFailure) {</span>
-<span class="nc" id="L785">                addSuppressedWrapper(terminalFailure, wrapper);</span>
-<span class="nc" id="L786">                return terminalFailure;</span>
+<span class="nc bnc" id="L790" title="All 2 branches missed.">            if (failure instanceof CodexAppServerTerminalException terminalFailure) {</span>
+<span class="nc" id="L791">                addSuppressedWrapper(terminalFailure, wrapper);</span>
+<span class="nc" id="L792">                return terminalFailure;</span>
             }
-<span class="nc bnc" id="L788" title="All 2 branches missed.">            return new IOException(&quot;app-server reader failed&quot;, wrapper == null ? failure : wrapper);</span>
+<span class="nc bnc" id="L794" title="All 2 branches missed.">            return new IOException(&quot;app-server reader failed&quot;, wrapper == null ? failure : wrapper);</span>
         }
 
         private Exception unwrapResponseFailure(ExecutionException failure) {
-<span class="nc" id="L792">            Throwable cause = failure.getCause();</span>
-<span class="nc bnc" id="L793" title="All 2 branches missed.">            if (cause instanceof CodexAppServerTerminalException terminalFailure) {</span>
-<span class="nc" id="L794">                terminalFailure.addSuppressed(failure);</span>
-<span class="nc" id="L795">                return terminalFailure;</span>
+<span class="nc" id="L798">            Throwable cause = failure.getCause();</span>
+<span class="nc bnc" id="L799" title="All 2 branches missed.">            if (cause instanceof CodexAppServerTerminalException terminalFailure) {</span>
+<span class="nc" id="L800">                terminalFailure.addSuppressed(failure);</span>
+<span class="nc" id="L801">                return terminalFailure;</span>
             }
-<span class="nc bnc" id="L797" title="All 2 branches missed.">            if (cause instanceof Exception exception) {</span>
-<span class="nc" id="L798">                exception.addSuppressed(failure);</span>
-<span class="nc" id="L799">                return exception;</span>
+<span class="nc bnc" id="L803" title="All 2 branches missed.">            if (cause instanceof Exception exception) {</span>
+<span class="nc" id="L804">                exception.addSuppressed(failure);</span>
+<span class="nc" id="L805">                return exception;</span>
             }
-<span class="nc" id="L801">            return new IOException(&quot;app-server request failed&quot;, failure);</span>
+<span class="nc" id="L807">            return new IOException(&quot;app-server request failed&quot;, failure);</span>
         }
 
         private void addSuppressedWrapper(Exception exception, Throwable wrapper) {
-<span class="nc bnc" id="L805" title="All 2 branches missed.">            if (wrapper != null) {</span>
-<span class="nc" id="L806">                exception.addSuppressed(wrapper);</span>
+<span class="nc bnc" id="L811" title="All 2 branches missed.">            if (wrapper != null) {</span>
+<span class="nc" id="L812">                exception.addSuppressed(wrapper);</span>
             }
-<span class="nc" id="L808">        }</span>
+<span class="nc" id="L814">        }</span>
 
         private Map&lt;String, Long&gt; extractUsage(String method, JsonNode params) {
-<span class="nc bnc" id="L811" title="All 2 branches missed.">            if (!&quot;thread/tokenUsage/updated&quot;.equals(method)) {</span>
-<span class="nc" id="L812">                return Map.of();</span>
+<span class="nc bnc" id="L817" title="All 2 branches missed.">            if (!&quot;thread/tokenUsage/updated&quot;.equals(method)) {</span>
+<span class="nc" id="L818">                return Map.of();</span>
             }
-<span class="nc" id="L814">            JsonNode usage = params.path(&quot;usage&quot;);</span>
-<span class="nc bnc" id="L815" title="All 6 branches missed.">            if (usage.isMissingNode() || usage.isNull() || usage.isEmpty()) {</span>
-<span class="nc" id="L816">                usage = params.path(&quot;tokenUsage&quot;).path(&quot;total&quot;);</span>
+<span class="nc" id="L820">            JsonNode usage = params.path(&quot;usage&quot;);</span>
+<span class="nc bnc" id="L821" title="All 6 branches missed.">            if (usage.isMissingNode() || usage.isNull() || usage.isEmpty()) {</span>
+<span class="nc" id="L822">                usage = params.path(&quot;tokenUsage&quot;).path(&quot;total&quot;);</span>
             }
-<span class="nc" id="L818">            return Map.of(</span>
+<span class="nc" id="L824">            return Map.of(</span>
                     &quot;input_tokens&quot;,
-<span class="nc" id="L820">                    usage.path(&quot;inputTokens&quot;).asLong(usage.path(&quot;input_tokens&quot;).asLong(0)),</span>
+<span class="nc" id="L826">                    usage.path(&quot;inputTokens&quot;).asLong(usage.path(&quot;input_tokens&quot;).asLong(0)),</span>
                     &quot;output_tokens&quot;,
-<span class="nc" id="L822">                    usage.path(&quot;outputTokens&quot;)</span>
-<span class="nc" id="L823">                            .asLong(usage.path(&quot;output_tokens&quot;).asLong(0)),</span>
+<span class="nc" id="L828">                    usage.path(&quot;outputTokens&quot;)</span>
+<span class="nc" id="L829">                            .asLong(usage.path(&quot;output_tokens&quot;).asLong(0)),</span>
                     &quot;total_tokens&quot;,
-<span class="nc" id="L825">                    usage.path(&quot;totalTokens&quot;).asLong(usage.path(&quot;total_tokens&quot;).asLong(0)));</span>
+<span class="nc" id="L831">                    usage.path(&quot;totalTokens&quot;).asLong(usage.path(&quot;total_tokens&quot;).asLong(0)));</span>
         }
 
         @Override
         public void close() {
             try {
-<span class="nc" id="L831">                RuntimeProcessShutdown.stop(process);</span>
+<span class="nc" id="L837">                RuntimeProcessShutdown.stop(process);</span>
             } finally {
-<span class="nc" id="L833">                closeWriter();</span>
+<span class="nc" id="L839">                closeWriter();</span>
             }
-<span class="nc" id="L835">        }</span>
+<span class="nc" id="L841">        }</span>
 
         private void closeWriter() {
-<span class="nc" id="L838">            synchronized (writerLock) {</span>
+<span class="nc" id="L844">            synchronized (writerLock) {</span>
                 try {
-<span class="nc" id="L840">                    writer.close();</span>
-<span class="nc" id="L841">                } catch (IOException e) {</span>
-<span class="nc" id="L842">                    LOG.debugf(&quot;codex_stdin pid=%d outcome=close_failed reason=%s&quot;, process.pid(), e.getMessage());</span>
-<span class="nc" id="L843">                }</span>
-<span class="nc" id="L844">            }</span>
-<span class="nc" id="L845">        }</span>
+<span class="nc" id="L846">                    writer.close();</span>
+<span class="nc" id="L847">                } catch (IOException e) {</span>
+<span class="nc" id="L848">                    LOG.debugf(&quot;codex_stdin pid=%d outcome=close_failed reason=%s&quot;, process.pid(), e.getMessage());</span>
+<span class="nc" id="L849">                }</span>
+<span class="nc" id="L850">            }</span>
+<span class="nc" id="L851">        }</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

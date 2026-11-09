@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HeartbeatReporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">HeartbeatReporter.java</span></div><h1>HeartbeatReporter.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import ch.fmartin.symphony.trello.telemetry.TelemetryState.PendingHeartbeat;
+import ch.fmartin.symphony.trello.telemetry.TelemetryState.ReportClaim;
+import ch.fmartin.symphony.trello.telemetry.TelemetryState.RetryState;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.StateRead;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
+import org.jspecify.annotations.Nullable;
+
+/// The worker-side due check. Called once when a worker is ready and then about once per minute,
+/// it decides under the state lock whether this worker should deliver today's heartbeat, releases
+/// the lock, sends asynchronously, and records the outcome only if its claim and the preference
+/// revision are unchanged. All timing comes from the injected clock and jitter source.
+public final class HeartbeatReporter {
+<span class="nc" id="L27">    static final Duration CLAIM_LIFETIME = Duration.ofSeconds(90);</span>
+<span class="nc" id="L28">    static final List&lt;Duration&gt; RETRY_BACKOFF =</span>
+<span class="nc" id="L29">            List.of(Duration.ofMinutes(1), Duration.ofMinutes(5), Duration.ofMinutes(15), Duration.ofMinutes(60));</span>
+<span class="nc" id="L30">    static final Duration RETRY_JITTER_MAX = Duration.ofSeconds(30);</span>
+
+    private final TelemetryInstallation installation;
+    private final HeartbeatSnapshots snapshots;
+    private final PostHogCaptureClient client;
+    private final Clock clock;
+    private final Executor executor;
+    private final LongSupplier jitterSeconds;
+    private final TelemetryOutput output;
+<span class="nc" id="L39">    private final String owner = UUID.randomUUID().toString();</span>
+<span class="nc" id="L40">    private final AtomicBoolean unreadableReported = new AtomicBoolean();</span>
+    /// Admission control: one delivery attempt per reporter at a time, so a stalled request cannot
+    /// pile up further attempts behind it on the delivery executor.
+<span class="nc" id="L43">    private final AtomicBoolean deliveryInFlight = new AtomicBoolean();</span>
+    private @Nullable HeartbeatEvent lastDebugPreview;
+    /// Credential issuance has no durable state before it succeeds, so its backoff lives with this
+    /// worker and restarts with it.
+<span class="nc" id="L47">    private final AtomicInteger issuanceFailures = new AtomicInteger();</span>
+    private volatile @Nullable Instant issuanceNotBefore;
+
+    public HeartbeatReporter(
+            TelemetryInstallation installation,
+            HeartbeatSnapshots snapshots,
+            PostHogCaptureClient client,
+            Clock clock,
+            Executor executor,
+            LongSupplier jitterSeconds,
+<span class="nc" id="L57">            TelemetryOutput output) {</span>
+<span class="nc" id="L58">        this.installation = installation;</span>
+<span class="nc" id="L59">        this.snapshots = snapshots;</span>
+<span class="nc" id="L60">        this.client = client;</span>
+<span class="nc" id="L61">        this.clock = clock;</span>
+<span class="nc" id="L62">        this.executor = executor;</span>
+<span class="nc" id="L63">        this.jitterSeconds = jitterSeconds;</span>
+<span class="nc" id="L64">        this.output = output;</span>
+<span class="nc" id="L65">    }</span>
+
+    /// One local due check. It performs no network request itself; a dispatch runs on the executor.
+    public synchronized CheckResult check() {
+<span class="nc" id="L69">        return installation.installedStore().map(this::check).orElse(CheckResult.NOT_INSTALLED);</span>
+    }
+
+    private CheckResult check(TelemetryStateStore store) {
+<span class="nc" id="L73">        StateRead read = store.read();</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        if (read instanceof StateRead.Unreadable unreadable) {</span>
+<span class="nc" id="L75">            reportUnreadable(unreadable);</span>
+<span class="nc" id="L76">            return CheckResult.UNREADABLE;</span>
+        }
+<span class="nc" id="L78">        TelemetryState current = read.stateOrInitial();</span>
+<span class="nc" id="L79">        var erasure = new TelemetryErasure(installation, clock);</span>
+<span class="nc" id="L80">        boolean graceEnded = current.firstWorkerDeadlineAt()</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                .filter(deadline -&gt; !deadline.isAfter(clock.instant()))</span>
+<span class="nc" id="L82">                .isPresent();</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (installation.networkEligible()</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                &amp;&amp; erasure.needsMaintenance(current)</span>
+<span class="nc bnc" id="L85" title="All 4 branches missed.">                &amp;&amp; (current.ownership() != null || graceEnded)) {</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">            boolean issuing = !current.hasIdentity();</span>
+<span class="nc" id="L87">            Instant issuanceDue = issuanceNotBefore;</span>
+<span class="nc bnc" id="L88" title="All 6 branches missed.">            if (issuing &amp;&amp; issuanceDue != null &amp;&amp; issuanceDue.isAfter(clock.instant())) {</span>
+<span class="nc" id="L89">                return CheckResult.WAITING;</span>
+            }
+<span class="nc bnc" id="L91" title="All 2 branches missed.">            if (deliveryInFlight.compareAndSet(false, true)) {</span>
+<span class="nc" id="L92">                dispatch(() -&gt; maintainOwnership(store, erasure, issuing));</span>
+            }
+<span class="nc" id="L94">            return CheckResult.WAITING;</span>
+        }
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (current.blocksReporting()) {</span>
+<span class="nc" id="L97">            return CheckResult.WAITING;</span>
+        }
+<span class="nc" id="L99">        EffectiveTelemetry effective =</span>
+<span class="nc" id="L100">                installation.effective(read.stateOrInitial().mode());</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (effective.effective() == TelemetryMode.DEBUG) {</span>
+<span class="nc" id="L102">            printDebugPreview(read.stateOrInitial());</span>
+<span class="nc" id="L103">            return CheckResult.DEBUG;</span>
+        }
+<span class="nc bnc" id="L105" title="All 2 branches missed.">        if (effective.effective() == TelemetryMode.DISABLED) {</span>
+<span class="nc" id="L106">            return CheckResult.DISABLED;</span>
+        }
+<span class="nc bnc" id="L108" title="All 2 branches missed.">        if (!installation.distribution().ready()) {</span>
+<span class="nc" id="L109">            return CheckResult.NOT_CONFIGURED;</span>
+        }
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (deliveryInFlight.get()) {</span>
+<span class="nc" id="L112">            return CheckResult.WAITING;</span>
+        }
+        // Platform, version, and board count are read before the lock so the transaction stays short.
+<span class="nc" id="L115">        HeartbeatSnapshots.Observation observation = snapshots.observe();</span>
+        Decision decision;
+        try {
+<span class="nc" id="L118">            decision = store.update(state -&gt; decide(state, observation));</span>
+<span class="nc" id="L119">        } catch (TelemetryStateException exception) {</span>
+<span class="nc" id="L120">            output.info(&quot;telemetry check skipped: &quot; + exception.getMessage());</span>
+<span class="nc" id="L121">            return CheckResult.UNREADABLE;</span>
+<span class="nc" id="L122">        }</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        if (decision.result() == CheckResult.DISPATCHED) {</span>
+<span class="nc" id="L124">            Dispatch dispatch = decision.dispatch();</span>
+<span class="nc" id="L125">            deliveryInFlight.set(true);</span>
+<span class="nc" id="L126">            dispatch(() -&gt; deliver(store, dispatch));</span>
+        }
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (decision.printNotice()) {</span>
+<span class="nc" id="L129">            output.info(String.join(</span>
+<span class="nc" id="L130">                    &quot;\n&quot;, TelemetryNotice.lines(Optional.ofNullable(decision.deadline()), clock.instant())));</span>
+        }
+<span class="nc" id="L132">        return decision.result();</span>
+    }
+
+    /// Hands one piece of network work to the executor; a refused submission releases the in-flight
+    /// flag again so the next check can try.
+    private void dispatch(Runnable work) {
+        try {
+<span class="nc" id="L139">            executor.execute(work);</span>
+<span class="nc" id="L140">        } catch (RuntimeException exception) {</span>
+<span class="nc" id="L141">            deliveryInFlight.set(false);</span>
+<span class="nc" id="L142">            throw exception;</span>
+<span class="nc" id="L143">        }</span>
+<span class="nc" id="L144">    }</span>
+
+    private Update&lt;Decision&gt; decide(TelemetryState stored, HeartbeatSnapshots.Observation observation) {
+<span class="nc" id="L147">        Instant now = clock.instant();</span>
+<span class="nc" id="L148">        LocalDate today = LocalDate.ofInstant(now, ZoneOffset.UTC);</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (!installation.effective(stored.mode()).sendsReports()) {</span>
+<span class="nc" id="L150">            return Update.unchanged(Decision.of(CheckResult.DISABLED));</span>
+        }
+<span class="nc" id="L152">        TelemetryState state = stored;</span>
+<span class="nc" id="L153">        boolean printNotice = false;</span>
+<span class="nc bnc" id="L154" title="All 4 branches missed.">        if (!state.hasIdentity() &amp;&amp; installation.distribution().erasure().isEmpty()) {</span>
+<span class="nc" id="L155">            state = state.withIdentity(UUID.randomUUID(), today);</span>
+        }
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (state.noticeRevision() &lt; TelemetryNotice.REVISION) {</span>
+<span class="nc" id="L158">            state = state.withNotice(TelemetryNotice.REVISION, now);</span>
+        }
+        // The shared grace period starts once, at the first ready worker, and is never reset. The
+        // worker that starts it prints the notice with the real deadline even when setup already
+        // showed the advance disclosure; later workers and restarts print nothing.
+<span class="nc bnc" id="L163" title="All 2 branches missed.">        if (state.firstWorkerDeadlineAt().isEmpty()) {</span>
+<span class="nc" id="L164">            printNotice = true;</span>
+        }
+<span class="nc" id="L166">        Instant deadline = state.firstWorkerDeadlineAt().orElseGet(() -&gt; now.plus(TelemetryNotice.FIRST_REPORT_GRACE));</span>
+<span class="nc" id="L167">        state = state.withFirstWorkerDeadline(deadline);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (deadline.isAfter(now)) {</span>
+<span class="nc" id="L169">            return Update.write(state, new Decision(CheckResult.GRACE, printNotice, deadline, null));</span>
+        }
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (!state.hasIdentity()) {</span>
+<span class="nc" id="L172">            return Update.write(state, new Decision(CheckResult.WAITING, printNotice, deadline, null));</span>
+        }
+<span class="nc bnc" id="L174" title="All 2 branches missed.">        if (state.blocksReporting()) {</span>
+<span class="nc" id="L175">            return Update.unchanged(Decision.of(CheckResult.WAITING));</span>
+        }
+<span class="nc" id="L177">        TelemetryOwnership ownership = state.ownership();</span>
+        // A clock that moved backwards must not produce a second report for a day already covered:
+        // anything observed on or after today counts as done or still pending.
+<span class="nc" id="L180">        Optional&lt;PendingHeartbeat&gt; pending =</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">                state.pending().filter(report -&gt; !report.observationDate().isBefore(today));</span>
+<span class="nc bnc" id="L182" title="All 4 branches missed.">        if (state.pending().isPresent() &amp;&amp; pending.isEmpty()) {</span>
+            // A report from an earlier UTC day is never replayed: drop it with its retry schedule so a
+            // fresh observation is not delayed by the old backoff.
+<span class="nc" id="L185">            state = state.withReporting(state.lastReportedDate(), null, null, null);</span>
+        }
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        if (state.retrySchedule().map(retry -&gt; retry.notBefore().isAfter(now)).orElse(false)</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                || state.activeClaim(now).isPresent()) {</span>
+<span class="nc" id="L189">            return Update.write(state, new Decision(CheckResult.WAITING, printNotice, deadline, null));</span>
+        }
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        if (pending.isEmpty()</span>
+<span class="nc bnc" id="L192" title="All 4 branches missed.">                &amp;&amp; (state.lastReported().map(last -&gt; !last.isBefore(today)).orElse(false)</span>
+<span class="nc" id="L193">                        || state.lastDispatch()</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                                .map(last -&gt; !last.isBefore(today))</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                                .orElse(false))) {</span>
+<span class="nc" id="L196">            return Update.write(state, new Decision(CheckResult.DONE_TODAY, printNotice, deadline, null));</span>
+        }
+        // Build the snapshot from the state that already carries the identity created above.
+<span class="nc" id="L199">        TelemetryState registered = state;</span>
+<span class="nc" id="L200">        PendingHeartbeat report = pending.orElseGet(() -&gt; new PendingHeartbeat(</span>
+<span class="nc" id="L201">                UUID.randomUUID(),</span>
+                now,
+                today,
+<span class="nc" id="L204">                registered.preferenceRevision(),</span>
+<span class="nc" id="L205">                snapshots.properties(registered, observation)));</span>
+        // The attempt token is new per claim, so a stale completion of an earlier attempt for the
+        // same event cannot record over a newer attempt.
+<span class="nc" id="L208">        var claim = new ReportClaim(owner, report.eventUuid(), UUID.randomUUID(), now.plus(CLAIM_LIFETIME));</span>
+        // A fresh report starts its own bounded backoff; only a retry of the same report keeps it.
+<span class="nc bnc" id="L210" title="All 2 branches missed.">        RetryState retry = pending.isPresent() ? state.retry() : null;</span>
+<span class="nc" id="L211">        TelemetryState claimed = state.withReporting(state.lastReportedDate(), retry, report, claim)</span>
+<span class="nc" id="L212">                .withDispatchDate(today);</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">        if (ownership != null) {</span>
+<span class="nc" id="L214">            claimed = claimed.withOwnership(ownership.markDispatched(claim.expiresAt()));</span>
+        }
+<span class="nc" id="L216">        var dispatch = new Dispatch(claimed, report, claim);</span>
+<span class="nc" id="L217">        return Update.write(claimed, new Decision(CheckResult.DISPATCHED, printNotice, deadline, dispatch));</span>
+    }
+
+    private void deliver(TelemetryStateStore store, Dispatch dispatch) {
+        try {
+<span class="nc" id="L222">            dispatch(store, dispatch);</span>
+        } finally {
+<span class="nc" id="L224">            deliveryInFlight.set(false);</span>
+        }
+<span class="nc" id="L226">    }</span>
+
+    private void dispatch(TelemetryStateStore store, Dispatch dispatch) {
+        // Permission is rechecked right before any bytes leave: a disable that landed between the
+        // claim and this point must win.
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        if (!canStartRequest(store, dispatch)) {</span>
+<span class="nc" id="L232">            return;</span>
+        }
+<span class="nc" id="L234">        HeartbeatEvent event = snapshots.event(</span>
+<span class="nc" id="L235">                dispatch.state(),</span>
+<span class="nc" id="L236">                dispatch.report().eventUuid(),</span>
+<span class="nc" id="L237">                dispatch.report().timestamp(),</span>
+<span class="nc" id="L238">                dispatch.report().properties());</span>
+        String body;
+        try {
+<span class="nc" id="L241">            body = HeartbeatJson.serialize(event.requireSendable());</span>
+<span class="nc" id="L242">        } catch (IllegalStateException exception) {</span>
+<span class="nc" id="L243">            output.info(&quot;telemetry report not sent: &quot; + exception.getMessage());</span>
+<span class="nc" id="L244">            record(store, dispatch, CaptureOutcome.localFailure(&quot;local validation failed&quot;));</span>
+<span class="nc" id="L245">            return;</span>
+<span class="nc" id="L246">        }</span>
+<span class="nc" id="L247">        boolean log = installation.environment().log();</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">        if (log) {</span>
+<span class="nc" id="L249">            output.info(&quot;telemetry request POST &quot; + client.endpoint() + &quot; headers=&quot;</span>
+<span class="nc" id="L250">                    + PostHogCaptureClient.requestHeaders() + &quot;\n&quot; + body);</span>
+        }
+        // Serialization and logging can be delayed. Require the full transport budget immediately before IO.
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (!canStartRequest(store, dispatch)) {</span>
+<span class="nc" id="L254">            return;</span>
+        }
+<span class="nc" id="L256">        CaptureOutcome outcome = client.capture(body);</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">        if (log) {</span>
+<span class="nc" id="L258">            output.info(&quot;telemetry response &quot; + outcome.summary()</span>
+<span class="nc" id="L259">                    + outcome.statusCode().map(status -&gt; &quot; status=&quot; + status).orElse(&quot;&quot;)</span>
+<span class="nc" id="L260">                    + outcome.retryAfter()</span>
+<span class="nc" id="L261">                            .map(delay -&gt; &quot; retry-after=&quot; + delay.toSeconds() + &quot;s&quot;)</span>
+<span class="nc" id="L262">                            .orElse(&quot;&quot;));</span>
+        }
+<span class="nc" id="L264">        record(store, dispatch, outcome);</span>
+<span class="nc" id="L265">    }</span>
+
+    private boolean canStartRequest(TelemetryStateStore store, Dispatch dispatch) {
+<span class="nc" id="L268">        StateRead latest = store.read();</span>
+<span class="nc bnc" id="L269" title="All 2 branches missed.">        return !(latest instanceof StateRead.Unreadable)</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                &amp;&amp; stillOurs(latest.stateOrInitial(), dispatch)</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                &amp;&amp; dispatch.claim().expiresAt().isAfter(clock.instant().plus(client.requestTimeout()));</span>
+    }
+
+    /// Runs the erasure maintenance on the delivery thread and keeps the issuance backoff.
+    private void maintainOwnership(TelemetryStateStore store, TelemetryErasure erasure, boolean issuing) {
+        try {
+<span class="nc" id="L277">            erasure.maintain(store);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            if (issuing) {</span>
+<span class="nc" id="L279">                issuanceFailures.set(0);</span>
+<span class="nc" id="L280">                issuanceNotBefore = null;</span>
+            }
+<span class="nc" id="L282">        } catch (TelemetryStateException exception) {</span>
+<span class="nc bnc" id="L283" title="All 2 branches missed.">            if (issuing) {</span>
+<span class="nc" id="L284">                int failures = issuanceFailures.incrementAndGet();</span>
+<span class="nc" id="L285">                issuanceNotBefore = clock.instant().plus(backoff(failures));</span>
+            }
+<span class="nc" id="L287">            output.info(&quot;telemetry ownership request deferred: &quot; + exception.getMessage());</span>
+        } finally {
+<span class="nc" id="L289">            deliveryInFlight.set(false);</span>
+        }
+<span class="nc" id="L291">    }</span>
+
+    private void record(TelemetryStateStore store, Dispatch dispatch, CaptureOutcome outcome) {
+        try {
+<span class="nc" id="L295">            store.update(state -&gt; recordTransaction(state, dispatch, outcome));</span>
+<span class="nc" id="L296">        } catch (TelemetryStateException exception) {</span>
+<span class="nc" id="L297">            output.info(&quot;telemetry outcome not recorded: &quot; + exception.getMessage());</span>
+<span class="nc" id="L298">        }</span>
+<span class="nc" id="L299">    }</span>
+
+    /// The outcome belongs to the dispatch that produced it; a state replaced meanwhile keeps its own.
+    private Update&lt;@Nullable Void&gt; recordTransaction(TelemetryState state, Dispatch dispatch, CaptureOutcome outcome) {
+<span class="nc bnc" id="L303" title="All 2 branches missed.">        if (!stillOurs(state, dispatch)) {</span>
+<span class="nc" id="L304">            return Update.unchanged(null);</span>
+        }
+<span class="nc" id="L306">        return Update.write(recorded(state, dispatch.report(), outcome), null);</span>
+    }
+
+    private TelemetryState recorded(TelemetryState state, PendingHeartbeat report, CaptureOutcome outcome) {
+<span class="nc" id="L310">        Instant now = clock.instant();</span>
+<span class="nc" id="L311">        int attempts = state.retrySchedule().map(RetryState::attempts).orElse(0) + 1;</span>
+<span class="nc bnc" id="L312" title="All 3 branches missed.">        return switch (outcome.kind()) {</span>
+<span class="nc" id="L313">            case ACCEPTED -&gt; state.withReporting(report.observationDate(), null, null, null);</span>
+            // Neither outcome is an accepted report. Keep the last real success, wait for the next UTC
+            // day because a retry today would be dropped or rejected again, and show the reason in status.
+            case QUOTA_LIMITED, PERMANENT -&gt;
+<span class="nc" id="L317">                state.withReporting(</span>
+<span class="nc" id="L318">                        state.lastReportedDate(),</span>
+<span class="nc" id="L319">                        new RetryState(attempts, nextUtcDay(report.observationDate()), outcome.summary()),</span>
+                        null,
+                        null);
+            case TRANSIENT -&gt;
+<span class="nc" id="L323">                state.withReporting(</span>
+<span class="nc" id="L324">                        state.lastReportedDate(),</span>
+                        new RetryState(
+<span class="nc" id="L326">                                attempts, now.plus(retryDelay(attempts, outcome.retryAfter())), outcome.summary()),</span>
+                        report,
+                        null);
+        };
+    }
+
+    private Duration retryDelay(int attempts, Optional&lt;Duration&gt; retryAfter) {
+<span class="nc" id="L333">        Duration base = retryAfter.orElseGet(() -&gt; backoff(attempts));</span>
+<span class="nc" id="L334">        long jitter = Math.floorMod(jitterSeconds.getAsLong(), RETRY_JITTER_MAX.toSeconds() + 1);</span>
+<span class="nc" id="L335">        return base.plusSeconds(jitter);</span>
+    }
+
+    /// The backoff step for the given failure count; failures beyond the table keep the last step.
+    private static Duration backoff(int failures) {
+<span class="nc" id="L340">        return RETRY_BACKOFF.get(Math.min(failures, RETRY_BACKOFF.size()) - 1);</span>
+    }
+
+    private boolean stillOurs(TelemetryState state, Dispatch dispatch) {
+<span class="nc" id="L344">        ReportClaim claim = state.claim();</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        if (claim == null) {</span>
+<span class="nc" id="L346">            return false;</span>
+        }
+<span class="nc bnc" id="L348" title="All 2 branches missed.">        return !state.blocksReporting()</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">                &amp;&amp; installation.effective(state.mode()).sendsReports()</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                &amp;&amp; state.preferenceRevision() == dispatch.report().preferenceRevision()</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">                &amp;&amp; owner.equals(claim.owner())</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                &amp;&amp; dispatch.claim().attempt().equals(claim.attempt())</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                &amp;&amp; dispatch.claim().eventUuid().equals(claim.eventUuid())</span>
+<span class="nc" id="L354">                &amp;&amp; state.pending()</span>
+<span class="nc" id="L355">                        .map(pending -&gt;</span>
+<span class="nc" id="L356">                                pending.eventUuid().equals(dispatch.report().eventUuid()))</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                        .orElse(false);</span>
+    }
+
+    private void printDebugPreview(TelemetryState state) {
+<span class="nc" id="L361">        HeartbeatEvent preview = snapshots.preview(state, clock.instant());</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (preview.hasSameContentAs(lastDebugPreview)) {</span>
+<span class="nc" id="L363">            return;</span>
+        }
+<span class="nc" id="L365">        lastDebugPreview = preview;</span>
+<span class="nc" id="L366">        output.info(&quot;telemetry debug preview (local only, not sent):\n&quot; + HeartbeatJson.serialize(preview));</span>
+<span class="nc" id="L367">    }</span>
+
+    private void reportUnreadable(StateRead.Unreadable read) {
+<span class="nc bnc" id="L370" title="All 2 branches missed.">        if (unreadableReported.compareAndSet(false, true)) {</span>
+<span class="nc" id="L371">            output.info(&quot;telemetry reporting is off: &quot; + read.problem());</span>
+        }
+<span class="nc" id="L373">    }</span>
+
+    static Instant nextUtcDay(LocalDate day) {
+<span class="nc" id="L376">        return day.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();</span>
+    }
+
+<span class="nc" id="L379">    public enum CheckResult {</span>
+<span class="nc" id="L380">        NOT_INSTALLED,</span>
+<span class="nc" id="L381">        UNREADABLE,</span>
+<span class="nc" id="L382">        DISABLED,</span>
+<span class="nc" id="L383">        DEBUG,</span>
+<span class="nc" id="L384">        NOT_CONFIGURED,</span>
+<span class="nc" id="L385">        GRACE,</span>
+<span class="nc" id="L386">        WAITING,</span>
+<span class="nc" id="L387">        DONE_TODAY,</span>
+<span class="nc" id="L388">        DISPATCHED</span>
+    }
+
+<span class="nc" id="L391">    private record Decision(</span>
+            CheckResult result, boolean printNotice, @Nullable Instant deadline, @Nullable Dispatch dispatch) {
+        static Decision of(CheckResult result) {
+<span class="nc" id="L394">            return new Decision(result, false, null, null);</span>
+        }
+    }
+
+<span class="nc" id="L398">    private record Dispatch(TelemetryState state, PendingHeartbeat report, ReportClaim claim) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

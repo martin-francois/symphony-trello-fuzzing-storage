@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryCommandTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TelemetryCommandTest.java</span></div><h1>TelemetryCommandTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static ch.fmartin.symphony.trello.CliExitCodes.SETUP_FAILURE;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.telemetry.InstalledVersion;
+import ch.fmartin.symphony.trello.telemetry.TelemetryDistribution;
+import ch.fmartin.symphony.trello.telemetry.TelemetryEnvironment;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore;
+import ch.fmartin.symphony.trello.testsupport.CliRunResult;
+import ch.fmartin.symphony.trello.testsupport.FakeTrelloServer;
+import ch.fmartin.symphony.trello.testsupport.TestEnv;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/// Process-level behavior of `symphony-trello telemetry ...` and of the board commands' telemetry
+/// hooks, run through the real command boundary against an installed-looking state home.
+<span class="nc" id="L34">final class TelemetryCommandTest {</span>
+<span class="nc" id="L35">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+    private static final String EXISTING_BOARD = &quot;https://trello.com/b/input/existing-board&quot;;
+    /// The source tree ships without a live token; these runs configure a synthetic one.
+<span class="nc" id="L38">    private static final String TEST_TOKEN = &quot;phc_&quot; + &quot;commandtest0&quot;.repeat(4);</span>
+
+    @TempDir
+    Path tempDir;
+
+    private FakeTrelloServer trello;
+    private Path installedConfigDir;
+    private Path configDir;
+    private Path stateHome;
+
+    @BeforeEach
+    void setUp() throws IOException {
+<span class="nc" id="L50">        trello = new FakeTrelloServer().start();</span>
+<span class="nc" id="L51">        configDir = Files.createDirectories(tempDir.resolve(&quot;config&quot;));</span>
+<span class="nc" id="L52">        installedConfigDir = configDir;</span>
+<span class="nc" id="L53">        stateHome = Files.createDirectories(tempDir.resolve(&quot;.local/state/symphony-trello&quot;));</span>
+<span class="nc" id="L54">        Files.writeString(InstalledVersion.installContextPath(stateHome), &quot;installer=install.sh\napp_version=1.2.0\n&quot;);</span>
+<span class="nc" id="L55">    }</span>
+
+    @AfterEach
+    void tearDown() {
+<span class="nc" id="L59">        trello.close();</span>
+<span class="nc" id="L60">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;status&quot;, &quot;preview&quot;, &quot;privacy&quot;, &quot;enable&quot;, &quot;disable&quot;, &quot;debug&quot;})
+    void everyTelemetrySubcommandHasHelp(String subcommand) {
+        // given
+<span class="nc" id="L66">        String[] help = {&quot;telemetry&quot;, subcommand, &quot;--help&quot;};</span>
+
+        // when
+<span class="nc" id="L69">        CliRunResult result = run(Map.of(), help);</span>
+<span class="nc" id="L70">        CliRunResult parent = run(Map.of(), &quot;telemetry&quot;, &quot;--help&quot;);</span>
+
+        // then
+<span class="nc" id="L73">        result.assertSuccess().stdoutContains(&quot;Usage: symphony-trello telemetry &quot; + subcommand);</span>
+<span class="nc" id="L74">        parent.assertSuccess().stdoutContains(&quot;Usage: symphony-trello telemetry&quot;, subcommand);</span>
+<span class="nc" id="L75">    }</span>
+
+    @Test
+    void bareTelemetryCommandPrintsUsageAndUnknownSubcommandFails() {
+        // given
+<span class="nc" id="L80">        Map&lt;String, String&gt; noEnvironment = Map.of();</span>
+
+        // when
+<span class="nc" id="L83">        CliRunResult bare = run(noEnvironment, &quot;telemetry&quot;);</span>
+<span class="nc" id="L84">        CliRunResult unknown = run(noEnvironment, &quot;telemetry&quot;, &quot;watch&quot;);</span>
+
+        // then
+<span class="nc" id="L87">        bare.assertSuccess().stdoutContains(&quot;Usage: symphony-trello telemetry&quot;);</span>
+<span class="nc" id="L88">        unknown.assertFailure(SETUP_FAILURE).stderrContains(&quot;setup_invalid_arguments&quot;, &quot;watch&quot;);</span>
+<span class="nc" id="L89">    }</span>
+
+    @Test
+    void previewAndStatusAreReadOnlyEvenInAnInstalledContext() {
+        // given
+<span class="nc" id="L94">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+
+        // when
+<span class="nc" id="L97">        CliRunResult preview = run(environment, &quot;telemetry&quot;, &quot;preview&quot;);</span>
+<span class="nc" id="L98">        CliRunResult status = run(environment, &quot;telemetry&quot;, &quot;status&quot;);</span>
+
+        // then
+<span class="nc" id="L101">        preview.assertSuccess()</span>
+<span class="nc" id="L102">                .stdoutContains(&quot;\&quot;event\&quot; : \&quot;installation_heartbeat\&quot;&quot;, &quot;\&quot;app_version\&quot; : \&quot;1.2.0\&quot;&quot;, &quot;not sent&quot;);</span>
+<span class="nc" id="L103">        status.assertSuccess().stdoutContains(&quot;Installed context: yes&quot;, &quot;Stored mode: enabled (default&quot;);</span>
+<span class="nc" id="L104">        assertThat(stateHome.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L105">    }</span>
+
+    @Test
+    void disableWithoutATerminalPersistsDirectlyAndEnableRestores() throws IOException {
+        // given
+<span class="nc" id="L110">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+
+        // when
+<span class="nc" id="L113">        CliRunResult disable = run(environment, &quot;telemetry&quot;, &quot;disable&quot;);</span>
+<span class="nc" id="L114">        JsonNode disabled = state();</span>
+<span class="nc" id="L115">        CliRunResult enable = run(environment, &quot;telemetry&quot;, &quot;enable&quot;);</span>
+<span class="nc" id="L116">        JsonNode enabled = state();</span>
+
+        // then
+<span class="nc" id="L119">        disable.assertSuccess()</span>
+<span class="nc" id="L120">                .stdoutDoesNotContain(&quot;Disable telemetry?&quot;)</span>
+<span class="nc" id="L121">                .stdoutContains(&quot;Telemetry disabled. The orchestra will have to play this one by ear.&quot;);</span>
+<span class="nc" id="L122">        assertThat(disabled.get(&quot;mode&quot;).asText()).isEqualTo(&quot;DISABLED&quot;);</span>
+<span class="nc" id="L123">        enable.assertSuccess().stdoutContains(&quot;Telemetry enabled.&quot;);</span>
+<span class="nc" id="L124">        assertThat(enabled.get(&quot;mode&quot;).asText()).isEqualTo(&quot;ENABLED&quot;);</span>
+<span class="nc" id="L125">        assertThat(enabled.get(&quot;preference_revision&quot;).asLong()).isEqualTo(2);</span>
+<span class="nc" id="L126">    }</span>
+
+    @Test
+    void enableIsRefusedUnderTheEnvironmentDisableOverride() {
+        // given
+<span class="nc" id="L131">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+<span class="nc" id="L132">        environment.put(TelemetryEnvironment.DISABLED_VARIABLE, &quot;1&quot;);</span>
+
+        // when
+<span class="nc" id="L135">        CliRunResult enable = run(environment, &quot;telemetry&quot;, &quot;enable&quot;);</span>
+<span class="nc" id="L136">        CliRunResult status = run(environment, &quot;telemetry&quot;, &quot;status&quot;);</span>
+
+        // then
+<span class="nc" id="L139">        enable.assertFailure(1).stderrContains(&quot;cannot be enabled while &quot; + TelemetryEnvironment.DISABLED_VARIABLE);</span>
+<span class="nc" id="L140">        status.assertSuccess()</span>
+<span class="nc" id="L141">                .stdoutContains(</span>
+                        &quot;Effective mode: disabled, overridden by &quot; + TelemetryEnvironment.DISABLED_VARIABLE + &quot;=1&quot;);
+<span class="nc" id="L143">    }</span>
+
+    @Test
+    void configuredDotenvOptOutDisablesStatusAndRefusesEnable() throws IOException {
+        // given
+<span class="nc" id="L148">        Path dotenv =</span>
+<span class="nc" id="L149">                Files.writeString(tempDir.resolve(&quot;selected.env&quot;), TelemetryEnvironment.DISABLED_VARIABLE + &quot;=1\n&quot;);</span>
+<span class="nc" id="L150">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+<span class="nc" id="L151">        environment.put(&quot;SYMPHONY_TRELLO_DOTENV&quot;, dotenv.toString());</span>
+
+        // when
+<span class="nc" id="L154">        CliRunResult status = run(environment, &quot;telemetry&quot;, &quot;status&quot;);</span>
+<span class="nc" id="L155">        CliRunResult enable = run(environment, &quot;telemetry&quot;, &quot;enable&quot;);</span>
+
+        // then
+<span class="nc" id="L158">        status.assertSuccess().stdoutContains(&quot;Effective mode: disabled&quot;);</span>
+<span class="nc" id="L159">        enable.assertFailure(1).stderrContains(&quot;cannot be enabled while &quot; + TelemetryEnvironment.DISABLED_VARIABLE);</span>
+<span class="nc" id="L160">        assertThat(stateHome.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L161">    }</span>
+
+    @Test
+    void importUsesExplicitDotenvOptOutBeforeNoticeAndCounters() throws IOException {
+        // given
+<span class="nc" id="L166">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+<span class="nc" id="L167">        Path configured = Files.writeString(configDir.resolve(&quot;.env&quot;), TelemetryEnvironment.DISABLED_VARIABLE + &quot;=0\n&quot;);</span>
+<span class="nc" id="L168">        environment.put(&quot;SYMPHONY_TRELLO_DOTENV&quot;, configured.toString());</span>
+<span class="nc" id="L169">        Path selected = Files.writeString(</span>
+<span class="nc" id="L170">                tempDir.resolve(&quot;.env.selected&quot;),</span>
+<span class="nc" id="L171">                TestEnv.trelloApiEndpoint(trello.endpoint()) + TelemetryEnvironment.DISABLED_VARIABLE + &quot;=1\n&quot;);</span>
+
+        // when
+<span class="nc" id="L174">        CliRunResult result = importBoard(environment, configDir.resolve(&quot;WORKFLOW.md&quot;), selected);</span>
+
+        // then
+<span class="nc" id="L177">        result.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting is enabled.&quot;);</span>
+<span class="nc" id="L178">        assertThat(stateHome.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L179">    }</span>
+
+    @Test
+    void importBoardPrintsTheNoticeOnceAndCountsOnlyNewRegistrations() throws IOException {
+        // given
+<span class="nc" id="L184">        Path workflow = configDir.resolve(&quot;first.WORKFLOW.md&quot;);</span>
+<span class="nc" id="L185">        Path secondWorkflow = configDir.resolve(&quot;second.WORKFLOW.md&quot;);</span>
+
+        // when
+<span class="nc" id="L188">        CliRunResult first = importBoard(installedEnvironment(), workflow);</span>
+<span class="nc" id="L189">        JsonNode afterFirst = state();</span>
+<span class="nc" id="L190">        CliRunResult repeated = importBoard(installedEnvironment(), secondWorkflow);</span>
+<span class="nc" id="L191">        JsonNode afterRepeat = state();</span>
+
+        // then
+<span class="nc" id="L194">        first.assertSuccess()</span>
+<span class="nc" id="L195">                .stdoutContainsSubsequence(</span>
+                        &quot;Optional usage reporting is enabled.&quot;,
+                        &quot;Disable: symphony-trello telemetry disable&quot;,
+                        &quot;Wrote workflow&quot;);
+<span class="nc" id="L199">        repeated.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting is enabled.&quot;);</span>
+<span class="nc" id="L200">        assertThat(afterFirst.get(&quot;board_imports_total&quot;).asLong()).isOne();</span>
+<span class="nc" id="L201">        assertThat(afterFirst.get(&quot;installation_id&quot;).isTextual())</span>
+<span class="nc" id="L202">                .as(&quot;setup registers before the operation&quot;)</span>
+<span class="nc" id="L203">                .isTrue();</span>
+<span class="nc" id="L204">        assertThat(afterFirst.get(&quot;first_worker_deadline&quot;).isNull())</span>
+<span class="nc" id="L205">                .as(&quot;setup does not start the worker countdown&quot;)</span>
+<span class="nc" id="L206">                .isTrue();</span>
+<span class="nc" id="L207">        assertThat(afterRepeat.get(&quot;board_imports_total&quot;).asLong())</span>
+<span class="nc" id="L208">                .as(&quot;re-importing an already connected board is not a new operation&quot;)</span>
+<span class="nc" id="L209">                .isOne();</span>
+<span class="nc" id="L210">    }</span>
+
+    @Test
+    void aSeparateManifestDoesNotUseTheInstalledTelemetryState() throws IOException {
+        // given
+<span class="nc" id="L215">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+<span class="nc" id="L216">        configDir = Files.createDirectories(tempDir.resolve(&quot;isolated/config&quot;));</span>
+
+        // when
+<span class="nc" id="L219">        CliRunResult result = importBoard(environment, configDir.resolve(&quot;WORKFLOW.md&quot;));</span>
+
+        // then
+<span class="nc" id="L222">        result.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting is enabled.&quot;);</span>
+<span class="nc" id="L223">        assertThat(stateHome.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L224">        assertThat(configDir.resolveSibling(&quot;state&quot;).resolve(TelemetryStateStore.STATE_FILE))</span>
+<span class="nc" id="L225">                .doesNotExist();</span>
+<span class="nc" id="L226">    }</span>
+
+    @Test
+    void anInvalidEndpointOverrideStillLetsTheUserDisableAndSeeWhy() throws IOException {
+        // given
+<span class="nc" id="L231">        Map&lt;String, String&gt; properties = Map.of(</span>
+                TelemetryDistribution.TOKEN_PROPERTY,
+                TEST_TOKEN,
+                TelemetryDistribution.ENDPOINT_PROPERTY,
+                &quot;http://127.example.invalid/not-loopback&quot;);
+
+        // when
+<span class="nc" id="L238">        CliRunResult status = runWithProperties(properties, installedEnvironment(), &quot;telemetry&quot;, &quot;status&quot;);</span>
+<span class="nc" id="L239">        CliRunResult disable = runWithProperties(properties, installedEnvironment(), &quot;telemetry&quot;, &quot;disable&quot;, &quot;--yes&quot;);</span>
+<span class="nc" id="L240">        JsonNode disabled = state();</span>
+
+        // then
+<span class="nc" id="L243">        status.assertSuccess().stdoutContains(&quot;is not a usable endpoint&quot;).stdoutDoesNotContain(&quot;127.example.invalid&quot;);</span>
+<span class="nc" id="L244">        disable.assertSuccess().stdoutContains(&quot;Telemetry disabled.&quot;);</span>
+<span class="nc" id="L245">        assertThat(disabled.get(&quot;mode&quot;).asText()).isEqualTo(&quot;DISABLED&quot;);</span>
+<span class="nc" id="L246">    }</span>
+
+    @Test
+    void failedImportCountsNothing() throws IOException {
+        // given
+<span class="nc" id="L251">        trello.givenRawBoardListsJson(&quot;not json&quot;);</span>
+
+        // when
+<span class="nc" id="L254">        CliRunResult failed = importBoard(installedEnvironment(), configDir.resolve(&quot;failed.WORKFLOW.md&quot;));</span>
+<span class="nc" id="L255">        JsonNode state = state();</span>
+
+        // then
+<span class="nc" id="L258">        failed.assertFailure(SETUP_FAILURE);</span>
+<span class="nc" id="L259">        assertThat(state.get(&quot;installation_id&quot;).isTextual())</span>
+<span class="nc" id="L260">                .as(&quot;registration happens before the operation&quot;)</span>
+<span class="nc" id="L261">                .isTrue();</span>
+<span class="nc" id="L262">        assertThat(state.get(&quot;board_imports_total&quot;).asLong()).isZero();</span>
+<span class="nc" id="L263">        assertThat(state.get(&quot;board_creations_total&quot;).asLong()).isZero();</span>
+<span class="nc" id="L264">    }</span>
+
+    @Test
+    void developmentRunsWithoutAnInstallerContextShowNoNoticeAndWriteNoState() throws IOException {
+        // given
+<span class="nc" id="L269">        Path developmentConfig = Files.createDirectories(tempDir.resolve(&quot;dev&quot;).resolve(&quot;config&quot;));</span>
+<span class="nc" id="L270">        Map&lt;String, String&gt; development = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L271">        development.put(&quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;, developmentConfig.toString());</span>
+<span class="nc" id="L272">        development.put(</span>
+<span class="nc" id="L273">                &quot;SYMPHONY_TRELLO_WORKSPACE_ROOT&quot;, tempDir.resolve(&quot;workspaces&quot;).toString());</span>
+<span class="nc" id="L274">        configDir = developmentConfig;</span>
+
+        // when
+<span class="nc" id="L277">        CliRunResult developmentRun = importBoard(development, developmentConfig.resolve(&quot;dev.WORKFLOW.md&quot;));</span>
+
+        // then
+<span class="nc" id="L280">        developmentRun.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting is enabled.&quot;);</span>
+<span class="nc" id="L281">        assertThat(developmentConfig.resolveSibling(&quot;state&quot;).resolve(TelemetryStateStore.STATE_FILE))</span>
+<span class="nc" id="L282">                .as(&quot;the default state home is untouched without an installer context&quot;)</span>
+<span class="nc" id="L283">                .doesNotExist();</span>
+<span class="nc" id="L284">    }</span>
+
+    private CliRunResult importBoard(Map&lt;String, String&gt; environment, Path workflow) {
+<span class="nc" id="L287">        return importBoard(environment, workflow, configDir.resolve(&quot;.env&quot;));</span>
+    }
+
+    private CliRunResult importBoard(Map&lt;String, String&gt; environment, Path workflow, Path envPath) {
+<span class="nc" id="L291">        List&lt;String&gt; args = List.of(</span>
+                &quot;import-board&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L294">                trello.endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board&quot;,
+                EXISTING_BOARD,
+                &quot;--workflow&quot;,
+<span class="nc" id="L302">                workflow.toString(),</span>
+                &quot;--manifest&quot;,
+<span class="nc" id="L304">                configDir.resolve(ConnectedBoardManifest.FILE_NAME).toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L306">                envPath.toString());</span>
+<span class="nc" id="L307">        return run(environment, args.toArray(String[]::new));</span>
+    }
+
+    private Map&lt;String, String&gt; installedEnvironment() {
+<span class="nc" id="L311">        Map&lt;String, String&gt; environment = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L312">        environment.put(&quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;, configDir.toString());</span>
+<span class="nc" id="L313">        environment.put(&quot;SYMPHONY_TRELLO_STATE_HOME&quot;, stateHome.toString());</span>
+<span class="nc" id="L314">        environment.put(</span>
+<span class="nc" id="L315">                &quot;SYMPHONY_TRELLO_WORKSPACE_ROOT&quot;, tempDir.resolve(&quot;workspaces&quot;).toString());</span>
+<span class="nc" id="L316">        return environment;</span>
+    }
+
+    private JsonNode state() throws IOException {
+<span class="nc" id="L320">        return JSON.readTree(Files.readString(stateHome.resolve(TelemetryStateStore.STATE_FILE)));</span>
+    }
+
+    private CliRunResult run(Map&lt;String, String&gt; environment, String... args) {
+<span class="nc" id="L324">        return runWithProperties(</span>
+<span class="nc" id="L325">                Map.of(</span>
+                        TelemetryDistribution.TOKEN_PROPERTY, TEST_TOKEN,
+<span class="nc" id="L327">                        InstalledCliDefaults.INSTALLED_CONFIG_DIR_PROPERTY, installedConfigDir.toString(),</span>
+<span class="nc" id="L328">                        InstalledCliDefaults.INSTALLED_STATE_HOME_PROPERTY, stateHome.toString()),</span>
+                environment,
+                args);
+    }
+
+    private CliRunResult runWithProperties(
+            Map&lt;String, String&gt; properties, Map&lt;String, String&gt; environment, String... args) {
+<span class="nc" id="L335">        var result = new AtomicReference&lt;CliRunResult&gt;();</span>
+<span class="nc" id="L336">        SetupSystemProperties.withLookup(properties::get, () -&gt; {</span>
+<span class="nc" id="L337">            result.set(runWithCurrentProperties(environment, args));</span>
+<span class="nc" id="L338">            return 0;</span>
+        });
+<span class="nc" id="L340">        return result.get();</span>
+    }
+
+    private CliRunResult runWithCurrentProperties(Map&lt;String, String&gt; environment, String... args) {
+<span class="nc" id="L344">        var stdout = new ByteArrayOutputStream();</span>
+<span class="nc" id="L345">        var stderr = new ByteArrayOutputStream();</span>
+<span class="nc" id="L346">        var setup = new TrelloBoardSetup(</span>
+                new ObjectMapper(),
+<span class="nc" id="L348">                () -&gt; CodexModelSelectionDefaults.of(TrelloBoardSetup.CodexModelDefaults.fallback()));</span>
+<span class="nc" id="L349">        var workerManager = new LocalWorkerManager(environment);</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">        String[] effectiveArgs = environment.isEmpty() ? args : withStateHome(args);</span>
+<span class="nc" id="L351">        int exitCode = TrelloBoardSetupMain.run(</span>
+                effectiveArgs,
+                new TrelloBoardSetupService(setup, workerManager, environment),
+                new LocalSetup(setup, new ProcessCommandRunner()),
+                workerManager,
+                new PrintStream(stdout, true, StandardCharsets.UTF_8),
+                new PrintStream(stderr, true, StandardCharsets.UTF_8));
+<span class="nc" id="L358">        return new CliRunResult(</span>
+<span class="nc" id="L359">                exitCode, stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));</span>
+    }
+
+    /// The installed wrapper injects these paths; direct process runs pass them explicitly.
+    private String[] withStateHome(String[] args) {
+<span class="nc bnc" id="L364" title="All 2 branches missed.">        if (!&quot;telemetry&quot;.equals(args[0])) {</span>
+<span class="nc" id="L365">            return args;</span>
+        }
+<span class="nc" id="L367">        String[] withPaths = new String[args.length + 4];</span>
+<span class="nc" id="L368">        withPaths[0] = args[0];</span>
+<span class="nc" id="L369">        withPaths[1] = &quot;--config-dir&quot;;</span>
+<span class="nc" id="L370">        withPaths[2] = configDir.toString();</span>
+<span class="nc" id="L371">        withPaths[3] = &quot;--state-home&quot;;</span>
+<span class="nc" id="L372">        withPaths[4] = stateHome.toString();</span>
+<span class="nc" id="L373">        System.arraycopy(args, 1, withPaths, 5, args.length - 1);</span>
+<span class="nc" id="L374">        return withPaths;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

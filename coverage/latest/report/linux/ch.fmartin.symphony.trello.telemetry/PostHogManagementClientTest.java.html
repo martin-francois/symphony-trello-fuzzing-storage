@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PostHogManagementClientTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">PostHogManagementClientTest.java</span></div><h1>PostHogManagementClientTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+
+import ch.fmartin.symphony.trello.telemetry.PostHogManagementClient.ManagementException;
+import ch.fmartin.symphony.trello.telemetry.PostHogManagementClient.Response;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/// The management client against a loopback server that misbehaves: it must stay bounded in time
+/// and bytes, close what it abandons, honor the invocation budget, and never repeat a secret.
+<span class="nc" id="L28">final class PostHogManagementClientTest {</span>
+    private static final String KEY = &quot;phx_unit_test_key_0123456789&quot;;
+    private static final long PROJECT_ID = 7;
+<span class="nc" id="L31">    private static final Duration SHORT_TIMEOUT = Duration.ofMillis(300);</span>
+<span class="nc" id="L32">    private static final Duration GENEROUS_WAIT = Duration.ofSeconds(30);</span>
+    private static final int LARGE_BODY_BYTES = 300 * 1024;
+
+    private HttpServer server;
+    private URI host;
+<span class="nc" id="L37">    private final CountDownLatch release = new CountDownLatch(1);</span>
+
+    @BeforeEach
+    void start() throws IOException {
+<span class="nc" id="L41">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L42">        server.start();</span>
+<span class="nc" id="L43">        host = URI.create(&quot;http://&quot; + server.getAddress().getHostString() + &quot;:&quot;</span>
+<span class="nc" id="L44">                + server.getAddress().getPort());</span>
+<span class="nc" id="L45">    }</span>
+
+    @AfterEach
+    void stop() {
+<span class="nc" id="L49">        release.countDown();</span>
+<span class="nc" id="L50">        server.stop(0);</span>
+<span class="nc" id="L51">    }</span>
+
+    @Test
+    void aStalledBodyFailsWithinTheDeadlineAndTheReadIsAbandoned() {
+        // given
+<span class="nc" id="L56">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L57">            exchange.sendResponseHeaders(200, 100);</span>
+<span class="nc" id="L58">            try (OutputStream body = exchange.getResponseBody()) {</span>
+<span class="nc" id="L59">                body.write('{');</span>
+<span class="nc" id="L60">                body.flush();</span>
+<span class="nc" id="L61">                awaitRelease();</span>
+            }
+<span class="nc" id="L63">        });</span>
+<span class="nc" id="L64">        var budget = new ExperimentBudget(10, GENEROUS_WAIT, Thread::sleep);</span>
+<span class="nc" id="L65">        PostHogManagementClient client = client(budget, SHORT_TIMEOUT);</span>
+<span class="nc" id="L66">        long started = System.nanoTime();</span>
+
+        // when
+<span class="nc" id="L69">        Throwable thrown = catchThrowable(client::project);</span>
+<span class="nc" id="L70">        Duration elapsed = Duration.ofNanos(System.nanoTime() - started);</span>
+
+        // then
+<span class="nc" id="L73">        assertThat(thrown).isInstanceOf(ManagementException.class).hasMessageContaining(&quot;body timed out&quot;);</span>
+<span class="nc" id="L74">        assertThat(elapsed).isLessThan(SHORT_TIMEOUT.multipliedBy(8));</span>
+<span class="nc" id="L75">        assertThat(budget.waited())</span>
+<span class="nc" id="L76">                .as(&quot;the stalled read was charged to the wait budget&quot;)</span>
+<span class="nc" id="L77">                .isGreaterThanOrEqualTo(SHORT_TIMEOUT.dividedBy(2));</span>
+<span class="nc" id="L78">    }</span>
+
+    @Test
+    void anOversizedBodyIsRefused() {
+        // given
+<span class="nc" id="L83">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; respond(exchange, 200, &quot;x&quot;.repeat(LARGE_BODY_BYTES)));</span>
+<span class="nc" id="L84">        PostHogManagementClient client = client(new ExperimentBudget(10, GENEROUS_WAIT, Thread::sleep), SHORT_TIMEOUT);</span>
+
+        // when
+<span class="nc" id="L87">        Throwable thrown = catchThrowable(client::project);</span>
+
+        // then
+<span class="nc" id="L90">        assertThat(thrown).isInstanceOf(ManagementException.class).hasMessageContaining(&quot;bytes, refused&quot;);</span>
+<span class="nc" id="L91">    }</span>
+
+    @Test
+    void aRedirectWithABodyIsRefusedAndNotFollowed() {
+        // given
+        // Recorded on the fake server's threads while the test reads; a snapshot-safe list avoids a concurrent
+        // modification.
+<span class="nc" id="L98">        List&lt;String&gt; paths = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L99">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L100">            paths.add(exchange.getRequestURI().getPath());</span>
+<span class="nc" id="L101">            exchange.getResponseHeaders()</span>
+<span class="nc" id="L102">                    .add(&quot;Location&quot;, host.resolve(&quot;/elsewhere/&quot;).toString());</span>
+<span class="nc" id="L103">            respond(exchange, 302, &quot;{\&quot;detail\&quot;:\&quot;moved\&quot;}&quot;);</span>
+<span class="nc" id="L104">        });</span>
+<span class="nc" id="L105">        server.createContext(&quot;/elsewhere/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L106">            paths.add(exchange.getRequestURI().getPath());</span>
+<span class="nc" id="L107">            respond(exchange, 200, &quot;{}&quot;);</span>
+<span class="nc" id="L108">        });</span>
+<span class="nc" id="L109">        PostHogManagementClient client = client(new ExperimentBudget(10, GENEROUS_WAIT, Thread::sleep), SHORT_TIMEOUT);</span>
+
+        // when
+<span class="nc" id="L112">        Throwable thrown = catchThrowable(client::project);</span>
+
+        // then
+<span class="nc" id="L115">        assertThat(thrown).isInstanceOf(ManagementException.class).hasMessageContaining(&quot;redirect (302)&quot;);</span>
+<span class="nc" id="L116">        assertThat(paths).containsExactly(&quot;/api/projects/&quot; + PROJECT_ID + &quot;/&quot;);</span>
+<span class="nc" id="L117">    }</span>
+
+    @Test
+    void aMalformedAnswerIsNotJsonAndKeepsItsRawDetail() {
+        // given
+<span class="nc" id="L122">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; respond(exchange, 200, &quot;&lt;html&gt;maintenance&lt;/html&gt;&quot;));</span>
+<span class="nc" id="L123">        PostHogManagementClient client = client(new ExperimentBudget(10, GENEROUS_WAIT, Thread::sleep), SHORT_TIMEOUT);</span>
+
+        // when
+<span class="nc" id="L126">        Response response = client.project();</span>
+
+        // then
+<span class="nc" id="L129">        assertThat(response.json().isMissingNode())</span>
+<span class="nc" id="L130">                .as(&quot;malformed JSON must not look like an object&quot;)</span>
+<span class="nc" id="L131">                .isTrue();</span>
+<span class="nc" id="L132">        assertThat(response.detail()).isEqualTo(&quot;&lt;html&gt;maintenance&lt;/html&gt;&quot;);</span>
+<span class="nc" id="L133">    }</span>
+
+    @Test
+    void anExhaustedWaitBudgetStopsARequestBeforeItStalls() {
+        // given
+<span class="nc" id="L138">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L139">            exchange.sendResponseHeaders(200, 100);</span>
+<span class="nc" id="L140">            try (OutputStream body = exchange.getResponseBody()) {</span>
+<span class="nc" id="L141">                body.write('{');</span>
+<span class="nc" id="L142">                body.flush();</span>
+<span class="nc" id="L143">                awaitRelease();</span>
+            }
+<span class="nc" id="L145">        });</span>
+<span class="nc" id="L146">        var budget = new ExperimentBudget(10, Duration.ofMillis(150), Thread::sleep);</span>
+<span class="nc" id="L147">        PostHogManagementClient client = client(budget, Duration.ofSeconds(30));</span>
+<span class="nc" id="L148">        long started = System.nanoTime();</span>
+
+        // when
+<span class="nc" id="L151">        Throwable first = catchThrowable(client::project);</span>
+<span class="nc" id="L152">        Throwable second = catchThrowable(client::project);</span>
+<span class="nc" id="L153">        Duration elapsed = Duration.ofNanos(System.nanoTime() - started);</span>
+
+        // then
+<span class="nc" id="L156">        assertThat(first).isInstanceOf(RuntimeException.class);</span>
+<span class="nc" id="L157">        assertThat(second).isInstanceOf(ExperimentBudget.BudgetExhaustedException.class);</span>
+<span class="nc" id="L158">        assertThat(elapsed)</span>
+<span class="nc" id="L159">                .as(&quot;the budget, not the 30 s request timeout, bounded the calls&quot;)</span>
+<span class="nc" id="L160">                .isLessThan(Duration.ofSeconds(5));</span>
+<span class="nc" id="L161">    }</span>
+
+    @Test
+    void aLargeRetryAfterIsNotWaitedForBeyondTheBudget() {
+        // given
+<span class="nc" id="L166">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L167">            exchange.getResponseHeaders().add(&quot;Retry-After&quot;, &quot;3600&quot;);</span>
+<span class="nc" id="L168">            respond(exchange, 429, &quot;{\&quot;detail\&quot;:\&quot;slow down\&quot;}&quot;);</span>
+<span class="nc" id="L169">        });</span>
+        // Recorded on the fake server's threads while the test reads; a snapshot-safe list avoids a concurrent
+        // modification.
+<span class="nc" id="L172">        List&lt;Duration&gt; sleeps = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L173">        var budget = new ExperimentBudget(10, Duration.ofSeconds(10), sleeps::add);</span>
+<span class="nc" id="L174">        PostHogManagementClient client = client(budget, SHORT_TIMEOUT);</span>
+
+        // when
+<span class="nc" id="L177">        Throwable thrown = catchThrowable(client::project);</span>
+
+        // then
+<span class="nc" id="L180">        assertThat(thrown)</span>
+<span class="nc" id="L181">                .isInstanceOf(ExperimentBudget.BudgetExhaustedException.class)</span>
+<span class="nc" id="L182">                .hasMessageContaining(&quot;rate limited&quot;);</span>
+<span class="nc" id="L183">        assertThat(sleeps)</span>
+<span class="nc" id="L184">                .as(&quot;no sleep happens once the budget refuses the delay&quot;)</span>
+<span class="nc" id="L185">                .isEmpty();</span>
+<span class="nc" id="L186">    }</span>
+
+    @Test
+    void anAnswerThatEchoesTheKeyIsRedacted() {
+        // given
+<span class="nc" id="L191">        server.createContext(</span>
+<span class="nc" id="L192">                &quot;/api/projects/&quot;, exchange -&gt; respond(exchange, 400, &quot;{\&quot;detail\&quot;:\&quot;bad key &quot; + KEY + &quot;\&quot;}&quot;));</span>
+<span class="nc" id="L193">        PostHogManagementClient client = client(new ExperimentBudget(10, GENEROUS_WAIT, Thread::sleep), SHORT_TIMEOUT);</span>
+
+        // when
+<span class="nc" id="L196">        Response response = client.project();</span>
+
+        // then
+<span class="nc" id="L199">        assertThat(response.detail()).contains(&quot;[redacted]&quot;).doesNotContain(KEY);</span>
+<span class="nc" id="L200">        assertThat(response.body()).doesNotContain(KEY);</span>
+<span class="nc" id="L201">    }</span>
+
+    @Test
+    void anInterruptedCallerGetsAnExceptionAndKeepsItsInterruptFlag() {
+        // given
+<span class="nc" id="L206">        server.createContext(&quot;/api/projects/&quot;, exchange -&gt; respond(exchange, 200, &quot;{}&quot;));</span>
+<span class="nc" id="L207">        PostHogManagementClient client = client(new ExperimentBudget(10, GENEROUS_WAIT, Thread::sleep), SHORT_TIMEOUT);</span>
+<span class="nc" id="L208">        Thread.currentThread().interrupt();</span>
+
+        // when
+<span class="nc" id="L211">        Throwable thrown = catchThrowable(client::project);</span>
+<span class="nc" id="L212">        boolean interrupted = Thread.interrupted();</span>
+
+        // then
+<span class="nc" id="L215">        assertThat(thrown).isInstanceOf(ManagementException.class).hasMessageContaining(&quot;interrupted&quot;);</span>
+<span class="nc" id="L216">        assertThat(interrupted)</span>
+<span class="nc" id="L217">                .as(&quot;the interrupt flag survives the failed call&quot;)</span>
+<span class="nc" id="L218">                .isTrue();</span>
+<span class="nc" id="L219">    }</span>
+
+    private PostHogManagementClient client(ExperimentBudget budget, Duration timeout) {
+<span class="nc" id="L222">        HttpClient http = HttpClient.newBuilder()</span>
+<span class="nc" id="L223">                .connectTimeout(Duration.ofSeconds(2))</span>
+<span class="nc" id="L224">                .followRedirects(HttpClient.Redirect.NEVER)</span>
+<span class="nc" id="L225">                .build();</span>
+<span class="nc" id="L226">        return new PostHogManagementClient(http, host, PROJECT_ID, () -&gt; KEY, budget, timeout);</span>
+    }
+
+    private void awaitRelease() {
+        try {
+<span class="nc" id="L231">            release.await(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L232">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L233">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L234">        }</span>
+<span class="nc" id="L235">    }</span>
+
+    private static void respond(HttpExchange exchange, int status, String body) throws IOException {
+<span class="nc" id="L238">        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L239">        exchange.getResponseHeaders().add(&quot;Content-Type&quot;, &quot;application/json&quot;);</span>
+<span class="nc" id="L240">        exchange.sendResponseHeaders(status, bytes.length);</span>
+<span class="nc" id="L241">        try (OutputStream output = exchange.getResponseBody()) {</span>
+<span class="nc" id="L242">            output.write(bytes);</span>
+        }
+<span class="nc" id="L244">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

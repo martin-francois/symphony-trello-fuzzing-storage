@@ -1,0 +1,752 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryServiceTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryServiceTest.java</span></div><h1>TelemetryServiceTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.telemetry.TelemetryService.DisableRequest;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.StateRead;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import ch.fmartin.symphony.trello.testsupport.MutableClock;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Deque;
+import java.util.List;
+import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L29">final class TelemetryServiceTest {</span>
+    @TempDir
+    Path tempDir;
+
+    private Path stateDir;
+    private TelemetryStateStore store;
+<span class="nc" id="L35">    private final MutableClock clock = new MutableClock(TelemetryFixture.NOON);</span>
+<span class="nc" id="L36">    private final ByteArrayOutputStream stdout = new ByteArrayOutputStream();</span>
+<span class="nc" id="L37">    private final ByteArrayOutputStream stderr = new ByteArrayOutputStream();</span>
+<span class="nc" id="L38">    private final PrintStream out = new PrintStream(stdout, true, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L39">    private final PrintStream err = new PrintStream(stderr, true, StandardCharsets.UTF_8);</span>
+
+    @BeforeEach
+    void setUp() throws IOException {
+<span class="nc" id="L43">        stateDir = TelemetryFixture.installedStateDir(tempDir);</span>
+<span class="nc" id="L44">        store = new TelemetryStateStore(stateDir);</span>
+<span class="nc" id="L45">    }</span>
+
+    @Test
+    void previewPrintsTheFullJsonWithoutWritingAnythingBeforeRegistration() {
+        // given
+<span class="nc" id="L50">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L53">        int exit = service.preview(out);</span>
+
+        // then
+<span class="nc" id="L56">        assertThat(exit).isZero();</span>
+<span class="nc" id="L57">        assertThat(output())</span>
+<span class="nc" id="L58">                .contains(&quot;\&quot;event\&quot; : \&quot;installation_heartbeat\&quot;&quot;)</span>
+<span class="nc" id="L59">                .contains(&quot;\&quot;distinct_id\&quot; : null&quot;)</span>
+<span class="nc" id="L60">                .contains(&quot;\&quot;registered_on\&quot; : null&quot;)</span>
+<span class="nc" id="L61">                .contains(&quot;\&quot;app_version\&quot; : \&quot;1.2.0\&quot;&quot;)</span>
+<span class="nc" id="L62">                .contains(&quot;\&quot;connected_board_count\&quot; : 3&quot;)</span>
+<span class="nc" id="L63">                .contains(&quot;This preview is not sent.&quot;)</span>
+<span class="nc" id="L64">                .contains(&quot;distinct_id and registered_on are null until&quot;);</span>
+<span class="nc" id="L65">        assertThat(store.read()).isInstanceOf(StateRead.Absent.class);</span>
+<span class="nc" id="L66">    }</span>
+
+    @Test
+    void previewAfterAReportShowsTheRealIdentityAndChangesNoSchedule() {
+        // given
+<span class="nc" id="L71">        UUID id = UUID.randomUUID();</span>
+<span class="nc" id="L72">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L73">                state.withIdentity(id, LocalDate.of(2026, 9, 20))</span>
+<span class="nc" id="L74">                        .withFirstWorkerDeadline(TelemetryFixture.NOON.minus(Duration.ofDays(1)))</span>
+<span class="nc" id="L75">                        .withReporting(LocalDate.of(2026, 9, 21), null, null, null),</span>
+                null));
+<span class="nc" id="L77">        TelemetryState before = store.read().stateOrInitial();</span>
+<span class="nc" id="L78">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L81">        service.preview(out);</span>
+
+        // then
+<span class="nc" id="L84">        assertThat(output())</span>
+<span class="nc" id="L85">                .contains(&quot;\&quot;distinct_id\&quot; : \&quot;&quot; + id + &quot;\&quot;&quot;)</span>
+<span class="nc" id="L86">                .contains(&quot;\&quot;registered_on\&quot; : \&quot;2026-09-20\&quot;&quot;);</span>
+<span class="nc" id="L87">        assertThat(output()).doesNotContain(&quot;until the first eligible worker&quot;);</span>
+<span class="nc" id="L88">        assertThat(store.read().stateOrInitial()).isEqualTo(before);</span>
+<span class="nc" id="L89">    }</span>
+
+    @Test
+    void statusReportsStoredAndEffectiveModeWithTheOverrideReason() {
+        // given
+<span class="nc" id="L94">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DEBUG), null));</span>
+<span class="nc" id="L95">        TelemetryService service = service(new TelemetryEnvironment(true, false, true));</span>
+
+        // when
+<span class="nc" id="L98">        int exit = service.status(out);</span>
+
+        // then
+<span class="nc" id="L101">        assertThat(exit).isZero();</span>
+<span class="nc" id="L102">        assertThat(output())</span>
+<span class="nc" id="L103">                .contains(&quot;Stored mode: debug&quot;)</span>
+<span class="nc" id="L104">                .contains(&quot;Effective mode: disabled, overridden by &quot; + TelemetryEnvironment.DISABLED_VARIABLE + &quot;=1&quot;)</span>
+<span class="nc" id="L105">                .contains(&quot;Request logging: on&quot;)</span>
+<span class="nc" id="L106">                .contains(&quot;Installation ID: not registered yet&quot;)</span>
+<span class="nc" id="L107">                .contains(&quot;Installed context: yes&quot;)</span>
+<span class="nc" id="L108">                .contains(&quot;project token configured&quot;)</span>
+<span class="nc" id="L109">                .contains(&quot;Last accepted report: none&quot;)</span>
+<span class="nc" id="L110">                .contains(&quot;State file: &quot; + store.stateFile());</span>
+<span class="nc" id="L111">    }</span>
+
+    @Test
+    void unreadableStateShowsUnknownPreferencesAndReportingOff() throws IOException {
+        // given
+<span class="nc" id="L116">        Files.writeString(store.stateFile(), &quot;{corrupt&quot;);</span>
+<span class="nc" id="L117">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L120">        int exit = service.status(out);</span>
+
+        // then
+<span class="nc" id="L123">        assertThat(exit).isZero();</span>
+<span class="nc" id="L124">        assertThat(output())</span>
+<span class="nc" id="L125">                .contains(&quot;Stored mode: unknown&quot;)</span>
+<span class="nc" id="L126">                .contains(&quot;Effective mode: disabled&quot;)</span>
+<span class="nc" id="L127">                .contains(&quot;state file is unreadable&quot;)</span>
+<span class="nc" id="L128">                .doesNotContain(&quot;mode: enabled&quot;, &quot;not registered yet&quot;);</span>
+<span class="nc" id="L129">        assertThat(store.stateFile()).content(StandardCharsets.UTF_8).isEqualTo(&quot;{corrupt&quot;);</span>
+<span class="nc" id="L130">    }</span>
+
+    @Test
+    void statusExplainsWhyADevelopmentRunOrUnconfiguredBuildNeverSends() throws IOException {
+        // given
+<span class="nc" id="L135">        Path developmentDir = Files.createDirectories(tempDir.resolve(&quot;dev&quot;));</span>
+<span class="nc" id="L136">        var development = new TelemetryService(</span>
+<span class="nc" id="L137">                TelemetryFixture.installation(developmentDir),</span>
+<span class="nc" id="L138">                TelemetryFixture.snapshots(TelemetryFixture.installation(developmentDir)),</span>
+                clock);
+<span class="nc" id="L140">        TelemetryInstallation unconfigured = TelemetryFixture.installation(</span>
+<span class="nc" id="L141">                stateDir, TelemetryEnvironment.none(), TelemetryFixture.unconfiguredDistribution());</span>
+<span class="nc" id="L142">        var noToken = new TelemetryService(unconfigured, TelemetryFixture.snapshots(unconfigured), clock);</span>
+
+        // when
+<span class="nc" id="L145">        development.status(out);</span>
+<span class="nc" id="L146">        String developmentOutput = output();</span>
+<span class="nc" id="L147">        stdout.reset();</span>
+<span class="nc" id="L148">        noToken.status(out);</span>
+
+        // then
+<span class="nc" id="L151">        assertThat(developmentOutput).contains(&quot;Installed context: no&quot;).contains(&quot;reports are never sent&quot;);</span>
+<span class="nc" id="L152">        assertThat(output()).contains(&quot;no project token, never sends&quot;).contains(&quot;No project token is configured&quot;);</span>
+<span class="nc" id="L153">    }</span>
+
+    @Test
+    void privacyPrintsTheBundledTextOffline() {
+        // given
+<span class="nc" id="L158">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L161">        int exit = service.privacy(out);</span>
+
+        // then
+<span class="nc" id="L164">        assertThat(exit).isZero();</span>
+<span class="nc" id="L165">        assertThat(output()).startsWith(&quot;# Usage reporting privacy&quot;).contains(&quot;installation_heartbeat&quot;);</span>
+<span class="nc" id="L166">    }</span>
+
+    @ParameterizedTest(name = &quot;answer {0} keeps telemetry enabled&quot;)
+    @ValueSource(strings = {&quot;&quot;, &quot;n&quot;, &quot;N&quot;, &quot;no&quot;, &quot;No&quot;, &quot;NO&quot;, &quot;  no  &quot;})
+    void interactiveDisableDefaultsToNoAndWritesNothing(String answer) {
+        // given
+<span class="nc" id="L172">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L175">        int exit = service.disable(interactive(answer), out, err);</span>
+
+        // then
+<span class="nc" id="L178">        assertThat(exit).isZero();</span>
+<span class="nc" id="L179">        assertThat(output())</span>
+<span class="nc" id="L180">                .contains(&quot;Telemetry helps François Martin improve Symphony for Trello.&quot;)</span>
+<span class="nc" id="L181">                .contains(&quot;This is the complete JSON body of a report generated now.&quot;)</span>
+<span class="nc" id="L182">                .contains(&quot;\&quot;event\&quot; : \&quot;installation_heartbeat\&quot;&quot;)</span>
+<span class="nc" id="L183">                .contains(&quot;Disable telemetry? [yes/No/privacy]&quot;)</span>
+<span class="nc" id="L184">                .contains(&quot;Enter keeps telemetry enabled.&quot;)</span>
+<span class="nc" id="L185">                .endsWith(&quot;Telemetry remains enabled.\nThanks for helping improve Symphony for Trello!\n&quot;);</span>
+<span class="nc" id="L186">        assertThat(store.read()).isInstanceOf(StateRead.Absent.class);</span>
+<span class="nc" id="L187">    }</span>
+
+    @ParameterizedTest(name = &quot;answer {0} disables&quot;)
+    @ValueSource(strings = {&quot;y&quot;, &quot;Y&quot;, &quot;yes&quot;, &quot;YES&quot;, &quot; Yes &quot;})
+    void interactiveDisablePersistsOnlyAfterAffirmativeConfirmation(String answer) {
+        // given
+<span class="nc" id="L193">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L196">        int exit = service.disable(interactive(answer), out, err);</span>
+
+        // then
+<span class="nc" id="L199">        assertThat(exit).isZero();</span>
+<span class="nc" id="L200">        assertThat(output())</span>
+<span class="nc" id="L201">                .endsWith(&quot;Telemetry disabled. The orchestra will have to play this one by ear.\n&quot;</span>
+                        + &quot;All features remain available.\n&quot;
+                        + TelemetryService.IN_FLIGHT_LINE + &quot;\n&quot;);
+<span class="nc" id="L204">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L205">        assertThat(store.read().stateOrInitial().preferenceRevision()).isOne();</span>
+<span class="nc" id="L206">    }</span>
+
+    @Test
+    void invalidAnswersRepeatTheQuestionUntilAValidOne() {
+        // given
+<span class="nc" id="L211">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L214">        service.disable(interactive(&quot;maybe&quot;, &quot;sure&quot;, &quot;no&quot;), out, err);</span>
+
+        // then
+<span class="nc" id="L217">        assertThat(output())</span>
+<span class="nc" id="L218">                .containsSubsequence(</span>
+                        &quot;Disable telemetry? [yes/No/privacy]&quot;,
+                        &quot;Please answer yes, no, or privacy.&quot;,
+                        &quot;Disable telemetry? [yes/No/privacy]&quot;,
+                        &quot;Please answer yes, no, or privacy.&quot;,
+                        &quot;Disable telemetry? [yes/No/privacy]&quot;,
+                        &quot;Telemetry remains enabled.&quot;);
+<span class="nc" id="L225">        assertThat(store.read()).isInstanceOf(StateRead.Absent.class);</span>
+<span class="nc" id="L226">    }</span>
+
+    @ParameterizedTest(name = &quot;answer {0} shows privacy and asks again&quot;)
+    @ValueSource(strings = {&quot;p&quot;, &quot;privacy&quot;, &quot;P&quot;})
+    void privacyAnswerShowsTheTextAndReturnsToTheQuestion(String answer) {
+        // given
+<span class="nc" id="L232">        TelemetryService keeps = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L233">        TelemetryService disables = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L236">        int keepExit = keeps.disable(interactive(answer, &quot;no&quot;), out, err);</span>
+<span class="nc" id="L237">        String keepOutput = output();</span>
+<span class="nc" id="L238">        stdout.reset();</span>
+<span class="nc" id="L239">        int disableExit = disables.disable(interactive(answer, answer, &quot;yes&quot;), out, err);</span>
+
+        // then
+<span class="nc" id="L242">        assertThat(keepExit).isZero();</span>
+<span class="nc" id="L243">        assertThat(keepOutput)</span>
+<span class="nc" id="L244">                .containsSubsequence(</span>
+                        &quot;Disable telemetry? [yes/No/privacy]&quot;,
+                        &quot;# Usage reporting privacy&quot;,
+                        &quot;Disable telemetry? [yes/No/privacy]&quot;,
+                        &quot;Telemetry remains enabled.&quot;)
+<span class="nc" id="L249">                .endsWith(&quot;Telemetry remains enabled.\nThanks for helping improve Symphony for Trello!\n&quot;);</span>
+<span class="nc" id="L250">        assertThat(disableExit).isZero();</span>
+<span class="nc" id="L251">        assertThat(output()).contains(&quot;Telemetry disabled.&quot;);</span>
+<span class="nc" id="L252">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L253">    }</span>
+
+    @Test
+    void endOfInputCancelsWithoutAWrite() {
+        // given
+<span class="nc" id="L258">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L261">        int exit = service.disable(new DisableRequest(false, true, () -&gt; null), out, err);</span>
+
+        // then
+<span class="nc" id="L264">        assertThat(exit).isZero();</span>
+<span class="nc" id="L265">        assertThat(output()).endsWith(&quot;Cancelled. Telemetry remains enabled.\n&quot;);</span>
+<span class="nc" id="L266">        assertThat(store.read()).isInstanceOf(StateRead.Absent.class);</span>
+<span class="nc" id="L267">    }</span>
+
+    @Test
+    void reviewOutcomeReportsAConcurrentDisableTruthfully() {
+        // given
+<span class="nc" id="L272">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L273">        var request = new DisableRequest(false, true, () -&gt; {</span>
+<span class="nc" id="L274">            store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+<span class="nc" id="L275">            return &quot;&quot;;</span>
+        });
+
+        // when
+<span class="nc" id="L279">        int exit = service.disable(request, out, err);</span>
+
+        // then
+<span class="nc" id="L282">        assertThat(exit).isZero();</span>
+<span class="nc" id="L283">        assertThat(output()).endsWith(&quot;Telemetry is disabled.\n&quot;).doesNotContain(&quot;Thanks for helping&quot;);</span>
+<span class="nc" id="L284">    }</span>
+
+    @Test
+    void reviewOutcomeNamesAnEnvironmentDisableInsteadOfThankingForData() {
+        // given
+<span class="nc" id="L289">        TelemetryService service = service(new TelemetryEnvironment(true, false, false));</span>
+<span class="nc" id="L290">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.ENABLED), null));</span>
+
+        // when
+<span class="nc" id="L293">        service.disable(interactive(&quot;no&quot;), out, err);</span>
+
+        // then
+<span class="nc" id="L296">        assertThat(output())</span>
+<span class="nc" id="L297">                .endsWith(</span>
+                        &quot;Telemetry is disabled for this process by &quot; + TelemetryEnvironment.DISABLED_VARIABLE + &quot;=1\n&quot;)
+<span class="nc" id="L299">                .doesNotContain(&quot;Thanks for helping&quot;);</span>
+<span class="nc" id="L300">    }</span>
+
+    @Test
+    void cancellationDoesNotOverwriteAConcurrentChangeMadeDuringTheDialog() {
+        // given
+<span class="nc" id="L305">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L306">        var request = new DisableRequest(false, true, () -&gt; {</span>
+            // Another command changes the preference while the question is open.
+<span class="nc" id="L308">            store.update(</span>
+<span class="nc" id="L309">                    state -&gt; Update.write(state.withMode(TelemetryMode.DEBUG).withCounters(7, 0), null));</span>
+<span class="nc" id="L310">            return &quot;no&quot;;</span>
+        });
+
+        // when
+<span class="nc" id="L314">        service.disable(request, out, err);</span>
+<span class="nc" id="L315">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L318">        assertThat(state.mode()).isEqualTo(TelemetryMode.DEBUG);</span>
+<span class="nc" id="L319">        assertThat(state.boardImportsTotal()).isEqualTo(7);</span>
+<span class="nc" id="L320">    }</span>
+
+    @Test
+    void confirmationRereadsTheLatestStateUnderLock() {
+        // given
+<span class="nc" id="L325">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L326">        var request = new DisableRequest(false, true, () -&gt; {</span>
+<span class="nc" id="L327">            store.update(state -&gt; Update.write(state.withCounters(5, 2), null));</span>
+<span class="nc" id="L328">            return &quot;yes&quot;;</span>
+        });
+
+        // when
+<span class="nc" id="L332">        service.disable(request, out, err);</span>
+<span class="nc" id="L333">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L336">        assertThat(state.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L337">        assertThat(state.boardImportsTotal())</span>
+<span class="nc" id="L338">                .as(&quot;counters written during the dialog survive&quot;)</span>
+<span class="nc" id="L339">                .isEqualTo(5);</span>
+<span class="nc" id="L340">    }</span>
+
+    @Test
+    void nonInteractiveAndYesDisableDirectlyWithoutTheReview() {
+        // given
+<span class="nc" id="L345">        TelemetryService piped = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L346">        TelemetryService withYes = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L349">        int pipedExit = piped.disable(DisableRequest.nonInteractive(), out, err);</span>
+<span class="nc" id="L350">        String pipedOutput = output();</span>
+<span class="nc" id="L351">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.ENABLED), null));</span>
+<span class="nc" id="L352">        stdout.reset();</span>
+<span class="nc" id="L353">        int yesExit = withYes.disable(new DisableRequest(true, true, () -&gt; &quot;no&quot;), out, err);</span>
+
+        // then
+<span class="nc" id="L356">        assertThat(pipedExit).isZero();</span>
+<span class="nc" id="L357">        assertThat(pipedOutput).doesNotContain(&quot;Disable telemetry?&quot;).contains(&quot;Telemetry disabled.&quot;);</span>
+<span class="nc" id="L358">        assertThat(yesExit).isZero();</span>
+<span class="nc" id="L359">        assertThat(output()).doesNotContain(&quot;Disable telemetry?&quot;).contains(&quot;Telemetry disabled.&quot;);</span>
+<span class="nc" id="L360">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L361">    }</span>
+
+    @Test
+    void alreadyDisabledSucceedsWithoutAnotherReview() {
+        // given
+<span class="nc" id="L366">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+<span class="nc" id="L367">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L370">        int exit = service.disable(interactive(&quot;yes&quot;), out, err);</span>
+
+        // then
+<span class="nc" id="L373">        assertThat(exit).isZero();</span>
+<span class="nc" id="L374">        assertThat(output()).isEqualTo(&quot;Telemetry is already disabled.\n&quot;);</span>
+<span class="nc" id="L375">        assertThat(store.read().stateOrInitial().preferenceRevision()).isOne();</span>
+<span class="nc" id="L376">    }</span>
+
+    @Test
+    void disableDiscardsPendingWorkAndBumpsTheRevision() {
+        // given
+<span class="nc" id="L381">        UUID pendingUuid = UUID.randomUUID();</span>
+<span class="nc" id="L382">        store.update(state -&gt; Update.write(state.withIdentity(UUID.randomUUID(), LocalDate.of(2026, 9, 22)), null));</span>
+<span class="nc" id="L383">        var properties =</span>
+<span class="nc" id="L384">                new HeartbeatProperties(1, &quot;2026-09-22&quot;, &quot;1.2.0&quot;, &quot;linux&quot;, &quot;24.04&quot;, &quot;ubuntu&quot;, &quot;x64&quot;, null, 3, 0, 0);</span>
+<span class="nc" id="L385">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L386">                state.withReporting(</span>
+                        null,
+                        new TelemetryState.RetryState(1, TelemetryFixture.NOON, &quot;HTTP 503&quot;),
+                        new TelemetryState.PendingHeartbeat(
+<span class="nc" id="L390">                                pendingUuid, TelemetryFixture.NOON, LocalDate.of(2026, 9, 22), 0, properties),</span>
+                        new TelemetryState.ReportClaim(
+<span class="nc" id="L392">                                &quot;w&quot;, pendingUuid, UUID.randomUUID(), TelemetryFixture.NOON.plusSeconds(60))),</span>
+                null));
+<span class="nc" id="L394">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L397">        service.disable(DisableRequest.nonInteractive(), out, err);</span>
+<span class="nc" id="L398">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L401">        assertThat(output())</span>
+<span class="nc" id="L402">                .as(&quot;a disable must say that a report already on its way cannot be recalled&quot;)</span>
+<span class="nc" id="L403">                .contains(TelemetryService.IN_FLIGHT_LINE);</span>
+<span class="nc" id="L404">        assertThat(state.pendingReport())</span>
+<span class="nc" id="L405">                .as(&quot;the report discarded by the disable is not replayed&quot;)</span>
+<span class="nc" id="L406">                .isNull();</span>
+<span class="nc" id="L407">        assertThat(state.claim()).isNull();</span>
+<span class="nc" id="L408">        assertThat(state.retry()).isNull();</span>
+<span class="nc" id="L409">        assertThat(state.preferenceRevision()).isOne();</span>
+<span class="nc" id="L410">    }</span>
+
+    @Test
+    void failedPreferenceWriteReportsAnErrorAndNeverPrintsSuccess() throws IOException {
+        // given
+<span class="nc" id="L415">        Files.writeString(store.stateFile(), &quot;{corrupt&quot;);</span>
+<span class="nc" id="L416">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L419">        int disableExit = service.disable(DisableRequest.nonInteractive(), out, err);</span>
+<span class="nc" id="L420">        int enableExit = service.enable(out, err);</span>
+
+        // then
+<span class="nc" id="L423">        assertThat(disableExit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L424">        assertThat(enableExit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L425">        assertThat(output()).doesNotContain(&quot;Telemetry disabled&quot;).doesNotContain(&quot;Telemetry enabled&quot;);</span>
+<span class="nc" id="L426">        assertThat(errors()).contains(&quot;unreadable&quot;).contains(&quot;could not be enabled&quot;);</span>
+<span class="nc" id="L427">    }</span>
+
+    @Test
+    void eraseWithAnUnreadableStateSaysReportingIsAlreadyOff() throws IOException {
+        // given
+<span class="nc" id="L432">        Files.writeString(store.stateFile(), &quot;{corrupt&quot;);</span>
+<span class="nc" id="L433">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L436">        int exit = service.erase(out, err);</span>
+
+        // then
+<span class="nc" id="L439">        assertThat(exit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L440">        assertThat(errors())</span>
+<span class="nc" id="L441">                .contains(&quot;not valid JSON&quot;)</span>
+<span class="nc" id="L442">                .contains(&quot;Reporting is already off&quot;)</span>
+<span class="nc" id="L443">                .doesNotContain(&quot;The previous preference is unchanged&quot;);</span>
+<span class="nc" id="L444">        assertThat(store.stateFile())</span>
+<span class="nc" id="L445">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L446">                .as(&quot;an unreadable state file is kept for diagnosis&quot;)</span>
+<span class="nc" id="L447">                .isEqualTo(&quot;{corrupt&quot;);</span>
+<span class="nc" id="L448">    }</span>
+
+    @Test
+    void eraseWithAnIdentityButNoInstallContextDoesNotClaimNothingWasSent() throws IOException {
+        // given
+<span class="nc" id="L453">        store.update(state -&gt; Update.write(state.withIdentity(UUID.randomUUID(), LocalDate.of(2026, 9, 22)), null));</span>
+<span class="nc" id="L454">        Files.delete(InstalledVersion.installContextPath(stateDir));</span>
+<span class="nc" id="L455">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L458">        int exit = service.erase(out, err);</span>
+
+        // then
+<span class="nc" id="L461">        assertThat(exit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L462">        assertThat(output()).doesNotContain(&quot;nothing to erase&quot;);</span>
+<span class="nc" id="L463">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L464">    }</span>
+
+    @Test
+    void eraseWithoutAutomaticErasureBeforeAnyIdentityDisablesAndSucceeds() {
+        // given
+<span class="nc" id="L469">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L472">        int exit = service.erase(out, err);</span>
+
+        // then
+<span class="nc" id="L475">        assertThat(exit).isEqualTo(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L476">        assertThat(output()).contains(&quot;nothing to erase&quot;);</span>
+<span class="nc" id="L477">        assertThat(errors()).isEmpty();</span>
+<span class="nc" id="L478">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L479">    }</span>
+
+    @Test
+    void messagesStayTruthfulUnderAnEnvironmentDisableOverride() {
+        // given
+<span class="nc" id="L484">        TelemetryService service = service(new TelemetryEnvironment(true, false, false));</span>
+
+        // when
+<span class="nc" id="L487">        int disableExit = service.disable(DisableRequest.nonInteractive(), out, err);</span>
+<span class="nc" id="L488">        int enableExit = service.enable(out, err);</span>
+
+        // then
+<span class="nc" id="L491">        assertThat(disableExit).isZero();</span>
+<span class="nc" id="L492">        assertThat(output())</span>
+<span class="nc" id="L493">                .contains(&quot;Telemetry disabled.&quot;)</span>
+<span class="nc" id="L494">                .contains(TelemetryEnvironment.DISABLED_VARIABLE + &quot; already covered&quot;);</span>
+<span class="nc" id="L495">        assertThat(enableExit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L496">        assertThat(errors()).contains(&quot;cannot be enabled while &quot; + TelemetryEnvironment.DISABLED_VARIABLE);</span>
+<span class="nc" id="L497">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L498">    }</span>
+
+    @Test
+    void explicitEnableEndsAnExistingInitialGracePeriod() {
+        // given
+<span class="nc" id="L503">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L504">                state.withFirstWorkerDeadline(TelemetryFixture.NOON.plus(TelemetryNotice.FIRST_REPORT_GRACE)), null));</span>
+<span class="nc" id="L505">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L508">        int exit = service.enable(out, err);</span>
+
+        // then
+<span class="nc" id="L511">        assertThat(exit).isZero();</span>
+<span class="nc" id="L512">        assertThat(store.read().stateOrInitial().firstWorkerDeadline()).isEqualTo(TelemetryFixture.NOON);</span>
+<span class="nc" id="L513">        assertThat(output()).contains(&quot;Optional usage reporting is enabled.&quot;, &quot;this command sends nothing&quot;);</span>
+<span class="nc" id="L514">    }</span>
+
+    @Test
+    void explicitEnableBeforeTheFirstWorkerSetsAnImmediateDeadline() {
+        // given
+<span class="nc" id="L519">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L522">        int exit = service.enable(out, err);</span>
+
+        // then
+<span class="nc" id="L525">        assertThat(exit).isZero();</span>
+<span class="nc" id="L526">        assertThat(store.read().stateOrInitial().firstWorkerDeadline()).isEqualTo(TelemetryFixture.NOON);</span>
+<span class="nc" id="L527">        assertThat(output()).contains(&quot;Optional usage reporting is enabled.&quot;, &quot;this command sends nothing&quot;);</span>
+<span class="nc" id="L528">    }</span>
+
+    @NullSource
+    @ParameterizedTest
+    @ValueSource(strings = &quot;no&quot;)
+    void cancellationReportsWhenTheStateBecameUnreadable(String answer) throws IOException {
+        // given
+<span class="nc" id="L535">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L536">        var request = new DisableRequest(false, true, TelemetryService.lines(() -&gt; {</span>
+<span class="nc" id="L537">            Files.writeString(store.stateFile(), &quot;{corrupt&quot;);</span>
+<span class="nc" id="L538">            return answer;</span>
+        }));
+
+        // when
+<span class="nc" id="L542">        int exit = service.disable(request, out, err);</span>
+
+        // then
+<span class="nc" id="L545">        assertThat(exit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L546">        assertThat(errors()).contains(&quot;Telemetry state is unreadable&quot;, &quot;Reporting is already off&quot;);</span>
+<span class="nc" id="L547">        assertThat(output()).doesNotContain(&quot;Telemetry remains enabled&quot;, &quot;Thanks for helping&quot;);</span>
+<span class="nc" id="L548">        assertThat(store.stateFile()).content(StandardCharsets.UTF_8).isEqualTo(&quot;{corrupt&quot;);</span>
+<span class="nc" id="L549">    }</span>
+
+    @Test
+    void enableAfterDisableKeepsIdentityAndCountersAndRemovesTheGracePeriod() {
+        // given
+<span class="nc" id="L554">        UUID id = UUID.randomUUID();</span>
+<span class="nc" id="L555">        var properties =</span>
+<span class="nc" id="L556">                new HeartbeatProperties(1, &quot;2026-09-21&quot;, &quot;1.2.0&quot;, &quot;linux&quot;, &quot;24.04&quot;, &quot;ubuntu&quot;, &quot;x64&quot;, null, 3, 4, 2);</span>
+<span class="nc" id="L557">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L558">                state.withIdentity(id, LocalDate.of(2026, 9, 1))</span>
+<span class="nc" id="L559">                        .withCounters(4, 2)</span>
+<span class="nc" id="L560">                        .withReporting(</span>
+<span class="nc" id="L561">                                LocalDate.of(2026, 9, 20),</span>
+                                null,
+                                new TelemetryState.PendingHeartbeat(
+<span class="nc" id="L564">                                        UUID.randomUUID(),</span>
+                                        TelemetryFixture.NOON,
+<span class="nc" id="L566">                                        LocalDate.of(2026, 9, 21),</span>
+                                        0,
+                                        properties),
+                                null)
+<span class="nc" id="L570">                        .withMode(TelemetryMode.DISABLED),</span>
+                null));
+<span class="nc" id="L572">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L575">        int exit = service.enable(out, err);</span>
+<span class="nc" id="L576">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L579">        assertThat(exit).isZero();</span>
+<span class="nc" id="L580">        assertThat(output()).contains(&quot;Optional usage reporting is enabled.&quot;).contains(&quot;this command sends nothing&quot;);</span>
+<span class="nc" id="L581">        assertThat(state.mode()).isEqualTo(TelemetryMode.ENABLED);</span>
+<span class="nc" id="L582">        assertThat(state.installationId()).isEqualTo(id);</span>
+<span class="nc" id="L583">        assertThat(state.registeredOn()).isEqualTo(LocalDate.of(2026, 9, 1));</span>
+<span class="nc" id="L584">        assertThat(state.boardImportsTotal()).isEqualTo(4);</span>
+<span class="nc" id="L585">        assertThat(state.boardCreationsTotal()).isEqualTo(2);</span>
+<span class="nc" id="L586">        assertThat(state.lastReportedDate())</span>
+<span class="nc" id="L587">                .as(&quot;nothing is backfilled or replayed&quot;)</span>
+<span class="nc" id="L588">                .isEqualTo(LocalDate.of(2026, 9, 20));</span>
+<span class="nc" id="L589">        assertThat(state.pendingReport()).isNull();</span>
+<span class="nc" id="L590">        assertThat(state.firstWorkerDeadline()).isEqualTo(TelemetryFixture.NOON);</span>
+<span class="nc" id="L591">        assertThat(state.preferenceRevision()).isEqualTo(2);</span>
+<span class="nc" id="L592">    }</span>
+
+    @Test
+    void enableWithoutAConfiguredTokenChangesTheModeButCreatesNoIdentity() {
+        // given
+<span class="nc" id="L597">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+<span class="nc" id="L598">        TelemetryInstallation unconfigured = TelemetryFixture.installation(</span>
+<span class="nc" id="L599">                stateDir, TelemetryEnvironment.none(), TelemetryFixture.unconfiguredDistribution());</span>
+<span class="nc" id="L600">        var service = new TelemetryService(unconfigured, TelemetryFixture.snapshots(unconfigured), clock);</span>
+
+        // when
+<span class="nc" id="L603">        int exit = service.enable(out, err);</span>
+<span class="nc" id="L604">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L607">        assertThat(exit).isZero();</span>
+<span class="nc" id="L608">        assertThat(state.mode()).isEqualTo(TelemetryMode.ENABLED);</span>
+<span class="nc" id="L609">        assertThat(state.hasIdentity())</span>
+<span class="nc" id="L610">                .as(&quot;no identity exists where no report can ever leave&quot;)</span>
+<span class="nc" id="L611">                .isFalse();</span>
+<span class="nc" id="L612">        assertThat(output()).contains(&quot;No project token is configured&quot;);</span>
+<span class="nc" id="L613">    }</span>
+
+    @Test
+    void debugIsRefusedWhileTheStoredPreferenceIsDisabled() {
+        // given
+<span class="nc" id="L618">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+<span class="nc" id="L619">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L622">        int exit = service.debug(out, err);</span>
+<span class="nc" id="L623">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L626">        assertThat(exit).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L627">        assertThat(errors()).contains(&quot;debug mode does not override that&quot;);</span>
+<span class="nc" id="L628">        assertThat(state.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L629">        assertThat(state.preferenceRevision()).isOne();</span>
+<span class="nc" id="L630">    }</span>
+
+    @Test
+    void preferenceCommandsOutsideAnInstallationChangeNothing() throws IOException {
+        // given
+<span class="nc" id="L635">        Path developmentDir = Files.createDirectories(tempDir.resolve(&quot;dev&quot;));</span>
+<span class="nc" id="L636">        TelemetryInstallation development = TelemetryFixture.installation(developmentDir);</span>
+<span class="nc" id="L637">        var service = new TelemetryService(development, TelemetryFixture.snapshots(development), clock);</span>
+
+        // when
+<span class="nc" id="L640">        List&lt;Integer&gt; exits = List.of(</span>
+<span class="nc" id="L641">                service.enable(out, err),</span>
+<span class="nc" id="L642">                service.disable(DisableRequest.nonInteractive(), out, err),</span>
+<span class="nc" id="L643">                service.debug(out, err));</span>
+
+        // then
+<span class="nc" id="L646">        assertThat(exits).containsOnly(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L647">        assertThat(output()).contains(&quot;Nothing to change.&quot;);</span>
+<span class="nc" id="L648">        assertThat(developmentDir.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L649">    }</span>
+
+    @Test
+    void debugStoresLocalOnlyModeAndPrintsAPreviewImmediately() {
+        // given
+<span class="nc" id="L654">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L657">        int exit = service.debug(out, err);</span>
+
+        // then
+<span class="nc" id="L660">        assertThat(exit).isZero();</span>
+<span class="nc" id="L661">        assertThat(output()).contains(&quot;local-only debug mode&quot;).contains(&quot;\&quot;event\&quot; : \&quot;installation_heartbeat\&quot;&quot;);</span>
+<span class="nc" id="L662">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DEBUG);</span>
+<span class="nc" id="L663">    }</span>
+
+    @Test
+    void setupPreparationRegistersAndPrintsTheNoticeExactlyOnce() {
+        // given
+<span class="nc" id="L668">        TelemetryService service = service(TelemetryEnvironment.none());</span>
+
+        // when
+<span class="nc" id="L671">        service.prepareForSetup(out);</span>
+<span class="nc" id="L672">        String first = output();</span>
+<span class="nc" id="L673">        stdout.reset();</span>
+<span class="nc" id="L674">        service.prepareForSetup(out);</span>
+<span class="nc" id="L675">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L678">        assertThat(first)</span>
+<span class="nc" id="L679">                .contains(&quot;Optional usage reporting is enabled. First report 5 minutes after the first worker starts&quot;)</span>
+<span class="nc" id="L680">                .contains(TelemetryNotice.FIELD_SUMMARY);</span>
+<span class="nc" id="L681">        assertThat(output()).isEmpty();</span>
+<span class="nc" id="L682">        assertThat(state.hasIdentity())</span>
+<span class="nc" id="L683">                .as(&quot;setup registers the installation before the first operation&quot;)</span>
+<span class="nc" id="L684">                .isTrue();</span>
+<span class="nc" id="L685">        assertThat(state.firstWorkerDeadline())</span>
+<span class="nc" id="L686">                .as(&quot;setup must not start the worker countdown&quot;)</span>
+<span class="nc" id="L687">                .isNull();</span>
+<span class="nc" id="L688">    }</span>
+
+    @Test
+    void setupPreparationDoesNothingWhenDisabledOrNotEligible() throws IOException {
+        // given
+<span class="nc" id="L693">        Path developmentDir = Files.createDirectories(tempDir.resolve(&quot;dev&quot;));</span>
+<span class="nc" id="L694">        TelemetryService disabled = service(new TelemetryEnvironment(true, false, false));</span>
+<span class="nc" id="L695">        var development = new TelemetryService(</span>
+<span class="nc" id="L696">                TelemetryFixture.installation(developmentDir),</span>
+<span class="nc" id="L697">                TelemetryFixture.snapshots(TelemetryFixture.installation(developmentDir)),</span>
+                clock);
+
+        // when
+<span class="nc" id="L701">        disabled.prepareForSetup(out);</span>
+<span class="nc" id="L702">        development.prepareForSetup(out);</span>
+
+        // then
+<span class="nc" id="L705">        assertThat(output()).isEmpty();</span>
+<span class="nc" id="L706">        assertThat(store.read()).isInstanceOf(StateRead.Absent.class);</span>
+<span class="nc" id="L707">        assertThat(Files.exists(developmentDir.resolve(TelemetryStateStore.STATE_FILE)))</span>
+<span class="nc" id="L708">                .as(&quot;no dev state&quot;)</span>
+<span class="nc" id="L709">                .isFalse();</span>
+<span class="nc" id="L710">    }</span>
+
+    @Test
+    void countersAccrueWhenEnabledOrDebugAndFreezeWhenDisabled() {
+        // given
+<span class="nc" id="L715">        TelemetryService enabled = service(TelemetryEnvironment.none());</span>
+<span class="nc" id="L716">        TelemetryService debug = service(new TelemetryEnvironment(false, true, false));</span>
+<span class="nc" id="L717">        TelemetryService disabled = service(new TelemetryEnvironment(true, false, false));</span>
+
+        // when
+<span class="nc" id="L720">        boolean importCounted = enabled.recordSuccessfulOperation(BoardOperation.IMPORT);</span>
+<span class="nc" id="L721">        boolean createCounted = debug.recordSuccessfulOperation(BoardOperation.CREATE);</span>
+<span class="nc" id="L722">        boolean frozen = disabled.recordSuccessfulOperation(BoardOperation.IMPORT);</span>
+<span class="nc" id="L723">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L726">        assertThat(importCounted).as(&quot;enabled counts&quot;).isTrue();</span>
+<span class="nc" id="L727">        assertThat(createCounted).as(&quot;debug counts locally&quot;).isTrue();</span>
+<span class="nc" id="L728">        assertThat(frozen).as(&quot;disabled freezes&quot;).isFalse();</span>
+<span class="nc" id="L729">        assertThat(state.boardImportsTotal()).isOne();</span>
+<span class="nc" id="L730">        assertThat(state.boardCreationsTotal()).isOne();</span>
+<span class="nc" id="L731">    }</span>
+
+    private TelemetryService service(TelemetryEnvironment environment) {
+<span class="nc" id="L734">        TelemetryInstallation installation = TelemetryFixture.installation(stateDir, environment);</span>
+<span class="nc" id="L735">        return new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+    }
+
+    private static DisableRequest interactive(String... answers) {
+        // A queue hands the scripted answers out in order, one per prompt.
+<span class="nc" id="L740">        Deque&lt;String&gt; queue = new ArrayDeque&lt;&gt;(Arrays.asList(answers));</span>
+<span class="nc" id="L741">        return new DisableRequest(false, true, queue::poll);</span>
+    }
+
+    private String output() {
+<span class="nc" id="L745">        return stdout.toString(StandardCharsets.UTF_8);</span>
+    }
+
+    private String errors() {
+<span class="nc" id="L749">        return stderr.toString(StandardCharsets.UTF_8);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryErasureClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryErasureClient.java</span></div><h1>TelemetryErasureClient.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import ch.fmartin.symphony.trello.telemetry.BoundedHttp.BodyRead;
+import ch.fmartin.symphony.trello.telemetry.BoundedHttp.Exchange;
+import ch.fmartin.symphony.trello.telemetry.BoundedHttp.Failure;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.ws.rs.core.Response.Status;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
+import org.jboss.logging.Logger;
+
+/// Bounded HTTPS transport for ownership operations. Request bodies and raw errors are never logged.
+final class TelemetryErasureClient implements AutoCloseable {
+<span class="nc" id="L21">    private static final Logger LOG = Logger.getLogger(TelemetryErasureClient.class);</span>
+<span class="nc" id="L22">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+<span class="nc" id="L23">    private static final Duration TIMEOUT = Duration.ofSeconds(20);</span>
+    // The erasure handler (infra/posthog/erasure-service.hog.tftpl) rejects longer validity windows.
+<span class="nc" id="L25">    static final Duration SIGNATURE_LIFETIME = Duration.ofSeconds(900);</span>
+    // Wire values the handler and scripts/erasure-lifecycle-live.ts repeat; TelemetryErasureContractTest
+    // pins each of them on every side.
+    static final String ISSUE_PAYLOAD = &quot;issue-v1&quot;;
+    /// Joins the signed fields; the handler splits on the same character.
+    static final String SIGNED_FIELD_SEPARATOR = &quot;|&quot;;
+    static final String SIGNED_FORMAT = &quot;h2&quot;;
+    static final String STATUS_KEY_CONTEXT = &quot;symphony-trello/status/v1|&quot;;
+    static final String STATUS_FLAG_PREFIX = &quot;erasure-&quot;;
+    /// Public flag evaluation, resolved against the capture endpoint; it names no installation.
+    static final String FLAGS_PATH = &quot;/flags?v=2&quot;;
+    static final String STATUS_DISTINCT_ID = &quot;erasure-status&quot;;
+    private static final String NOT_CONFIRMED = &quot;erasure service did not confirm the request; retry later&quot;;
+    // The handler answers 401 to a bad signature and to a timestamp outside its clock tolerance,
+    // so a fast or slow clock is the common cause a user can fix; retries keep their backoff.
+    static final String SIGNATURE_REJECTED = &quot;erasure service rejected the signed request; check that the system&quot;
+            + &quot; clock is correct, and if it is, contact the maintainer because the stored credential may be invalid&quot;;
+    private final TelemetryErasureEndpoint endpoint;
+    private final TelemetryDistribution distribution;
+<span class="nc" id="L44">    private final HttpClient http = BoundedHttp.newClient();</span>
+
+<span class="nc" id="L46">    TelemetryErasureClient(TelemetryErasureEndpoint endpoint, TelemetryDistribution distribution) {</span>
+<span class="nc" id="L47">        this.endpoint = endpoint;</span>
+<span class="nc" id="L48">        this.distribution = distribution;</span>
+<span class="nc" id="L49">    }</span>
+
+    /// Signed operations the erasure handler accepts; the wire name is the lower-case constant name.
+<span class="nc" id="L52">    enum Action {</span>
+<span class="nc" id="L53">        ERASE,</span>
+<span class="nc" id="L54">        STATUS,</span>
+<span class="nc" id="L55">        ACK;</span>
+
+        String wireName() {
+<span class="nc" id="L58">            return name().toLowerCase(Locale.ROOT);</span>
+        }
+    }
+
+    @Override
+    public void close() {
+<span class="nc" id="L64">        http.shutdownNow();</span>
+<span class="nc" id="L65">    }</span>
+
+    // Parsing causes can contain the issuance response, including its credential.
+    @SuppressWarnings(&quot;PMD.PreserveStackTrace&quot;)
+    TelemetryCredential issue() {
+<span class="nc" id="L70">        JsonNode result = post(ISSUE_PAYLOAD, NOT_CONFIRMED);</span>
+        try {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            if (!&quot;issued&quot;.equals(result.path(&quot;status&quot;).asText())) {</span>
+<span class="nc" id="L73">                throw new IllegalArgumentException(&quot;unexpected issuance response&quot;);</span>
+            }
+<span class="nc" id="L75">            return new TelemetryCredential(</span>
+<span class="nc" id="L76">                    UUID.fromString(result.path(TelemetryCredential.INSTALLATION_ID_FIELD)</span>
+<span class="nc" id="L77">                            .asText()),</span>
+<span class="nc" id="L78">                    result.path(TelemetryCredential.KEY_VERSION_FIELD).asText(),</span>
+<span class="nc" id="L79">                    result.path(TelemetryCredential.SECRET_FIELD).asText());</span>
+<span class="nc" id="L80">        } catch (IllegalArgumentException exception) {</span>
+<span class="nc" id="L81">            throw new TelemetryStateException(&quot;ownership issuance did not return a valid credential&quot;);</span>
+        }
+    }
+
+    void request(Action action, TelemetryOwnership ownership, TelemetryOwnership.Erasure erasure, Instant now) {
+<span class="nc" id="L86">        String unsigned = String.join(</span>
+                SIGNED_FIELD_SEPARATOR,
+                SIGNED_FORMAT,
+<span class="nc" id="L89">                action.wireName(),</span>
+<span class="nc" id="L90">                endpoint.audience(),</span>
+<span class="nc" id="L91">                ownership.credential().subject(),</span>
+<span class="nc" id="L92">                ownership.period().toString(),</span>
+<span class="nc" id="L93">                erasure.operation().toString(),</span>
+<span class="nc" id="L94">                Long.toString(now.getEpochSecond()),</span>
+<span class="nc" id="L95">                Long.toString(now.plus(SIGNATURE_LIFETIME).getEpochSecond()));</span>
+<span class="nc" id="L96">        post(unsigned + SIGNED_FIELD_SEPARATOR + ownership.credential().sign(unsigned), SIGNATURE_REJECTED);</span>
+<span class="nc" id="L97">    }</span>
+
+    /// Best effort: a lost acknowledgment leaves only a status flag for the operator to archive.
+    void acknowledge(TelemetryOwnership ownership, TelemetryOwnership.Erasure erasure, Instant now) {
+        try {
+<span class="nc" id="L102">            request(Action.ACK, ownership, erasure, now);</span>
+<span class="nc" id="L103">        } catch (TelemetryStateException unreachable) {</span>
+            // Completion is already durable locally, so the user has nothing to retry.
+<span class="nc" id="L105">            LOG.debugf(&quot;erasure acknowledgment not delivered: %s&quot;, unreachable.getMessage());</span>
+<span class="nc" id="L106">        }</span>
+<span class="nc" id="L107">    }</span>
+
+    private JsonNode post(String payload, String rejected) {
+        // All fields have a restricted alphabet; canonical JSON rejects duplicate/extra members server-side.
+<span class="nc" id="L111">        String body = &quot;{\&quot;payload\&quot;:\&quot;&quot; + payload + &quot;\&quot;}&quot;;</span>
+<span class="nc" id="L112">        return post(endpoint.uri(), body, rejected);</span>
+    }
+
+    /// The provider-confirmed phase, or empty while the service reports pending or an unknown value.
+    Optional&lt;TelemetryOwnership.Phase&gt; status(TelemetryOwnership ownership) {
+<span class="nc" id="L117">        String key = STATUS_FLAG_PREFIX</span>
+                + ownership
+<span class="nc" id="L119">                        .credential()</span>
+<span class="nc" id="L120">                        .sign(STATUS_KEY_CONTEXT + endpoint.audience() + SIGNED_FIELD_SEPARATOR + ownership.period());</span>
+<span class="nc" id="L121">        var body = JSON.createObjectNode();</span>
+<span class="nc" id="L122">        body.put(&quot;api_key&quot;, distribution.projectToken().orElseThrow());</span>
+<span class="nc" id="L123">        body.put(&quot;distinct_id&quot;, STATUS_DISTINCT_ID);</span>
+<span class="nc" id="L124">        body.putArray(&quot;flag_keys_to_evaluate&quot;).add(key);</span>
+<span class="nc" id="L125">        JsonNode response = post(distribution.endpoint().resolve(FLAGS_PATH), body.toString(), NOT_CONFIRMED);</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        if (response.path(&quot;errorsWhileComputingFlags&quot;).asBoolean(true)) {</span>
+<span class="nc" id="L127">            throw new TelemetryStateException(&quot;erasure status is temporarily unavailable&quot;);</span>
+        }
+<span class="nc" id="L129">        String variant = response.path(&quot;flags&quot;).path(key).path(&quot;variant&quot;).asText();</span>
+<span class="nc" id="L130">        return WireVocabulary.fromWireName(TelemetryOwnership.Phase.class, variant)</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                .filter(phase -&gt; phase != TelemetryOwnership.Phase.REQUESTED);</span>
+    }
+
+    /// `rejected` is the diagnostic for a 401, whose likely cause depends on the request.
+    private JsonNode post(URI uri, String body, String rejected) {
+<span class="nc bnc" id="L136" title="All 2 branches missed.">        return switch (BoundedHttp.post(http, uri, TIMEOUT, body)) {</span>
+<span class="nc" id="L137">            case Exchange.Unanswered unanswered -&gt;</span>
+<span class="nc" id="L138">                throw new TelemetryStateException(</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                        unanswered.failure() == Failure.INTERRUPTED</span>
+<span class="nc" id="L140">                                ? &quot;erasure request interrupted; its outcome is unknown&quot;</span>
+<span class="nc" id="L141">                                : &quot;erasure service unavailable; its outcome is unknown&quot;);</span>
+<span class="nc" id="L142">            case Exchange.Answered answered -&gt; answer(answered, rejected);</span>
+        };
+    }
+
+    // JSON parsing causes can retain the response body. Expose only fixed diagnostics.
+    @SuppressWarnings(&quot;PMD.PreserveStackTrace&quot;)
+    private static JsonNode answer(Exchange.Answered answered, String rejected) {
+<span class="nc bnc" id="L149" title="All 2 branches missed.">        if (answered.status() == Status.UNAUTHORIZED.getStatusCode()) {</span>
+<span class="nc" id="L150">            throw new TelemetryStateException(rejected);</span>
+        }
+<span class="nc bnc" id="L152" title="All 2 branches missed.">        boolean receipt = answered.status() == Status.CREATED.getStatusCode();</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">        if ((answered.status() != Status.OK.getStatusCode() &amp;&amp; !receipt)</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                || !(answered.body() instanceof BodyRead.Complete complete)) {</span>
+<span class="nc" id="L155">            throw new TelemetryStateException(NOT_CONFIRMED);</span>
+        }
+<span class="nc bnc" id="L157" title="All 4 branches missed.">        if (receipt || complete.text().isBlank()) {</span>
+            // A receipt carries no result; the handler continues in the background.
+<span class="nc" id="L159">            return JSON.createObjectNode();</span>
+        }
+        try {
+<span class="nc" id="L162">            JsonNode result = JSON.readTree(complete.text());</span>
+<span class="nc bnc" id="L163" title="All 4 branches missed.">            if (result == null || !result.isObject()) {</span>
+<span class="nc" id="L164">                throw new TelemetryStateException(&quot;erasure service returned an unrecognized response&quot;);</span>
+            }
+<span class="nc" id="L166">            return result;</span>
+<span class="nc" id="L167">        } catch (IOException exception) {</span>
+<span class="nc" id="L168">            throw new TelemetryStateException(&quot;erasure service returned an unreadable response&quot;);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

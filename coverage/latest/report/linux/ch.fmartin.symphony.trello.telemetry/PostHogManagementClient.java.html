@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PostHogManagementClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">PostHogManagementClient.java</span></div><h1>PostHogManagementClient.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
+import org.jboss.logging.Logger;
+import org.jspecify.annotations.Nullable;
+
+/// Test-only client for the PostHog management API, pinned to one numeric project. It never
+/// follows redirects, never puts its key into messages or evidence, and charges every request to
+/// the run budget. Only the endpoints the erasure experiment needs exist here.
+final class PostHogManagementClient {
+    static final String USER_AGENT = &quot;symphony-trello-telemetry-experiment/1&quot;;
+    static final String REFRESH_MODE = &quot;force_blocking&quot;;
+    private static final int MAX_BODY_BYTES = 256 * 1024;
+    private static final int RATE_LIMIT_ATTEMPTS = 3;
+    private static final int HTTP_TOO_MANY_REQUESTS = 429;
+    private static final int HTTP_REDIRECT_START = 300;
+    private static final int HTTP_CLIENT_ERROR_START = 400;
+<span class="nc" id="L37">    private static final Duration DEFAULT_RETRY_AFTER = Duration.ofSeconds(5);</span>
+<span class="nc" id="L38">    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(120);</span>
+    private static final String REDACTED = &quot;[redacted]&quot;;
+<span class="nc" id="L40">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+<span class="nc" id="L41">    private static final Logger LOG = Logger.getLogger(PostHogManagementClient.class);</span>
+
+    private final HttpClient http;
+    private final URI host;
+    private final long projectId;
+    private final Supplier&lt;String&gt; key;
+    private final ExperimentBudget budget;
+    private final Duration requestTimeout;
+
+    PostHogManagementClient(URI host, long projectId, Supplier&lt;String&gt; key, ExperimentBudget budget) {
+<span class="nc" id="L51">        this(</span>
+<span class="nc" id="L52">                HttpClient.newBuilder()</span>
+<span class="nc" id="L53">                        .connectTimeout(Duration.ofSeconds(20))</span>
+<span class="nc" id="L54">                        .followRedirects(HttpClient.Redirect.NEVER)</span>
+<span class="nc" id="L55">                        .build(),</span>
+                host,
+                projectId,
+                key,
+                budget);
+<span class="nc" id="L60">    }</span>
+
+    PostHogManagementClient(HttpClient http, URI host, long projectId, Supplier&lt;String&gt; key, ExperimentBudget budget) {
+<span class="nc" id="L63">        this(http, host, projectId, key, budget, REQUEST_TIMEOUT);</span>
+<span class="nc" id="L64">    }</span>
+
+    PostHogManagementClient(
+            HttpClient http,
+            URI host,
+            long projectId,
+            Supplier&lt;String&gt; key,
+            ExperimentBudget budget,
+<span class="nc" id="L72">            Duration requestTimeout) {</span>
+<span class="nc" id="L73">        this.http = http;</span>
+<span class="nc" id="L74">        this.host = host;</span>
+<span class="nc" id="L75">        this.projectId = projectId;</span>
+<span class="nc" id="L76">        this.key = key;</span>
+<span class="nc" id="L77">        this.budget = budget;</span>
+<span class="nc" id="L78">        this.requestTimeout = requestTimeout;</span>
+<span class="nc" id="L79">    }</span>
+
+    long projectId() {
+<span class="nc" id="L82">        return projectId;</span>
+    }
+
+    /// `GET /api/projects/{id}/`: the project's identity and its public capture token.
+    Response project() {
+<span class="nc" id="L87">        return send(&quot;GET&quot;, projectPath(&quot;&quot;), null);</span>
+    }
+
+    /// `GET /api/projects/{id}/persons/?distinct_id=`: the persons currently mapped to one ID.
+    Response persons(String distinctId) {
+<span class="nc" id="L92">        return send(&quot;GET&quot;, projectPath(&quot;persons/?distinct_id=&quot; + encode(distinctId)), null);</span>
+    }
+
+    /// `POST /api/projects/{id}/persons/bulk_delete/` by distinct IDs, always with event deletion.
+    Response bulkDelete(List&lt;String&gt; distinctIds) {
+<span class="nc" id="L97">        return send(</span>
+                &quot;POST&quot;,
+<span class="nc" id="L99">                projectPath(&quot;persons/bulk_delete/&quot;),</span>
+<span class="nc" id="L100">                Map.of(&quot;distinct_ids&quot;, distinctIds, &quot;delete_events&quot;, true));</span>
+    }
+
+    /// `GET /api/projects/{id}/persons/deletion_status/` for one person UUID, all statuses.
+    Response deletionStatus(String personUuid) {
+<span class="nc" id="L105">        return send(&quot;GET&quot;, projectPath(&quot;persons/deletion_status/?status=all&amp;person_uuid=&quot; + encode(personUuid)), null);</span>
+    }
+
+    /// `POST /api/projects/{id}/persons/reset_person_distinct_id/` with the body the source reads.
+    Response resetPersonDistinctId(String distinctId) {
+<span class="nc" id="L110">        return send(&quot;POST&quot;, projectPath(&quot;persons/reset_person_distinct_id/&quot;), Map.of(&quot;distinct_id&quot;, distinctId));</span>
+    }
+
+    /// `POST /api/projects/{id}/query/` with a HogQL query, always recalculated, never from cache.
+    Response query(String hogql) {
+<span class="nc" id="L115">        Response response = send(</span>
+                &quot;POST&quot;,
+<span class="nc" id="L117">                projectPath(&quot;query/&quot;),</span>
+<span class="nc" id="L118">                Map.of(&quot;query&quot;, Map.of(&quot;kind&quot;, &quot;HogQLQuery&quot;, &quot;query&quot;, hogql), &quot;refresh&quot;, REFRESH_MODE));</span>
+<span class="nc bnc" id="L119" title="All 4 branches missed.">        if (response.success() &amp;&amp; response.json().path(&quot;is_cached&quot;).asBoolean(false)) {</span>
+<span class="nc" id="L120">            throw new ManagementException(&quot;query answered from cache despite refresh=&quot; + REFRESH_MODE);</span>
+        }
+<span class="nc" id="L122">        return response;</span>
+    }
+
+    private String projectPath(String suffix) {
+<span class="nc" id="L126">        return &quot;/api/projects/&quot; + projectId + &quot;/&quot; + suffix;</span>
+    }
+
+    private Response send(String method, String path, @Nullable Object body) {
+<span class="nc" id="L130">        for (int attempt = 1; ; attempt++) {</span>
+<span class="nc" id="L131">            budget.chargeRequest(method + &quot; &quot; + path);</span>
+<span class="nc" id="L132">            Response response = exchange(method, path, body);</span>
+<span class="nc bnc" id="L133" title="All 4 branches missed.">            if (response.status() != HTTP_TOO_MANY_REQUESTS || attempt &gt;= RATE_LIMIT_ATTEMPTS) {</span>
+<span class="nc" id="L134">                return response;</span>
+            }
+<span class="nc" id="L136">            budget.await(response.retryAfter().orElse(DEFAULT_RETRY_AFTER), &quot;rate limited on &quot; + method + &quot; &quot; + path);</span>
+        }
+    }
+
+    /// One exchange bounded in time and bytes. The deadline is the smaller of the request timeout
+    /// and the wait budget the invocation has left; it covers headers and body. The body is read on
+    /// a virtual thread so a stalled server cannot hold the caller past the deadline, the stream is
+    /// closed on every path, an oversized answer is refused, and the key never reaches a message.
+    private Response exchange(String method, String path, @Nullable Object body) {
+<span class="nc" id="L145">        Duration allowance = min(requestTimeout, budget.remainingWait());</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (allowance.isZero()) {</span>
+<span class="nc" id="L147">            throw new ExperimentBudget.BudgetExhaustedException(&quot;wait budget exhausted before &quot; + method + &quot; &quot; + path);</span>
+        }
+<span class="nc" id="L149">        HttpRequest.Builder request = HttpRequest.newBuilder(host.resolve(path))</span>
+<span class="nc" id="L150">                .timeout(allowance)</span>
+<span class="nc" id="L151">                .header(&quot;Authorization&quot;, &quot;Bearer &quot; + key.get())</span>
+<span class="nc" id="L152">                .header(&quot;Accept&quot;, &quot;application/json&quot;)</span>
+<span class="nc" id="L153">                .header(&quot;User-Agent&quot;, USER_AGENT);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">        if (body == null) {</span>
+<span class="nc" id="L155">            request.method(method, HttpRequest.BodyPublishers.noBody());</span>
+        } else {
+<span class="nc" id="L157">            request.header(&quot;Content-Type&quot;, &quot;application/json&quot;)</span>
+<span class="nc" id="L158">                    .method(method, HttpRequest.BodyPublishers.ofString(serialize(body), StandardCharsets.UTF_8));</span>
+        }
+<span class="nc" id="L160">        long started = System.nanoTime();</span>
+<span class="nc" id="L161">        long deadline = started + allowance.toNanos();</span>
+        HttpResponse&lt;InputStream&gt; response;
+        try {
+<span class="nc" id="L164">            response = http.send(request.build(), HttpResponse.BodyHandlers.ofInputStream());</span>
+<span class="nc" id="L165">        } catch (IOException exception) {</span>
+<span class="nc" id="L166">            charge(started, method, path);</span>
+<span class="nc" id="L167">            throw new ManagementException(</span>
+<span class="nc" id="L168">                    method + &quot; &quot; + path + &quot; failed: &quot; + exception.getClass().getSimpleName(), exception);</span>
+<span class="nc" id="L169">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L170">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L171">            throw new ManagementException(method + &quot; &quot; + path + &quot; interrupted&quot;, exception);</span>
+<span class="nc" id="L172">        }</span>
+<span class="nc" id="L173">        int status = response.statusCode();</span>
+<span class="nc bnc" id="L174" title="All 4 branches missed.">        if (status &gt;= HTTP_REDIRECT_START &amp;&amp; status &lt; HTTP_CLIENT_ERROR_START) {</span>
+<span class="nc" id="L175">            closeQuietly(response.body());</span>
+<span class="nc" id="L176">            charge(started, method, path);</span>
+<span class="nc" id="L177">            throw new ManagementException(method + &quot; &quot; + path + &quot; answered a redirect (&quot; + status + &quot;), refused&quot;);</span>
+        }
+        byte[] bytes;
+        try {
+<span class="nc" id="L181">            bytes = readBounded(response.body(), deadline, method + &quot; &quot; + path);</span>
+        } finally {
+<span class="nc" id="L183">            charge(started, method, path);</span>
+        }
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (bytes.length &gt; MAX_BODY_BYTES) {</span>
+<span class="nc" id="L186">            throw new ManagementException(</span>
+                    method + &quot; &quot; + path + &quot; answered more than &quot; + MAX_BODY_BYTES + &quot; bytes, refused&quot;);
+        }
+<span class="nc" id="L189">        String text = redact(new String(bytes, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L190">        Optional&lt;Duration&gt; retryAfter = response.headers().firstValueAsLong(&quot;Retry-After&quot;).stream()</span>
+<span class="nc" id="L191">                .mapToObj(Duration::ofSeconds)</span>
+<span class="nc" id="L192">                .findFirst();</span>
+<span class="nc" id="L193">        return new Response(status, text, retryAfter);</span>
+    }
+
+    private void charge(long startedNanos, String method, String path) {
+<span class="nc" id="L197">        budget.chargeElapsed(Duration.ofNanos(System.nanoTime() - startedNanos), &quot;waiting for &quot; + method + &quot; &quot; + path);</span>
+<span class="nc" id="L198">    }</span>
+
+    private byte[] readBounded(InputStream stream, long deadline, String what) {
+<span class="nc" id="L201">        var read = new CompletableFuture&lt;byte[]&gt;();</span>
+<span class="nc" id="L202">        Thread.startVirtualThread(() -&gt; {</span>
+<span class="nc" id="L203">            try (InputStream body = stream) {</span>
+<span class="nc" id="L204">                read.complete(body.readNBytes(MAX_BODY_BYTES + 1));</span>
+<span class="nc" id="L205">            } catch (IOException exception) {</span>
+<span class="nc" id="L206">                read.completeExceptionally(exception);</span>
+<span class="nc" id="L207">            }</span>
+<span class="nc" id="L208">        });</span>
+        try {
+<span class="nc" id="L210">            return read.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L211">        } catch (TimeoutException exception) {</span>
+<span class="nc" id="L212">            closeQuietly(stream);</span>
+<span class="nc" id="L213">            throw new ManagementException(what + &quot; body timed out&quot;, exception);</span>
+<span class="nc" id="L214">        } catch (ExecutionException exception) {</span>
+<span class="nc" id="L215">            throw new ManagementException(</span>
+                    what + &quot; body unreadable: &quot;
+<span class="nc" id="L217">                            + exception.getCause().getClass().getSimpleName(),</span>
+                    exception);
+<span class="nc" id="L219">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L220">            closeQuietly(stream);</span>
+<span class="nc" id="L221">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L222">            throw new ManagementException(what + &quot; interrupted&quot;, exception);</span>
+        }
+    }
+
+    private static void closeQuietly(InputStream stream) {
+        try {
+<span class="nc" id="L228">            stream.close();</span>
+<span class="nc" id="L229">        } catch (IOException exception) {</span>
+            // Closing only abandons the exchange; a failure to close changes nothing.
+<span class="nc" id="L231">            LOG.debugf(exception, &quot;management response stream close failed&quot;);</span>
+<span class="nc" id="L232">        }</span>
+<span class="nc" id="L233">    }</span>
+
+    /// The key is the only secret this client holds; a body that echoes it is never kept verbatim.
+    private String redact(String text) {
+<span class="nc" id="L237">        String secret = key.get();</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">        return secret.isEmpty() ? text : text.replace(secret, REDACTED);</span>
+    }
+
+    private static Duration min(Duration left, Duration right) {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        return left.compareTo(right) &lt;= 0 ? left : right;</span>
+    }
+
+    private static String serialize(Object body) {
+        try {
+<span class="nc" id="L247">            return JSON.writeValueAsString(body);</span>
+<span class="nc" id="L248">        } catch (IOException exception) {</span>
+<span class="nc" id="L249">            throw new ManagementException(&quot;request body serialization failed&quot;, exception);</span>
+        }
+    }
+
+    private static String encode(String value) {
+<span class="nc" id="L254">        return URLEncoder.encode(value, StandardCharsets.UTF_8);</span>
+    }
+
+    /// A bounded management answer. The body is kept in memory only; callers copy the fields they
+    /// need into evidence.
+<span class="nc" id="L259">    record Response(int status, String body, Optional&lt;Duration&gt; retryAfter) {</span>
+        static final int HTTP_OK = 200;
+        static final int HTTP_ACCEPTED = 202;
+        static final int HTTP_FORBIDDEN = 403;
+        static final int HTTP_NOT_FOUND = 404;
+
+        boolean success() {
+<span class="nc bnc" id="L266" title="All 4 branches missed.">            return status &gt;= HTTP_OK &amp;&amp; status &lt; HTTP_REDIRECT_START;</span>
+        }
+
+        JsonNode json() {
+            try {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                return body.isBlank() ? MissingNode.getInstance() : JSON.readTree(body);</span>
+<span class="nc" id="L272">            } catch (IOException exception) {</span>
+<span class="nc" id="L273">                return MissingNode.getInstance();</span>
+            }
+        }
+
+        /// The provider's own error text when there is one, bounded so a stray page cannot flood
+        /// the evidence.
+        String detail() {
+<span class="nc" id="L280">            JsonNode detail = json().path(&quot;detail&quot;);</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            String text = detail.isMissingNode() ? body : detail.asText();</span>
+<span class="nc bnc" id="L282" title="All 2 branches missed.">            return text.length() &gt; 200 ? text.substring(0, 200) : text;</span>
+        }
+    }
+
+    /// A transport or contract failure. Messages name the method and path, never a credential.
+    static final class ManagementException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        ManagementException(String message) {
+<span class="nc" id="L291">            super(message);</span>
+<span class="nc" id="L292">        }</span>
+
+        ManagementException(String message, Throwable cause) {
+<span class="nc" id="L295">            super(message, cause);</span>
+<span class="nc" id="L296">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

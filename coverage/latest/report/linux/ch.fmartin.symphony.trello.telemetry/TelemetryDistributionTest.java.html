@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryDistributionTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryDistributionTest.java</span></div><h1>TelemetryDistributionTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+
+import java.net.URI;
+import java.util.Map;
+import java.util.Optional;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L14">final class TelemetryDistributionTest {</span>
+<span class="nc" id="L15">    private static final String LONG_TOKEN = &quot;phc_&quot; + &quot;a1B2&quot;.repeat(11);</span>
+
+    @Test
+    void sourceTreeDefaultsPointAtProductionWithoutAToken() {
+        // given
+<span class="nc" id="L20">        Map&lt;String, String&gt; noOverrides = Map.of();</span>
+
+        // when
+<span class="nc" id="L23">        TelemetryDistribution distribution = TelemetryDistribution.load(noOverrides::get);</span>
+
+        // then
+<span class="nc" id="L26">        assertThat(distribution.endpoint()).isEqualTo(TelemetryDistribution.PRODUCTION_ENDPOINT);</span>
+<span class="nc" id="L27">        assertThat(distribution.ready())</span>
+<span class="nc" id="L28">                .as(&quot;only the release workflow injects a token, so builds from the repository never send&quot;)</span>
+<span class="nc" id="L29">                .isFalse();</span>
+<span class="nc" id="L30">    }</span>
+
+    @Test
+    void systemPropertiesOverrideEndpointAndToken() {
+        // given
+<span class="nc" id="L35">        Map&lt;String, String&gt; overrides = Map.of(</span>
+                TelemetryDistribution.ENDPOINT_PROPERTY,
+                &quot;http://127.0.0.1:18443/i/v0/e/&quot;,
+                TelemetryDistribution.TOKEN_PROPERTY,
+                LONG_TOKEN);
+
+        // when
+<span class="nc" id="L42">        TelemetryDistribution distribution = TelemetryDistribution.load(overrides::get);</span>
+
+        // then
+<span class="nc" id="L45">        assertThat(distribution.endpoint()).isEqualTo(URI.create(&quot;http://127.0.0.1:18443/i/v0/e/&quot;));</span>
+<span class="nc" id="L46">        assertThat(distribution.projectToken()).hasValue(LONG_TOKEN);</span>
+<span class="nc" id="L47">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                TelemetryDistribution.TOKEN_PLACEHOLDER,
+                &quot;&quot;,
+                &quot;  &quot;,
+                &quot;phx_personal&quot;,
+                &quot;phc_with space&quot;,
+                &quot;sk_live_secret&quot;,
+                &quot;phc_&quot;,
+                &quot;phc_short&quot;,
+                &quot;phc_under_score0000000000000000000000000000000000000000&quot;
+            })
+    void placeholderAndForeignTokensAreTreatedAsUnconfigured(String token) {
+        // given
+<span class="nc" id="L64">        String candidate = token;</span>
+
+        // when
+<span class="nc" id="L67">        Optional&lt;String&gt; valid = TelemetryDistribution.validToken(candidate);</span>
+
+        // then
+<span class="nc" id="L70">        assertThat(valid).isEmpty();</span>
+<span class="nc" id="L71">    }</span>
+
+    @Test
+    void anInvalidEndpointOverrideBecomesADiagnosableNonSendingConfiguration() {
+        // given
+<span class="nc" id="L76">        Map&lt;String, String&gt; overrides = Map.of(</span>
+                TelemetryDistribution.ENDPOINT_PROPERTY,
+                &quot;http://127.example.invalid/not-loopback&quot;,
+                TelemetryDistribution.TOKEN_PROPERTY,
+                LONG_TOKEN);
+
+        // when
+<span class="nc" id="L83">        TelemetryDistribution distribution = TelemetryDistribution.load(overrides::get);</span>
+
+        // then
+<span class="nc" id="L86">        assertThat(distribution.ready())</span>
+<span class="nc" id="L87">                .as(&quot;an invalid override never sends anywhere&quot;)</span>
+<span class="nc" id="L88">                .isFalse();</span>
+<span class="nc" id="L89">        assertThat(distribution.problem()).get().asString().contains(TelemetryDistribution.ENDPOINT_PROPERTY);</span>
+<span class="nc" id="L90">        assertThat(distribution.problem()).get().asString().doesNotContain(&quot;127.example.invalid&quot;);</span>
+<span class="nc" id="L91">    }</span>
+
+    @Test
+    void aMalformedEndpointOverrideDoesNotThrow() {
+        // given
+<span class="nc" id="L96">        Map&lt;String, String&gt; overrides = Map.of(TelemetryDistribution.ENDPOINT_PROPERTY, &quot;::not a uri::&quot;);</span>
+
+        // when
+<span class="nc" id="L99">        TelemetryDistribution distribution = TelemetryDistribution.load(overrides::get);</span>
+
+        // then
+<span class="nc" id="L102">        assertThat(distribution.ready()).as(&quot;a malformed override cannot send&quot;).isFalse();</span>
+<span class="nc" id="L103">        assertThat(distribution.problem()).isPresent();</span>
+<span class="nc" id="L104">    }</span>
+
+    @Test
+    void aMalformedEndpointOverrideIsNamedWithoutEchoingTheValue() {
+        // given
+<span class="nc" id="L109">        Map&lt;String, String&gt; overrides = Map.of(TelemetryDistribution.ENDPOINT_PROPERTY, &quot;https://secret-marker host/&quot;);</span>
+
+        // when
+<span class="nc" id="L112">        TelemetryDistribution distribution = TelemetryDistribution.load(overrides::get);</span>
+
+        // then
+<span class="nc" id="L115">        assertThat(distribution.problem())</span>
+<span class="nc" id="L116">                .hasValue(TelemetryDistribution.ENDPOINT_PROPERTY + &quot; is not a usable endpoint&quot;);</span>
+<span class="nc" id="L117">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;https://secret-marker host/erase&quot;, &quot;http://secret-marker.example/erase&quot;})
+    void anUnusableErasureServiceIsNamedWithoutEchoingTheValue(String erasureEndpoint) {
+        // given
+<span class="nc" id="L123">        Map&lt;String, String&gt; overrides = Map.of(</span>
+                TelemetryDistribution.ERASURE_ENDPOINT_PROPERTY,
+                erasureEndpoint,
+                TelemetryDistribution.ERASURE_AUDIENCE_PROPERTY,
+                &quot;symphony-trello-erasure&quot;,
+                TelemetryDistribution.TOKEN_PROPERTY,
+                LONG_TOKEN);
+
+        // when
+<span class="nc" id="L132">        TelemetryDistribution distribution = TelemetryDistribution.load(overrides::get);</span>
+
+        // then
+<span class="nc" id="L135">        assertThat(distribution.ready())</span>
+<span class="nc" id="L136">                .as(&quot;an unusable erasure service blocks sending&quot;)</span>
+<span class="nc" id="L137">                .isFalse();</span>
+<span class="nc" id="L138">        assertThat(distribution.problem())</span>
+<span class="nc" id="L139">                .hasValue(TelemetryDistribution.ERASURE_ENDPOINT_PROPERTY + &quot; and &quot;</span>
+                        + TelemetryDistribution.ERASURE_AUDIENCE_PROPERTY + &quot; are not a usable erasure service&quot;);
+<span class="nc" id="L141">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                &quot;http://example.com/i/v0/e/&quot;,
+                &quot;ftp://eu.i.posthog.com/&quot;,
+                &quot;https:///no-host&quot;,
+                &quot;http://127.example.invalid/i/v0/e/&quot;,
+                &quot;http://[::2]/i/v0/e/&quot;
+            })
+    void nonHttpsNonLoopbackEndpointsAreRejected(String endpoint) {
+        // given
+<span class="nc" id="L154">        URI candidate = URI.create(endpoint);</span>
+
+        // when
+<span class="nc" id="L157">        ThrowingCallable construction = () -&gt; new TelemetryDistribution(candidate, Optional.empty());</span>
+
+        // then
+<span class="nc" id="L160">        assertThatIllegalArgumentException().isThrownBy(construction);</span>
+<span class="nc" id="L161">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

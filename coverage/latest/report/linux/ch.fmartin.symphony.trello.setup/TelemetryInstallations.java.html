@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryInstallations.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">TelemetryInstallations.java</span></div><h1>TelemetryInstallations.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import ch.fmartin.symphony.trello.config.LocalEnvironment;
+import ch.fmartin.symphony.trello.telemetry.ConnectedBoardInventory;
+import ch.fmartin.symphony.trello.telemetry.HeartbeatSnapshots;
+import ch.fmartin.symphony.trello.telemetry.TelemetryDistribution;
+import ch.fmartin.symphony.trello.telemetry.TelemetryEnvironment;
+import ch.fmartin.symphony.trello.telemetry.TelemetryInstallation;
+import ch.fmartin.symphony.trello.telemetry.TelemetryService;
+import ch.fmartin.symphony.trello.time.ApplicationClock;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+
+/// Wires telemetry to the installed layout: the state home holds `telemetry.json`, and the
+/// connected-board manifest in the config directory supplies the board count.
+final class TelemetryInstallations {
+    private TelemetryInstallations() {}
+
+    static TelemetryInstallation forPaths(LocalWorkerPaths paths, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L24">        return forPaths(</span>
+                paths,
+<span class="nc" id="L26">                paths.manifestPath(),</span>
+<span class="nc" id="L27">                LocalEnvironment.defaultDotenv(environment, paths.defaultEnvPath()),</span>
+                environment);
+    }
+
+    /// Direct `new-board` and `import-board` runs may name a manifest outside the config directory;
+    /// the board count must come from that same file, not from the default file name.
+    static TelemetryInstallation forPaths(
+            LocalWorkerPaths paths, Path manifestPath, Path envPath, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L35">        return TelemetryInstallation.of(</span>
+<span class="nc" id="L36">                paths.stateHome(),</span>
+<span class="nc" id="L37">                inventory(manifestPath),</span>
+<span class="nc" id="L38">                TelemetryEnvironment.from(WorkflowEnvironmentResolver.resolver(environment, envPath)),</span>
+<span class="nc" id="L39">                TelemetryDistribution.load(SetupSystemProperties::get));</span>
+    }
+
+    /// Managed workers receive the config and state directories from the environment that
+    /// `LocalWorkerManager` sets; anything else is a development or test run without telemetry.
+    static TelemetryInstallation forWorker(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L45">        TelemetryEnvironment telemetryEnvironment = TelemetryEnvironment.from(environment);</span>
+<span class="nc" id="L46">        TelemetryDistribution distribution = TelemetryDistribution.load(SetupSystemProperties::get);</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">        if (!LocalWorkerPaths.managedWorkerEnvironmentPresent(environment)) {</span>
+<span class="nc" id="L48">            return TelemetryInstallation.absent(telemetryEnvironment, distribution);</span>
+        }
+        try {
+<span class="nc" id="L51">            LocalWorkerPaths paths = LocalWorkerPaths.from(</span>
+<span class="nc" id="L52">                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), environment);</span>
+<span class="nc" id="L53">            return forPaths(paths, environment);</span>
+<span class="nc" id="L54">        } catch (RuntimeException exception) {</span>
+            // Telemetry must never stop a worker; an unusable layout only means no reports from it.
+<span class="nc" id="L56">            return TelemetryInstallation.absent(telemetryEnvironment, distribution);</span>
+        }
+    }
+
+    static TelemetryService service(LocalWorkerPaths paths, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L61">        return service(forPaths(paths, environment));</span>
+    }
+
+    static TelemetryService service(
+            LocalWorkerPaths paths, Path manifestPath, Path envPath, Map&lt;String, String&gt; environment) {
+<span class="nc" id="L66">        return service(forPaths(paths, manifestPath, envPath, environment));</span>
+    }
+
+    private static TelemetryService service(TelemetryInstallation installation) {
+<span class="nc" id="L70">        return new TelemetryService(</span>
+<span class="nc" id="L71">                installation, HeartbeatSnapshots.detectingPlatform(installation), ApplicationClock.systemUtc());</span>
+    }
+
+    static ConnectedBoardInventory inventory(Path manifestPath) {
+<span class="nc" id="L75">        return () -&gt; distinctBoardCount(manifestPath);</span>
+    }
+
+    /// The number of distinct boards in a clean manifest; unknown when the manifest is unreadable or
+    /// has warnings, because a doubtful count must not fail the report.
+    private static OptionalInt distinctBoardCount(Path manifestPath) {
+        try {
+            // Lifecycle checks treat an absent manifest as empty; telemetry must distinguish it
+            // from a readable manifest that actually records no boards.
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (!Files.isRegularFile(manifestPath)) {</span>
+<span class="nc" id="L85">                return OptionalInt.empty();</span>
+            }
+<span class="nc" id="L87">            ConnectedBoardRepository.ManifestLoadResult loaded =</span>
+<span class="nc" id="L88">                    new ConnectedBoardRepository(manifestPath).loadForCheck();</span>
+<span class="nc bnc" id="L89" title="All 4 branches missed.">            if (!loaded.usableRows() || !loaded.warnings().isEmpty()) {</span>
+<span class="nc" id="L90">                return OptionalInt.empty();</span>
+            }
+<span class="nc" id="L92">            long distinct = loaded.manifest().boards().stream()</span>
+<span class="nc" id="L93">                    .map(ConnectedBoard::boardId)</span>
+<span class="nc" id="L94">                    .distinct()</span>
+<span class="nc" id="L95">                    .count();</span>
+<span class="nc" id="L96">            return OptionalInt.of(Math.toIntExact(distinct));</span>
+<span class="nc" id="L97">        } catch (IOException | RuntimeException exception) {</span>
+<span class="nc" id="L98">            return OptionalInt.empty();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

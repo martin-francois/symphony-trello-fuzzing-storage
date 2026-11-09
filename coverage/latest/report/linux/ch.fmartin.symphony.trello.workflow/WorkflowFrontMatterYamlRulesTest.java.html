@@ -1,0 +1,580 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowFrontMatterYamlRulesTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.workflow</a> &gt; <span class="el_source">WorkflowFrontMatterYamlRulesTest.java</span></div><h1>WorkflowFrontMatterYamlRulesTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.workflow;
+
+import static ch.fmartin.symphony.trello.workflow.FrontMatterWorkflows.WORKFLOW;
+import static ch.fmartin.symphony.trello.workflow.FrontMatterWorkflows.workflow;
+import static ch.fmartin.symphony.trello.workflow.WorkflowFrontMatterYaml.MAX_ALIAS_COPIED_CHARACTERS;
+import static ch.fmartin.symphony.trello.workflow.WorkflowFrontMatterYaml.MAX_ALIAS_EXPANDED_NODES;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.assertj.core.api.InstanceOfAssertFactories.LIST;
+import static org.junit.jupiter.api.Named.named;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/// The YAML rules of `SPEC.md` section 5.2 for workflow front matter: aliases resolve, merge keys and
+/// repeated keys fail with a `workflow_parse_error` that names the key, and front matter without
+/// content is an empty config.
+<span class="nc" id="L29">final class WorkflowFrontMatterYamlRulesTest {</span>
+    private static final String PARSE_ERROR = &quot;workflow_parse_error&quot;;
+    // The message shows a next-line character in a key as its escape, so the message stays one line.
+    private static final String ESCAPED_NEXT_LINE = &quot;\\u0085&quot;;
+    // Long enough that the character limit, not the node limit, stops the copies.
+<span class="nc" id="L34">    private static final String LONG_SCALAR = &quot;x&quot;.repeat(1_000);</span>
+
+<span class="nc" id="L36">    private final WorkflowLoader loader = new WorkflowLoader();</span>
+
+    @CsvSource(
+            textBlock =
+                    &quot;&quot;&quot;
+            a: 1, '--- # second', 'b: 2', 2
+            null, '--- # second', 'b: 2', 2
+            {}, '--- # second', 'b: 2', 2
+            '--- # empty first', '--- # second', 'b: 2', 2
+            a: 1, '...\n--- # second', 'b: 2', 3
+            a: 1, '...', 'b: 2', 3
+            a: 1, '--- # second', '', 2
+            a: 1, '--- # second', 'private-value: [', 2
+            a: 1, '...', 'private-value: [', 3
+            a: 1, '...', '%YAML 1.1', 3
+            a: 1, '...', '...', 3
+            a: 1, '...', '&quot;unfinished\nprivate-value', 3
+            a: 1, '...\n# comment\n', '%YAML 1.1\n--- # second', 5
+            'a: &quot;\uD83D\uDE00&quot;', '...', '%YAML 1.1', 3
+            &quot;&quot;&quot;)
+    @ParameterizedTest
+    void aSecondYamlDocumentFailsInsteadOfDroppingItsSettings(
+            String firstDocument, String separator, String secondDocument, int line) {
+        // given
+<span class="nc" id="L60">        byte[] workflow = workflow(firstDocument + &quot;\n&quot; + separator + &quot;\n&quot; + secondDocument + &quot;\n&quot;);</span>
+
+        // when
+<span class="nc" id="L63">        WorkflowException failure =</span>
+<span class="nc" id="L64">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L67">        assertThat(failure)</span>
+<span class="nc" id="L68">                .hasMessageContaining(&quot;single YAML document&quot;)</span>
+<span class="nc" id="L69">                .hasMessageContaining(&quot;front matter line %s&quot;, line)</span>
+<span class="nc" id="L70">                .hasMessageNotContaining(&quot;private-value&quot;)</span>
+<span class="nc" id="L71">                .extracting(WorkflowException::code)</span>
+<span class="nc" id="L72">                .isEqualTo(PARSE_ERROR);</span>
+<span class="nc" id="L73">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;a: 1\n...\n# end\n&quot;, &quot;--- # first\na: 1\n...\n&quot;, &quot;a: |\n  --- # literal\n  ...\n&quot;})
+    void singleDocumentMarkersAndLiteralBlockContentRemainValid(String frontMatter) {
+        // given
+<span class="nc" id="L79">        byte[] workflow = workflow(frontMatter);</span>
+
+        // when
+<span class="nc" id="L82">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L85">        assertThat(loaded.config()).containsOnlyKeys(&quot;a&quot;);</span>
+<span class="nc" id="L86">    }</span>
+
+    @MethodSource(&quot;aliasCases&quot;)
+    @ParameterizedTest
+    void aliasesResolveToTheAnchoredValue(String frontMatter, Map&lt;String, Object&gt; expectedConfig) {
+        // given
+<span class="nc" id="L92">        byte[] workflow = workflow(frontMatter);</span>
+
+        // when
+<span class="nc" id="L95">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L98">        assertThat(loaded.config()).containsExactlyInAnyOrderEntriesOf(expectedConfig);</span>
+<span class="nc" id="L99">    }</span>
+
+    private static Stream&lt;Arguments&gt; aliasCases() {
+<span class="nc" id="L102">        return Stream.of(</span>
+<span class="nc" id="L103">                arguments(named(&quot;backslash in anchor&quot;, &quot;a: &amp;a\\b 1\nb: *a\\b\n&quot;), Map.of(&quot;a&quot;, 1, &quot;b&quot;, 1)),</span>
+<span class="nc" id="L104">                arguments(named(&quot;quote in anchor&quot;, &quot;a: &amp;a\&quot;b 1\nb: *a\&quot;b\n&quot;), Map.of(&quot;a&quot;, 1, &quot;b&quot;, 1)),</span>
+<span class="nc" id="L105">                arguments(</span>
+<span class="nc" id="L106">                        named(</span>
+                                &quot;raw anchor differs from diagnostic escape&quot;,
+                                &quot;first: &amp;a\\b 1\nsecond: &amp;a\\\\b 2\ncopy: *a\\b\n&quot;),
+<span class="nc" id="L109">                        Map.of(&quot;first&quot;, 1, &quot;second&quot;, 2, &quot;copy&quot;, 1)),</span>
+<span class="nc" id="L110">                arguments(named(&quot;scalar&quot;, &quot;a: &amp;x 5\nb: *x\n&quot;), Map.of(&quot;a&quot;, 5, &quot;b&quot;, 5)),</span>
+<span class="nc" id="L111">                arguments(</span>
+<span class="nc" id="L112">                        named(&quot;block sequence&quot;, &quot;a: &amp;x\n  - 1\n  - two\nb: *x\n&quot;),</span>
+<span class="nc" id="L113">                        Map.of(&quot;a&quot;, List.of(1, &quot;two&quot;), &quot;b&quot;, List.of(1, &quot;two&quot;))),</span>
+<span class="nc" id="L114">                arguments(</span>
+<span class="nc" id="L115">                        named(&quot;flow sequence&quot;, &quot;a: &amp;x [1, 2]\nb: *x\n&quot;),</span>
+<span class="nc" id="L116">                        Map.of(&quot;a&quot;, List.of(1, 2), &quot;b&quot;, List.of(1, 2))),</span>
+<span class="nc" id="L117">                arguments(</span>
+<span class="nc" id="L118">                        named(&quot;block mapping&quot;, &quot;base: &amp;d\n  t: 5\n  on: yes\nc: *d\n&quot;),</span>
+<span class="nc" id="L119">                        Map.of(&quot;base&quot;, Map.of(&quot;t&quot;, 5, &quot;on&quot;, true), &quot;c&quot;, Map.of(&quot;t&quot;, 5, &quot;on&quot;, true))),</span>
+<span class="nc" id="L120">                arguments(</span>
+<span class="nc" id="L121">                        named(&quot;flow mapping&quot;, &quot;base: &amp;d {t: 5}\nc: *d\n&quot;),</span>
+<span class="nc" id="L122">                        Map.of(&quot;base&quot;, Map.of(&quot;t&quot;, 5), &quot;c&quot;, Map.of(&quot;t&quot;, 5))),</span>
+<span class="nc" id="L123">                arguments(</span>
+<span class="nc" id="L124">                        named(&quot;nested mapping value&quot;, &quot;base: &amp;d {t: 5}\ncodex:\n  hooks:\n    copy: *d\n&quot;),</span>
+<span class="nc" id="L125">                        Map.of(&quot;base&quot;, Map.of(&quot;t&quot;, 5), &quot;codex&quot;, Map.of(&quot;hooks&quot;, Map.of(&quot;copy&quot;, Map.of(&quot;t&quot;, 5))))),</span>
+<span class="nc" id="L126">                arguments(</span>
+<span class="nc" id="L127">                        named(&quot;block sequence items&quot;, &quot;a: &amp;x {t: 1}\nl:\n  - *x\n  - *x\n&quot;),</span>
+<span class="nc" id="L128">                        Map.of(&quot;a&quot;, Map.of(&quot;t&quot;, 1), &quot;l&quot;, List.of(Map.of(&quot;t&quot;, 1), Map.of(&quot;t&quot;, 1)))),</span>
+<span class="nc" id="L129">                arguments(</span>
+<span class="nc" id="L130">                        named(&quot;flow sequence items&quot;, &quot;a: &amp;x 1\nl: [*x, 2, *x]\n&quot;),</span>
+<span class="nc" id="L131">                        Map.of(&quot;a&quot;, 1, &quot;l&quot;, List.of(1, 2, 1))),</span>
+<span class="nc" id="L132">                arguments(</span>
+<span class="nc" id="L133">                        named(&quot;flow mapping value&quot;, &quot;a: &amp;x [1]\nc: {k: *x}\n&quot;),</span>
+<span class="nc" id="L134">                        Map.of(&quot;a&quot;, List.of(1), &quot;c&quot;, Map.of(&quot;k&quot;, List.of(1)))),</span>
+<span class="nc" id="L135">                arguments(</span>
+<span class="nc" id="L136">                        named(&quot;alias inside an anchored sequence&quot;, &quot;a: &amp;x 1\nb: &amp;y [*x]\nc: *y\n&quot;),</span>
+<span class="nc" id="L137">                        Map.of(&quot;a&quot;, 1, &quot;b&quot;, List.of(1), &quot;c&quot;, List.of(1))),</span>
+<span class="nc" id="L138">                arguments(</span>
+<span class="nc" id="L139">                        named(&quot;alias inside an anchored mapping&quot;, &quot;a: &amp;x 1\nb: &amp;y {k: *x}\nc: *y\n&quot;),</span>
+<span class="nc" id="L140">                        Map.of(&quot;a&quot;, 1, &quot;b&quot;, Map.of(&quot;k&quot;, 1), &quot;c&quot;, Map.of(&quot;k&quot;, 1))),</span>
+<span class="nc" id="L141">                arguments(</span>
+<span class="nc" id="L142">                        named(&quot;anchor redefined later&quot;, &quot;a: &amp;x 1\nb: *x\nc: &amp;x 2\nd: *x\n&quot;),</span>
+<span class="nc" id="L143">                        Map.of(&quot;a&quot;, 1, &quot;b&quot;, 1, &quot;c&quot;, 2, &quot;d&quot;, 2)),</span>
+<span class="nc" id="L144">                arguments(</span>
+<span class="nc" id="L145">                        named(</span>
+                                &quot;copy keeps the value an inner alias had where the anchor was defined&quot;,
+                                &quot;a: &amp;x 1\nb: &amp;y [*x]\nc: &amp;x 2\nd: *y\ne: *x\n&quot;),
+<span class="nc" id="L148">                        Map.of(&quot;a&quot;, 1, &quot;b&quot;, List.of(1), &quot;c&quot;, 2, &quot;d&quot;, List.of(1), &quot;e&quot;, 2)),</span>
+<span class="nc" id="L149">                arguments(</span>
+<span class="nc" id="L150">                        named(&quot;anchor nested inside an anchor&quot;, &quot;a: &amp;outer {in: &amp;inner [1]}\nb: *inner\nc: *outer\n&quot;),</span>
+<span class="nc" id="L151">                        Map.of(&quot;a&quot;, Map.of(&quot;in&quot;, List.of(1)), &quot;b&quot;, List.of(1), &quot;c&quot;, Map.of(&quot;in&quot;, List.of(1)))),</span>
+<span class="nc" id="L152">                arguments(</span>
+<span class="nc" id="L153">                        named(&quot;anchor redefined inside its own node&quot;, &quot;a: &amp;x [&amp;x 1, *x]\nb: *x\n&quot;),</span>
+<span class="nc" id="L154">                        Map.of(&quot;a&quot;, List.of(1, 1), &quot;b&quot;, 1)),</span>
+<span class="nc" id="L155">                arguments(</span>
+<span class="nc" id="L156">                        named(</span>
+                                &quot;anchor redefined inside its own node stays redefined after it&quot;,
+                                &quot;a: &amp;x {k: &amp;x [2]}\nb: *x\n&quot;),
+<span class="nc" id="L159">                        Map.of(&quot;a&quot;, Map.of(&quot;k&quot;, List.of(2)), &quot;b&quot;, List.of(2))),</span>
+<span class="nc" id="L160">                arguments(named(&quot;alias as a key&quot;, &quot;a: &amp;k name\n*k : v\n&quot;), Map.of(&quot;a&quot;, &quot;name&quot;, &quot;name&quot;, &quot;v&quot;)),</span>
+<span class="nc" id="L161">                arguments(named(&quot;alias to a quoted scalar&quot;, &quot;a: &amp;x '5'\nb: *x\n&quot;), Map.of(&quot;a&quot;, &quot;5&quot;, &quot;b&quot;, &quot;5&quot;)),</span>
+<span class="nc" id="L162">                arguments(named(&quot;alias to null&quot;, &quot;c:\n  a: &amp;x\n  b: *x\n&quot;), Map.of(&quot;c&quot;, nullValues(&quot;a&quot;, &quot;b&quot;))));</span>
+    }
+
+    @MethodSource(&quot;ruleViolations&quot;)
+    @ParameterizedTest
+    void ruleViolationsFailWithAMessageThatNamesTheKeyAndTheFix(String frontMatter, String expectedMessage) {
+        // given
+<span class="nc" id="L169">        byte[] workflow = workflow(frontMatter);</span>
+
+        // when
+<span class="nc" id="L172">        WorkflowException failure =</span>
+<span class="nc" id="L173">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L176">        assertThat(failure)</span>
+<span class="nc" id="L177">                .hasMessage(expectedMessage)</span>
+<span class="nc" id="L178">                .extracting(WorkflowException::code)</span>
+<span class="nc" id="L179">                .isEqualTo(PARSE_ERROR);</span>
+<span class="nc" id="L180">    }</span>
+
+    private static Stream&lt;Arguments&gt; ruleViolations() {
+<span class="nc" id="L183">        return Stream.of(</span>
+<span class="nc" id="L184">                arguments(named(&quot;merge key at the top level&quot;, &quot;base: &amp;d {t: 5}\n&lt;&lt;: *d\n&quot;), mergeKey(&quot;&lt;&lt;&quot;, 2)),</span>
+<span class="nc" id="L185">                arguments(</span>
+<span class="nc" id="L186">                        named(&quot;merge key in a block mapping&quot;, &quot;base: &amp;d {t: 5}\nc:\n  &lt;&lt;: *d\n&quot;), mergeKey(&quot;c.&lt;&lt;&quot;, 3)),</span>
+<span class="nc" id="L187">                arguments(named(&quot;merge key in a flow mapping&quot;, &quot;base: &amp;d {t: 5}\nc: {&lt;&lt;: *d}\n&quot;), mergeKey(&quot;c.&lt;&lt;&quot;, 2)),</span>
+<span class="nc" id="L188">                arguments(</span>
+<span class="nc" id="L189">                        named(&quot;merge key nested two levels&quot;, &quot;base: &amp;d {t: 5}\ncodex:\n  hooks:\n    &lt;&lt;: *d\n&quot;),</span>
+<span class="nc" id="L190">                        mergeKey(&quot;codex.hooks.&lt;&lt;&quot;, 4)),</span>
+<span class="nc" id="L191">                arguments(</span>
+<span class="nc" id="L192">                        named(&quot;merge key in a sequence item&quot;, &quot;base: &amp;d {t: 5}\nl:\n  - x: 1\n  - &lt;&lt;: *d\n&quot;),</span>
+<span class="nc" id="L193">                        mergeKey(&quot;l[1].&lt;&lt;&quot;, 4)),</span>
+<span class="nc" id="L194">                arguments(named(&quot;merge key with an inline mapping&quot;, &quot;c:\n  &lt;&lt;: {t: 5}\n&quot;), mergeKey(&quot;c.&lt;&lt;&quot;, 2)),</span>
+<span class="nc" id="L195">                arguments(</span>
+<span class="nc" id="L196">                        named(&quot;merge key with a list of mappings&quot;, &quot;a: &amp;a {x: 1}\nb: &amp;b {y: 2}\nc:\n  &lt;&lt;: [*a, *b]\n&quot;),</span>
+<span class="nc" id="L197">                        mergeKey(&quot;c.&lt;&lt;&quot;, 4)),</span>
+<span class="nc" id="L198">                arguments(named(&quot;merge key after other keys&quot;, &quot;c:\n  t: 1\n  &lt;&lt;: {t: 5}\n&quot;), mergeKey(&quot;c.&lt;&lt;&quot;, 3)),</span>
+<span class="nc" id="L199">                arguments(named(&quot;merge key with an explicit tag&quot;, &quot;c:\n  !!merge &lt;&lt;: {t: 5}\n&quot;), mergeKey(&quot;c.&lt;&lt;&quot;, 2)),</span>
+<span class="nc" id="L200">                arguments(</span>
+<span class="nc" id="L201">                        named(</span>
+                                &quot;merge key with a percent-escaped verbatim tag&quot;,
+                                &quot;c:\n  !&lt;tag:yaml.org,2002:merg%65&gt; x: 1\n&quot;),
+<span class="nc" id="L204">                        mergeKey(&quot;c.x&quot;, 2)),</span>
+<span class="nc" id="L205">                arguments(</span>
+<span class="nc" id="L206">                        named(&quot;merge key inside an anchored mapping&quot;, &quot;base: &amp;d {&lt;&lt;: {t: 5}}\nc: *d\n&quot;),</span>
+<span class="nc" id="L207">                        mergeKey(&quot;base.&lt;&lt;&quot;, 1)),</span>
+<span class="nc" id="L208">                arguments(</span>
+<span class="nc" id="L209">                        named(&quot;merge key introduced through an alias&quot;, &quot;k: &amp;k &lt;&lt;\nc:\n  *k : {t: 5}\n&quot;),</span>
+<span class="nc" id="L210">                        mergeKey(&quot;c.*k&quot;, 3)),</span>
+<span class="nc" id="L211">                arguments(</span>
+<span class="nc" id="L212">                        named(&quot;merge key under a key that an alias supplies&quot;, &quot;a: &amp;k v\n*k : {&lt;&lt;: {t: 5}}\n&quot;),</span>
+<span class="nc" id="L213">                        mergeKey(&quot;*k.&lt;&lt;&quot;, 2)),</span>
+<span class="nc" id="L214">                arguments(named(&quot;duplicate at the top level&quot;, &quot;a: 1\nb: 2\na: 3\n&quot;), duplicateKey(&quot;a&quot;, 3)),</span>
+<span class="nc" id="L215">                arguments(</span>
+<span class="nc" id="L216">                        named(&quot;duplicate in a block mapping&quot;, &quot;codex:\n  x: 1\n  x: 2\n&quot;), duplicateKey(&quot;codex.x&quot;, 3)),</span>
+<span class="nc" id="L217">                arguments(named(&quot;duplicate in a flow mapping&quot;, &quot;c: {x: 1, x: 2}\n&quot;), duplicateKey(&quot;c.x&quot;, 1)),</span>
+<span class="nc" id="L218">                arguments(</span>
+<span class="nc" id="L219">                        named(&quot;duplicate nested two levels&quot;, &quot;codex:\n  hooks:\n    x: 1\n    x: 2\n&quot;),</span>
+<span class="nc" id="L220">                        duplicateKey(&quot;codex.hooks.x&quot;, 4)),</span>
+<span class="nc" id="L221">                arguments(</span>
+<span class="nc" id="L222">                        named(&quot;duplicate in a sequence item&quot;, &quot;l:\n  - {x: 1}\n  - {x: 1, x: 2}\n&quot;),</span>
+<span class="nc" id="L223">                        duplicateKey(&quot;l[1].x&quot;, 3)),</span>
+<span class="nc" id="L224">                arguments(</span>
+<span class="nc" id="L225">                        named(&quot;duplicate that differs only in double quotes&quot;, &quot;a: 1\n\&quot;a\&quot;: 2\n&quot;),</span>
+<span class="nc" id="L226">                        duplicateKey(&quot;a&quot;, 2)),</span>
+<span class="nc" id="L227">                arguments(</span>
+<span class="nc" id="L228">                        named(&quot;duplicate that differs only in single quotes&quot;, &quot;'a': 1\na: 2\n&quot;), duplicateKey(&quot;a&quot;, 2)),</span>
+<span class="nc" id="L229">                arguments(named(&quot;number key and quoted number key&quot;, &quot;1: a\n\&quot;1\&quot;: b\n&quot;), duplicateKey(&quot;1&quot;, 2)),</span>
+<span class="nc" id="L230">                arguments(</span>
+<span class="nc" id="L231">                        named(&quot;duplicate introduced through an alias&quot;, &quot;k: &amp;k a\na: 1\n*k : 2\n&quot;),</span>
+<span class="nc" id="L232">                        duplicateKey(&quot;*k&quot;, 3)),</span>
+<span class="nc" id="L233">                arguments(</span>
+<span class="nc" id="L234">                        named(&quot;duplicate of an anchored key through its alias&quot;, &quot;&amp;k x: 1\n*k : 2\n&quot;),</span>
+<span class="nc" id="L235">                        duplicateKey(&quot;*k&quot;, 2)),</span>
+<span class="nc" id="L236">                arguments(</span>
+<span class="nc" id="L237">                        named(&quot;duplicate under a key that an alias supplies&quot;, &quot;a: &amp;k v\n*k : {y: 1, y: 2}\n&quot;),</span>
+<span class="nc" id="L238">                        duplicateKey(&quot;*k.y&quot;, 2)),</span>
+<span class="nc" id="L239">                arguments(named(&quot;duplicate with different value types&quot;, &quot;a: {x: 1}\na: [1]\n&quot;), duplicateKey(&quot;a&quot;, 2)),</span>
+<span class="nc" id="L240">                arguments(named(&quot;undefined alias&quot;, &quot;a: *missing\n&quot;), undefinedAlias(&quot;missing&quot;, 1)),</span>
+<span class="nc" id="L241">                arguments(named(&quot;alias before its anchor&quot;, &quot;a: *x\nb: &amp;x 1\n&quot;), undefinedAlias(&quot;x&quot;, 1)),</span>
+<span class="nc" id="L242">                arguments(</span>
+<span class="nc" id="L243">                        named(&quot;alias inside the node its anchor marks&quot;, &quot;a: &amp;x\n  b: *x\n&quot;),</span>
+<span class="nc" id="L244">                        aliasInsideItsAnchor(&quot;x&quot;, 2)),</span>
+<span class="nc" id="L245">                arguments(</span>
+<span class="nc" id="L246">                        named(&quot;alias inside a node that redefines an earlier anchor&quot;, &quot;a: &amp;x 1\nb: &amp;x [*x]\n&quot;),</span>
+<span class="nc" id="L247">                        aliasInsideItsAnchor(&quot;x&quot;, 2)),</span>
+<span class="nc" id="L248">                arguments(</span>
+<span class="nc" id="L249">                        named(&quot;alias inside the flow sequence its anchor marks&quot;, &quot;a: &amp;x [1, *x]\n&quot;),</span>
+<span class="nc" id="L250">                        aliasInsideItsAnchor(&quot;x&quot;, 1)),</span>
+<span class="nc" id="L251">                arguments(</span>
+<span class="nc" id="L252">                        named(&quot;repeated key with a line break&quot;, &quot;\&quot;a\\nb\&quot;: 1\n\&quot;a\\nb\&quot;: 2\n&quot;),</span>
+<span class="nc" id="L253">                        duplicateKey(&quot;a\\nb&quot;, 2)),</span>
+<span class="nc" id="L254">                arguments(</span>
+<span class="nc" id="L255">                        named(&quot;repeated nested key with a next-line character&quot;, &quot;c:\n  \&quot;a\\Nb\&quot;: 1\n  \&quot;a\\Nb\&quot;: 2\n&quot;),</span>
+<span class="nc" id="L256">                        duplicateKey(&quot;c.a&quot; + ESCAPED_NEXT_LINE + &quot;b&quot;, 3)),</span>
+<span class="nc" id="L257">                arguments(</span>
+<span class="nc" id="L258">                        named(&quot;merge key under a key with a line break&quot;, &quot;\&quot;a\\nb\&quot;:\n  &lt;&lt;: {t: 5}\n&quot;),</span>
+<span class="nc" id="L259">                        mergeKey(&quot;a\\nb.&lt;&lt;&quot;, 2)));</span>
+    }
+
+    @Test
+    void twoQuotedMergeKeysInOneMappingAreDuplicates() {
+        // given
+<span class="nc" id="L265">        byte[] workflow = workflow(&quot;a:\n  \&quot;&lt;&lt;\&quot;: 1\n  '&lt;&lt;': 2\nb: \&quot;&lt;&lt;\&quot;\nc: !!str &lt;&lt;\n&quot;);</span>
+
+        // when
+<span class="nc" id="L268">        WorkflowException failure =</span>
+<span class="nc" id="L269">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L272">        assertThat(failure)</span>
+<span class="nc" id="L273">                .as(&quot;two quoted \&quot;&lt;&lt;\&quot; keys in one mapping are the same string key&quot;)</span>
+<span class="nc" id="L274">                .hasMessage(duplicateKey(&quot;a.&lt;&lt;&quot;, 3));</span>
+<span class="nc" id="L275">    }</span>
+
+    @Test
+    void quotedMergeKeyAndPlainMergeScalarValuesLoadAsStrings() {
+        // given
+<span class="nc" id="L280">        byte[] workflow = workflow(&quot;a:\n  \&quot;&lt;&lt;\&quot;: 1\nb: \&quot;&lt;&lt;\&quot;\nc: &lt;&lt;\nd: !!str &lt;&lt;\n&quot;);</span>
+
+        // when
+<span class="nc" id="L283">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L286">        assertThat(loaded.config())</span>
+<span class="nc" id="L287">                .containsExactlyInAnyOrderEntriesOf(Map.of(&quot;a&quot;, Map.of(&quot;&lt;&lt;&quot;, 1), &quot;b&quot;, &quot;&lt;&lt;&quot;, &quot;c&quot;, &quot;&lt;&lt;&quot;, &quot;d&quot;, &quot;&lt;&lt;&quot;));</span>
+<span class="nc" id="L288">    }</span>
+
+    @Test
+    void aMergeKeyWithTheNonSpecificTagLoadsAsAStringKey() {
+        // given
+<span class="nc" id="L293">        byte[] workflow = workflow(&quot;c:\n  ! &lt;&lt;: {a: 1}\n&quot;);</span>
+
+        // when
+<span class="nc" id="L296">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L299">        assertThat(loaded.config())</span>
+<span class="nc" id="L300">                .as(&quot;YAML reads a scalar tagged ! as a string, so ! &lt;&lt; is the key \&quot;&lt;&lt;\&quot;&quot;)</span>
+<span class="nc" id="L301">                .containsExactlyInAnyOrderEntriesOf(Map.of(&quot;c&quot;, Map.of(&quot;&lt;&lt;&quot;, Map.of(&quot;a&quot;, 1))));</span>
+<span class="nc" id="L302">    }</span>
+
+    @Test
+    void aKeyTagThatEndsInATruncatedEscapeIsInvalidYaml() {
+        // given
+        // SnakeYAML decodes the &quot;%0&quot; at the end of the input to a NUL character, so the key's tag
+        // ends in a control character.
+<span class="nc" id="L309">        byte[] workflow = workflow(&quot;{!%0\n&quot;);</span>
+
+        // when
+<span class="nc" id="L312">        WorkflowException failure =</span>
+<span class="nc" id="L313">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L316">        assertThat(failure)</span>
+<span class="nc" id="L317">                .hasMessage(&quot;Workflow front matter is invalid YAML&quot;)</span>
+<span class="nc" id="L318">                .extracting(WorkflowException::code)</span>
+<span class="nc" id="L319">                .isEqualTo(PARSE_ERROR);</span>
+<span class="nc" id="L320">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;!&lt;x%20&gt; a: 1\n&quot;, &quot;!&lt;%20x&gt; a: 1\n&quot;, &quot;!x%09 a: 1\n&quot;, &quot;!&lt;tag:yaml.org,2002:merge%20&gt; a: 1\n&quot;})
+    void aKeyWithACustomTagThatStartsOrEndsInWhitespaceLoadsLikeAnyCustomTaggedKey(String frontMatter) {
+        // given
+<span class="nc" id="L326">        byte[] workflow = workflow(frontMatter);</span>
+
+        // when
+<span class="nc" id="L329">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L332">        assertThat(loaded.config())</span>
+<span class="nc" id="L333">                .as(&quot;only the exact !!merge tag makes a merge key; other tags on a key are ignored&quot;)</span>
+<span class="nc" id="L334">                .containsExactlyInAnyOrderEntriesOf(Map.of(&quot;a&quot;, 1));</span>
+<span class="nc" id="L335">    }</span>
+
+    @Test
+    void sameKeyInDifferentMappingsIsNotADuplicate() {
+        // given
+<span class="nc" id="L340">        byte[] workflow = workflow(&quot;x: {x: 1}\ny: {x: 2}\nl: [{x: 1}, {x: 2}]\nd: &amp;d {x: 3}\ncopies: [*d, *d]\n&quot;);</span>
+
+        // when
+<span class="nc" id="L343">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L346">        assertThat(loaded.config())</span>
+<span class="nc" id="L347">                .containsExactlyInAnyOrderEntriesOf(Map.of(</span>
+<span class="nc" id="L348">                        &quot;x&quot;, Map.of(&quot;x&quot;, 1),</span>
+<span class="nc" id="L349">                        &quot;y&quot;, Map.of(&quot;x&quot;, 2),</span>
+<span class="nc" id="L350">                        &quot;l&quot;, List.of(Map.of(&quot;x&quot;, 1), Map.of(&quot;x&quot;, 2)),</span>
+<span class="nc" id="L351">                        &quot;d&quot;, Map.of(&quot;x&quot;, 3),</span>
+<span class="nc" id="L352">                        &quot;copies&quot;, List.of(Map.of(&quot;x&quot;, 3), Map.of(&quot;x&quot;, 3))));</span>
+<span class="nc" id="L353">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                &quot;---\n---\nBody\n&quot;,
+                &quot;---\n# only a comment\n---\nBody\n&quot;,
+                &quot;---\n  # indented comment\n\n# another\n---\nBody\n&quot;,
+                &quot;---\n   \n \n\n---\nBody\n&quot;,
+                &quot;---\n\n---\nBody\n&quot;,
+                &quot;---\nnull\n---\nBody\n&quot;,
+                &quot;---\n~\n---\nBody\n&quot;,
+                &quot;---\r\n# comment with CRLF\r\n---\r\nBody\r\n&quot;
+            })
+    void frontMatterWithoutContentIsAnEmptyConfig(String markdown) {
+        // given
+<span class="nc" id="L369">        byte[] workflow = markdown.getBytes(UTF_8);</span>
+
+        // when
+<span class="nc" id="L372">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L375">        assertThat(loaded.config()).isEmpty();</span>
+<span class="nc" id="L376">        assertThat(loaded.promptTemplate()).isEqualTo(&quot;Body&quot;);</span>
+<span class="nc" id="L377">    }</span>
+
+    @Test
+    void aliasesMayExpandToExactlyTheNodeLimit() {
+        // given
+<span class="nc" id="L382">        byte[] workflow = workflow(scalarAliases(MAX_ALIAS_EXPANDED_NODES));</span>
+
+        // when
+<span class="nc" id="L385">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L388">        assertThat(loaded.config().get(&quot;copies&quot;))</span>
+<span class="nc" id="L389">                .asInstanceOf(LIST)</span>
+<span class="nc" id="L390">                .hasSize(MAX_ALIAS_EXPANDED_NODES)</span>
+<span class="nc" id="L391">                .containsOnly(&quot;x&quot;);</span>
+<span class="nc" id="L392">    }</span>
+
+    @Test
+    void aliasesThatExpandBeyondTheNodeLimitFail() {
+        // given
+<span class="nc" id="L397">        int copies = MAX_ALIAS_EXPANDED_NODES + 1;</span>
+<span class="nc" id="L398">        byte[] workflow = workflow(scalarAliases(copies));</span>
+
+        // when
+<span class="nc" id="L401">        WorkflowException failure =</span>
+<span class="nc" id="L402">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L405">        assertThat(failure)</span>
+<span class="nc" id="L406">                .hasMessage(aliasLimit(&quot;s&quot;, 2))</span>
+<span class="nc" id="L407">                .extracting(WorkflowException::code)</span>
+<span class="nc" id="L408">                .isEqualTo(PARSE_ERROR);</span>
+<span class="nc" id="L409">    }</span>
+
+    @MethodSource(&quot;collectionAliasesWithinLimit&quot;)
+    @ParameterizedTest
+    void collectionAliasesLoadUpToTheNodeLimit(String anchored, int copiesWithinLimit) {
+        // given
+<span class="nc" id="L415">        byte[] workflow = workflow(listCopies(anchored, copiesWithinLimit));</span>
+
+        // when
+<span class="nc" id="L418">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L421">        assertThat(loaded.config().get(&quot;copies&quot;)).asInstanceOf(LIST).hasSize(copiesWithinLimit);</span>
+<span class="nc" id="L422">    }</span>
+
+    @MethodSource(&quot;collectionAliasCases&quot;)
+    @ParameterizedTest
+    void collectionAliasesFailOneCopyPastTheNodeLimit(String anchored, int copiesWithinLimit, int aliasLine) {
+        // given
+<span class="nc" id="L428">        byte[] workflow = workflow(listCopies(anchored, copiesWithinLimit + 1));</span>
+
+        // when
+<span class="nc" id="L431">        WorkflowException failure =</span>
+<span class="nc" id="L432">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L435">        assertThat(failure).hasMessage(aliasLimit(&quot;l&quot;, aliasLine));</span>
+<span class="nc" id="L436">    }</span>
+
+    // The same lists as collectionAliasCases, without the alias line that only a failure reports.
+    private static List&lt;Arguments&gt; collectionAliasesWithinLimit() {
+<span class="nc" id="L440">        List&lt;Arguments&gt; cases = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        for (Arguments listAndCopies : collectionAliasCases()) {</span>
+<span class="nc" id="L442">            Object[] values = listAndCopies.get();</span>
+<span class="nc" id="L443">            cases.add(arguments(values[0], values[1]));</span>
+<span class="nc" id="L444">        }</span>
+<span class="nc" id="L445">        return List.copyOf(cases);</span>
+    }
+
+    private static List&lt;Arguments&gt; collectionAliasCases() {
+        // A copy of the plain list is 1 sequence node plus 9 scalars. A copy of the list of aliases is
+        // 1 sequence node plus the 4 scalars its aliases copied where it was defined, and that
+        // definition already used 4 nodes of the limit.
+<span class="nc" id="L452">        return List.of(</span>
+<span class="nc" id="L453">                arguments(</span>
+<span class="nc" id="L454">                        named(&quot;a list of scalars&quot;, &quot;list: &amp;l [1, 2, 3, 4, 5, 6, 7, 8, 9]\n&quot;),</span>
+<span class="nc" id="L455">                        MAX_ALIAS_EXPANDED_NODES / 10,</span>
+<span class="nc" id="L456">                        2),</span>
+<span class="nc" id="L457">                arguments(</span>
+<span class="nc" id="L458">                        named(&quot;a list of aliases&quot;, &quot;s: &amp;s x\nlist: &amp;l [*s, *s, *s, *s]\n&quot;),</span>
+<span class="nc" id="L459">                        (MAX_ALIAS_EXPANDED_NODES - 4) / 5,</span>
+<span class="nc" id="L460">                        3));</span>
+    }
+
+    @Test
+    void aScalarThatAnAliasCopiesIntoAnAnchoredNodeCountsInEveryCopyOfIt() {
+        // given
+        // The definition of the list copies the scalar once, so the last copy of the list passes the limit.
+<span class="nc" id="L467">        String anchored = &quot;s: &amp;s &quot; + LONG_SCALAR + &quot;\nlist: &amp;l [*s]\n&quot;;</span>
+<span class="nc" id="L468">        int copies = MAX_ALIAS_COPIED_CHARACTERS / LONG_SCALAR.length();</span>
+<span class="nc" id="L469">        byte[] workflow = workflow(listCopies(anchored, copies));</span>
+
+        // when
+<span class="nc" id="L472">        WorkflowException failure =</span>
+<span class="nc" id="L473">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L476">        assertThat(failure).hasMessage(characterLimit(&quot;l&quot;, 3));</span>
+<span class="nc" id="L477">    }</span>
+
+    @Test
+    void aliasesMayCopyExactlyTheCharacterLimit() {
+        // given
+<span class="nc" id="L482">        int copies = MAX_ALIAS_COPIED_CHARACTERS / LONG_SCALAR.length();</span>
+<span class="nc" id="L483">        byte[] workflow = workflow(longScalarAliases(copies));</span>
+
+        // when
+<span class="nc" id="L486">        WorkflowDefinition loaded = loader.parse(WORKFLOW, workflow);</span>
+
+        // then
+<span class="nc" id="L489">        assertThat(loaded.config().get(&quot;copies&quot;))</span>
+<span class="nc" id="L490">                .asInstanceOf(LIST)</span>
+<span class="nc" id="L491">                .hasSize(copies)</span>
+<span class="nc" id="L492">                .containsOnly(LONG_SCALAR);</span>
+<span class="nc" id="L493">    }</span>
+
+    @Test
+    void aliasesThatCopyBeyondTheCharacterLimitFail() {
+        // given
+<span class="nc" id="L498">        int copies = MAX_ALIAS_COPIED_CHARACTERS / LONG_SCALAR.length() + 1;</span>
+<span class="nc" id="L499">        byte[] workflow = workflow(longScalarAliases(copies));</span>
+
+        // when
+<span class="nc" id="L502">        WorkflowException failure =</span>
+<span class="nc" id="L503">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L506">        assertThat(failure)</span>
+<span class="nc" id="L507">                .hasMessage(characterLimit(&quot;s&quot;, 2))</span>
+<span class="nc" id="L508">                .extracting(WorkflowException::code)</span>
+<span class="nc" id="L509">                .isEqualTo(PARSE_ERROR);</span>
+<span class="nc" id="L510">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;---\n\t\n---\nBody\n&quot;, &quot;---\n\t# comment\n---\nBody\n&quot;, &quot;---\na: 1\n\t\n---\nBody\n&quot;})
+    void aTabThatStartsALineIsAParseError(String markdown) {
+        // given
+<span class="nc" id="L516">        byte[] workflow = markdown.getBytes(UTF_8);</span>
+
+        // when
+<span class="nc" id="L519">        WorkflowException failure =</span>
+<span class="nc" id="L520">                catchThrowableOfType(WorkflowException.class, () -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L523">        assertThat(failure)</span>
+<span class="nc" id="L524">                .as(&quot;a tab that starts a line is a YAML syntax error&quot;)</span>
+<span class="nc" id="L525">                .extracting(WorkflowException::code)</span>
+<span class="nc" id="L526">                .isEqualTo(PARSE_ERROR);</span>
+<span class="nc" id="L527">    }</span>
+
+    private static String listCopies(String anchored, int copies) {
+<span class="nc" id="L530">        return anchored + &quot;copies: [&quot; + &quot;*l, &quot;.repeat(copies) + &quot;]\n&quot;;</span>
+    }
+
+    private static String longScalarAliases(int copies) {
+<span class="nc" id="L534">        return &quot;s: &amp;s &quot; + LONG_SCALAR + &quot;\ncopies: [&quot; + &quot;*s,&quot;.repeat(copies - 1) + &quot;*s]\n&quot;;</span>
+    }
+
+    private static String scalarAliases(int copies) {
+<span class="nc" id="L538">        return &quot;s: &amp;s x\ncopies: [&quot; + &quot;*s,&quot;.repeat(copies - 1) + &quot;*s]\n&quot;;</span>
+    }
+
+    private static Map&lt;String, Object&gt; nullValues(String... keys) {
+<span class="nc" id="L542">        Map&lt;String, Object&gt; values = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">        for (String key : keys) {</span>
+<span class="nc" id="L544">            values.put(key, null);</span>
+        }
+<span class="nc" id="L546">        return values;</span>
+    }
+
+    private static String mergeKey(String path, int line) {
+<span class="nc" id="L550">        return &quot;Workflow front matter uses a YAML merge key at &quot; + path + &quot; (front matter line &quot; + line</span>
+                + &quot;), which is not supported; repeat the keys of the merged mapping there instead&quot;;
+    }
+
+    private static String undefinedAlias(String alias, int line) {
+<span class="nc" id="L555">        return &quot;Workflow front matter uses the alias *&quot; + alias + &quot; (front matter line &quot; + line + &quot;) before an anchor &amp;&quot;</span>
+                + alias + &quot; defines it; define the anchor earlier or write the value instead&quot;;
+    }
+
+    private static String aliasInsideItsAnchor(String alias, int line) {
+<span class="nc" id="L560">        return &quot;Workflow front matter uses the alias *&quot; + alias + &quot; (front matter line &quot; + line</span>
+                + &quot;) inside the node its anchor &amp;&quot; + alias + &quot; marks; replace the alias with a value&quot;;
+    }
+
+    private static String duplicateKey(String path, int line) {
+<span class="nc" id="L565">        return &quot;Workflow front matter has the key &quot; + path + &quot; more than once (front matter line &quot; + line</span>
+                + &quot;); keep one entry and remove the others&quot;;
+    }
+
+    private static String aliasLimit(String alias, int line) {
+<span class="nc" id="L570">        return &quot;Workflow front matter aliases expand to more than &quot; + MAX_ALIAS_EXPANDED_NODES + &quot; YAML nodes (alias *&quot;</span>
+                + alias + &quot;, front matter line &quot; + line + &quot;); use fewer aliases or smaller anchored values&quot;;
+    }
+
+    private static String characterLimit(String alias, int line) {
+<span class="nc" id="L575">        return &quot;Workflow front matter aliases copy more than &quot; + MAX_ALIAS_COPIED_CHARACTERS</span>
+                + &quot; characters of scalars (alias *&quot; + alias + &quot;, front matter line &quot; + line
+                + &quot;); use fewer aliases or shorter anchored values&quot;;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

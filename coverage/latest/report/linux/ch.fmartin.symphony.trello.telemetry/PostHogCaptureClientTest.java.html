@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PostHogCaptureClientTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">PostHogCaptureClientTest.java</span></div><h1>PostHogCaptureClientTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+<span class="nc" id="L33">final class PostHogCaptureClientTest {</span>
+    private static final String BODY = &quot;{\&quot;event\&quot;:\&quot;installation_heartbeat\&quot;}&quot;;
+<span class="nc" id="L35">    private static final Duration SHORT_REQUEST_TIMEOUT = Duration.ofMillis(500);</span>
+
+    private HttpServer server;
+    // Recorded on the fake server's threads while the test reads; a snapshot-safe list avoids a concurrent
+    // modification.
+<span class="nc" id="L40">    private final List&lt;RecordedRequest&gt; requests = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    @BeforeEach
+    void startServer() throws IOException {
+<span class="nc" id="L44">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L45">        server.start();</span>
+<span class="nc" id="L46">    }</span>
+
+    @AfterEach
+    void stopServer() {
+<span class="nc" id="L50">        server.stop(0);</span>
+<span class="nc" id="L51">    }</span>
+
+    @Test
+    void acceptedResponseCarriesOnlyTheStatusAndTheBodyIsSentVerbatim() {
+        // given
+<span class="nc" id="L56">        respondWith(200, &quot;{\&quot;status\&quot;:\&quot;Ok\&quot;}&quot;, Map.of());</span>
+<span class="nc" id="L57">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L60">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L63">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.ACCEPTED);</span>
+<span class="nc" id="L64">        assertThat(outcome.statusCode()).hasValue(200);</span>
+<span class="nc" id="L65">        assertThat(requests).singleElement().satisfies(request -&gt; {</span>
+<span class="nc" id="L66">            assertThat(request.method()).isEqualTo(&quot;POST&quot;);</span>
+<span class="nc" id="L67">            assertThat(request.path()).isEqualTo(&quot;/i/v0/e/&quot;);</span>
+<span class="nc" id="L68">            assertThat(request.body()).isEqualTo(BODY);</span>
+<span class="nc" id="L69">            assertThat(request.headers()).containsEntry(&quot;Content-type&quot;, &quot;application/json&quot;);</span>
+<span class="nc" id="L70">            assertThat(request.headers()).containsEntry(&quot;User-agent&quot;, BoundedHttp.USER_AGENT);</span>
+<span class="nc" id="L71">            assertThat(request.headers().keySet())</span>
+<span class="nc bnc" id="L72" title="All 4 branches missed.">                    .noneMatch(name -&gt; name.equalsIgnoreCase(&quot;Authorization&quot;) || name.equalsIgnoreCase(&quot;Cookie&quot;));</span>
+<span class="nc" id="L73">        });</span>
+<span class="nc" id="L74">    }</span>
+
+    @Test
+    void quotaLimitedTwoHundredIsReportedSeparately() {
+        // given
+<span class="nc" id="L79">        respondWith(200, &quot;{\&quot;status\&quot;:1,\&quot;quota_limited\&quot;:[\&quot;events\&quot;]}&quot;, Map.of());</span>
+<span class="nc" id="L80">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L83">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L86">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.QUOTA_LIMITED);</span>
+<span class="nc" id="L87">        assertThat(outcome.accepted())</span>
+<span class="nc" id="L88">                .as(&quot;a dropped event is not an accepted report&quot;)</span>
+<span class="nc" id="L89">                .isFalse();</span>
+<span class="nc" id="L90">    }</span>
+
+    @CsvSource({
+        &quot;400, PERMANENT&quot;,
+        &quot;401, PERMANENT&quot;,
+        &quot;413, PERMANENT&quot;,
+        &quot;408, TRANSIENT&quot;,
+        &quot;429, TRANSIENT&quot;,
+        &quot;503, TRANSIENT&quot;,
+        &quot;500, TRANSIENT&quot;
+    })
+    @ParameterizedTest(name = &quot;HTTP {0} is {1}&quot;)
+    void statusCodesAreClassified(int status, CaptureOutcome.Kind expected) {
+        // given
+<span class="nc" id="L104">        respondWith(status, &quot;{\&quot;type\&quot;:\&quot;error\&quot;,\&quot;detail\&quot;:\&quot;secret &quot; + status + &quot;\&quot;}&quot;, Map.of());</span>
+<span class="nc" id="L105">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L108">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L111">        assertThat(outcome.kind()).isEqualTo(expected);</span>
+<span class="nc" id="L112">        assertThat(outcome.summary()).doesNotContain(&quot;secret&quot;);</span>
+<span class="nc" id="L113">    }</span>
+
+    @Test
+    void retryAfterIsHonoredAndBounded() {
+        // given
+<span class="nc" id="L118">        respondWith(429, &quot;&quot;, Map.of(&quot;Retry-After&quot;, &quot;120&quot;));</span>
+<span class="nc" id="L119">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L122">        CaptureOutcome outcome = client.capture(BODY);</span>
+<span class="nc" id="L123">        Optional&lt;Duration&gt; huge = PostHogCaptureClient.retryAfter(headers(&quot;retry-after&quot;, &quot;999999&quot;));</span>
+<span class="nc" id="L124">        Optional&lt;Duration&gt; date =</span>
+<span class="nc" id="L125">                PostHogCaptureClient.retryAfter(headers(&quot;Retry-After&quot;, &quot;Wed, 21 Oct 2026 07:28:00 GMT&quot;));</span>
+
+        // then
+<span class="nc" id="L128">        assertThat(outcome.retryAfter()).hasValue(Duration.ofSeconds(120));</span>
+<span class="nc" id="L129">        assertThat(huge).hasValue(PostHogCaptureClient.MAX_RETRY_AFTER);</span>
+<span class="nc" id="L130">        assertThat(date).isEmpty();</span>
+<span class="nc" id="L131">    }</span>
+
+    @Test
+    void redirectsAreNotFollowed() {
+        // given
+<span class="nc" id="L136">        respondWith(307, &quot;&quot;, Map.of(&quot;Location&quot;, &quot;https://example.invalid/elsewhere&quot;));</span>
+<span class="nc" id="L137">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L140">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L143">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.PERMANENT);</span>
+<span class="nc" id="L144">        assertThat(outcome.summary()).contains(&quot;redirect&quot;);</span>
+<span class="nc" id="L145">        assertThat(requests).hasSize(1);</span>
+<span class="nc" id="L146">    }</span>
+
+    @Test
+    void anOversizedTwoHundredIsAFailedAttemptNotAnAcceptedReport() {
+        // given
+<span class="nc" id="L151">        respondWith(200, &quot;{\&quot;status\&quot;:1,\&quot;padding\&quot;:\&quot;&quot; + &quot;x&quot;.repeat(200_000) + &quot;\&quot;}&quot;, Map.of());</span>
+<span class="nc" id="L152">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L155">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L158">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L159">        assertThat(outcome.summary()).isEqualTo(&quot;response too large&quot;);</span>
+<span class="nc" id="L160">        assertThat(outcome.statusCode()).hasValue(200);</span>
+<span class="nc" id="L161">    }</span>
+
+    @Test
+    void aCompleteEmptyTwoHundredIsAccepted() {
+        // given
+<span class="nc" id="L166">        respondWith(200, &quot;&quot;, Map.of());</span>
+<span class="nc" id="L167">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L170">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L173">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.ACCEPTED);</span>
+<span class="nc" id="L174">    }</span>
+
+    @Test
+    void aCompleteTwoHundredThatIsNotJsonIsRetriedNotAccepted() {
+        // given
+<span class="nc" id="L179">        respondWith(200, &quot;&lt;html&gt;maintenance&lt;/html&gt;&quot;, Map.of());</span>
+<span class="nc" id="L180">        var client = new PostHogCaptureClient(endpoint(&quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L183">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L186">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L187">        assertThat(outcome.summary()).isEqualTo(&quot;unrecognized response&quot;);</span>
+<span class="nc" id="L188">    }</span>
+
+    @Test
+    void headersFollowedByAStalledBodyTimeOutWithinTheBudgetAndReleaseTheConnection() throws Exception {
+        // given
+<span class="nc" id="L193">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L194">        var handlerFinished = new CountDownLatch(1);</span>
+<span class="nc" id="L195">        server.createContext(&quot;/stalled&quot;, exchange -&gt; {</span>
+<span class="nc" id="L196">            exchange.sendResponseHeaders(200, 20);</span>
+<span class="nc" id="L197">            exchange.getResponseBody().flush();</span>
+            try {
+<span class="nc" id="L199">                release.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L200">            } catch (InterruptedException exception) {</span>
+<span class="nc" id="L201">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L202">            }</span>
+<span class="nc" id="L203">            try (OutputStream out = exchange.getResponseBody()) {</span>
+<span class="nc" id="L204">                out.write(&quot;{\&quot;status\&quot;:\&quot;Ok\&quot;}     &quot;.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L205">            } catch (IOException ignored) {</span>
+                // the client already closed the stream
+<span class="nc" id="L207">            }</span>
+<span class="nc" id="L208">            handlerFinished.countDown();</span>
+<span class="nc" id="L209">        });</span>
+<span class="nc" id="L210">        var client = new PostHogCaptureClient(</span>
+<span class="nc" id="L211">                HttpClient.newBuilder()</span>
+<span class="nc" id="L212">                        .followRedirects(HttpClient.Redirect.NEVER)</span>
+<span class="nc" id="L213">                        .build(),</span>
+<span class="nc" id="L214">                endpoint(&quot;/stalled&quot;),</span>
+                SHORT_REQUEST_TIMEOUT);
+
+        // when
+<span class="nc" id="L218">        long started = System.nanoTime();</span>
+<span class="nc" id="L219">        CaptureOutcome outcome = client.capture(BODY);</span>
+<span class="nc" id="L220">        long elapsedMillis = (System.nanoTime() - started) / 1_000_000;</span>
+<span class="nc" id="L221">        release.countDown();</span>
+
+        // then
+<span class="nc" id="L224">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L225">        assertThat(outcome.summary()).isEqualTo(&quot;response body timed out&quot;);</span>
+<span class="nc" id="L226">        assertThat(outcome.statusCode()).hasValue(200);</span>
+<span class="nc" id="L227">        assertThat(elapsedMillis)</span>
+<span class="nc" id="L228">                .as(</span>
+                        &quot;the whole attempt, body included, ends close to the %s ms budget&quot;,
+<span class="nc" id="L230">                        SHORT_REQUEST_TIMEOUT.toMillis())</span>
+<span class="nc" id="L231">                .isLessThan(SHORT_REQUEST_TIMEOUT.toMillis() * 6);</span>
+<span class="nc" id="L232">        assertThat(handlerFinished.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L233">                .as(&quot;the server side unblocks after the client cancels&quot;)</span>
+<span class="nc" id="L234">                .isTrue();</span>
+<span class="nc" id="L235">    }</span>
+
+    @Test
+    void aBodyCutOffInsideTheQuotaAnswerIsAFailedAttempt() {
+        // given
+<span class="nc" id="L240">        server.createContext(&quot;/broken&quot;, exchange -&gt; {</span>
+<span class="nc" id="L241">            exchange.sendResponseHeaders(200, 200);</span>
+<span class="nc" id="L242">            exchange.getResponseBody()</span>
+<span class="nc" id="L243">                    .write(&quot;{\&quot;status\&quot;:\&quot;Ok\&quot;,\&quot;quota_limited\&quot;:[\&quot;ev&quot;.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L244">            exchange.getResponseBody().flush();</span>
+<span class="nc" id="L245">            exchange.close();</span>
+<span class="nc" id="L246">        });</span>
+<span class="nc" id="L247">        var client = new PostHogCaptureClient(endpoint(&quot;/broken&quot;));</span>
+
+        // when
+<span class="nc" id="L250">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L253">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L254">        assertThat(outcome.summary()).isEqualTo(&quot;response body unreadable&quot;);</span>
+<span class="nc" id="L255">        assertThat(outcome.statusCode()).hasValue(200);</span>
+<span class="nc" id="L256">    }</span>
+
+    @Test
+    void anImmediateEndOfStreamAgainstAnAdvertisedLengthIsAFailedAttempt() {
+        // given
+<span class="nc" id="L261">        server.createContext(&quot;/eof&quot;, exchange -&gt; {</span>
+<span class="nc" id="L262">            exchange.sendResponseHeaders(200, 50);</span>
+<span class="nc" id="L263">            exchange.getResponseBody().flush();</span>
+<span class="nc" id="L264">            exchange.close();</span>
+<span class="nc" id="L265">        });</span>
+<span class="nc" id="L266">        var client = new PostHogCaptureClient(endpoint(&quot;/eof&quot;));</span>
+
+        // when
+<span class="nc" id="L269">        CaptureOutcome outcome = client.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L272">        assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L273">        assertThat(outcome.summary()).isEqualTo(&quot;response body unreadable&quot;);</span>
+<span class="nc" id="L274">    }</span>
+
+    @Test
+    void aChunkedBodyThatBreaksMidwayIsAFailedAttempt() throws Exception {
+        // given
+<span class="nc" id="L279">        try (var raw = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {</span>
+<span class="nc" id="L280">            Thread.startVirtualThread(() -&gt; {</span>
+<span class="nc" id="L281">                try (Socket connection = raw.accept()) {</span>
+<span class="nc" id="L282">                    connection.getInputStream().read(new byte[1024]);</span>
+<span class="nc" id="L283">                    connection</span>
+<span class="nc" id="L284">                            .getOutputStream()</span>
+<span class="nc" id="L285">                            .write((&quot;HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n&quot;</span>
+                                            + &quot;40\r\n{\&quot;status\&quot;:\&quot;Ok\&quot;,\&quot;quota_lim&quot;)
+<span class="nc" id="L287">                                    .getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L288">                    connection.getOutputStream().flush();</span>
+<span class="nc" id="L289">                } catch (IOException ignored) {</span>
+                    // the client sees the broken body either way
+<span class="nc" id="L291">                }</span>
+<span class="nc" id="L292">            });</span>
+<span class="nc" id="L293">            var client = new PostHogCaptureClient(URI.create(&quot;http://127.0.0.1:&quot; + raw.getLocalPort() + &quot;/i/v0/e/&quot;));</span>
+
+            // when
+<span class="nc" id="L296">            CaptureOutcome outcome = client.capture(BODY);</span>
+
+            // then
+<span class="nc" id="L299">            assertThat(outcome.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L300">            assertThat(outcome.summary()).isEqualTo(&quot;response body unreadable&quot;);</span>
+<span class="nc" id="L301">            assertThat(outcome.statusCode()).hasValue(200);</span>
+        }
+<span class="nc" id="L303">    }</span>
+
+    @Test
+    void anInterruptedCallerGetsAFailedAttemptAndReleasesTheConnection() throws Exception {
+        // given
+<span class="nc" id="L308">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L309">        var handlerFinished = new CountDownLatch(1);</span>
+<span class="nc" id="L310">        var headersSent = new CountDownLatch(1);</span>
+<span class="nc" id="L311">        server.createContext(&quot;/interrupt&quot;, exchange -&gt; {</span>
+<span class="nc" id="L312">            exchange.sendResponseHeaders(200, 20);</span>
+<span class="nc" id="L313">            exchange.getResponseBody().flush();</span>
+<span class="nc" id="L314">            headersSent.countDown();</span>
+            try {
+<span class="nc" id="L316">                release.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L317">            } catch (InterruptedException exception) {</span>
+<span class="nc" id="L318">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L319">            }</span>
+<span class="nc" id="L320">            try (OutputStream out = exchange.getResponseBody()) {</span>
+<span class="nc" id="L321">                out.write(&quot;{\&quot;status\&quot;:\&quot;Ok\&quot;}     &quot;.getBytes(StandardCharsets.UTF_8));</span>
+<span class="nc" id="L322">            } catch (IOException ignored) {</span>
+                // the client already closed the stream
+<span class="nc" id="L324">            }</span>
+<span class="nc" id="L325">            handlerFinished.countDown();</span>
+<span class="nc" id="L326">        });</span>
+<span class="nc" id="L327">        var client = new PostHogCaptureClient(endpoint(&quot;/interrupt&quot;));</span>
+<span class="nc" id="L328">        var outcome = new AtomicReference&lt;CaptureOutcome&gt;();</span>
+<span class="nc" id="L329">        var interruptedFlag = new AtomicBoolean();</span>
+<span class="nc" id="L330">        var caller = new Thread(() -&gt; {</span>
+<span class="nc" id="L331">            outcome.set(client.capture(BODY));</span>
+<span class="nc" id="L332">            interruptedFlag.set(Thread.currentThread().isInterrupted());</span>
+<span class="nc" id="L333">        });</span>
+
+        // when
+<span class="nc" id="L336">        caller.start();</span>
+<span class="nc" id="L337">        assertThat(headersSent.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L338">                .as(&quot;the server sends the headers and then holds the body&quot;)</span>
+<span class="nc" id="L339">                .isTrue();</span>
+<span class="nc" id="L340">        caller.interrupt();</span>
+<span class="nc" id="L341">        caller.join(5_000);</span>
+<span class="nc" id="L342">        release.countDown();</span>
+
+        // then
+<span class="nc" id="L345">        assertThat(caller.isAlive())</span>
+<span class="nc" id="L346">                .as(&quot;the caller returns promptly after the interrupt&quot;)</span>
+<span class="nc" id="L347">                .isFalse();</span>
+<span class="nc" id="L348">        assertThat(outcome.get().kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L349">        assertThat(outcome.get().summary()).isEqualTo(&quot;interrupted&quot;);</span>
+<span class="nc" id="L350">        assertThat(interruptedFlag)</span>
+<span class="nc" id="L351">                .as(&quot;the interrupt flag is restored for the caller&quot;)</span>
+<span class="nc" id="L352">                .isTrue();</span>
+<span class="nc" id="L353">        assertThat(handlerFinished.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L354">                .as(&quot;the server side unblocks after the client closes the stream&quot;)</span>
+<span class="nc" id="L355">                .isTrue();</span>
+<span class="nc" id="L356">    }</span>
+
+    @Test
+    void connectionFailureAndTimeoutAreTransient() throws Exception {
+        // given
+<span class="nc" id="L361">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L362">        server.createContext(&quot;/slow&quot;, exchange -&gt; {</span>
+            try {
+<span class="nc" id="L364">                release.await(5, TimeUnit.SECONDS);</span>
+<span class="nc" id="L365">            } catch (InterruptedException exception) {</span>
+<span class="nc" id="L366">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L367">            }</span>
+<span class="nc" id="L368">            exchange.sendResponseHeaders(200, -1);</span>
+<span class="nc" id="L369">            exchange.close();</span>
+<span class="nc" id="L370">        });</span>
+<span class="nc" id="L371">        var slow = new PostHogCaptureClient(</span>
+<span class="nc" id="L372">                HttpClient.newBuilder()</span>
+<span class="nc" id="L373">                        .followRedirects(HttpClient.Redirect.NEVER)</span>
+<span class="nc" id="L374">                        .build(),</span>
+<span class="nc" id="L375">                endpoint(&quot;/slow&quot;),</span>
+                SHORT_REQUEST_TIMEOUT);
+        int closedPort;
+<span class="nc" id="L378">        try (var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {</span>
+<span class="nc" id="L379">            closedPort = socket.getLocalPort();</span>
+        }
+<span class="nc" id="L381">        var unreachable = new PostHogCaptureClient(URI.create(&quot;http://127.0.0.1:&quot; + closedPort + &quot;/i/v0/e/&quot;));</span>
+
+        // when
+<span class="nc" id="L384">        CaptureOutcome timedOut = slow.capture(BODY);</span>
+<span class="nc" id="L385">        release.countDown();</span>
+<span class="nc" id="L386">        CaptureOutcome refused = unreachable.capture(BODY);</span>
+
+        // then
+<span class="nc" id="L389">        assertThat(timedOut.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L390">        assertThat(timedOut.summary()).isEqualTo(&quot;request timed out&quot;);</span>
+<span class="nc" id="L391">        assertThat(refused.kind()).isEqualTo(CaptureOutcome.Kind.TRANSIENT);</span>
+<span class="nc" id="L392">        assertThat(refused.statusCode()).isEmpty();</span>
+<span class="nc" id="L393">    }</span>
+
+    private URI endpoint(String path) {
+<span class="nc" id="L396">        return URI.create(&quot;http://127.0.0.1:&quot; + server.getAddress().getPort() + path);</span>
+    }
+
+    private static HttpHeaders headers(String name, String value) {
+<span class="nc" id="L400">        return HttpHeaders.of(Map.of(name, List.of(value)), (headerName, headerValue) -&gt; true);</span>
+    }
+
+    private void respondWith(int status, String body, Map&lt;String, String&gt; headers) {
+<span class="nc" id="L404">        server.createContext(&quot;/&quot;, exchange -&gt; {</span>
+<span class="nc" id="L405">            record(exchange);</span>
+<span class="nc" id="L406">            headers.forEach((name, value) -&gt; exchange.getResponseHeaders().add(name, value));</span>
+<span class="nc" id="L407">            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">            exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            if (bytes.length &gt; 0) {</span>
+<span class="nc" id="L410">                try (OutputStream out = exchange.getResponseBody()) {</span>
+<span class="nc" id="L411">                    out.write(bytes);</span>
+                }
+            }
+<span class="nc" id="L414">            exchange.close();</span>
+<span class="nc" id="L415">        });</span>
+<span class="nc" id="L416">    }</span>
+
+    private void record(HttpExchange exchange) throws IOException {
+<span class="nc" id="L419">        Map&lt;String, String&gt; headers = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L420">        exchange.getRequestHeaders().forEach((name, values) -&gt; headers.put(name, String.join(&quot;,&quot;, values)));</span>
+<span class="nc" id="L421">        requests.add(new RecordedRequest(</span>
+<span class="nc" id="L422">                exchange.getRequestMethod(),</span>
+<span class="nc" id="L423">                exchange.getRequestURI().getPath(),</span>
+<span class="nc" id="L424">                new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8),</span>
+                headers));
+<span class="nc" id="L426">    }</span>
+
+<span class="nc" id="L428">    private record RecordedRequest(String method, String path, String body, Map&lt;String, String&gt; headers) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

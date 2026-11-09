@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BoundedHttp.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">BoundedHttp.java</span></div><h1>BoundedHttp.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.jboss.logging.Logger;
+import org.jspecify.annotations.Nullable;
+
+/// The JSON POST exchange every telemetry client uses: no redirects, fixed headers, one time budget
+/// for the headers and the body, and a size bound on the answer. Callers see a status and a body
+/// read, never exception text, because transport causes can carry request or response bodies.
+final class BoundedHttp {
+    private static final String BODY_UNREADABLE = &quot;response body unreadable&quot;;
+    static final String USER_AGENT = &quot;symphony-trello-telemetry/1&quot;;
+<span class="nc" id="L27">    static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);</span>
+    static final int MAX_RESPONSE_BYTES = 4096;
+<span class="nc" id="L29">    private static final Logger LOG = Logger.getLogger(BoundedHttp.class);</span>
+
+    private BoundedHttp() {}
+
+    static HttpClient newClient() {
+<span class="nc" id="L34">        return HttpClient.newBuilder()</span>
+<span class="nc" id="L35">                .connectTimeout(CONNECT_TIMEOUT)</span>
+<span class="nc" id="L36">                .followRedirects(HttpClient.Redirect.NEVER)</span>
+<span class="nc" id="L37">                .build();</span>
+    }
+
+    /// The only headers a telemetry request carries besides what the JDK adds for the transport.
+    static Map&lt;String, String&gt; requestHeaders() {
+<span class="nc" id="L42">        return Map.of(&quot;Content-Type&quot;, &quot;application/json&quot;, &quot;User-Agent&quot;, USER_AGENT);</span>
+    }
+
+    /// Sends the body and reads the answer, bounded to [#MAX_RESPONSE_BYTES], inside one time
+    /// budget. The JDK request timeout covers only the response headers, so the body read runs on
+    /// its own thread against the same deadline; on timeout the exchange is cancelled and the
+    /// stream closed.
+    static Exchange post(HttpClient http, URI uri, Duration timeout, String body) {
+<span class="nc" id="L50">        HttpRequest.Builder request = HttpRequest.newBuilder(uri)</span>
+<span class="nc" id="L51">                .timeout(timeout)</span>
+<span class="nc" id="L52">                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));</span>
+<span class="nc" id="L53">        requestHeaders().forEach(request::header);</span>
+<span class="nc" id="L54">        long deadline = System.nanoTime() + timeout.toNanos();</span>
+<span class="nc" id="L55">        var bodyHandler = new ResponseBodyHandler();</span>
+<span class="nc" id="L56">        CompletableFuture&lt;HttpResponse&lt;InputStream&gt;&gt; exchange = http.sendAsync(request.build(), bodyHandler);</span>
+        HttpResponse&lt;InputStream&gt; response;
+        try {
+<span class="nc" id="L59">            response = exchange.get(remaining(deadline), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L60">        } catch (TimeoutException exception) {</span>
+<span class="nc" id="L61">            exchange.cancel(true);</span>
+<span class="nc" id="L62">            return new Exchange.Unanswered(Failure.TIMED_OUT);</span>
+<span class="nc" id="L63">        } catch (ExecutionException exception) {</span>
+<span class="nc" id="L64">            return bodyHandler.failed(</span>
+<span class="nc bnc" id="L65" title="All 2 branches missed.">                    exception.getCause() instanceof HttpTimeoutException</span>
+<span class="nc" id="L66">                            ? Failure.TIMED_OUT</span>
+<span class="nc" id="L67">                            : Failure.CONNECTION_FAILED);</span>
+<span class="nc" id="L68">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L69">            exchange.cancel(true);</span>
+<span class="nc" id="L70">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L71">            return new Exchange.Unanswered(Failure.INTERRUPTED);</span>
+<span class="nc" id="L72">        }</span>
+<span class="nc" id="L73">        return new Exchange.Answered(response.statusCode(), response.headers(), readBounded(response.body(), deadline));</span>
+    }
+
+    /// Headers arrive before the response future completes. If the body fails in between,
+    /// preserve those headers instead of reporting that no response arrived.
+    private static final class ResponseBodyHandler implements HttpResponse.BodyHandler&lt;InputStream&gt; {
+        private volatile HttpResponse.@Nullable ResponseInfo responseInfo;
+
+        @Override
+        public HttpResponse.BodySubscriber&lt;InputStream&gt; apply(HttpResponse.ResponseInfo info) {
+<span class="nc" id="L83">            responseInfo = info;</span>
+<span class="nc" id="L84">            return HttpResponse.BodySubscribers.ofInputStream();</span>
+        }
+
+        Exchange failed(Failure failure) {
+<span class="nc" id="L88">            HttpResponse.ResponseInfo info = responseInfo;</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            return info == null</span>
+<span class="nc" id="L90">                    ? new Exchange.Unanswered(failure)</span>
+<span class="nc" id="L91">                    : new Exchange.Answered(info.statusCode(), info.headers(), new BodyRead.Failed(BODY_UNREADABLE));</span>
+        }
+    }
+
+    private static long remaining(long deadline) {
+<span class="nc" id="L96">        return Math.max(0, deadline - System.nanoTime());</span>
+    }
+
+    /// Reads the whole body on a virtual thread so a stalled body cannot hold the caller past the
+    /// deadline. One byte more than the bound is requested: a read that fills it means the answer
+    /// is larger than any documented response, and no prefix of it is trusted. A read that fails,
+    /// times out, or is interrupted is a failed attempt, never an empty answer; the stream is closed
+    /// on those paths, which cancels the exchange.
+    static BodyRead readBounded(InputStream body, long deadline) {
+<span class="nc" id="L105">        var read = new CompletableFuture&lt;BodyRead&gt;();</span>
+<span class="nc" id="L106">        Thread.startVirtualThread(() -&gt; readInto(read, body));</span>
+        try {
+<span class="nc" id="L108">            return read.get(remaining(deadline), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L109">        } catch (TimeoutException exception) {</span>
+<span class="nc" id="L110">            read.cancel(true);</span>
+<span class="nc" id="L111">            closeQuietly(body);</span>
+<span class="nc" id="L112">            return new BodyRead.Failed(&quot;response body timed out&quot;);</span>
+<span class="nc" id="L113">        } catch (ExecutionException exception) {</span>
+<span class="nc" id="L114">            closeQuietly(body);</span>
+<span class="nc" id="L115">            return new BodyRead.Failed(BODY_UNREADABLE);</span>
+<span class="nc" id="L116">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L117">            read.cancel(true);</span>
+<span class="nc" id="L118">            closeQuietly(body);</span>
+<span class="nc" id="L119">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L120">            return new BodyRead.Failed(&quot;interrupted&quot;);</span>
+        }
+    }
+
+    private static void readInto(CompletableFuture&lt;BodyRead&gt; read, InputStream body) {
+<span class="nc" id="L125">        try (InputStream stream = body) {</span>
+<span class="nc" id="L126">            byte[] bytes = stream.readNBytes(MAX_RESPONSE_BYTES + 1);</span>
+<span class="nc" id="L127">            read.complete(</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                    bytes.length &gt; MAX_RESPONSE_BYTES</span>
+<span class="nc" id="L129">                            ? new BodyRead.Failed(&quot;response too large&quot;)</span>
+<span class="nc" id="L130">                            : new BodyRead.Complete(new String(bytes, StandardCharsets.UTF_8)));</span>
+<span class="nc" id="L131">        } catch (IOException exception) {</span>
+<span class="nc" id="L132">            read.complete(new BodyRead.Failed(BODY_UNREADABLE));</span>
+<span class="nc" id="L133">        } catch (RuntimeException exception) {</span>
+            // Without this the caller would wait out the whole deadline for a read that already ended.
+<span class="nc" id="L135">            read.completeExceptionally(exception);</span>
+<span class="nc" id="L136">        }</span>
+<span class="nc" id="L137">    }</span>
+
+    private static void closeQuietly(InputStream stream) {
+        try {
+<span class="nc" id="L141">            stream.close();</span>
+<span class="nc" id="L142">        } catch (IOException exception) {</span>
+            // Closing only serves to cancel the exchange; a failure to close changes nothing.
+<span class="nc" id="L144">            LOG.debugf(exception, &quot;telemetry response stream close failed&quot;);</span>
+<span class="nc" id="L145">        }</span>
+<span class="nc" id="L146">    }</span>
+
+    /// Why no response headers arrived; the summary is safe to store and print.
+<span class="nc" id="L149">    enum Failure {</span>
+<span class="nc" id="L150">        TIMED_OUT(&quot;request timed out&quot;),</span>
+<span class="nc" id="L151">        CONNECTION_FAILED(&quot;connection failed&quot;),</span>
+<span class="nc" id="L152">        INTERRUPTED(&quot;interrupted&quot;);</span>
+
+        private final String summary;
+
+<span class="nc" id="L156">        Failure(String summary) {</span>
+<span class="nc" id="L157">            this.summary = summary;</span>
+<span class="nc" id="L158">        }</span>
+
+        String summary() {
+<span class="nc" id="L161">            return summary;</span>
+        }
+    }
+
+    /// The result of one exchange: an answer with its status, or the reason none arrived.
+    sealed interface Exchange {
+<span class="nc" id="L167">        record Answered(int status, HttpHeaders headers, BodyRead body) implements Exchange {}</span>
+
+<span class="nc" id="L169">        record Unanswered(Failure failure) implements Exchange {}</span>
+    }
+
+    /// What the body read produced: every byte of a bounded answer, or the reason it is not one.
+    sealed interface BodyRead {
+<span class="nc" id="L174">        record Complete(String text) implements BodyRead {}</span>
+
+<span class="nc" id="L176">        record Failed(String summary) implements BodyRead {}</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

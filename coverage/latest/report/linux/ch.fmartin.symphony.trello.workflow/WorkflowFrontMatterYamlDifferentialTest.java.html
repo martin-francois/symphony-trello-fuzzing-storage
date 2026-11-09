@@ -1,0 +1,491 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowFrontMatterYamlDifferentialTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.workflow</a> &gt; <span class="el_source">WorkflowFrontMatterYamlDifferentialTest.java</span></div><h1>WorkflowFrontMatterYamlDifferentialTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.workflow;
+
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_BYTE_ORDER_MARK;
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_LINE_SEPARATOR;
+import static ch.fmartin.symphony.trello.TextCharacterMatchers.UNICODE_PARAGRAPH_SEPARATOR;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.fuzz.WorkflowLoaderInvariants;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import java.io.IOException;
+import java.io.StringReader;
+import java.io.UncheckedIOException;
+import java.nio.charset.CharacterCodingException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Named;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.error.YAMLException;
+import org.yaml.snakeyaml.events.AliasEvent;
+import org.yaml.snakeyaml.events.Event;
+import org.yaml.snakeyaml.nodes.Node;
+
+/// Loads a corpus of front matter through Jackson's plain YAML reader, which the workflow loader used
+/// before the `SPEC.md` section 5.2 rules, and through [WorkflowFrontMatterYaml], and checks both give
+/// the same values with the same Java types, or both fail. The corpus is every front matter in the
+/// repository's workflow files, fuzz seeds and Java text blocks, plus hand-made YAML scalars and
+/// structures. Inputs that the section 5.2 rules decide differently live in
+/// [WorkflowFrontMatterYamlRulesTest] instead.
+<span class="nc" id="L48">final class WorkflowFrontMatterYamlDifferentialTest {</span>
+<span class="nc" id="L49">    private static final ObjectMapper JACKSON_PLAIN = new ObjectMapper(new YAMLFactory());</span>
+<span class="nc" id="L50">    private static final TypeReference&lt;LinkedHashMap&lt;String, Object&gt;&gt; MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L51">    private static final Path REPOSITORY_ROOT = Path.of(&quot;&quot;);</span>
+<span class="nc" id="L52">    private static final List&lt;Path&gt; FRONT_MATTER_FILE_DIRECTORIES =</span>
+<span class="nc" id="L53">            List.of(Path.of(&quot;oss-fuzz/corpora&quot;), Path.of(&quot;src/test/resources/ch/fmartin/symphony/trello/workflow&quot;));</span>
+<span class="nc" id="L54">    private static final List&lt;Path&gt; JAVA_SOURCE_DIRECTORIES =</span>
+<span class="nc" id="L55">            List.of(Path.of(&quot;src/main/java&quot;), Path.of(&quot;src/test/java&quot;));</span>
+<span class="nc" id="L56">    private static final Pattern TEXT_BLOCK = Pattern.compile(&quot;\&quot;\&quot;\&quot;[ \\t]*\\R(.*?)\&quot;\&quot;\&quot;&quot;, Pattern.DOTALL);</span>
+    private static final String DELIMITER = &quot;---&quot;;
+    // A corpus this small would mean the harvest silently stopped finding the repository's workflows.
+    private static final int MIN_REPOSITORY_FRONT_MATTERS = 100;
+    // Keeps parameterized case names readable in test reports.
+    private static final int MAX_CASE_NAME_LENGTH = 80;
+    private static final String LATIN_SMALL_E_WITH_ACUTE = &quot;\u00E9&quot;;
+
+<span class="nc" id="L64">    private static final List&lt;String&gt; SCALARS = List.of(</span>
+            // YAML 1.1 and 1.2 booleans and near misses
+            &quot;true&quot;,
+            &quot;True&quot;,
+            &quot;TRUE&quot;,
+            &quot;false&quot;,
+            &quot;False&quot;,
+            &quot;FALSE&quot;,
+            &quot;tRUE&quot;,
+            &quot;yes&quot;,
+            &quot;Yes&quot;,
+            &quot;YES&quot;,
+            &quot;no&quot;,
+            &quot;No&quot;,
+            &quot;NO&quot;,
+            &quot;on&quot;,
+            &quot;On&quot;,
+            &quot;ON&quot;,
+            &quot;off&quot;,
+            &quot;Off&quot;,
+            &quot;OFF&quot;,
+            &quot;y&quot;,
+            &quot;Y&quot;,
+            &quot;n&quot;,
+            &quot;N&quot;,
+            // nulls
+            &quot;null&quot;,
+            &quot;Null&quot;,
+            &quot;NULL&quot;,
+            &quot;nULL&quot;,
+            &quot;~&quot;,
+            &quot;&quot;,
+            // integers in every base and form
+            &quot;0&quot;,
+            &quot;-0&quot;,
+            &quot;+1&quot;,
+            &quot;-17&quot;,
+            &quot;017&quot;,
+            &quot;08&quot;,
+            &quot;0o17&quot;,
+            &quot;0O17&quot;,
+            &quot;0x1F&quot;,
+            &quot;0X1f&quot;,
+            &quot;0xff_ff&quot;,
+            &quot;0b101&quot;,
+            &quot;0b1_0&quot;,
+            &quot;-0b101&quot;,
+            &quot;1_000&quot;,
+            &quot;1__0&quot;,
+            &quot;_1&quot;,
+            &quot;1_&quot;,
+            &quot;1,000&quot;,
+            &quot;190:20:30&quot;,
+            &quot;-190:20:30&quot;,
+            &quot;2147483647&quot;,
+            &quot;2147483648&quot;,
+            &quot;-2147483649&quot;,
+            &quot;9223372036854775807&quot;,
+            &quot;9223372036854775808&quot;,
+            &quot;12345678901234567890123&quot;,
+            &quot;0x8000000000000000&quot;,
+            // floats
+            &quot;1.5&quot;,
+            &quot;-1.5&quot;,
+            &quot;+1.5&quot;,
+            &quot;1e3&quot;,
+            &quot;1E3&quot;,
+            &quot;1e+3&quot;,
+            &quot;3.0e+2&quot;,
+            &quot;.5&quot;,
+            &quot;-.5&quot;,
+            &quot;1.&quot;,
+            &quot;1_000.5&quot;,
+            &quot;6.8523015e+5&quot;,
+            &quot;685.230_15e+03&quot;,
+            &quot;190:20:30.15&quot;,
+            &quot;0.1e&quot;,
+            &quot;1e&quot;,
+            &quot;1.5.5&quot;,
+            &quot;0.0&quot;,
+            &quot;1.7976931348623157e309&quot;,
+            // values Jackson cannot read as numbers, which both readers must reject the same way
+            &quot;.inf&quot;,
+            &quot;-.Inf&quot;,
+            &quot;.NaN&quot;,
+            // timestamps stay strings
+            &quot;2001-12-14&quot;,
+            &quot;2001-12-14t21:59:43.10-05:00&quot;,
+            &quot;2001-12-14 21:59:43.10 -5&quot;,
+            &quot;12:30&quot;,
+            // strings that look like other types or need quoting
+            &quot;'1'&quot;,
+            &quot;\&quot;true\&quot;&quot;,
+            &quot;'~'&quot;,
+            &quot;\&quot;\&quot;&quot;,
+            &quot;''&quot;,
+            &quot;'yes'&quot;,
+            &quot;\&quot;0x1F\&quot;&quot;,
+            &quot;a: b&quot;,
+            &quot;\&quot;a: b\&quot;&quot;,
+            &quot;a #not&quot;,
+            &quot;a#b&quot;,
+            &quot;\&quot;tab\\there\&quot;&quot;,
+            &quot;\&quot;\\u00e9\&quot;&quot;,
+            &quot;'it''s'&quot;,
+            &quot;\&quot;line\\nbreak\&quot;&quot;,
+            &quot;plain text&quot;,
+            &quot;  spaced  &quot;,
+            &quot;$TRELLO_API_KEY&quot;,
+            &quot;file:~/secret&quot;,
+            &quot;~/cache&quot;,
+            &quot;@at&quot;,
+            &quot;`tick`&quot;,
+            &quot;%percent&quot;,
+            &quot;!bang&quot;,
+            &quot;&amp;anchorless&quot;,
+            &quot;|&quot;,
+            &quot;&gt;&quot;,
+            &quot;-&quot;,
+            &quot;- x&quot;,
+            &quot;? x&quot;,
+            &quot;[1, 2]&quot;,
+            &quot;{a: 1}&quot;,
+            &quot;\&quot;[1, 2]\&quot;&quot;,
+            &quot;&lt;&lt;&quot;,
+            &quot;\&quot;&lt;&lt;\&quot;&quot;,
+            &quot;'&lt;&lt;'&quot;,
+            // explicit tags
+            &quot;!!str 5&quot;,
+            &quot;!!str true&quot;,
+            &quot;!!str&quot;,
+            &quot;!!int '7'&quot;,
+            &quot;!!int 0x1F&quot;,
+            &quot;!!float 1&quot;,
+            &quot;!!bool yes&quot;,
+            &quot;!!bool 'on'&quot;,
+            &quot;!!null ''&quot;,
+            &quot;!!null x&quot;,
+            &quot;!!binary aGVsbG8=&quot;,
+            &quot;!custom x&quot;,
+            &quot;!&lt;tag:example.com,2026:x&gt; y&quot;,
+            &quot;!!timestamp 2001-12-14&quot;,
+            &quot;! 5&quot;,
+            &quot;!!seq [1]&quot;,
+            &quot;!!map {a: 1}&quot;);
+
+<span class="nc" id="L210">    private static final List&lt;String&gt; STRUCTURES = List.of(</span>
+            &quot;a:\n  b:\n    c: 1\n&quot;,
+            &quot;a: {b: {c: [1, {d: 2}]}}\n&quot;,
+            &quot;a: []\nb: {}\nc: [[], {}]\n&quot;,
+            &quot;a:\n- 1\n- 2\n&quot;,
+            &quot;a:\n  - - x\n    - y\n  - - z\n&quot;,
+            &quot;a:\n  - k: 1\n    l: 2\n  - k: 3\n&quot;,
+            &quot;? a\n: 1\n&quot;,
+            &quot;? a\n&quot;,
+            &quot;: empty key\n&quot;,
+            &quot;a: 1 # comment\n# full line\nb: 2\n&quot;,
+            &quot;a: |\n  literal\n  text\n&quot;,
+            &quot;a: |-\n  stripped\n&quot;,
+            &quot;a: |+\n  kept\n\n&quot;,
+            &quot;a: &gt;\n  folded\n  text\n&quot;,
+            &quot;a: &gt;-\n  folded\n\n  paragraph\n&quot;,
+            &quot;a: \&quot;double\n  quoted multi\&quot;\n&quot;,
+            &quot;a: plain\n  multi line\n&quot;,
+            &quot;a: 'single\n  quoted'\n&quot;,
+            &quot;a: !!set {x, y}\n&quot;,
+            &quot;a: !!omap [x: 1, y: 2]\n&quot;,
+            &quot;a: !!pairs [x: 1, x: 2]\n&quot;,
+            &quot;a: [x: 1, y: 2]\n&quot;,
+            &quot;a: {x, y: 1}\n&quot;,
+            &quot;a: 1\n...\n&quot;,
+            &quot;a: 1\n--- # second\nb: 2\n&quot;,
+            &quot;%YAML 1.1\n--- \na: 1\n&quot;,
+            &quot;\&quot;quoted key\&quot;: 1\n'single key': 2\n&quot;,
+            &quot;\&quot;\&quot;: empty quoted key\n&quot;,
+            &quot;! &lt;&lt;: 1\n&quot;,
+            &quot;a:\n  ! &lt;&lt;: {b: 1}\n&quot;,
+            &quot;a b c: spaced key\n&quot;,
+            &quot;\&quot;k\\u00e9y\&quot;: unicode escape\n&quot;,
+            &quot;k&quot; + LATIN_SMALL_E_WITH_ACUTE + &quot;y: unicode\n&quot;,
+            &quot;a: &quot; + UNICODE_LINE_SEPARATOR + &quot;\n&quot;,
+            &quot;a: x&quot; + UNICODE_PARAGRAPH_SEPARATOR + &quot;y\n&quot;,
+            UNICODE_BYTE_ORDER_MARK + &quot;a: bom\n&quot;,
+            &quot;a:    \n&quot;,
+            &quot;a: &amp;anchor-only 1\n&quot;,
+            &quot;a: &amp;x 1\n&quot;,
+            &quot;[1, 2]\n&quot;,
+            &quot;plain scalar\n&quot;,
+            &quot;42\n&quot;,
+            &quot;a: [\n&quot;,
+            &quot;a: b: c\n&quot;,
+            &quot;\ta: tab\n&quot;,
+            &quot;a:\n\t- tab\n&quot;,
+            &quot;a: 'unterminated\n&quot;,
+            &quot;- a\nb: 1\n&quot;,
+            &quot;a: 1\n  b: 2\n&quot;,
+            &quot;{a: 1, b: [x, y], c: {d: null}}\n&quot;,
+            &quot;a: [1, 2,]\n&quot;,
+            &quot;a: {,}\n&quot;,
+            &quot;a: [?, ?]\n&quot;,
+            &quot;1: a\n2.5: b\ntrue: c\n~: d\nnull: e\n0x10: f\n&quot;);
+
+    @MethodSource({&quot;repositoryFrontMatters&quot;, &quot;handMadeFrontMatters&quot;})
+    @ParameterizedTest
+    void frontMatterOutsideTheRulesLoadsAsBefore(String frontMatter) {
+        // given
+<span class="nc" id="L270">        String before = jacksonPlain(frontMatter);</span>
+
+        // when
+<span class="nc" id="L273">        String after = frontMatterReader(frontMatter);</span>
+
+        // then
+<span class="nc" id="L276">        assertThat(after).isEqualTo(before);</span>
+<span class="nc" id="L277">    }</span>
+
+    @Test
+    void corpusCoversTheRepositoryWorkflowsAndFixtures() {
+        // given
+<span class="nc" id="L282">        List&lt;String&gt; harvested = repositoryFrontMatterTexts();</span>
+
+        // when
+<span class="nc" id="L285">        List&lt;String&gt; compared = comparable(harvested);</span>
+
+        // then
+<span class="nc" id="L288">        assertThat(harvested)</span>
+<span class="nc" id="L289">                .as(&quot;the harvest finds the example workflow, the fuzz seeds and the text blocks&quot;)</span>
+<span class="nc" id="L290">                .hasSizeGreaterThan(MIN_REPOSITORY_FRONT_MATTERS)</span>
+<span class="nc" id="L291">                .contains(frontMatter(read(Path.of(&quot;WORKFLOW.example.md&quot;))).orElseThrow());</span>
+<span class="nc" id="L292">        assertThat(compared)</span>
+<span class="nc" id="L293">                .as(&quot;front matter that loads without a section 5.2 rule is compared&quot;)</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                .filteredOn(yaml -&gt; !jacksonPlain(yaml).startsWith(&quot;failure&quot;))</span>
+<span class="nc" id="L295">                .hasSizeGreaterThan(MIN_REPOSITORY_FRONT_MATTERS);</span>
+<span class="nc" id="L296">    }</span>
+
+    private static List&lt;Named&lt;String&gt;&gt; repositoryFrontMatters() {
+<span class="nc" id="L299">        return named(comparable(repositoryFrontMatterTexts()));</span>
+    }
+
+    private static List&lt;String&gt; repositoryFrontMatterTexts() {
+<span class="nc" id="L303">        List&lt;String&gt; found = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L304">        frontMatter(read(Path.of(&quot;WORKFLOW.example.md&quot;))).ifPresent(found::add);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">        for (Path directory : FRONT_MATTER_FILE_DIRECTORIES) {</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">            for (Path file : files(directory, &quot;&quot;)) {</span>
+<span class="nc" id="L307">                readUtf8(file)</span>
+<span class="nc" id="L308">                        .flatMap(WorkflowFrontMatterYamlDifferentialTest::frontMatter)</span>
+<span class="nc" id="L309">                        .ifPresent(found::add);</span>
+<span class="nc" id="L310">            }</span>
+<span class="nc" id="L311">        }</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        for (Path directory : JAVA_SOURCE_DIRECTORIES) {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            for (Path file : files(directory, &quot;.java&quot;)) {</span>
+<span class="nc" id="L314">                Matcher block = TEXT_BLOCK.matcher(read(file));</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                while (block.find()) {</span>
+<span class="nc" id="L316">                    textBlockValue(block.group(1))</span>
+<span class="nc" id="L317">                            .flatMap(WorkflowFrontMatterYamlDifferentialTest::frontMatter)</span>
+<span class="nc" id="L318">                            .ifPresent(found::add);</span>
+                }
+<span class="nc" id="L320">            }</span>
+<span class="nc" id="L321">        }</span>
+<span class="nc" id="L322">        return found;</span>
+    }
+
+    private static List&lt;Named&lt;String&gt;&gt; handMadeFrontMatters() {
+<span class="nc" id="L326">        List&lt;String&gt; corpus = new ArrayList&lt;&gt;(STRUCTURES);</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        for (String scalar : SCALARS) {</span>
+<span class="nc" id="L328">            corpus.add(&quot;v: &quot; + scalar + &quot;\n&quot;);</span>
+<span class="nc" id="L329">            corpus.add(scalar + &quot;: v\n&quot;);</span>
+<span class="nc" id="L330">            corpus.add(&quot;l: [&quot; + scalar + &quot;]\n&quot;);</span>
+<span class="nc" id="L331">            corpus.add(&quot;l:\n  - &quot; + scalar + &quot;\n&quot;);</span>
+<span class="nc" id="L332">            corpus.add(&quot;m: {k: &quot; + scalar + &quot;}\n&quot;);</span>
+<span class="nc" id="L333">        }</span>
+<span class="nc" id="L334">        return named(comparable(corpus));</span>
+    }
+
+    private static List&lt;String&gt; comparable(List&lt;String&gt; corpus) {
+        // Keeps the first occurrence in corpus order, so parameterized case numbers stay stable.
+<span class="nc" id="L339">        Set&lt;String&gt; unique = new LinkedHashSet&lt;&gt;(corpus);</span>
+<span class="nc" id="L340">        List&lt;String&gt; comparable = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        for (String yaml : unique) {</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            if (outsideTheDecidedRules(yaml)) {</span>
+<span class="nc" id="L343">                comparable.add(yaml);</span>
+            }
+<span class="nc" id="L345">        }</span>
+<span class="nc" id="L346">        return comparable;</span>
+    }
+
+    private static List&lt;Named&lt;String&gt;&gt; named(List&lt;String&gt; corpus) {
+<span class="nc" id="L350">        List&lt;Named&lt;String&gt;&gt; cases = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        for (String yaml : corpus) {</span>
+<span class="nc" id="L352">            cases.add(Named.of(abbreviate(yaml), yaml));</span>
+<span class="nc" id="L353">        }</span>
+<span class="nc" id="L354">        return cases;</span>
+    }
+
+    // Inputs that use a section 5.2 rule (aliases, merge keys, repeated keys, multiple documents or no content) load
+    // differently on purpose; WorkflowFrontMatterYamlRulesTest owns them. SnakeYAML's own parser and
+    // composer find them, independently of the code under test.
+    private static boolean outsideTheDecidedRules(String yaml) {
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        if (WorkflowLoaderInvariants.hasTrailingDocumentContent(yaml)) {</span>
+<span class="nc" id="L362">            return false;</span>
+        }
+<span class="nc" id="L364">        var snakeYaml = new Yaml();</span>
+        try {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">            for (Event event : snakeYaml.parse(new StringReader(yaml))) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">                if (event instanceof AliasEvent) {</span>
+<span class="nc" id="L368">                    return false;</span>
+                }
+<span class="nc" id="L370">            }</span>
+<span class="nc" id="L371">            Node root = WorkflowLoaderInvariants.compose(yaml);</span>
+<span class="nc bnc" id="L372" title="All 4 branches missed.">            return root != null &amp;&amp; !WorkflowLoaderInvariants.hasMergeOrRepeatedKey(root);</span>
+<span class="nc" id="L373">        } catch (YAMLException | IllegalArgumentException notOneValidDocument) {</span>
+            // Malformed escapes stay in the corpus so both readers must agree on their rejection.
+<span class="nc" id="L375">            return true;</span>
+        }
+    }
+
+    private static String jacksonPlain(String yaml) {
+        try {
+<span class="nc" id="L381">            return typed(JACKSON_PLAIN.readValue(yaml, MAP_TYPE));</span>
+<span class="nc" id="L382">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L383">            return failure(e);</span>
+        }
+    }
+
+    private static String frontMatterReader(String yaml) {
+        try {
+<span class="nc" id="L389">            return typed(WorkflowFrontMatterYaml.readMap(yaml));</span>
+<span class="nc" id="L390">        } catch (IOException | RuntimeException e) {</span>
+<span class="nc" id="L391">            return failure(e);</span>
+        }
+    }
+
+    // Both readers may word a failure differently; only the fact that YAML failed must match, except
+    // for the rule violations, which the corpus filter keeps out of the comparison.
+    private static String failure(Exception e) {
+<span class="nc bnc" id="L398" title="All 2 branches missed.">        if (e instanceof WorkflowFrontMatterYaml.RuleViolation) {</span>
+<span class="nc" id="L399">            return &quot;failure &quot; + e.getClass().getSimpleName() + &quot; &quot; + e.getMessage();</span>
+        }
+<span class="nc" id="L401">        String message = String.valueOf(e.getMessage());</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">        return message.contains(&quot;No content to map due to end-of-input&quot;)</span>
+<span class="nc" id="L403">                ? &quot;failure No content to map due to end-of-input&quot;</span>
+<span class="nc" id="L404">                : &quot;failure&quot;;</span>
+    }
+
+    /// Spells out a value with the Java type of every node, so `1` and `&quot;1&quot;` or `1` and `1L` differ.
+    private static String typed(@Nullable Object value) {
+<span class="nc bnc" id="L409" title="All 5 branches missed.">        return switch (value) {</span>
+<span class="nc" id="L410">            case null -&gt; &quot;null&quot;;</span>
+<span class="nc" id="L411">            case Map&lt;?, ?&gt; map -&gt; {</span>
+<span class="nc" id="L412">                List&lt;String&gt; entries = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L413">                map.forEach((key, entry) -&gt; entries.add(typed(key) + &quot;=&quot; + typed(entry)));</span>
+<span class="nc" id="L414">                yield &quot;{&quot; + String.join(&quot;, &quot;, entries) + &quot;}&quot;;</span>
+            }
+<span class="nc" id="L416">            case List&lt;?&gt; list -&gt; {</span>
+<span class="nc" id="L417">                List&lt;String&gt; elements = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L418">                list.forEach(element -&gt; elements.add(typed(element)));</span>
+<span class="nc" id="L419">                yield &quot;[&quot; + String.join(&quot;, &quot;, elements) + &quot;]&quot;;</span>
+            }
+<span class="nc" id="L421">            case byte[] bytes -&gt; &quot;byte[]&quot; + Arrays.toString(bytes);</span>
+<span class="nc" id="L422">            default -&gt; value.getClass().getSimpleName() + &quot;:&quot; + value;</span>
+        };
+    }
+
+    // Splits like WorkflowLoader: the first line is ---, and the front matter ends at the next ---.
+    private static Optional&lt;String&gt; frontMatter(String markdown) {
+<span class="nc" id="L428">        List&lt;String&gt; lines = Arrays.asList(markdown.split(&quot;\\r\\n|\\r|\\n&quot;));</span>
+<span class="nc bnc" id="L429" title="All 4 branches missed.">        if (lines.isEmpty() || !DELIMITER.equals(lines.getFirst().trim())) {</span>
+<span class="nc" id="L430">            return Optional.empty();</span>
+        }
+<span class="nc bnc" id="L432" title="All 2 branches missed.">        for (int i = 1; i &lt; lines.size(); i++) {</span>
+<span class="nc bnc" id="L433" title="All 2 branches missed.">            if (DELIMITER.equals(lines.get(i).trim())) {</span>
+<span class="nc" id="L434">                return Optional.of(String.join(&quot;\n&quot;, lines.subList(1, i)));</span>
+            }
+        }
+<span class="nc" id="L437">        return Optional.empty();</span>
+    }
+
+    private static Optional&lt;String&gt; textBlockValue(String rawContent) {
+        try {
+<span class="nc" id="L442">            return Optional.of(rawContent.stripIndent().translateEscapes());</span>
+<span class="nc" id="L443">        } catch (IllegalArgumentException invalidEscape) {</span>
+            // A text block with a Java format escape the JDK cannot translate is no workflow fixture.
+<span class="nc" id="L445">            return Optional.empty();</span>
+        }
+    }
+
+    private static List&lt;Path&gt; files(Path directory, String suffix) {
+<span class="nc" id="L450">        List&lt;Path&gt; files = new ArrayList&lt;&gt;();</span>
+        try {
+<span class="nc" id="L452">            Files.walkFileTree(REPOSITORY_ROOT.resolve(directory), new SimpleFileVisitor&lt;&gt;() {</span>
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+<span class="nc bnc" id="L455" title="All 4 branches missed.">                    if (attributes.isRegularFile() &amp;&amp; file.toString().endsWith(suffix)) {</span>
+<span class="nc" id="L456">                        files.add(file);</span>
+                    }
+<span class="nc" id="L458">                    return FileVisitResult.CONTINUE;</span>
+                }
+            });
+<span class="nc" id="L461">        } catch (IOException e) {</span>
+<span class="nc" id="L462">            throw new UncheckedIOException(e);</span>
+<span class="nc" id="L463">        }</span>
+<span class="nc" id="L464">        files.sort(null);</span>
+<span class="nc" id="L465">        return files;</span>
+    }
+
+    private static String read(Path file) {
+        try {
+<span class="nc" id="L470">            return Files.readString(file);</span>
+<span class="nc" id="L471">        } catch (IOException e) {</span>
+<span class="nc" id="L472">            throw new UncheckedIOException(e);</span>
+        }
+    }
+
+    private static Optional&lt;String&gt; readUtf8(Path file) {
+        try {
+<span class="nc" id="L478">            return Optional.of(Files.readString(file));</span>
+<span class="nc" id="L479">        } catch (CharacterCodingException binarySeed) {</span>
+<span class="nc" id="L480">            return Optional.empty();</span>
+<span class="nc" id="L481">        } catch (IOException e) {</span>
+<span class="nc" id="L482">            throw new UncheckedIOException(e);</span>
+        }
+    }
+
+    private static String abbreviate(String yaml) {
+<span class="nc" id="L487">        String oneLine = yaml.replace(&quot;\n&quot;, &quot;\\n&quot;);</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">        return oneLine.length() &lt;= MAX_CASE_NAME_LENGTH ? oneLine : oneLine.substring(0, MAX_CASE_NAME_LENGTH) + &quot;...&quot;;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

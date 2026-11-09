@@ -1,0 +1,791 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HeartbeatReporterTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">HeartbeatReporterTest.java</span></div><h1>HeartbeatReporterTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import ch.fmartin.symphony.trello.telemetry.HeartbeatReporter.CheckResult;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import ch.fmartin.symphony.trello.testsupport.MutableClock;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentCaptor;
+
+<span class="nc" id="L40">final class HeartbeatReporterTest {</span>
+<span class="nc" id="L41">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+<span class="nc" id="L42">    private static final Duration ONE_MINUTE = Duration.ofMinutes(1);</span>
+
+    @TempDir
+    Path tempDir;
+
+    private Path stateDir;
+    private TelemetryStateStore store;
+<span class="nc" id="L49">    private final MutableClock clock = new MutableClock(TelemetryFixture.NOON);</span>
+<span class="nc" id="L50">    private final PostHogCaptureClient client = mock();</span>
+<span class="nc" id="L51">    private final List&lt;String&gt; output = new ArrayList&lt;&gt;();</span>
+    /// Tasks run only when the test says so, in FIFO order like the worker executor; this models a
+    /// slow request.
+<span class="nc" id="L54">    private final Deque&lt;Runnable&gt; queued = new ArrayDeque&lt;&gt;();</span>
+<span class="nc" id="L55">    private final Executor deferred = queued::add;</span>
+
+    @BeforeEach
+    void setUp() throws IOException {
+<span class="nc" id="L59">        stateDir = TelemetryFixture.installedStateDir(tempDir);</span>
+<span class="nc" id="L60">        store = new TelemetryStateStore(stateDir);</span>
+<span class="nc" id="L61">        when(client.endpoint()).thenReturn(TelemetryFixture.LOOPBACK_ENDPOINT);</span>
+<span class="nc" id="L62">        when(client.requestTimeout()).thenReturn(PostHogCaptureClient.REQUEST_TIMEOUT);</span>
+<span class="nc" id="L63">    }</span>
+
+    @Test
+    void firstReadyWorkerRegistersPrintsTheNoticeAndStartsTheGracePeriodOnce() {
+        // given
+<span class="nc" id="L68">        HeartbeatReporter first = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L69">        HeartbeatReporter second = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L72">        CheckResult firstResult = first.check();</span>
+<span class="nc" id="L73">        clock.advance(ONE_MINUTE);</span>
+<span class="nc" id="L74">        CheckResult secondResult = second.check();</span>
+<span class="nc" id="L75">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L78">        assertThat(firstResult).isEqualTo(CheckResult.GRACE);</span>
+<span class="nc" id="L79">        assertThat(secondResult).isEqualTo(CheckResult.GRACE);</span>
+<span class="nc" id="L80">        assertThat(state.hasIdentity())</span>
+<span class="nc" id="L81">                .as(&quot;identity created at the first ready worker&quot;)</span>
+<span class="nc" id="L82">                .isTrue();</span>
+<span class="nc" id="L83">        assertThat(state.registeredOn()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L84">        assertThat(state.firstWorkerDeadline())</span>
+<span class="nc" id="L85">                .isEqualTo(TelemetryFixture.NOON.plus(TelemetryNotice.FIRST_REPORT_GRACE));</span>
+<span class="nc" id="L86">        assertThat(state.noticeRevision()).isEqualTo(TelemetryNotice.REVISION);</span>
+<span class="nc" id="L87">        assertThat(output)</span>
+<span class="nc" id="L88">                .singleElement()</span>
+<span class="nc" id="L89">                .asString()</span>
+<span class="nc" id="L90">                .contains(&quot;First report in 5 minutes&quot;)</span>
+<span class="nc" id="L91">                .contains(&quot;Disable: &quot;);</span>
+<span class="nc" id="L92">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L93">    }</span>
+
+    @Test
+    void firstHeartbeatIsSentAfterTheGraceDeadlineAndRecordedOnce() throws IOException {
+        // given
+<span class="nc" id="L98">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L99">        HeartbeatReporter reporter = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L100">        reporter.check();</span>
+
+        // when
+<span class="nc" id="L103">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE.minusSeconds(1));</span>
+<span class="nc" id="L104">        CheckResult beforeDeadline = reporter.check();</span>
+<span class="nc" id="L105">        clock.advance(Duration.ofSeconds(1));</span>
+<span class="nc" id="L106">        CheckResult atDeadline = reporter.check();</span>
+<span class="nc" id="L107">        CheckResult again = reporter.check();</span>
+<span class="nc" id="L108">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L111">        assertThat(beforeDeadline).isEqualTo(CheckResult.GRACE);</span>
+<span class="nc" id="L112">        assertThat(atDeadline).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L113">        assertThat(again).isEqualTo(CheckResult.DONE_TODAY);</span>
+<span class="nc" id="L114">        ArgumentCaptor&lt;String&gt; body = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L115">        verify(client).capture(body.capture());</span>
+<span class="nc" id="L116">        JsonNode sent = JSON.readTree(body.getValue());</span>
+<span class="nc" id="L117">        assertThat(sent.get(&quot;distinct_id&quot;).asText())</span>
+<span class="nc" id="L118">                .isEqualTo(state.installationId().toString());</span>
+<span class="nc" id="L119">        assertThat(sent.get(&quot;timestamp&quot;).asText()).isEqualTo(&quot;2026-09-22T12:05:00Z&quot;);</span>
+<span class="nc" id="L120">        assertThat(sent.get(&quot;properties&quot;).get(&quot;app_version&quot;).asText()).isEqualTo(TelemetryFixture.INSTALLED_VERSION);</span>
+<span class="nc" id="L121">        assertThat(sent.get(&quot;properties&quot;).get(&quot;connected_board_count&quot;).asInt()).isEqualTo(3);</span>
+<span class="nc" id="L122">        assertThat(state.lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L123">        assertThat(state.pendingReport()).isNull();</span>
+<span class="nc" id="L124">        assertThat(state.claim()).isNull();</span>
+<span class="nc" id="L125">    }</span>
+
+    @Test
+    void identityCreatedInTheSameTransactionAsTheFirstClaimIsSent() throws IOException {
+        // given
+        // A state whose grace period ended but that was never registered, for example when the
+        // deadline was stored by a worker that could not reach the network.
+<span class="nc" id="L132">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L133">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L134">                state.withFirstWorkerDeadline(TelemetryFixture.NOON.minusSeconds(1))</span>
+<span class="nc" id="L135">                        .withNotice(TelemetryNotice.REVISION, TelemetryFixture.NOON.minusSeconds(1)),</span>
+                null));
+<span class="nc" id="L137">        HeartbeatReporter reporter = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L140">        CheckResult result = reporter.check();</span>
+<span class="nc" id="L141">        ArgumentCaptor&lt;String&gt; body = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L142">        verify(client).capture(body.capture());</span>
+<span class="nc" id="L143">        JsonNode sent = JSON.readTree(body.getValue());</span>
+
+        // then
+<span class="nc" id="L146">        assertThat(result).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L147">        assertThat(sent.get(&quot;properties&quot;).get(&quot;registered_on&quot;).asText()).isEqualTo(&quot;2026-09-22&quot;);</span>
+<span class="nc" id="L148">        assertThat(sent.get(&quot;distinct_id&quot;).asText())</span>
+<span class="nc" id="L149">                .isEqualTo(store.read().stateOrInitial().installationId().toString());</span>
+<span class="nc" id="L150">    }</span>
+
+    @Test
+    void restartsDuringGraceKeepTheOriginalDeadlineAndDoNotRepeatTheNotice() {
+        // given
+<span class="nc" id="L155">        HeartbeatReporter reporter = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L156">        reporter.check();</span>
+<span class="nc" id="L157">        Instant deadline = store.read().stateOrInitial().firstWorkerDeadline();</span>
+
+        // when
+<span class="nc" id="L160">        clock.advance(Duration.ofMinutes(3));</span>
+<span class="nc" id="L161">        HeartbeatReporter restarted = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L162">        CheckResult result = restarted.check();</span>
+
+        // then
+<span class="nc" id="L165">        assertThat(result).isEqualTo(CheckResult.GRACE);</span>
+<span class="nc" id="L166">        assertThat(store.read().stateOrInitial().firstWorkerDeadline()).isEqualTo(deadline);</span>
+<span class="nc" id="L167">        assertThat(output).hasSize(1);</span>
+<span class="nc" id="L168">    }</span>
+
+    @Test
+    void oneAcceptedReportPerUtcDayAcrossMidnightAndRestarts() {
+        // given
+<span class="nc" id="L173">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L174">        HeartbeatReporter reporter = readyReporter();</span>
+
+        // when
+<span class="nc" id="L177">        CheckResult first = reporter.check();</span>
+<span class="nc" id="L178">        clock.advance(Duration.ofHours(6));</span>
+<span class="nc" id="L179">        CheckResult sameDayRestart =</span>
+<span class="nc" id="L180">                reporter(TelemetryEnvironment.none(), Runnable::run).check();</span>
+<span class="nc" id="L181">        clock.set(Instant.parse(&quot;2026-09-23T00:00:30Z&quot;));</span>
+<span class="nc" id="L182">        CheckResult nextDay = reporter.check();</span>
+
+        // then
+<span class="nc" id="L185">        assertThat(List.of(first, sameDayRestart, nextDay))</span>
+<span class="nc" id="L186">                .containsExactly(CheckResult.DISPATCHED, CheckResult.DONE_TODAY, CheckResult.DISPATCHED);</span>
+<span class="nc" id="L187">        verify(client, times(2)).capture(anyString());</span>
+<span class="nc" id="L188">        assertThat(store.read().stateOrInitial().lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 23));</span>
+<span class="nc" id="L189">    }</span>
+
+    @Test
+    void transientFailuresRetryWithBoundedBackoffAndTheSameEventIdentity() throws IOException {
+        // given
+<span class="nc" id="L194">        when(client.capture(anyString()))</span>
+<span class="nc" id="L195">                .thenReturn(CaptureOutcome.transientFailure(Optional.of(503), Optional.empty(), &quot;HTTP 503&quot;))</span>
+<span class="nc" id="L196">                .thenReturn(CaptureOutcome.transientFailure(</span>
+<span class="nc" id="L197">                        Optional.of(429), Optional.of(Duration.ofSeconds(120)), &quot;HTTP 429&quot;))</span>
+<span class="nc" id="L198">                .thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L199">        HeartbeatReporter reporter = readyReporter();</span>
+
+        // when
+<span class="nc" id="L202">        Instant firstAttempt = clock.instant();</span>
+<span class="nc" id="L203">        reporter.check();</span>
+<span class="nc" id="L204">        TelemetryState afterFirst = store.read().stateOrInitial();</span>
+<span class="nc" id="L205">        CheckResult tooEarly = reporter.check();</span>
+<span class="nc" id="L206">        clock.advance(Duration.ofSeconds(61));</span>
+<span class="nc" id="L207">        Instant secondAttemptAt = clock.instant();</span>
+<span class="nc" id="L208">        CheckResult secondAttempt = reporter.check();</span>
+<span class="nc" id="L209">        TelemetryState afterSecond = store.read().stateOrInitial();</span>
+<span class="nc" id="L210">        clock.advance(Duration.ofSeconds(121));</span>
+<span class="nc" id="L211">        CheckResult thirdAttempt = reporter.check();</span>
+<span class="nc" id="L212">        ArgumentCaptor&lt;String&gt; bodies = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L213">        verify(client, times(3)).capture(bodies.capture());</span>
+
+        // then
+<span class="nc" id="L216">        assertThat(afterFirst.retry()).satisfies(retry -&gt; {</span>
+<span class="nc" id="L217">            assertThat(retry.attempts()).isOne();</span>
+<span class="nc" id="L218">            assertThat(retry.notBefore()).isEqualTo(firstAttempt.plus(HeartbeatReporter.RETRY_BACKOFF.getFirst()));</span>
+<span class="nc" id="L219">        });</span>
+<span class="nc" id="L220">        assertThat(tooEarly).isEqualTo(CheckResult.WAITING);</span>
+<span class="nc" id="L221">        assertThat(secondAttempt).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L222">        assertThat(afterSecond.retry().notBefore())</span>
+<span class="nc" id="L223">                .as(&quot;Retry-After replaces the backoff step&quot;)</span>
+<span class="nc" id="L224">                .isEqualTo(secondAttemptAt.plusSeconds(120));</span>
+<span class="nc" id="L225">        assertThat(thirdAttempt).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L226">        List&lt;String&gt; sent = bodies.getAllValues();</span>
+<span class="nc" id="L227">        assertThat(sent)</span>
+<span class="nc" id="L228">                .extracting(body -&gt; parse(body).get(&quot;uuid&quot;).asText())</span>
+<span class="nc" id="L229">                .containsOnly(parse(sent.getFirst()).get(&quot;uuid&quot;).asText());</span>
+<span class="nc" id="L230">        assertThat(sent)</span>
+<span class="nc" id="L231">                .extracting(body -&gt; parse(body).get(&quot;timestamp&quot;).asText())</span>
+<span class="nc" id="L232">                .containsOnly(&quot;2026-09-22T12:05:00Z&quot;);</span>
+<span class="nc" id="L233">        assertThat(store.read().stateOrInitial().lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L234">    }</span>
+
+    @Test
+    void anUnreadableResponseBodyIsRetriedWithTheSameEventAndAdvancesNothing() throws IOException {
+        // given
+<span class="nc" id="L239">        when(client.capture(anyString()))</span>
+<span class="nc" id="L240">                .thenReturn(</span>
+<span class="nc" id="L241">                        CaptureOutcome.transientFailure(Optional.of(200), Optional.empty(), &quot;response body unreadable&quot;))</span>
+<span class="nc" id="L242">                .thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L243">        HeartbeatReporter reporter = readyReporter();</span>
+
+        // when
+<span class="nc" id="L246">        Instant firstAttempt = clock.instant();</span>
+<span class="nc" id="L247">        reporter.check();</span>
+<span class="nc" id="L248">        TelemetryState afterFailure = store.read().stateOrInitial();</span>
+<span class="nc" id="L249">        clock.advance(Duration.ofSeconds(61));</span>
+<span class="nc" id="L250">        reporter.check();</span>
+<span class="nc" id="L251">        TelemetryState afterRetry = store.read().stateOrInitial();</span>
+<span class="nc" id="L252">        ArgumentCaptor&lt;String&gt; bodies = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L253">        verify(client, times(2)).capture(bodies.capture());</span>
+<span class="nc" id="L254">        List&lt;String&gt; sent = bodies.getAllValues();</span>
+
+        // then
+<span class="nc" id="L257">        assertThat(afterFailure.lastReported())</span>
+<span class="nc" id="L258">                .as(&quot;a body that never arrived whole proves nothing&quot;)</span>
+<span class="nc" id="L259">                .isEmpty();</span>
+<span class="nc" id="L260">        assertThat(afterFailure.pending())</span>
+<span class="nc" id="L261">                .map(pending -&gt; pending.eventUuid().toString())</span>
+<span class="nc" id="L262">                .hasValue(parse(sent.getFirst()).get(&quot;uuid&quot;).asText());</span>
+<span class="nc" id="L263">        assertThat(afterFailure.retry()).satisfies(retry -&gt; {</span>
+<span class="nc" id="L264">            assertThat(retry.reason()).isEqualTo(&quot;response body unreadable&quot;);</span>
+<span class="nc" id="L265">            assertThat(retry.attempts()).isOne();</span>
+<span class="nc" id="L266">            assertThat(retry.notBefore()).isEqualTo(firstAttempt.plus(HeartbeatReporter.RETRY_BACKOFF.getFirst()));</span>
+<span class="nc" id="L267">        });</span>
+<span class="nc" id="L268">        assertThat(sent)</span>
+<span class="nc" id="L269">                .extracting(body -&gt; parse(body).get(&quot;uuid&quot;).asText())</span>
+<span class="nc" id="L270">                .containsOnly(parse(sent.getFirst()).get(&quot;uuid&quot;).asText());</span>
+<span class="nc" id="L271">        assertThat(afterRetry.lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L272">        assertThat(afterRetry.pending()).isEmpty();</span>
+<span class="nc" id="L273">    }</span>
+
+    @Test
+    void stalePendingReportIsReplacedByAFreshSnapshotOnTheNextDay() throws IOException {
+        // given
+<span class="nc" id="L278">        when(client.capture(anyString()))</span>
+<span class="nc" id="L279">                .thenReturn(CaptureOutcome.transientFailure(Optional.empty(), Optional.empty(), &quot;connection failed&quot;))</span>
+<span class="nc" id="L280">                .thenReturn(CaptureOutcome.transientFailure(Optional.of(503), Optional.empty(), &quot;HTTP 503&quot;));</span>
+<span class="nc" id="L281">        HeartbeatReporter reporter = readyReporter();</span>
+<span class="nc" id="L282">        reporter.check();</span>
+<span class="nc" id="L283">        store.update(state -&gt; Update.write(state.withCounters(9, 0), null));</span>
+
+        // when
+<span class="nc" id="L286">        clock.set(Instant.parse(&quot;2026-09-23T08:00:00Z&quot;));</span>
+<span class="nc" id="L287">        CheckResult nextDay = reporter.check();</span>
+<span class="nc" id="L288">        ArgumentCaptor&lt;String&gt; bodies = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L289">        verify(client, times(2)).capture(bodies.capture());</span>
+<span class="nc" id="L290">        JsonNode fresh = JSON.readTree(bodies.getAllValues().get(1));</span>
+
+        // then
+<span class="nc" id="L293">        assertThat(nextDay).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L294">        assertThat(store.read().stateOrInitial().retry())</span>
+<span class="nc" id="L295">                .as(&quot;a fresh report starts its own backoff instead of inheriting the stale attempt count&quot;)</span>
+<span class="nc" id="L296">                .satisfies(retry -&gt; {</span>
+<span class="nc" id="L297">                    assertThat(retry.attempts()).isOne();</span>
+<span class="nc" id="L298">                    assertThat(retry.reason()).isEqualTo(&quot;HTTP 503&quot;);</span>
+<span class="nc" id="L299">                });</span>
+<span class="nc" id="L300">        assertThat(fresh.get(&quot;timestamp&quot;).asText()).isEqualTo(&quot;2026-09-23T08:00:00Z&quot;);</span>
+<span class="nc" id="L301">        assertThat(fresh.get(&quot;properties&quot;).get(&quot;board_imports_total&quot;).asInt()).isEqualTo(9);</span>
+<span class="nc" id="L302">        assertThat(fresh.get(&quot;uuid&quot;).asText())</span>
+<span class="nc" id="L303">                .isNotEqualTo(JSON.readTree(bodies.getAllValues().getFirst())</span>
+<span class="nc" id="L304">                        .get(&quot;uuid&quot;)</span>
+<span class="nc" id="L305">                        .asText());</span>
+<span class="nc" id="L306">    }</span>
+
+    @Test
+    void stalePendingReportIsReplacedEvenWhileItsBackoffIsStillRunning() {
+        // given
+<span class="nc" id="L311">        when(client.capture(anyString()))</span>
+<span class="nc" id="L312">                .thenReturn(CaptureOutcome.transientFailure(</span>
+<span class="nc" id="L313">                        Optional.of(429), Optional.of(PostHogCaptureClient.MAX_RETRY_AFTER), &quot;HTTP 429&quot;))</span>
+<span class="nc" id="L314">                .thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L315">        HeartbeatReporter reporter = readyReporter();</span>
+<span class="nc" id="L316">        clock.set(Instant.parse(&quot;2026-09-22T23:30:00Z&quot;));</span>
+<span class="nc" id="L317">        reporter.check();</span>
+
+        // when
+<span class="nc" id="L320">        clock.set(Instant.parse(&quot;2026-09-23T00:05:00Z&quot;));</span>
+<span class="nc" id="L321">        CheckResult nextDay = reporter.check();</span>
+<span class="nc" id="L322">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L325">        assertThat(nextDay).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L326">        assertThat(state.lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 23));</span>
+<span class="nc" id="L327">        assertThat(state.retry()).isNull();</span>
+<span class="nc" id="L328">    }</span>
+
+    @Test
+    void aStoredDisableStaysDisabledAcrossRestartsAndTicksBeyondTheGracePeriod() {
+        // given
+<span class="nc" id="L333">        UUID id = UUID.randomUUID();</span>
+<span class="nc" id="L334">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L335">                state.withIdentity(id, LocalDate.of(2026, 9, 1))</span>
+<span class="nc" id="L336">                        .withCounters(4, 2)</span>
+<span class="nc" id="L337">                        .withFirstWorkerDeadline(TelemetryFixture.NOON.minusSeconds(1))</span>
+<span class="nc" id="L338">                        .withMode(TelemetryMode.DISABLED),</span>
+                null));
+
+        // when
+<span class="nc" id="L342">        List&lt;CheckResult&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">        for (int restart = 0; restart &lt; 3; restart++) {</span>
+<span class="nc" id="L344">            HeartbeatReporter worker = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L345">            results.add(worker.check());</span>
+<span class="nc" id="L346">            clock.advance(Duration.ofMinutes(6));</span>
+<span class="nc" id="L347">            results.add(worker.check());</span>
+        }
+<span class="nc" id="L349">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L352">        assertThat(results).containsOnly(CheckResult.DISABLED);</span>
+<span class="nc" id="L353">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L354">        assertThat(state.installationId())</span>
+<span class="nc" id="L355">                .as(&quot;the identity is neither replaced nor removed&quot;)</span>
+<span class="nc" id="L356">                .isEqualTo(id);</span>
+<span class="nc" id="L357">        assertThat(state.boardImportsTotal()).isEqualTo(4);</span>
+<span class="nc" id="L358">        assertThat(state.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L359">    }</span>
+
+    @Test
+    void quotaLimitedResponseIsDeferredNotRecordedAsAccepted() {
+        // given
+<span class="nc" id="L364">        when(client.capture(anyString())).thenReturn(CaptureOutcome.quotaLimited(200));</span>
+<span class="nc" id="L365">        HeartbeatReporter reporter = readyReporter();</span>
+
+        // when
+<span class="nc" id="L368">        CheckResult first = reporter.check();</span>
+<span class="nc" id="L369">        clock.advance(Duration.ofHours(1));</span>
+<span class="nc" id="L370">        CheckResult later = reporter.check();</span>
+<span class="nc" id="L371">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L374">        assertThat(first).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L375">        assertThat(later)</span>
+<span class="nc" id="L376">                .as(&quot;no retry storm against a quota that would drop the event again&quot;)</span>
+<span class="nc" id="L377">                .isEqualTo(CheckResult.WAITING);</span>
+<span class="nc" id="L378">        assertThat(state.lastReportedDate())</span>
+<span class="nc" id="L379">                .as(&quot;a dropped event is not an accepted report&quot;)</span>
+<span class="nc" id="L380">                .isNull();</span>
+<span class="nc" id="L381">        assertThat(state.retry().reason()).isEqualTo(&quot;accepted but quota-limited&quot;);</span>
+<span class="nc" id="L382">        assertThat(state.retry().notBefore()).isEqualTo(Instant.parse(&quot;2026-09-23T00:00:00Z&quot;));</span>
+<span class="nc" id="L383">        verify(client).capture(anyString());</span>
+<span class="nc" id="L384">    }</span>
+
+    @MethodSource(&quot;modeRoundTripsAfterADailyHold&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void aModeRoundTripDoesNotLiftTheHoldUntilTheNextUtcDay(
+            String scenario, CaptureOutcome outcome, TelemetryMode interim) {
+        // given
+<span class="nc" id="L391">        when(client.capture(anyString())).thenReturn(outcome).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L392">        HeartbeatReporter reporter = readyReporter();</span>
+<span class="nc" id="L393">        reporter.check();</span>
+
+        // when
+<span class="nc" id="L396">        store.update(state -&gt; Update.write(state.withMode(interim), null));</span>
+<span class="nc" id="L397">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.ENABLED), null));</span>
+<span class="nc" id="L398">        clock.advance(Duration.ofHours(1));</span>
+<span class="nc" id="L399">        CheckResult sameDay = reporter.check();</span>
+<span class="nc" id="L400">        clock.set(Instant.parse(&quot;2026-09-23T00:00:30Z&quot;));</span>
+<span class="nc" id="L401">        CheckResult nextDay = reporter.check();</span>
+
+        // then
+<span class="nc" id="L404">        assertThat(sameDay)</span>
+<span class="nc" id="L405">                .as(&quot;%s: the hold until the next UTC day survives the preference change&quot;, scenario)</span>
+<span class="nc" id="L406">                .isEqualTo(CheckResult.WAITING);</span>
+<span class="nc" id="L407">        assertThat(nextDay)</span>
+<span class="nc" id="L408">                .as(&quot;%s: the next UTC day sends a fresh report&quot;, scenario)</span>
+<span class="nc" id="L409">                .isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L410">        verify(client, times(2)).capture(anyString());</span>
+<span class="nc" id="L411">        assertThat(store.read().stateOrInitial().lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 23));</span>
+<span class="nc" id="L412">    }</span>
+
+    static List&lt;Arguments&gt; modeRoundTripsAfterADailyHold() {
+<span class="nc" id="L415">        CaptureOutcome quotaLimited = CaptureOutcome.quotaLimited(200);</span>
+<span class="nc" id="L416">        CaptureOutcome permanent = CaptureOutcome.permanentFailure(401, &quot;project token rejected&quot;);</span>
+<span class="nc" id="L417">        return List.of(</span>
+<span class="nc" id="L418">                Arguments.of(&quot;quota-limited, disable, enable&quot;, quotaLimited, TelemetryMode.DISABLED),</span>
+<span class="nc" id="L419">                Arguments.of(&quot;quota-limited, debug, enable&quot;, quotaLimited, TelemetryMode.DEBUG),</span>
+<span class="nc" id="L420">                Arguments.of(&quot;permanent failure, disable, enable&quot;, permanent, TelemetryMode.DISABLED));</span>
+    }
+
+    @Test
+    void firstWorkerPrintsTheNoticeWithTheRealDeadlineEvenAfterSetupDisclosure() {
+        // given
+<span class="nc" id="L426">        UUID id = UUID.randomUUID();</span>
+<span class="nc" id="L427">        store.update(state -&gt; Update.write(</span>
+<span class="nc" id="L428">                state.withIdentity(id, LocalDate.of(2026, 9, 20))</span>
+<span class="nc" id="L429">                        .withNotice(TelemetryNotice.REVISION, TelemetryFixture.NOON.minusSeconds(600))</span>
+<span class="nc" id="L430">                        .withCounters(1, 0),</span>
+                null));
+<span class="nc" id="L432">        HeartbeatReporter first = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L433">        HeartbeatReporter second = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L436">        CheckResult firstResult = first.check();</span>
+<span class="nc" id="L437">        clock.advance(Duration.ofMinutes(2));</span>
+<span class="nc" id="L438">        CheckResult secondResult = second.check();</span>
+<span class="nc" id="L439">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L442">        assertThat(List.of(firstResult, secondResult)).containsOnly(CheckResult.GRACE);</span>
+<span class="nc" id="L443">        assertThat(output).singleElement().asString().contains(&quot;First report in 5 minutes&quot;);</span>
+<span class="nc" id="L444">        assertThat(state.installationId())</span>
+<span class="nc" id="L445">                .as(&quot;setup identity and counters are kept&quot;)</span>
+<span class="nc" id="L446">                .isEqualTo(id);</span>
+<span class="nc" id="L447">        assertThat(state.boardImportsTotal()).isOne();</span>
+<span class="nc" id="L448">        assertThat(state.firstWorkerDeadline())</span>
+<span class="nc" id="L449">                .isEqualTo(TelemetryFixture.NOON.plus(TelemetryNotice.FIRST_REPORT_GRACE));</span>
+<span class="nc" id="L450">    }</span>
+
+    @Test
+    void aClockThatMovesBackwardsDoesNotProduceASecondReportForACoveredDay() {
+        // given
+        // The report for the 23rd was accepted shortly after midnight.
+<span class="nc" id="L456">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L457">        HeartbeatReporter reporter = readyReporter();</span>
+<span class="nc" id="L458">        clock.set(Instant.parse(&quot;2026-09-23T00:30:00Z&quot;));</span>
+<span class="nc" id="L459">        reporter.check();</span>
+
+        // when
+        // The clock is corrected backwards into the 22nd, after the grace deadline.
+<span class="nc" id="L463">        clock.set(Instant.parse(&quot;2026-09-22T23:50:00Z&quot;));</span>
+<span class="nc" id="L464">        CheckResult yesterdayAgain = reporter.check();</span>
+
+        // then
+<span class="nc" id="L467">        assertThat(yesterdayAgain).isEqualTo(CheckResult.DONE_TODAY);</span>
+<span class="nc" id="L468">        assertThat(store.read().stateOrInitial().lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 23));</span>
+<span class="nc" id="L469">        verify(client).capture(anyString());</span>
+<span class="nc" id="L470">    }</span>
+
+    @Test
+    void anInFlightDeliveryBlocksFurtherClaimsUntilItFinishes() {
+        // given
+<span class="nc" id="L475">        HeartbeatReporter reporter = reporterReady(TelemetryEnvironment.none(), deferred);</span>
+<span class="nc" id="L476">        when(client.capture(anyString())).thenAnswer(invocation -&gt; {</span>
+            // The request has already started. Advancing the clock must not queue another behind it.
+<span class="nc" id="L478">            clock.advance(HeartbeatReporter.CLAIM_LIFETIME.plusSeconds(1));</span>
+<span class="nc" id="L479">            assertThat(reporter.check())</span>
+<span class="nc" id="L480">                    .as(&quot;no second attempt is queued while capture is running&quot;)</span>
+<span class="nc" id="L481">                    .isEqualTo(CheckResult.WAITING);</span>
+<span class="nc" id="L482">            return CaptureOutcome.accepted(200);</span>
+        });
+
+        // when
+<span class="nc" id="L486">        CheckResult claimed = reporter.check();</span>
+<span class="nc" id="L487">        queued.forEach(Runnable::run);</span>
+<span class="nc" id="L488">        CheckResult afterwards = reporter.check();</span>
+
+        // then
+<span class="nc" id="L491">        assertThat(claimed).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L492">        assertThat(queued).hasSize(1);</span>
+<span class="nc" id="L493">        assertThat(afterwards).isEqualTo(CheckResult.DONE_TODAY);</span>
+<span class="nc" id="L494">        verify(client).capture(anyString());</span>
+<span class="nc" id="L495">    }</span>
+
+    @Test
+    void aStaleAttemptCannotRecordOverANewerClaimOfTheSameEvent() {
+        // given
+        // The takeover sends first and succeeds; the stale attempt runs afterwards and fails.
+<span class="nc" id="L501">        when(client.capture(anyString()))</span>
+<span class="nc" id="L502">                .thenReturn(CaptureOutcome.accepted(200))</span>
+<span class="nc" id="L503">                .thenReturn(CaptureOutcome.transientFailure(Optional.of(503), Optional.empty(), &quot;HTTP 503&quot;));</span>
+<span class="nc" id="L504">        HeartbeatReporter stalled = reporterReady(TelemetryEnvironment.none(), deferred);</span>
+<span class="nc" id="L505">        HeartbeatReporter other = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L506">        stalled.check();</span>
+<span class="nc" id="L507">        Runnable staleAttempt = queued.pollFirst();</span>
+
+        // when
+        // The first claim expires, another worker takes over and succeeds, then the stale attempt
+        // finally completes with its old failure.
+<span class="nc" id="L512">        clock.advance(HeartbeatReporter.CLAIM_LIFETIME.plusSeconds(1));</span>
+<span class="nc" id="L513">        CheckResult takeover = other.check();</span>
+<span class="nc" id="L514">        staleAttempt.run();</span>
+<span class="nc" id="L515">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L518">        assertThat(takeover).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L519">        assertThat(state.lastReportedDate()).as(&quot;the newer success stands&quot;).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L520">        assertThat(state.retry())</span>
+<span class="nc" id="L521">                .as(&quot;the stale failure does not schedule a retry&quot;)</span>
+<span class="nc" id="L522">                .isNull();</span>
+<span class="nc" id="L523">    }</span>
+
+    @Test
+    void permanentFailureDefersToTheNextUtcDayWithoutRetrying() {
+        // given
+<span class="nc" id="L528">        when(client.capture(anyString())).thenReturn(CaptureOutcome.permanentFailure(401, &quot;project token rejected&quot;));</span>
+<span class="nc" id="L529">        HeartbeatReporter reporter = readyReporter();</span>
+
+        // when
+<span class="nc" id="L532">        CheckResult first = reporter.check();</span>
+<span class="nc" id="L533">        clock.advance(Duration.ofHours(2));</span>
+<span class="nc" id="L534">        CheckResult later = reporter.check();</span>
+<span class="nc" id="L535">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L538">        assertThat(first).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L539">        assertThat(later).isEqualTo(CheckResult.WAITING);</span>
+<span class="nc" id="L540">        assertThat(state.pendingReport()).isNull();</span>
+<span class="nc" id="L541">        assertThat(state.retry().notBefore()).isEqualTo(Instant.parse(&quot;2026-09-23T00:00:00Z&quot;));</span>
+<span class="nc" id="L542">        verify(client).capture(anyString());</span>
+<span class="nc" id="L543">    }</span>
+
+    @Test
+    void otherWorkersWaitWhileAClaimIsActiveAndTakeOverWhenItExpires() {
+        // given
+<span class="nc" id="L548">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L549">        HeartbeatReporter slow = reporterReady(TelemetryEnvironment.none(), deferred);</span>
+<span class="nc" id="L550">        HeartbeatReporter other = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L553">        CheckResult claimed = slow.check();</span>
+<span class="nc" id="L554">        CheckResult blocked = other.check();</span>
+<span class="nc" id="L555">        clock.advance(HeartbeatReporter.CLAIM_LIFETIME.plusSeconds(1));</span>
+<span class="nc" id="L556">        CheckResult takenOver = other.check();</span>
+<span class="nc" id="L557">        queued.forEach(Runnable::run);</span>
+<span class="nc" id="L558">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L561">        assertThat(claimed).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L562">        assertThat(blocked).isEqualTo(CheckResult.WAITING);</span>
+<span class="nc" id="L563">        assertThat(takenOver).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L564">        verify(client).capture(anyString());</span>
+<span class="nc" id="L565">        assertThat(state.lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L566">    }</span>
+
+    @Test
+    void disableDuringAnInFlightRequestFencesTheLateCompletion() {
+        // given
+<span class="nc" id="L571">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L572">        HeartbeatReporter reporter = reporterReady(TelemetryEnvironment.none(), deferred);</span>
+<span class="nc" id="L573">        reporter.check();</span>
+
+        // when
+<span class="nc" id="L576">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+<span class="nc" id="L577">        queued.forEach(Runnable::run);</span>
+<span class="nc" id="L578">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L581">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L582">        assertThat(state.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L583">        assertThat(state.lastReportedDate()).isNull();</span>
+<span class="nc" id="L584">        assertThat(state.pendingReport()).isNull();</span>
+<span class="nc" id="L585">    }</span>
+
+    @Test
+    void preferenceChangesDuringCaptureKeepTheDailyDispatchFence() {
+        // given
+<span class="nc" id="L590">        when(client.capture(anyString())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L591">            store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+<span class="nc" id="L592">            return CaptureOutcome.accepted(200);</span>
+        });
+<span class="nc" id="L594">        HeartbeatReporter first = reporterReady(TelemetryEnvironment.none(), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L597">        first.check();</span>
+<span class="nc" id="L598">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.ENABLED), null));</span>
+<span class="nc" id="L599">        HeartbeatReporter restarted = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+<span class="nc" id="L600">        CheckResult sameDay = restarted.check();</span>
+<span class="nc" id="L601">        clock.advance(Duration.ofDays(1));</span>
+<span class="nc" id="L602">        CheckResult nextDay = restarted.check();</span>
+
+        // then
+<span class="nc" id="L605">        assertThat(sameDay).isEqualTo(CheckResult.DONE_TODAY);</span>
+<span class="nc" id="L606">        assertThat(nextDay).isEqualTo(CheckResult.DISPATCHED);</span>
+<span class="nc" id="L607">        verify(client, times(2)).capture(anyString());</span>
+<span class="nc" id="L608">        assertThat(store.read().stateOrInitial().pendingReport()).isNull();</span>
+<span class="nc" id="L609">    }</span>
+
+    @Test
+    void aLateSuccessAfterANewerPreferenceCannotRewriteState() {
+        // given
+<span class="nc" id="L614">        var capturedBody = new AtomicReference&lt;String&gt;();</span>
+        // The gate holds the capture callbacks in FIFO order until the test releases them.
+<span class="nc" id="L616">        var gate = new ArrayDeque&lt;Runnable&gt;();</span>
+<span class="nc" id="L617">        when(client.capture(anyString())).thenAnswer(invocation -&gt; {</span>
+<span class="nc" id="L618">            capturedBody.set(invocation.getArgument(0));</span>
+            // The preference changes while the request is on the wire.
+<span class="nc" id="L620">            store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DEBUG), null));</span>
+<span class="nc" id="L621">            return CaptureOutcome.accepted(200);</span>
+        });
+<span class="nc" id="L623">        HeartbeatReporter reporter = reporterReady(TelemetryEnvironment.none(), gate::add);</span>
+<span class="nc" id="L624">        reporter.check();</span>
+
+        // when
+<span class="nc" id="L627">        gate.forEach(Runnable::run);</span>
+<span class="nc" id="L628">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L631">        assertThat(capturedBody.get()).as(&quot;the request was already dispatched&quot;).isNotNull();</span>
+<span class="nc" id="L632">        assertThat(state.mode()).isEqualTo(TelemetryMode.DEBUG);</span>
+<span class="nc" id="L633">        assertThat(state.lastReportedDate())</span>
+<span class="nc" id="L634">                .as(&quot;a fenced completion records nothing&quot;)</span>
+<span class="nc" id="L635">                .isNull();</span>
+<span class="nc" id="L636">        assertThat(state.claim()).isNull();</span>
+<span class="nc" id="L637">    }</span>
+
+    @Test
+    void debugWorkersPrintAPreviewImmediatelyAndOnlyOnMeaningfulChange() {
+        // given
+<span class="nc" id="L642">        HeartbeatReporter reporter = reporter(new TelemetryEnvironment(false, true, false), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L645">        CheckResult first = reporter.check();</span>
+<span class="nc" id="L646">        clock.advance(ONE_MINUTE);</span>
+<span class="nc" id="L647">        CheckResult unchanged = reporter.check();</span>
+<span class="nc" id="L648">        store.update(state -&gt; Update.write(state.withCounters(0, 1), null));</span>
+<span class="nc" id="L649">        CheckResult changed = reporter.check();</span>
+
+        // then
+<span class="nc" id="L652">        assertThat(List.of(first, unchanged, changed)).containsOnly(CheckResult.DEBUG);</span>
+<span class="nc" id="L653">        assertThat(output).hasSize(2);</span>
+<span class="nc" id="L654">        assertThat(output.getFirst()).contains(&quot;not sent&quot;).contains(&quot;\&quot;board_creations_total\&quot; : 0&quot;);</span>
+<span class="nc" id="L655">        assertThat(output.getLast()).contains(&quot;\&quot;board_creations_total\&quot; : 1&quot;);</span>
+<span class="nc" id="L656">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L657">        assertThat(store.read().stateOrInitial().hasIdentity())</span>
+<span class="nc" id="L658">                .as(&quot;debug creates no identity&quot;)</span>
+<span class="nc" id="L659">                .isFalse();</span>
+<span class="nc" id="L660">    }</span>
+
+    @Test
+    void debugWorkersPrintANewPreviewWhenTheReportingPeriodChanges() {
+        // given
+<span class="nc" id="L665">        var credential = new TelemetryCredential(UUID.randomUUID(), &quot;k1&quot;, &quot;0&quot;.repeat(64));</span>
+<span class="nc" id="L666">        TelemetryOwnership original = TelemetryOwnership.issued(credential);</span>
+<span class="nc" id="L667">        TelemetryState originalState = TelemetryState.initial()</span>
+<span class="nc" id="L668">                .withIdentity(credential.installationId(), LocalDate.of(2026, 9, 22))</span>
+<span class="nc" id="L669">                .withOwnership(original);</span>
+<span class="nc" id="L670">        store.update(ignored -&gt; Update.write(originalState, null));</span>
+<span class="nc" id="L671">        HeartbeatReporter reporter = reporter(new TelemetryEnvironment(false, true, false), Runnable::run);</span>
+<span class="nc" id="L672">        reporter.check();</span>
+
+        // when
+<span class="nc" id="L675">        TelemetryOwnership resumed = original.withErasure(new TelemetryOwnership.Erasure(</span>
+<span class="nc" id="L676">                        UUID.randomUUID(), clock.instant(), clock.instant(), TelemetryOwnership.Phase.COMPLETE))</span>
+<span class="nc" id="L677">                .resume();</span>
+<span class="nc" id="L678">        store.update(state -&gt; Update.write(state.withOwnership(resumed), null));</span>
+<span class="nc" id="L679">        CheckResult changed = reporter.check();</span>
+<span class="nc" id="L680">        clock.advance(ONE_MINUTE);</span>
+<span class="nc" id="L681">        CheckResult unchanged = reporter.check();</span>
+
+        // then
+<span class="nc" id="L684">        assertThat(List.of(changed, unchanged)).containsOnly(CheckResult.DEBUG);</span>
+<span class="nc" id="L685">        assertThat(output)</span>
+<span class="nc" id="L686">                .satisfiesExactly(</span>
+<span class="nc" id="L687">                        first -&gt; assertThat(first).contains(original.analyticsId()),</span>
+<span class="nc" id="L688">                        second -&gt; assertThat(second).contains(resumed.analyticsId()));</span>
+<span class="nc" id="L689">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L690">    }</span>
+
+    @Test
+    void logModePrintsTheExactRequestAndASafeOutcome() {
+        // given
+<span class="nc" id="L695">        when(client.capture(anyString())).thenReturn(CaptureOutcome.accepted(200));</span>
+<span class="nc" id="L696">        HeartbeatReporter reporter = reporterReady(new TelemetryEnvironment(false, false, true), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L699">        reporter.check();</span>
+<span class="nc" id="L700">        ArgumentCaptor&lt;String&gt; body = ArgumentCaptor.forClass(String.class);</span>
+<span class="nc" id="L701">        verify(client).capture(body.capture());</span>
+
+        // then
+<span class="nc" id="L704">        assertThat(output).anySatisfy(line -&gt; assertThat(line)</span>
+<span class="nc" id="L705">                .contains(&quot;telemetry request POST &quot; + TelemetryFixture.LOOPBACK_ENDPOINT)</span>
+<span class="nc" id="L706">                .contains(&quot;User-Agent&quot;)</span>
+<span class="nc" id="L707">                .contains(body.getValue()));</span>
+<span class="nc" id="L708">        assertThat(output).anySatisfy(line -&gt; assertThat(line).contains(&quot;telemetry response accepted status=200&quot;));</span>
+<span class="nc" id="L709">    }</span>
+
+    @Test
+    void environmentDisableAndMissingTokenAndDevelopmentRunsNeverRegister() throws IOException {
+        // given
+<span class="nc" id="L714">        Path developmentDir = Files.createDirectories(tempDir.resolve(&quot;dev&quot;));</span>
+<span class="nc" id="L715">        HeartbeatReporter disabled = reporter(new TelemetryEnvironment(true, false, false), Runnable::run);</span>
+<span class="nc" id="L716">        var unconfigured = new HeartbeatReporter(</span>
+<span class="nc" id="L717">                TelemetryFixture.installation(</span>
+<span class="nc" id="L718">                        stateDir, TelemetryEnvironment.none(), TelemetryFixture.unconfiguredDistribution()),</span>
+<span class="nc" id="L719">                TelemetryFixture.snapshots(TelemetryFixture.installation(stateDir)),</span>
+                client,
+                clock,
+                Runnable::run,
+<span class="nc" id="L723">                () -&gt; 0,</span>
+<span class="nc" id="L724">                output::add);</span>
+<span class="nc" id="L725">        var development = new HeartbeatReporter(</span>
+<span class="nc" id="L726">                TelemetryFixture.installation(developmentDir),</span>
+<span class="nc" id="L727">                TelemetryFixture.snapshots(TelemetryFixture.installation(developmentDir)),</span>
+                client,
+                clock,
+                Runnable::run,
+<span class="nc" id="L731">                () -&gt; 0,</span>
+<span class="nc" id="L732">                output::add);</span>
+
+        // when
+<span class="nc" id="L735">        List&lt;CheckResult&gt; results = List.of(disabled.check(), unconfigured.check(), development.check());</span>
+
+        // then
+<span class="nc" id="L738">        assertThat(results)</span>
+<span class="nc" id="L739">                .containsExactly(CheckResult.DISABLED, CheckResult.NOT_CONFIGURED, CheckResult.NOT_INSTALLED);</span>
+<span class="nc" id="L740">        assertThat(store.read()).isInstanceOf(TelemetryStateStore.StateRead.Absent.class);</span>
+<span class="nc" id="L741">        assertThat(Files.exists(developmentDir.resolve(TelemetryStateStore.STATE_FILE)))</span>
+<span class="nc" id="L742">                .as(&quot;a development run writes no telemetry state&quot;)</span>
+<span class="nc" id="L743">                .isFalse();</span>
+<span class="nc" id="L744">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L745">    }</span>
+
+    @Test
+    void corruptStateSuppressesReportingWithoutRegeneratingIt() throws IOException {
+        // given
+<span class="nc" id="L750">        Files.writeString(store.stateFile(), &quot;not json&quot;);</span>
+<span class="nc" id="L751">        HeartbeatReporter reporter = reporter(TelemetryEnvironment.none(), Runnable::run);</span>
+
+        // when
+<span class="nc" id="L754">        CheckResult first = reporter.check();</span>
+<span class="nc" id="L755">        CheckResult second = reporter.check();</span>
+
+        // then
+<span class="nc" id="L758">        assertThat(List.of(first, second)).containsOnly(CheckResult.UNREADABLE);</span>
+<span class="nc" id="L759">        assertThat(store.stateFile()).content(StandardCharsets.UTF_8).isEqualTo(&quot;not json&quot;);</span>
+<span class="nc" id="L760">        assertThat(output).singleElement().asString().contains(&quot;reporting is off&quot;);</span>
+<span class="nc" id="L761">        verify(client, never()).capture(anyString());</span>
+<span class="nc" id="L762">    }</span>
+
+    private HeartbeatReporter readyReporter() {
+<span class="nc" id="L765">        return reporterReady(TelemetryEnvironment.none(), Runnable::run);</span>
+    }
+
+    /// A reporter whose grace period already elapsed, so the next check is due immediately.
+    private HeartbeatReporter reporterReady(TelemetryEnvironment environment, Executor executor) {
+<span class="nc" id="L770">        HeartbeatReporter reporter = reporter(environment, executor);</span>
+<span class="nc" id="L771">        reporter.check();</span>
+<span class="nc" id="L772">        output.clear();</span>
+<span class="nc" id="L773">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE);</span>
+<span class="nc" id="L774">        return reporter;</span>
+    }
+
+    private HeartbeatReporter reporter(TelemetryEnvironment environment, Executor executor) {
+<span class="nc" id="L778">        TelemetryInstallation installation = TelemetryFixture.installation(stateDir, environment);</span>
+<span class="nc" id="L779">        return new HeartbeatReporter(</span>
+<span class="nc" id="L780">                installation, TelemetryFixture.snapshots(installation), client, clock, executor, () -&gt; 0, output::add);</span>
+    }
+
+    private static JsonNode parse(String body) {
+        try {
+<span class="nc" id="L785">            return JSON.readTree(body);</span>
+<span class="nc" id="L786">        } catch (JsonProcessingException exception) {</span>
+<span class="nc" id="L787">            throw new IllegalStateException(&quot;captured body is not JSON: &quot; + body, exception);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

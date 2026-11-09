@@ -1,0 +1,447 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryStateStoreTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryStateStoreTest.java</span></div><h1>TelemetryStateStoreTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.assertj.core.api.InstanceOfAssertFactories.type;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.setup.ExternalFileLockHolder;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.StateRead;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+<span class="nc" id="L43">final class TelemetryStateStoreTest {</span>
+<span class="nc" id="L44">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+    private static final int WRITERS = 8;
+    private static final int INCREMENTS_PER_WRITER = 25;
+<span class="nc" id="L47">    private static final Duration SHORT_LOCK_WAIT = Duration.ofMillis(300);</span>
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void absentFileReadsAsAbsentAndUpdatesFromInitialState() {
+        // given
+<span class="nc" id="L55">        var store = new TelemetryStateStore(tempDir.resolve(&quot;state&quot;));</span>
+
+        // when
+<span class="nc" id="L58">        StateRead before = store.read();</span>
+<span class="nc" id="L59">        UUID id = store.update(state -&gt;</span>
+<span class="nc" id="L60">                Update.write(state.withIdentity(UUID.randomUUID(), LocalDate.of(2026, 9, 22)), state.installationId()));</span>
+<span class="nc" id="L61">        StateRead after = store.read();</span>
+
+        // then
+<span class="nc" id="L64">        assertThat(before).isInstanceOf(StateRead.Absent.class);</span>
+<span class="nc" id="L65">        assertThat(id)</span>
+<span class="nc" id="L66">                .as(&quot;the transaction saw the initial state without an identity&quot;)</span>
+<span class="nc" id="L67">                .isNull();</span>
+<span class="nc" id="L68">        assertThat(after)</span>
+<span class="nc" id="L69">                .asInstanceOf(type(StateRead.Valid.class))</span>
+<span class="nc" id="L70">                .extracting(StateRead.Valid::state)</span>
+<span class="nc" id="L71">                .satisfies(state -&gt; {</span>
+<span class="nc" id="L72">                    assertThat(state.hasIdentity()).as(&quot;identity persisted&quot;).isTrue();</span>
+<span class="nc" id="L73">                    assertThat(state.registeredOn()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L74">                    assertThat(state.mode()).isEqualTo(TelemetryMode.ENABLED);</span>
+<span class="nc" id="L75">                });</span>
+<span class="nc" id="L76">        assertThat(store.stateFile()).hasFileName(&quot;telemetry.json&quot;);</span>
+<span class="nc" id="L77">    }</span>
+
+    @Test
+    void roundTripsEveryFieldIncludingPendingReportAndClaim() {
+        // given
+<span class="nc" id="L82">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L83">        var properties =</span>
+<span class="nc" id="L84">                new HeartbeatProperties(1, &quot;2026-09-22&quot;, &quot;1.2.0&quot;, &quot;linux&quot;, &quot;13&quot;, &quot;debian&quot;, &quot;x64&quot;, null, 2, 1, 1);</span>
+<span class="nc" id="L85">        TelemetryState full = TelemetryState.initial()</span>
+<span class="nc" id="L86">                .withIdentity(UUID.fromString(&quot;74a69e87-089d-4fd1-8ac2-df8aab052cb1&quot;), LocalDate.of(2026, 9, 22))</span>
+<span class="nc" id="L87">                .withNotice(1, Instant.parse(&quot;2026-09-22T10:00:00Z&quot;))</span>
+<span class="nc" id="L88">                .withFirstWorkerDeadline(Instant.parse(&quot;2026-09-22T10:05:00Z&quot;))</span>
+<span class="nc" id="L89">                .withCounters(4, 2)</span>
+<span class="nc" id="L90">                .withMode(TelemetryMode.DEBUG)</span>
+<span class="nc" id="L91">                .withReporting(</span>
+<span class="nc" id="L92">                        LocalDate.of(2026, 9, 21),</span>
+<span class="nc" id="L93">                        new TelemetryState.RetryState(2, Instant.parse(&quot;2026-09-22T11:00:00Z&quot;), &quot;HTTP 429&quot;),</span>
+                        new TelemetryState.PendingHeartbeat(
+<span class="nc" id="L95">                                UUID.fromString(&quot;95127c85-1c9e-460c-b652-0a3a7899cbde&quot;),</span>
+<span class="nc" id="L96">                                Instant.parse(&quot;2026-09-22T09:15:00Z&quot;),</span>
+<span class="nc" id="L97">                                LocalDate.of(2026, 9, 22),</span>
+                                1,
+                                properties),
+                        new TelemetryState.ReportClaim(
+                                &quot;worker-a&quot;,
+<span class="nc" id="L102">                                UUID.fromString(&quot;95127c85-1c9e-460c-b652-0a3a7899cbde&quot;),</span>
+<span class="nc" id="L103">                                UUID.fromString(&quot;0d6f1c2e-7b3a-4c5d-8e9f-a1b2c3d4e5f6&quot;),</span>
+<span class="nc" id="L104">                                Instant.parse(&quot;2026-09-22T09:16:30Z&quot;)));</span>
+
+        // when
+<span class="nc" id="L107">        store.update(state -&gt; Update.write(full, null));</span>
+<span class="nc" id="L108">        StateRead read = store.read();</span>
+
+        // then
+<span class="nc" id="L111">        assertThat(read)</span>
+<span class="nc" id="L112">                .asInstanceOf(type(StateRead.Valid.class))</span>
+<span class="nc" id="L113">                .extracting(StateRead.Valid::state)</span>
+<span class="nc" id="L114">                .isEqualTo(full)</span>
+<span class="nc" id="L115">                .extracting(TelemetryState::preferenceRevision)</span>
+<span class="nc" id="L116">                .isEqualTo(1L);</span>
+<span class="nc" id="L117">    }</span>
+
+    @Test
+    void unchangedTransactionsDoNotTouchTheFile() throws IOException {
+        // given
+<span class="nc" id="L122">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L123">        store.update(state -&gt; Update.write(state.withCounters(1, 0), null));</span>
+<span class="nc" id="L124">        Instant modified = Files.getLastModifiedTime(store.stateFile()).toInstant();</span>
+<span class="nc" id="L125">        String content = Files.readString(store.stateFile());</span>
+
+        // when
+<span class="nc" id="L128">        String result = store.update(state -&gt; Update.unchanged(&quot;kept&quot;));</span>
+
+        // then
+<span class="nc" id="L131">        assertThat(result).isEqualTo(&quot;kept&quot;);</span>
+<span class="nc" id="L132">        assertThat(store.stateFile()).content(StandardCharsets.UTF_8).isEqualTo(content);</span>
+<span class="nc" id="L133">        assertThat(Files.getLastModifiedTime(store.stateFile()).toInstant()).isEqualTo(modified);</span>
+<span class="nc" id="L134">    }</span>
+
+    @Test
+    void corruptContentIsUnreadableAndBlocksUpdatesInsteadOfRegenerating() throws IOException {
+        // given
+<span class="nc" id="L139">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L140">        Files.writeString(store.stateFile(), &quot;{\&quot;format_version\&quot;: 1, \&quot;mode\&quot;: \&quot;ENABLED\&quot;, \&quot;unexpected\&quot;: true&quot;);</span>
+
+        // when
+<span class="nc" id="L143">        StateRead read = store.read();</span>
+
+        // then
+<span class="nc" id="L146">        assertThat(read).as(&quot;truncated JSON is unreadable&quot;).isInstanceOf(StateRead.Unreadable.class);</span>
+<span class="nc" id="L147">        assertThatThrownBy(() -&gt; store.update(state -&gt; Update.write(state.withCounters(1, 1), null)))</span>
+<span class="nc" id="L148">                .isInstanceOf(TelemetryStateException.class)</span>
+<span class="nc" id="L149">                .hasMessageContaining(&quot;not valid&quot;);</span>
+<span class="nc" id="L150">        assertThat(store.stateFile()).content(StandardCharsets.UTF_8).startsWith(&quot;{\&quot;format_version\&quot;: 1&quot;);</span>
+<span class="nc" id="L151">    }</span>
+
+    @Test
+    void futureFormatVersionIsUnreadable() throws IOException {
+        // given
+<span class="nc" id="L156">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L157">        Files.writeString(</span>
+<span class="nc" id="L158">                store.stateFile(),</span>
+<span class="nc" id="L159">                TelemetryStateJson.write(TelemetryState.initial())</span>
+<span class="nc" id="L160">                        .replace(&quot;\&quot;format_version\&quot; : 1&quot;, &quot;\&quot;format_version\&quot; : 2&quot;));</span>
+
+        // when
+<span class="nc" id="L163">        StateRead read = store.read();</span>
+
+        // then
+<span class="nc" id="L166">        assertThat(read)</span>
+<span class="nc" id="L167">                .asInstanceOf(type(StateRead.Unreadable.class))</span>
+<span class="nc" id="L168">                .extracting(StateRead.Unreadable::problem)</span>
+<span class="nc" id="L169">                .asString()</span>
+<span class="nc" id="L170">                .contains(&quot;format version 2&quot;);</span>
+<span class="nc" id="L171">    }</span>
+
+    @Test
+    void unknownPropertiesMakeTheFileUnreadableRatherThanPartlyUnderstood() throws IOException {
+        // given
+<span class="nc" id="L176">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L177">        Files.writeString(</span>
+<span class="nc" id="L178">                store.stateFile(),</span>
+<span class="nc" id="L179">                TelemetryStateJson.write(TelemetryState.initial())</span>
+<span class="nc" id="L180">                        .replace(&quot;\&quot;mode\&quot;&quot;, &quot;\&quot;future_field\&quot; : 1,\n  \&quot;mode\&quot;&quot;));</span>
+
+        // when
+<span class="nc" id="L183">        StateRead read = store.read();</span>
+
+        // then
+<span class="nc" id="L186">        assertThat(read).as(&quot;a newer field set is not silently accepted&quot;).isInstanceOf(StateRead.Unreadable.class);</span>
+<span class="nc" id="L187">    }</span>
+
+    @Test
+    void aStoredProtocolFlagCannotChangeWhatIsSent() throws IOException {
+        // given
+<span class="nc" id="L192">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L193">        var document = (ObjectNode) JSON.readTree(TelemetryStateJson.write(validStoredState()));</span>
+<span class="nc" id="L194">        ((ObjectNode) document.get(&quot;pending_report&quot;).get(&quot;properties&quot;)).put(&quot;$geoip_disable&quot;, false);</span>
+<span class="nc" id="L195">        Files.writeString(</span>
+<span class="nc" id="L196">                store.stateFile(), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(document));</span>
+
+        // when
+<span class="nc" id="L199">        StateRead read = store.read();</span>
+
+        // then
+<span class="nc" id="L202">        assertThat(read)</span>
+<span class="nc" id="L203">                .as(&quot;the flag is not stored state, so the file stays readable&quot;)</span>
+<span class="nc" id="L204">                .isInstanceOf(StateRead.Valid.class);</span>
+<span class="nc" id="L205">        assertThat(TelemetryStateJson.write(read.stateOrInitial())).contains(&quot;\&quot;$geoip_disable\&quot; : true&quot;);</span>
+<span class="nc" id="L206">    }</span>
+
+    @MethodSource(&quot;inconsistentStates&quot;)
+    @ParameterizedTest(name = &quot;{0}&quot;)
+    void inconsistentStateIsUnreadableAndNeverRepairedInPlace(
+            String scenario, Consumer&lt;ObjectNode&gt; mutation, String expectedProblem) throws IOException {
+        // given
+<span class="nc" id="L213">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L214">        var document = (ObjectNode) JSON.readTree(TelemetryStateJson.write(validStoredState()));</span>
+<span class="nc" id="L215">        mutation.accept(document);</span>
+<span class="nc" id="L216">        String json = JSON.writerWithDefaultPrettyPrinter().writeValueAsString(document);</span>
+<span class="nc" id="L217">        Files.writeString(store.stateFile(), json);</span>
+
+        // when
+<span class="nc" id="L220">        StateRead read = store.read();</span>
+<span class="nc" id="L221">        Throwable failure = catchThrowable(() -&gt; store.update(state -&gt; Update.write(state.withCounters(9, 9), null)));</span>
+
+        // then
+<span class="nc" id="L224">        assertThat(read)</span>
+<span class="nc" id="L225">                .as(&quot;%s must not pass as healthy state&quot;, scenario)</span>
+<span class="nc" id="L226">                .asInstanceOf(type(StateRead.Unreadable.class))</span>
+<span class="nc" id="L227">                .extracting(StateRead.Unreadable::problem)</span>
+<span class="nc" id="L228">                .asString()</span>
+<span class="nc" id="L229">                .contains(expectedProblem);</span>
+<span class="nc" id="L230">        assertThat(failure).isInstanceOf(TelemetryStateException.class);</span>
+<span class="nc" id="L231">        assertThat(store.stateFile())</span>
+<span class="nc" id="L232">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L233">                .as(&quot;the original file is kept for diagnosis&quot;)</span>
+<span class="nc" id="L234">                .isEqualTo(json);</span>
+<span class="nc" id="L235">    }</span>
+
+    static Stream&lt;Arguments&gt; inconsistentStates() {
+<span class="nc" id="L238">        String inconsistent = &quot;inconsistent&quot;;</span>
+<span class="nc" id="L239">        return Stream.of(</span>
+<span class="nc" id="L240">                Arguments.of(</span>
+                        &quot;identity without registration date&quot;,
+<span class="nc" id="L242">                        (Consumer&lt;ObjectNode&gt;) node -&gt; node.putNull(&quot;registered_on&quot;),</span>
+                        inconsistent),
+<span class="nc" id="L244">                Arguments.of(</span>
+                        &quot;negative counter&quot;,
+<span class="nc" id="L246">                        (Consumer&lt;ObjectNode&gt;) node -&gt; node.put(&quot;board_imports_total&quot;, -1),</span>
+                        inconsistent),
+<span class="nc" id="L248">                Arguments.of(</span>
+                        &quot;claim without pending report&quot;,
+<span class="nc" id="L250">                        (Consumer&lt;ObjectNode&gt;) node -&gt; node.putNull(&quot;pending_report&quot;),</span>
+                        inconsistent),
+<span class="nc" id="L252">                Arguments.of(</span>
+                        &quot;claim for another event&quot;,
+<span class="nc" id="L254">                        (Consumer&lt;ObjectNode&gt;) node -&gt; ((ObjectNode) node.get(&quot;claim&quot;))</span>
+<span class="nc" id="L255">                                .put(&quot;event_uuid&quot;, &quot;00000000-0000-4000-8000-000000000000&quot;),</span>
+                        inconsistent),
+<span class="nc" id="L257">                Arguments.of(</span>
+                        &quot;pending report with free-text platform&quot;,
+                        (Consumer&lt;ObjectNode&gt;)
+<span class="nc" id="L260">                                node -&gt; ((ObjectNode) node.get(&quot;pending_report&quot;).get(&quot;properties&quot;))</span>
+<span class="nc" id="L261">                                        .put(&quot;os_release&quot;, &quot;Ubuntu 24.04 LTS (custom build)&quot;),</span>
+                        inconsistent),
+<span class="nc" id="L263">                Arguments.of(</span>
+                        &quot;pending report from a future revision&quot;,
+                        (Consumer&lt;ObjectNode&gt;)
+<span class="nc" id="L266">                                node -&gt; ((ObjectNode) node.get(&quot;pending_report&quot;)).put(&quot;preference_revision&quot;, 99),</span>
+                        inconsistent),
+<span class="nc" id="L268">                Arguments.of(</span>
+                        &quot;incomplete retry schedule&quot;,
+                        (Consumer&lt;ObjectNode&gt;) node -&gt;
+<span class="nc" id="L271">                                node.set(&quot;retry&quot;, JSON.createObjectNode().put(&quot;attempts&quot;, 0)),</span>
+                        inconsistent));
+    }
+
+    /// A complete, consistent stored state: registered, mid-retry, with a claimed pending report.
+    private static TelemetryState validStoredState() {
+<span class="nc" id="L277">        UUID eventUuid = UUID.fromString(&quot;95127c85-1c9e-460c-b652-0a3a7899cbde&quot;);</span>
+<span class="nc" id="L278">        var properties =</span>
+<span class="nc" id="L279">                new HeartbeatProperties(1, &quot;2026-09-22&quot;, &quot;1.2.0&quot;, &quot;linux&quot;, &quot;13&quot;, &quot;debian&quot;, &quot;x64&quot;, null, 2, 1, 1);</span>
+<span class="nc" id="L280">        return TelemetryState.initial()</span>
+<span class="nc" id="L281">                .withIdentity(UUID.fromString(&quot;74a69e87-089d-4fd1-8ac2-df8aab052cb1&quot;), LocalDate.of(2026, 9, 22))</span>
+<span class="nc" id="L282">                .withNotice(1, Instant.parse(&quot;2026-09-22T10:00:00Z&quot;))</span>
+<span class="nc" id="L283">                .withFirstWorkerDeadline(Instant.parse(&quot;2026-09-22T10:05:00Z&quot;))</span>
+<span class="nc" id="L284">                .withCounters(4, 2)</span>
+<span class="nc" id="L285">                .withReporting(</span>
+<span class="nc" id="L286">                        LocalDate.of(2026, 9, 21),</span>
+<span class="nc" id="L287">                        new TelemetryState.RetryState(1, Instant.parse(&quot;2026-09-22T11:00:00Z&quot;), &quot;HTTP 503&quot;),</span>
+                        new TelemetryState.PendingHeartbeat(
+                                eventUuid,
+<span class="nc" id="L290">                                Instant.parse(&quot;2026-09-22T09:15:00Z&quot;),</span>
+<span class="nc" id="L291">                                LocalDate.of(2026, 9, 22),</span>
+                                0,
+                                properties),
+                        new TelemetryState.ReportClaim(
+                                &quot;worker-a&quot;,
+                                eventUuid,
+<span class="nc" id="L297">                                UUID.fromString(&quot;0d6f1c2e-7b3a-4c5d-8e9f-a1b2c3d4e5f6&quot;),</span>
+<span class="nc" id="L298">                                Instant.parse(&quot;2026-09-22T09:16:30Z&quot;)));</span>
+    }
+
+    @Test
+    void aTransactionStuckInThisJvmDoesNotBlockAnotherStoreForever() throws Exception {
+        // given
+<span class="nc" id="L304">        var first = new TelemetryStateStore(tempDir, SHORT_LOCK_WAIT);</span>
+<span class="nc" id="L305">        var second = new TelemetryStateStore(tempDir, SHORT_LOCK_WAIT);</span>
+<span class="nc" id="L306">        var entered = new CountDownLatch(1);</span>
+<span class="nc" id="L307">        var release = new CountDownLatch(1);</span>
+<span class="nc" id="L308">        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {</span>
+<span class="nc" id="L309">            Future&lt;?&gt; stuck = executor.submit(() -&gt; first.update(state -&gt; {</span>
+<span class="nc" id="L310">                entered.countDown();</span>
+                try {
+<span class="nc" id="L312">                    release.await(10, TimeUnit.SECONDS);</span>
+<span class="nc" id="L313">                } catch (InterruptedException exception) {</span>
+<span class="nc" id="L314">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L315">                }</span>
+<span class="nc" id="L316">                return Update.unchanged(null);</span>
+            }));
+<span class="nc" id="L318">            assertThat(entered.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L319">                    .as(&quot;the first transaction is inside the lock&quot;)</span>
+<span class="nc" id="L320">                    .isTrue();</span>
+
+            // when
+<span class="nc" id="L323">            Throwable failure = catchThrowable(() -&gt; second.update(state -&gt; Update.unchanged(null)));</span>
+<span class="nc" id="L324">            release.countDown();</span>
+<span class="nc" id="L325">            stuck.get(5, TimeUnit.SECONDS);</span>
+
+            // then
+<span class="nc" id="L328">            assertThat(failure)</span>
+<span class="nc" id="L329">                    .isInstanceOf(TelemetryStateException.class)</span>
+<span class="nc" id="L330">                    .hasMessageContaining(&quot;held by another transaction of this process&quot;);</span>
+        }
+<span class="nc" id="L332">    }</span>
+
+    @Test
+    void stateFileIsOwnerOnlyOnPosix() throws IOException {
+        // given
+<span class="nc" id="L337">        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains(&quot;posix&quot;));</span>
+<span class="nc" id="L338">        var store = new TelemetryStateStore(tempDir.resolve(&quot;state&quot;));</span>
+
+        // when
+<span class="nc" id="L341">        store.update(state -&gt; Update.write(state.withCounters(1, 0), null));</span>
+
+        // then
+<span class="nc" id="L344">        assertThat(Files.getPosixFilePermissions(store.stateFile()))</span>
+<span class="nc" id="L345">                .containsExactlyInAnyOrder(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);</span>
+<span class="nc" id="L346">    }</span>
+
+    @Test
+    void concurrentIncrementsFromManyThreadsAreAllPreserved() throws Exception {
+        // given
+<span class="nc" id="L351">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L352">        var start = new CountDownLatch(1);</span>
+<span class="nc" id="L353">        List&lt;Future&lt;?&gt;&gt; writers = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L354">        try (ExecutorService executor = Executors.newFixedThreadPool(WRITERS)) {</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">            for (int writer = 0; writer &lt; WRITERS; writer++) {</span>
+<span class="nc" id="L356">                writers.add(executor.submit(() -&gt; {</span>
+<span class="nc" id="L357">                    start.await();</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                    for (int increment = 0; increment &lt; INCREMENTS_PER_WRITER; increment++) {</span>
+<span class="nc" id="L359">                        store.update(state -&gt; Update.write(state.withCounters(state.boardImportsTotal() + 1, 0), null));</span>
+                    }
+<span class="nc" id="L361">                    return null;</span>
+                }));
+            }
+
+            // when
+<span class="nc" id="L366">            start.countDown();</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            for (Future&lt;?&gt; writer : writers) {</span>
+<span class="nc" id="L368">                writer.get(30, TimeUnit.SECONDS);</span>
+<span class="nc" id="L369">            }</span>
+        }
+
+        // then
+<span class="nc" id="L373">        assertThat(store.read().stateOrInitial())</span>
+<span class="nc" id="L374">                .extracting(TelemetryState::boardImportsTotal)</span>
+<span class="nc" id="L375">                .isEqualTo((long) WRITERS * INCREMENTS_PER_WRITER);</span>
+<span class="nc" id="L376">    }</span>
+
+    @Test
+    void anExternalLockHolderBlocksTheTransactionUntilReleased() throws Exception {
+        // given
+<span class="nc" id="L381">        var store = new TelemetryStateStore(tempDir);</span>
+<span class="nc" id="L382">        store.update(state -&gt; Update.write(state.withCounters(1, 0), null));</span>
+<span class="nc" id="L383">        Path lockFile = tempDir.resolve(TelemetryStateStore.LOCK_FILE);</span>
+<span class="nc" id="L384">        Process holder = new ProcessBuilder(</span>
+<span class="nc" id="L385">                        Path.of(System.getProperty(&quot;java.home&quot;), &quot;bin&quot;, &quot;java&quot;).toString(),</span>
+                        &quot;-cp&quot;,
+<span class="nc" id="L387">                        System.getProperty(&quot;java.class.path&quot;),</span>
+<span class="nc" id="L388">                        ExternalFileLockHolder.class.getName(),</span>
+<span class="nc" id="L389">                        lockFile.toString())</span>
+<span class="nc" id="L390">                .redirectErrorStream(true)</span>
+<span class="nc" id="L391">                .start();</span>
+        try {
+<span class="nc" id="L393">            assertThat(holder.inputReader().readLine()).isEqualTo(&quot;locked&quot;);</span>
+            Long seen;
+<span class="nc" id="L395">            try (ExecutorService executor = Executors.newSingleThreadExecutor()) {</span>
+<span class="nc" id="L396">                Future&lt;Long&gt; blocked = executor.submit(</span>
+<span class="nc" id="L397">                        () -&gt; store.update(state -&gt; Update.write(state.withCounters(2, 0), state.boardImportsTotal())));</span>
+
+                // when
+<span class="nc" id="L400">                assertThatThrownBy(() -&gt; blocked.get(300, TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L401">                        .as(&quot;the update waits while another process holds telemetry.lock&quot;)</span>
+<span class="nc" id="L402">                        .isInstanceOf(TimeoutException.class);</span>
+<span class="nc" id="L403">                holder.getOutputStream().close();</span>
+<span class="nc" id="L404">                seen = blocked.get(TelemetryStateStore.LOCK_WAIT.toSeconds() + 5, TimeUnit.SECONDS);</span>
+            }
+
+            // then
+<span class="nc" id="L408">            assertThat(seen).isOne();</span>
+<span class="nc" id="L409">            assertThat(store.read().stateOrInitial())</span>
+<span class="nc" id="L410">                    .extracting(TelemetryState::boardImportsTotal)</span>
+<span class="nc" id="L411">                    .isEqualTo(2L);</span>
+        } finally {
+<span class="nc bnc" id="L413" title="All 2 branches missed.">            if (holder.isAlive()) {</span>
+<span class="nc" id="L414">                holder.destroyForcibly();</span>
+<span class="nc" id="L415">                holder.waitFor(Duration.ofSeconds(5));</span>
+            }
+        }
+<span class="nc" id="L418">    }</span>
+
+    @Test
+    void lockWaitIsBoundedWhenTheHolderNeverReleases() throws IOException {
+        // given
+<span class="nc" id="L423">        var store = new TelemetryStateStore(tempDir, SHORT_LOCK_WAIT);</span>
+<span class="nc" id="L424">        Path lockFile = tempDir.resolve(TelemetryStateStore.LOCK_FILE);</span>
+<span class="nc" id="L425">        Files.createDirectories(tempDir);</span>
+<span class="nc" id="L426">        try (FileChannel channel = FileChannel.open(lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE);</span>
+<span class="nc" id="L427">                FileLock ignored = channel.lock()) {</span>
+
+            // when
+<span class="nc" id="L430">            Throwable failure =</span>
+<span class="nc" id="L431">                    catchThrowable(() -&gt; runOnOtherThread(() -&gt; store.update(state -&gt; Update.unchanged(null))));</span>
+
+            // then
+<span class="nc" id="L434">            assertThat(failure)</span>
+<span class="nc" id="L435">                    .as(&quot;another thread of this JVM sees the lock as held and gives up after the bounded wait&quot;)</span>
+<span class="nc" id="L436">                    .hasCauseInstanceOf(TelemetryStateException.class)</span>
+<span class="nc" id="L437">                    .hasMessageContaining(&quot;held by another process&quot;);</span>
+        }
+<span class="nc" id="L439">    }</span>
+
+    private static void runOnOtherThread(Runnable task) throws Exception {
+<span class="nc" id="L442">        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {</span>
+<span class="nc" id="L443">            executor.submit(task).get(10, TimeUnit.SECONDS);</span>
+        }
+<span class="nc" id="L445">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

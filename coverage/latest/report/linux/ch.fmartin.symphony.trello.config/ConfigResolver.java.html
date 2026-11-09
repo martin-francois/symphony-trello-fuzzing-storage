@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConfigResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.config</a> &gt; <span class="el_source">ConfigResolver.java</span></div><h1>ConfigResolver.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.config;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import ch.fmartin.symphony.trello.TrelloEnvironment;
 import ch.fmartin.symphony.trello.workflow.CodexSandboxPolicy;
 import ch.fmartin.symphony.trello.workflow.WorkflowDefinition;
@@ -8,8 +10,10 @@ import com.google.common.base.Splitter;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -27,8 +31,8 @@ import org.jspecify.annotations.Nullable;
 
 @ApplicationScoped
 public class ConfigResolver {
-<span class="fc" id="L30">    private static final CharMatcher LINE_BREAK = CharMatcher.anyOf(&quot;\r\n&quot;);</span>
-<span class="fc" id="L31">    private static final Splitter PATH_SEPARATOR = Splitter.on(File.pathSeparator);</span>
+<span class="fc" id="L34">    private static final CharMatcher LINE_BREAK = CharMatcher.anyOf(&quot;\r\n&quot;);</span>
+<span class="fc" id="L35">    private static final Splitter PATH_SEPARATOR = Splitter.on(File.pathSeparator);</span>
     private static final String FILE_SECRET_PREFIX = &quot;file:&quot;;
     private static final int MAX_SECRET_BYTES = 64 * 1024;
     public static final String ADDITIONAL_WRITABLE_ROOTS_ENVIRONMENT = &quot;SYMPHONY_CODEX_ADDITIONAL_WRITABLE_ROOTS&quot;;
@@ -38,235 +42,259 @@ public class ConfigResolver {
     /// Separates the setting name from the variable name in a `missing_path_environment_variable`
     /// message, so setup can show the setting without the variable.
     public static final String MISSING_PATH_ENVIRONMENT_MARKER = &quot; references missing environment variable &quot;;
-<span class="fc" id="L41">    static final String NO_PR_LABEL_TYPE_MESSAGE =</span>
-<span class="fc" id="L42">            EffectiveConfig.GitHubConfig.qualifiedKey(EffectiveConfig.GitHubConfig.NO_PR_LABEL_KEY)</span>
+<span class="fc" id="L45">    static final String NO_PR_LABEL_TYPE_MESSAGE =</span>
+<span class="fc" id="L46">            EffectiveConfig.GitHubConfig.qualifiedKey(EffectiveConfig.GitHubConfig.NO_PR_LABEL_KEY)</span>
                     + &quot; must be a Trello label name, or \&quot;\&quot; to disable the label&quot;;
 
+    private final EnvironmentSources environment;
     private final Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver;
     private final SecretFiles secretFiles;
 
+    /// Resolves environment references from this process: the real environment, then the default
+    /// dotenv file, which is read once for each resolution.
     public ConfigResolver() {
-<span class="nc" id="L49">        this(LocalEnvironment::get);</span>
-<span class="nc" id="L50">    }</span>
+<span class="nc" id="L56">        this(LocalEnvironment.sources(System.getenv(), LocalEnvironment.defaultDotenv()));</span>
+<span class="nc" id="L57">    }</span>
 
+    /// Treats `environmentResolver` as the shell environment, so a Trello key or token it supplies
+    /// belongs to the endpoint it names in `TRELLO_API_ENDPOINT`: the binding check runs the same
+    /// way as for [#ConfigResolver(EnvironmentSources)]. Tests use this form; production code
+    /// passes its real sources.
     public ConfigResolver(Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
-<span class="fc" id="L53">        this(environmentResolver, SecretFiles.HOST);</span>
-<span class="fc" id="L54">    }</span>
+<span class="fc" id="L64">        this(environmentResolver, SecretFiles.HOST);</span>
+<span class="fc" id="L65">    }</span>
 
     /// Callers that resolve untrusted front matter pass in-memory [SecretFiles] so resolution never
     /// reads host files.
-<span class="fc" id="L58">    public ConfigResolver(Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver, SecretFiles secretFiles) {</span>
-<span class="fc" id="L59">        this.environmentResolver = environmentResolver;</span>
-<span class="fc" id="L60">        this.secretFiles = secretFiles;</span>
-<span class="fc" id="L61">    }</span>
+    public ConfigResolver(Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver, SecretFiles secretFiles) {
+<span class="fc" id="L70">        this(EnvironmentSources.of(new EnvironmentSource.ShellEnvironment(environmentResolver)), secretFiles);</span>
+<span class="fc" id="L71">    }</span>
+
+    public ConfigResolver(EnvironmentSources environment) {
+<span class="nc" id="L74">        this(environment, SecretFiles.HOST);</span>
+<span class="nc" id="L75">    }</span>
+
+<span class="fc" id="L77">    private ConfigResolver(EnvironmentSources environment, SecretFiles secretFiles) {</span>
+<span class="fc" id="L78">        this.environment = environment;</span>
+<span class="fc" id="L79">        this.environmentResolver = environment;</span>
+<span class="fc" id="L80">        this.secretFiles = secretFiles;</span>
+<span class="fc" id="L81">    }</span>
 
     public EffectiveConfig resolve(WorkflowDefinition workflow) {
-<span class="fc" id="L64">        Map&lt;String, Object&gt; root = workflow.config();</span>
-<span class="fc" id="L65">        Map&lt;String, Object&gt; tracker = object(root, &quot;tracker&quot;);</span>
-<span class="fc" id="L66">        Map&lt;String, Object&gt; workspace = object(root, &quot;workspace&quot;);</span>
-<span class="fc" id="L67">        Map&lt;String, Object&gt; repository = object(root, &quot;repository&quot;);</span>
-<span class="fc" id="L68">        Map&lt;String, Object&gt; hooks = object(root, &quot;hooks&quot;);</span>
-<span class="fc" id="L69">        Map&lt;String, Object&gt; agent = object(root, &quot;agent&quot;);</span>
-<span class="fc" id="L70">        Map&lt;String, Object&gt; codex = object(root, &quot;codex&quot;);</span>
-<span class="fc" id="L71">        boolean codexDangerFullAccess = environmentValue(DANGER_FULL_ACCESS_ENVIRONMENT)</span>
-<span class="fc" id="L72">                .map(Boolean::parseBoolean)</span>
-<span class="fc" id="L73">                .orElse(false);</span>
-        try {
-<span class="fc" id="L75">            CodexSandboxPolicy.validateCodexSection(codex, codexDangerFullAccess);</span>
-<span class="nc" id="L76">        } catch (CodexSandboxPolicy.InvalidPolicyException e) {</span>
-<span class="nc" id="L77">            throw new ConfigException(&quot;codex_sandbox_policy_invalid&quot;, e.getMessage(), e);</span>
-<span class="fc" id="L78">        }</span>
-<span class="fc" id="L79">        object(root, &quot;polling&quot;);</span>
-<span class="fc" id="L80">        object(root, &quot;server&quot;);</span>
-<span class="fc" id="L81">        Map&lt;String, Object&gt; trelloTools = object(root, &quot;trello_tools&quot;);</span>
-<span class="fc" id="L82">        EffectiveConfig.GitHubConfig github = gitHubConfig(object(root, EffectiveConfig.GitHubConfig.SECTION_KEY));</span>
-<span class="fc" id="L83">        object(tracker, &quot;priority_labels&quot;);</span>
-<span class="fc" id="L84">        object(agent, &quot;max_concurrent_agents_by_state&quot;);</span>
-<span class="fc" id="L85">        TypedWorkflowConfig typedWorkflow = WorkflowConfigIngestion.collect(workflow, environmentResolver);</span>
+<span class="fc" id="L84">        return new ConfigResolver(environment.snapshot(), secretFiles).resolveSnapshot(workflow);</span>
+    }
 
-<span class="fc" id="L87">        String trackerKind = string(tracker, &quot;kind&quot;, null);</span>
-<span class="fc" id="L88">        String endpoint = string(tracker, &quot;endpoint&quot;, &quot;https://api.trello.com/1&quot;);</span>
-<span class="fc" id="L89">        String apiKey =</span>
-<span class="fc" id="L90">                secret(workflow.path().getParent(), tracker, &quot;api_key&quot;, &quot;tracker.api_key&quot;, TrelloEnvironment.API_KEY);</span>
-<span class="fc" id="L91">        String apiToken = secret(</span>
-<span class="fc" id="L92">                workflow.path().getParent(), tracker, &quot;api_token&quot;, &quot;tracker.api_token&quot;, TrelloEnvironment.API_TOKEN);</span>
-<span class="fc" id="L93">        String boardId = environmentString(tracker, &quot;board_id&quot;, null);</span>
-<span class="fc" id="L94">        String resolvedBoardId = environmentString(tracker, &quot;resolved_board_id&quot;, boardId);</span>
-<span class="fc bfc" id="L95" title="All 2 branches covered.">        List&lt;Path&gt; codexAdditionalWritableRoots = codexDangerFullAccess</span>
-<span class="fc" id="L96">                ? List.of()</span>
-<span class="fc" id="L97">                : additionalWritableRoots(workflow.path().getParent(), codex);</span>
+    private EffectiveConfig resolveSnapshot(WorkflowDefinition workflow) {
+<span class="fc" id="L88">        Map&lt;String, Object&gt; root = workflow.config();</span>
+<span class="fc" id="L89">        Map&lt;String, Object&gt; tracker = object(root, &quot;tracker&quot;);</span>
+<span class="fc" id="L90">        Map&lt;String, Object&gt; workspace = object(root, &quot;workspace&quot;);</span>
+<span class="fc" id="L91">        Map&lt;String, Object&gt; repository = object(root, &quot;repository&quot;);</span>
+<span class="fc" id="L92">        Map&lt;String, Object&gt; hooks = object(root, &quot;hooks&quot;);</span>
+<span class="fc" id="L93">        Map&lt;String, Object&gt; agent = object(root, &quot;agent&quot;);</span>
+<span class="fc" id="L94">        Map&lt;String, Object&gt; codex = object(root, &quot;codex&quot;);</span>
+<span class="fc" id="L95">        boolean codexDangerFullAccess = environmentValue(DANGER_FULL_ACCESS_ENVIRONMENT)</span>
+<span class="fc" id="L96">                .map(Boolean::parseBoolean)</span>
+<span class="fc" id="L97">                .orElse(false);</span>
         try {
-<span class="fc" id="L99">            CodexSandboxPolicy.validateResolvedPolicy(</span>
-<span class="fc" id="L100">                    codex.get(&quot;turn_sandbox_policy&quot;), codexAdditionalWritableRoots, codexDangerFullAccess);</span>
-<span class="nc" id="L101">        } catch (CodexSandboxPolicy.InvalidPolicyException e) {</span>
-<span class="nc" id="L102">            throw new ConfigException(&quot;codex_sandbox_policy_invalid&quot;, e.getMessage(), e);</span>
-<span class="fc" id="L103">        }</span>
+<span class="fc" id="L99">            CodexSandboxPolicy.validateCodexSection(codex, codexDangerFullAccess);</span>
+<span class="nc" id="L100">        } catch (CodexSandboxPolicy.InvalidPolicyException e) {</span>
+<span class="nc" id="L101">            throw new ConfigException(&quot;codex_sandbox_policy_invalid&quot;, e.getMessage(), e);</span>
+<span class="fc" id="L102">        }</span>
+<span class="fc" id="L103">        object(root, &quot;polling&quot;);</span>
+<span class="fc" id="L104">        object(root, &quot;server&quot;);</span>
+<span class="fc" id="L105">        Map&lt;String, Object&gt; trelloTools = object(root, &quot;trello_tools&quot;);</span>
+<span class="fc" id="L106">        EffectiveConfig.GitHubConfig github = gitHubConfig(object(root, EffectiveConfig.GitHubConfig.SECTION_KEY));</span>
+<span class="fc" id="L107">        object(tracker, &quot;priority_labels&quot;);</span>
+<span class="fc" id="L108">        object(agent, &quot;max_concurrent_agents_by_state&quot;);</span>
+<span class="fc" id="L109">        TypedWorkflowConfig typedWorkflow = WorkflowConfigIngestion.collect(workflow, environmentResolver);</span>
 
-<span class="fc" id="L105">        boolean writes = bool(trelloTools, &quot;allow_writes&quot;, false);</span>
-<span class="fc" id="L106">        return new EffectiveConfig(</span>
-<span class="fc" id="L107">                workflow.path(),</span>
+<span class="fc" id="L111">        String trackerKind = string(tracker, &quot;kind&quot;, null);</span>
+<span class="fc" id="L112">        String endpoint = string(tracker, &quot;endpoint&quot;, TrelloCredentialEndpoint.TRELLO_API);</span>
+<span class="fc" id="L113">        validateEndpoint(endpoint);</span>
+<span class="fc" id="L114">        endpoint = TrelloCredentialEndpoint.canonical(endpoint).orElseThrow().toString();</span>
+<span class="fc" id="L115">        Secret apiKey =</span>
+<span class="fc" id="L116">                secret(workflow.path().getParent(), tracker, &quot;api_key&quot;, &quot;tracker.api_key&quot;, TrelloEnvironment.API_KEY);</span>
+<span class="fc" id="L117">        Secret apiToken = secret(</span>
+<span class="fc" id="L118">                workflow.path().getParent(), tracker, &quot;api_token&quot;, &quot;tracker.api_token&quot;, TrelloEnvironment.API_TOKEN);</span>
+<span class="fc" id="L119">        TrelloCredentialEndpoint.requireBoundTo(</span>
+<span class="fc" id="L120">                environmentCredentials(apiKey, apiToken), endpoint, &quot;the workflow's tracker.endpoint&quot;);</span>
+<span class="fc" id="L121">        String boardId = environmentString(tracker, &quot;board_id&quot;, null);</span>
+<span class="fc" id="L122">        String resolvedBoardId = environmentString(tracker, &quot;resolved_board_id&quot;, boardId);</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">        List&lt;Path&gt; codexAdditionalWritableRoots = codexDangerFullAccess</span>
+<span class="fc" id="L124">                ? List.of()</span>
+<span class="fc" id="L125">                : additionalWritableRoots(workflow.path().getParent(), codex);</span>
+        try {
+<span class="fc" id="L127">            CodexSandboxPolicy.validateResolvedPolicy(</span>
+<span class="fc" id="L128">                    codex.get(&quot;turn_sandbox_policy&quot;), codexAdditionalWritableRoots, codexDangerFullAccess);</span>
+<span class="nc" id="L129">        } catch (CodexSandboxPolicy.InvalidPolicyException e) {</span>
+<span class="nc" id="L130">            throw new ConfigException(&quot;codex_sandbox_policy_invalid&quot;, e.getMessage(), e);</span>
+<span class="fc" id="L131">        }</span>
+
+<span class="fc" id="L133">        boolean writes = bool(trelloTools, &quot;allow_writes&quot;, false);</span>
+<span class="fc" id="L134">        return new EffectiveConfig(</span>
+<span class="fc" id="L135">                workflow.path(),</span>
                 new EffectiveConfig.TrackerConfig(
                         trackerKind,
                         endpoint,
-                        apiKey,
-                        apiToken,
+<span class="fc" id="L139">                        apiKey.value(),</span>
+<span class="fc" id="L140">                        apiToken.value(),</span>
                         boardId,
                         resolvedBoardId,
-<span class="fc" id="L115">                        list(tracker, &quot;active_states&quot;, List.of(&quot;Todo&quot;, &quot;In Progress&quot;)),</span>
-<span class="fc" id="L116">                        list(tracker, &quot;active_list_ids&quot;, List.of()),</span>
-<span class="fc" id="L117">                        normalizedList(tracker, &quot;required_labels&quot;, List.of()),</span>
-<span class="fc" id="L118">                        string(tracker, &quot;in_progress_state&quot;, null),</span>
-<span class="fc" id="L119">                        string(tracker, &quot;blocked_state&quot;, null),</span>
-<span class="fc" id="L120">                        normalizedList(tracker, &quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;, &quot;Ready for Codex&quot;)),</span>
-<span class="fc" id="L121">                        normalizedList(</span>
+<span class="fc" id="L143">                        list(tracker, &quot;active_states&quot;, List.of(&quot;Todo&quot;, &quot;In Progress&quot;)),</span>
+<span class="fc" id="L144">                        list(tracker, &quot;active_list_ids&quot;, List.of()),</span>
+<span class="fc" id="L145">                        normalizedList(tracker, &quot;required_labels&quot;, List.of()),</span>
+<span class="fc" id="L146">                        string(tracker, &quot;in_progress_state&quot;, null),</span>
+<span class="fc" id="L147">                        string(tracker, &quot;blocked_state&quot;, null),</span>
+<span class="fc" id="L148">                        normalizedList(tracker, &quot;blocker_enforced_states&quot;, List.of(&quot;Todo&quot;, &quot;Ready for Codex&quot;)),</span>
+<span class="fc" id="L149">                        normalizedList(</span>
                                 tracker,
                                 &quot;terminal_states&quot;,
-<span class="fc" id="L124">                                List.of(&quot;Done&quot;, &quot;Archived&quot;, &quot;ArchivedList&quot;, &quot;ArchivedBoard&quot;, &quot;Deleted&quot;)),</span>
-<span class="fc" id="L125">                        list(tracker, &quot;terminal_list_ids&quot;, List.of()),</span>
-<span class="fc" id="L126">                        typedWorkflow.priorityLabels(),</span>
-<span class="fc" id="L127">                        string(tracker, &quot;card_identifier_prefix&quot;, ConfigDefaults.DEFAULT_CARD_IDENTIFIER_PREFIX),</span>
-<span class="fc" id="L128">                        millis(</span>
-<span class="fc" id="L129">                                typedWorkflow.trackerRequestTimeoutMs(),</span>
+<span class="fc" id="L152">                                List.of(&quot;Done&quot;, &quot;Archived&quot;, &quot;ArchivedList&quot;, &quot;ArchivedBoard&quot;, &quot;Deleted&quot;)),</span>
+<span class="fc" id="L153">                        list(tracker, &quot;terminal_list_ids&quot;, List.of()),</span>
+<span class="fc" id="L154">                        typedWorkflow.priorityLabels(),</span>
+<span class="fc" id="L155">                        string(tracker, &quot;card_identifier_prefix&quot;, ConfigDefaults.DEFAULT_CARD_IDENTIFIER_PREFIX),</span>
+<span class="fc" id="L156">                        millis(</span>
+<span class="fc" id="L157">                                typedWorkflow.trackerRequestTimeoutMs(),</span>
                                 &quot;request_timeout_ms&quot;,
                                 ConfigDefaults.DEFAULT_TRACKER_REQUEST_TIMEOUT_MS),
-<span class="fc" id="L132">                        integer(typedWorkflow.trackerMaxApiRetries(), ConfigDefaults.DEFAULT_TRACKER_MAX_API_RETRIES),</span>
-<span class="fc" id="L133">                        millis(</span>
-<span class="fc" id="L134">                                typedWorkflow.trackerApiRetryBaseDelayMs(),</span>
+<span class="fc" id="L160">                        integer(typedWorkflow.trackerMaxApiRetries(), ConfigDefaults.DEFAULT_TRACKER_MAX_API_RETRIES),</span>
+<span class="fc" id="L161">                        millis(</span>
+<span class="fc" id="L162">                                typedWorkflow.trackerApiRetryBaseDelayMs(),</span>
                                 &quot;api_retry_base_delay_ms&quot;,
                                 ConfigDefaults.DEFAULT_TRACKER_API_RETRY_BASE_DELAY_MS)),
-<span class="fc" id="L137">                new EffectiveConfig.PollingConfig(positiveMillis(</span>
-<span class="fc" id="L138">                        typedWorkflow.pollingIntervalMs(), &quot;interval_ms&quot;, ConfigDefaults.DEFAULT_POLLING_INTERVAL_MS)),</span>
-<span class="fc" id="L139">                new EffectiveConfig.WorkspaceConfig(pathFailingOnMissingVariable(</span>
-<span class="fc" id="L140">                        workflow.path().getParent(), &quot;workspace.root&quot;, string(workspace, &quot;root&quot;, systemTempRoot()))),</span>
-<span class="fc" id="L141">                repositoryConfig(workflow.path().getParent(), repository, typedWorkflow),</span>
+<span class="fc" id="L165">                new EffectiveConfig.PollingConfig(positiveMillis(</span>
+<span class="fc" id="L166">                        typedWorkflow.pollingIntervalMs(), &quot;interval_ms&quot;, ConfigDefaults.DEFAULT_POLLING_INTERVAL_MS)),</span>
+<span class="fc" id="L167">                new EffectiveConfig.WorkspaceConfig(pathFailingOnMissingVariable(</span>
+<span class="fc" id="L168">                        workflow.path().getParent(), &quot;workspace.root&quot;, string(workspace, &quot;root&quot;, systemTempRoot()))),</span>
+<span class="fc" id="L169">                repositoryConfig(workflow.path().getParent(), repository, typedWorkflow),</span>
                 new EffectiveConfig.HooksConfig(
-<span class="fc" id="L143">                        string(hooks, &quot;after_create&quot;, null),</span>
-<span class="fc" id="L144">                        string(hooks, &quot;before_run&quot;, null),</span>
-<span class="fc" id="L145">                        string(hooks, &quot;after_run&quot;, null),</span>
-<span class="fc" id="L146">                        string(hooks, &quot;before_remove&quot;, null),</span>
-<span class="fc" id="L147">                        millis(typedWorkflow.hooksTimeoutMs(), &quot;timeout_ms&quot;, 60_000)),</span>
+<span class="fc" id="L171">                        string(hooks, &quot;after_create&quot;, null),</span>
+<span class="fc" id="L172">                        string(hooks, &quot;before_run&quot;, null),</span>
+<span class="fc" id="L173">                        string(hooks, &quot;after_run&quot;, null),</span>
+<span class="fc" id="L174">                        string(hooks, &quot;before_remove&quot;, null),</span>
+<span class="fc" id="L175">                        millis(typedWorkflow.hooksTimeoutMs(), &quot;timeout_ms&quot;, 60_000)),</span>
                 new EffectiveConfig.AgentConfig(
-<span class="fc" id="L149">                        integer(</span>
-<span class="fc" id="L150">                                typedWorkflow.agentMaxConcurrentAgents(),</span>
+<span class="fc" id="L177">                        integer(</span>
+<span class="fc" id="L178">                                typedWorkflow.agentMaxConcurrentAgents(),</span>
                                 ConfigDefaults.DEFAULT_RUNTIME_MAX_CONCURRENT_AGENTS),
-<span class="fc" id="L152">                        integer(typedWorkflow.agentMaxTurns(), 20),</span>
-<span class="fc" id="L153">                        millis(</span>
-<span class="fc" id="L154">                                typedWorkflow.agentMaxRetryBackoffMs(),</span>
+<span class="fc" id="L180">                        integer(typedWorkflow.agentMaxTurns(), 20),</span>
+<span class="fc" id="L181">                        millis(</span>
+<span class="fc" id="L182">                                typedWorkflow.agentMaxRetryBackoffMs(),</span>
                                 &quot;max_retry_backoff_ms&quot;,
                                 ConfigDefaults.DEFAULT_AGENT_MAX_RETRY_BACKOFF_MS),
-<span class="fc" id="L157">                        typedWorkflow.maxConcurrentAgentsByState()),</span>
+<span class="fc" id="L185">                        typedWorkflow.maxConcurrentAgentsByState()),</span>
                 new EffectiveConfig.CodexConfig(
-<span class="fc" id="L159">                        string(codex, &quot;command&quot;, ConfigDefaults.DEFAULT_CODEX_COMMAND),</span>
-<span class="fc" id="L160">                        optionalString(codex, &quot;model&quot;),</span>
-<span class="fc" id="L161">                        optionalString(codex, &quot;reasoning_effort&quot;),</span>
-<span class="fc" id="L162">                        codex.get(&quot;approval_policy&quot;),</span>
-<span class="fc" id="L163">                        codex.get(&quot;thread_sandbox&quot;),</span>
-<span class="fc" id="L164">                        codex.get(&quot;turn_sandbox_policy&quot;),</span>
+<span class="fc" id="L187">                        string(codex, &quot;command&quot;, ConfigDefaults.DEFAULT_CODEX_COMMAND),</span>
+<span class="fc" id="L188">                        optionalString(codex, &quot;model&quot;),</span>
+<span class="fc" id="L189">                        optionalString(codex, &quot;reasoning_effort&quot;),</span>
+<span class="fc" id="L190">                        codex.get(&quot;approval_policy&quot;),</span>
+<span class="fc" id="L191">                        codex.get(&quot;thread_sandbox&quot;),</span>
+<span class="fc" id="L192">                        codex.get(&quot;turn_sandbox_policy&quot;),</span>
                         codexAdditionalWritableRoots,
                         codexDangerFullAccess,
-<span class="fc" id="L167">                        millis(</span>
-<span class="fc" id="L168">                                typedWorkflow.codexTurnTimeoutMs(),</span>
+<span class="fc" id="L195">                        millis(</span>
+<span class="fc" id="L196">                                typedWorkflow.codexTurnTimeoutMs(),</span>
                                 &quot;turn_timeout_ms&quot;,
                                 ConfigDefaults.DEFAULT_CODEX_TURN_TIMEOUT_MS),
-<span class="fc" id="L171">                        millis(</span>
-<span class="fc" id="L172">                                typedWorkflow.codexReadTimeoutMs(),</span>
+<span class="fc" id="L199">                        millis(</span>
+<span class="fc" id="L200">                                typedWorkflow.codexReadTimeoutMs(),</span>
                                 &quot;read_timeout_ms&quot;,
                                 ConfigDefaults.DEFAULT_CODEX_READ_TIMEOUT_MS),
-<span class="fc" id="L175">                        millis(</span>
-<span class="fc" id="L176">                                typedWorkflow.codexStallTimeoutMs(),</span>
+<span class="fc" id="L203">                        millis(</span>
+<span class="fc" id="L204">                                typedWorkflow.codexStallTimeoutMs(),</span>
                                 &quot;stall_timeout_ms&quot;,
                                 ConfigDefaults.DEFAULT_CODEX_STALL_TIMEOUT_MS)),
                 new EffectiveConfig.TrelloToolsConfig(
-<span class="fc" id="L180">                        bool(trelloTools, &quot;enabled&quot;, false),</span>
+<span class="fc" id="L208">                        bool(trelloTools, &quot;enabled&quot;, false),</span>
                         writes,
-<span class="fc" id="L182">                        list(trelloTools, &quot;allowed_move_list_ids&quot;, List.of()),</span>
-<span class="fc" id="L183">                        normalizedList(trelloTools, &quot;allowed_move_list_names&quot;, List.of()),</span>
-<span class="fc" id="L184">                        bool(trelloTools, &quot;allow_comments&quot;, writes),</span>
-<span class="fc" id="L185">                        bool(trelloTools, &quot;allow_checklists&quot;, writes),</span>
-<span class="fc" id="L186">                        bool(trelloTools, &quot;allow_url_attachments&quot;, writes),</span>
-<span class="fc" id="L187">                        bool(trelloTools, &quot;allow_destructive_operations&quot;, false),</span>
-<span class="fc" id="L188">                        bool(trelloTools, &quot;assume_write_scope&quot;, false),</span>
-<span class="fc" id="L189">                        followUpCards(object(trelloTools, &quot;follow_up_cards&quot;))),</span>
-<span class="fc" id="L190">                new EffectiveConfig.ServerConfig(optionalInt(typedWorkflow.serverPort())),</span>
+<span class="fc" id="L210">                        list(trelloTools, &quot;allowed_move_list_ids&quot;, List.of()),</span>
+<span class="fc" id="L211">                        normalizedList(trelloTools, &quot;allowed_move_list_names&quot;, List.of()),</span>
+<span class="fc" id="L212">                        bool(trelloTools, &quot;allow_comments&quot;, writes),</span>
+<span class="fc" id="L213">                        bool(trelloTools, &quot;allow_checklists&quot;, writes),</span>
+<span class="fc" id="L214">                        bool(trelloTools, &quot;allow_url_attachments&quot;, writes),</span>
+<span class="fc" id="L215">                        bool(trelloTools, &quot;allow_destructive_operations&quot;, false),</span>
+<span class="fc" id="L216">                        bool(trelloTools, &quot;assume_write_scope&quot;, false),</span>
+<span class="fc" id="L217">                        followUpCards(object(trelloTools, &quot;follow_up_cards&quot;))),</span>
+<span class="fc" id="L218">                new EffectiveConfig.ServerConfig(optionalInt(typedWorkflow.serverPort())),</span>
                 github);
     }
 
     public void validateForDispatch(EffectiveConfig config) {
-<span class="pc bpc" id="L195" title="1 of 2 branches missed.">        if (!&quot;trello&quot;.equals(config.tracker().kind())) {</span>
-<span class="fc" id="L196">            throw new ConfigException(&quot;unsupported_tracker_kind&quot;, &quot;tracker.kind must be trello&quot;);</span>
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">        if (!&quot;trello&quot;.equals(config.tracker().kind())) {</span>
+<span class="fc" id="L224">            throw new ConfigException(&quot;unsupported_tracker_kind&quot;, &quot;tracker.kind must be trello&quot;);</span>
         }
-<span class="nc" id="L198">        validateEndpoint(config.tracker().endpoint());</span>
-<span class="nc bnc" id="L199" title="All 2 branches missed.">        if (blank(config.tracker().apiKey())) {</span>
-<span class="nc" id="L200">            throw new ConfigException(&quot;missing_tracker_api_key&quot;, &quot;tracker.api_key is required&quot;);</span>
+<span class="nc" id="L226">        validateEndpoint(config.tracker().endpoint());</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">        if (blank(config.tracker().apiKey())) {</span>
+<span class="nc" id="L228">            throw new ConfigException(&quot;missing_tracker_api_key&quot;, &quot;tracker.api_key is required&quot;);</span>
         }
-<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (blank(config.tracker().apiToken())) {</span>
-<span class="nc" id="L203">            throw new ConfigException(&quot;missing_tracker_api_token&quot;, &quot;tracker.api_token is required&quot;);</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (blank(config.tracker().apiToken())) {</span>
+<span class="nc" id="L231">            throw new ConfigException(&quot;missing_tracker_api_token&quot;, &quot;tracker.api_token is required&quot;);</span>
         }
-<span class="nc bnc" id="L205" title="All 2 branches missed.">        if (blank(config.tracker().boardId())) {</span>
-<span class="nc" id="L206">            throw new ConfigException(&quot;missing_tracker_board_id&quot;, &quot;tracker.board_id is required&quot;);</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">        if (blank(config.tracker().boardId())) {</span>
+<span class="nc" id="L234">            throw new ConfigException(&quot;missing_tracker_board_id&quot;, &quot;tracker.board_id is required&quot;);</span>
         }
-<span class="nc bnc" id="L208" title="All 2 branches missed.">        if (blank(config.codex().command())) {</span>
-<span class="nc" id="L209">            throw new ConfigException(&quot;missing_codex_command&quot;, &quot;codex.command is required&quot;);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">        if (blank(config.codex().command())) {</span>
+<span class="nc" id="L237">            throw new ConfigException(&quot;missing_codex_command&quot;, &quot;codex.command is required&quot;);</span>
         }
-<span class="nc" id="L211">        firstAuthoritativeListRoleOverlap(config.tracker()).ifPresent(overlap -&gt; {</span>
-<span class="nc" id="L212">            throw new ConfigException(</span>
+<span class="nc" id="L239">        firstAuthoritativeListRoleOverlap(config.tracker()).ifPresent(overlap -&gt; {</span>
+<span class="nc" id="L240">            throw new ConfigException(</span>
                     &quot;overlapping_tracker_list_roles&quot;,
-<span class="nc" id="L214">                    &quot;tracker list roles must use distinct Trello lists: &quot; + overlap.description());</span>
+<span class="nc" id="L242">                    &quot;tracker list roles must use distinct Trello lists: &quot; + overlap.description());</span>
         });
-<span class="nc bnc" id="L216" title="All 2 branches missed.">        if (!blank(config.tracker().inProgressState())</span>
-<span class="nc bnc" id="L217" title="All 2 branches missed.">                &amp;&amp; config.tracker().activeListIds().isEmpty()</span>
-<span class="nc" id="L218">                &amp;&amp; config.tracker().activeStates().stream()</span>
-<span class="nc" id="L219">                        .map(StateNames::normalize)</span>
-<span class="nc bnc" id="L220" title="All 2 branches missed.">                        .noneMatch(StateNames.normalize(config.tracker().inProgressState())::equals)) {</span>
-<span class="nc" id="L221">            throw new ConfigException(</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">        if (!blank(config.tracker().inProgressState())</span>
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                &amp;&amp; config.tracker().activeListIds().isEmpty()</span>
+<span class="nc" id="L246">                &amp;&amp; config.tracker().activeStates().stream()</span>
+<span class="nc" id="L247">                        .map(StateNames::normalize)</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">                        .noneMatch(StateNames.normalize(config.tracker().inProgressState())::equals)) {</span>
+<span class="nc" id="L249">            throw new ConfigException(</span>
                     &quot;invalid_in_progress_state&quot;,
                     &quot;tracker.in_progress_state must also be listed in tracker.active_states&quot;);
         }
-<span class="nc" id="L225">    }</span>
+<span class="nc" id="L253">    }</span>
 
     @SuppressWarnings(&quot;unchecked&quot;)
     private static Map&lt;String, Object&gt; object(Map&lt;String, Object&gt; root, String key) {
-<span class="fc" id="L229">        Object value = root.get(key);</span>
-<span class="fc bfc" id="L230" title="All 2 branches covered.">        if (value == null) {</span>
-<span class="fc" id="L231">            return Map.of();</span>
+<span class="fc" id="L257">        Object value = root.get(key);</span>
+<span class="fc bfc" id="L258" title="All 2 branches covered.">        if (value == null) {</span>
+<span class="fc" id="L259">            return Map.of();</span>
         }
-<span class="fc bfc" id="L233" title="All 2 branches covered.">        if (value instanceof Map&lt;?, ?&gt; map) {</span>
-<span class="fc" id="L234">            return (Map&lt;String, Object&gt;) map;</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">        if (value instanceof Map&lt;?, ?&gt; map) {</span>
+<span class="fc" id="L262">            return (Map&lt;String, Object&gt;) map;</span>
         }
-<span class="fc" id="L236">        throw new ConfigException(&quot;config_type_error&quot;, key + &quot; must be an object&quot;);</span>
+<span class="fc" id="L264">        throw new ConfigException(&quot;config_type_error&quot;, key + &quot; must be an object&quot;);</span>
     }
 
     private static EffectiveConfig.FollowUpCardsConfig followUpCards(Map&lt;String, Object&gt; followUpCards) {
-<span class="fc" id="L240">        String path = &quot;trello_tools.follow_up_cards.&quot;;</span>
-<span class="fc" id="L241">        String listName = string(followUpCards, &quot;list_name&quot;, ConfigDefaults.DEFAULT_FOLLOW_UP_LIST_NAME);</span>
-<span class="pc bpc" id="L242" title="1 of 2 branches missed.">        if (blank(listName)) {</span>
-<span class="nc" id="L243">            throw new ConfigException(&quot;config_value_error&quot;, path + &quot;list_name must not be blank&quot;);</span>
+<span class="fc" id="L268">        String path = &quot;trello_tools.follow_up_cards.&quot;;</span>
+<span class="fc" id="L269">        String listName = string(followUpCards, &quot;list_name&quot;, ConfigDefaults.DEFAULT_FOLLOW_UP_LIST_NAME);</span>
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">        if (blank(listName)) {</span>
+<span class="nc" id="L271">            throw new ConfigException(&quot;config_value_error&quot;, path + &quot;list_name must not be blank&quot;);</span>
         }
-<span class="fc" id="L245">        Map&lt;FollowUpRelationship, String&gt; relationshipLabels = new EnumMap&lt;&gt;(FollowUpRelationship.class);</span>
-<span class="fc" id="L246">        object(followUpCards, &quot;relationship_labels&quot;).forEach((key, value) -&gt; {</span>
-<span class="nc" id="L247">            FollowUpRelationship relationship = FollowUpRelationship.fromValue(key)</span>
-<span class="nc" id="L248">                    .orElseThrow(() -&gt; new ConfigException(</span>
+<span class="fc" id="L273">        Map&lt;FollowUpRelationship, String&gt; relationshipLabels = new EnumMap&lt;&gt;(FollowUpRelationship.class);</span>
+<span class="fc" id="L274">        object(followUpCards, &quot;relationship_labels&quot;).forEach((key, value) -&gt; {</span>
+<span class="nc" id="L275">            FollowUpRelationship relationship = FollowUpRelationship.fromValue(key)</span>
+<span class="nc" id="L276">                    .orElseThrow(() -&gt; new ConfigException(</span>
                             &quot;config_value_error&quot;,
                             path + &quot;relationship_labels keys must be one of &quot;
-<span class="nc" id="L251">                                    + String.join(&quot;, &quot;, FollowUpRelationship.toolValues())));</span>
-<span class="nc bnc" id="L252" title="All 4 branches missed.">            if (value != null &amp;&amp; !value.toString().isBlank()) {</span>
-<span class="nc" id="L253">                relationshipLabels.put(relationship, value.toString().strip());</span>
+<span class="nc" id="L279">                                    + String.join(&quot;, &quot;, FollowUpRelationship.toolValues())));</span>
+<span class="nc bnc" id="L280" title="All 4 branches missed.">            if (value != null &amp;&amp; !value.toString().isBlank()) {</span>
+<span class="nc" id="L281">                relationshipLabels.put(relationship, value.toString().strip());</span>
             }
-<span class="nc" id="L255">        });</span>
-<span class="fc" id="L256">        return new EffectiveConfig.FollowUpCardsConfig(</span>
-<span class="fc" id="L257">                bool(followUpCards, &quot;enabled&quot;, false),</span>
-<span class="fc" id="L258">                listName.strip(),</span>
-<span class="fc" id="L259">                optionalString(followUpCards, &quot;list_id&quot;),</span>
-<span class="fc" id="L260">                string(followUpCards, &quot;label&quot;, ConfigDefaults.DEFAULT_FOLLOW_UP_LABEL)</span>
-<span class="fc" id="L261">                        .strip(),</span>
+<span class="nc" id="L283">        });</span>
+<span class="fc" id="L284">        return new EffectiveConfig.FollowUpCardsConfig(</span>
+<span class="fc" id="L285">                bool(followUpCards, &quot;enabled&quot;, false),</span>
+<span class="fc" id="L286">                listName.strip(),</span>
+<span class="fc" id="L287">                optionalString(followUpCards, &quot;list_id&quot;),</span>
+<span class="fc" id="L288">                string(followUpCards, &quot;label&quot;, ConfigDefaults.DEFAULT_FOLLOW_UP_LABEL)</span>
+<span class="fc" id="L289">                        .strip(),</span>
                 relationshipLabels,
-<span class="fc" id="L263">                bool(followUpCards, &quot;move_current_card_to_blocked&quot;, false),</span>
-<span class="fc" id="L264">                positiveWholeNumber(</span>
+<span class="fc" id="L291">                bool(followUpCards, &quot;move_current_card_to_blocked&quot;, false),</span>
+<span class="fc" id="L292">                positiveWholeNumber(</span>
                         followUpCards,
                         &quot;max_cards_per_source_card&quot;,
                         path,
                         ConfigDefaults.DEFAULT_FOLLOW_UP_MAX_CARDS_PER_SOURCE_CARD),
-<span class="fc" id="L269">                positiveWholeNumber(</span>
+<span class="fc" id="L297">                positiveWholeNumber(</span>
                         followUpCards,
                         &quot;max_cards_per_hour&quot;,
                         path,
@@ -274,298 +302,340 @@ public class ConfigResolver {
     }
 
     private static int positiveWholeNumber(Map&lt;String, Object&gt; root, String key, String path, int defaultValue) {
-<span class="fc" id="L277">        Object value = root.get(key);</span>
-<span class="pc bpc" id="L278" title="1 of 2 branches missed.">        if (value == null) {</span>
-<span class="fc" id="L279">            return defaultValue;</span>
+<span class="fc" id="L305">        Object value = root.get(key);</span>
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">        if (value == null) {</span>
+<span class="fc" id="L307">            return defaultValue;</span>
         }
-<span class="nc" id="L281">        WholeNumbers.Classified classified = WholeNumbers.classify(value.toString());</span>
-<span class="nc bnc" id="L282" title="All 4 branches missed.">        if (classified.kind() != WholeNumbers.Kind.WHOLE || classified.value() &lt; 1) {</span>
-<span class="nc" id="L283">            throw new ConfigException(&quot;config_value_error&quot;, path + key + &quot; must be a positive whole number&quot;);</span>
+<span class="nc" id="L309">        WholeNumbers.Classified classified = WholeNumbers.classify(value.toString());</span>
+<span class="nc bnc" id="L310" title="All 4 branches missed.">        if (classified.kind() != WholeNumbers.Kind.WHOLE || classified.value() &lt; 1) {</span>
+<span class="nc" id="L311">            throw new ConfigException(&quot;config_value_error&quot;, path + key + &quot; must be a positive whole number&quot;);</span>
         }
-<span class="nc" id="L285">        return classified.value();</span>
+<span class="nc" id="L313">        return classified.value();</span>
     }
 
     private static EffectiveConfig.GitHubConfig gitHubConfig(Map&lt;String, Object&gt; github) {
-<span class="fc" id="L289">        Object configuredMode = github.get(EffectiveConfig.GitHubConfig.PULL_REQUEST_MODE_KEY);</span>
-<span class="pc bpc" id="L290" title="1 of 2 branches missed.">        PullRequestMode mode = !github.containsKey(EffectiveConfig.GitHubConfig.PULL_REQUEST_MODE_KEY)</span>
-<span class="fc" id="L291">                ? EffectiveConfig.GitHubConfig.DEFAULTS.pullRequestMode()</span>
-<span class="nc" id="L292">                : PullRequestMode.fromWorkflowValue(String.valueOf(configuredMode))</span>
-<span class="pc" id="L293">                        .orElseThrow(() -&gt; new ConfigException(</span>
+<span class="fc" id="L317">        Object configuredMode = github.get(EffectiveConfig.GitHubConfig.PULL_REQUEST_MODE_KEY);</span>
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">        PullRequestMode mode = !github.containsKey(EffectiveConfig.GitHubConfig.PULL_REQUEST_MODE_KEY)</span>
+<span class="fc" id="L319">                ? EffectiveConfig.GitHubConfig.DEFAULTS.pullRequestMode()</span>
+<span class="nc" id="L320">                : PullRequestMode.fromWorkflowValue(String.valueOf(configuredMode))</span>
+<span class="pc" id="L321">                        .orElseThrow(() -&gt; new ConfigException(</span>
                                 &quot;config_value_error&quot;,
-<span class="nc" id="L295">                                EffectiveConfig.GitHubConfig.qualifiedKey(</span>
+<span class="nc" id="L323">                                EffectiveConfig.GitHubConfig.qualifiedKey(</span>
                                                 EffectiveConfig.GitHubConfig.PULL_REQUEST_MODE_KEY)
                                         + &quot; must be &quot;
-<span class="nc" id="L298">                                        + PullRequestMode.workflowValueChoices()));</span>
-<span class="fc" id="L299">        return new EffectiveConfig.GitHubConfig(mode, noPrLabel(github));</span>
+<span class="nc" id="L326">                                        + PullRequestMode.workflowValueChoices()));</span>
+<span class="fc" id="L327">        return new EffectiveConfig.GitHubConfig(mode, noPrLabel(github));</span>
     }
 
     /// An omitted key keeps the default label; an explicit empty or null value disables the signal.
     private static @Nullable String noPrLabel(Map&lt;String, Object&gt; github) {
-<span class="pc bpc" id="L304" title="1 of 2 branches missed.">        if (!github.containsKey(EffectiveConfig.GitHubConfig.NO_PR_LABEL_KEY)) {</span>
-<span class="fc" id="L305">            return EffectiveConfig.GitHubConfig.DEFAULTS.noPrLabel();</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (!github.containsKey(EffectiveConfig.GitHubConfig.NO_PR_LABEL_KEY)) {</span>
+<span class="fc" id="L333">            return EffectiveConfig.GitHubConfig.DEFAULTS.noPrLabel();</span>
         }
-<span class="nc" id="L307">        Object configured = github.get(EffectiveConfig.GitHubConfig.NO_PR_LABEL_KEY);</span>
-<span class="nc bnc" id="L308" title="All 2 branches missed.">        if (configured == null) {</span>
-<span class="nc" id="L309">            return null;</span>
+<span class="nc" id="L335">        Object configured = github.get(EffectiveConfig.GitHubConfig.NO_PR_LABEL_KEY);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        if (configured == null) {</span>
+<span class="nc" id="L337">            return null;</span>
         }
-<span class="nc bnc" id="L311" title="All 2 branches missed.">        if (!(configured instanceof String label)) {</span>
-<span class="nc" id="L312">            throw new ConfigException(&quot;config_value_error&quot;, NO_PR_LABEL_TYPE_MESSAGE);</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (!(configured instanceof String label)) {</span>
+<span class="nc" id="L340">            throw new ConfigException(&quot;config_value_error&quot;, NO_PR_LABEL_TYPE_MESSAGE);</span>
         }
-<span class="nc bnc" id="L314" title="All 2 branches missed.">        return label.isBlank() ? null : label.trim();</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        return label.isBlank() ? null : label.trim();</span>
     }
 
     private static String string(Map&lt;String, Object&gt; root, String key, String defaultValue) {
-<span class="fc" id="L318">        Object value = root.get(key);</span>
-<span class="fc bfc" id="L319" title="All 2 branches covered.">        if (value == null) {</span>
-<span class="fc" id="L320">            return defaultValue;</span>
+<span class="fc" id="L346">        Object value = root.get(key);</span>
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        if (value == null) {</span>
+<span class="fc" id="L348">            return defaultValue;</span>
         }
-<span class="fc" id="L322">        return value.toString();</span>
+<span class="fc" id="L350">        return value.toString();</span>
     }
 
     private static Optional&lt;TrelloListRoleValidator.Overlap&gt; firstAuthoritativeListRoleOverlap(
             EffectiveConfig.TrackerConfig tracker) {
-<span class="nc" id="L327">        return TrelloListRoleValidator.firstOverlap(tracker.activeListIds(), tracker.terminalListIds(), null, null)</span>
-<span class="nc" id="L328">                .or(() -&gt; TrelloListRoleValidator.firstOverlap(</span>
-<span class="nc bnc" id="L329" title="All 2 branches missed.">                        tracker.activeListIds().isEmpty() ? tracker.activeStates() : List.of(),</span>
-<span class="nc bnc" id="L330" title="All 2 branches missed.">                        tracker.terminalListIds().isEmpty() ? tracker.terminalStates() : List.of(),</span>
-<span class="nc" id="L331">                        tracker.inProgressState(),</span>
-<span class="nc" id="L332">                        tracker.blockedState()));</span>
+<span class="nc" id="L355">        return TrelloListRoleValidator.firstOverlap(tracker.activeListIds(), tracker.terminalListIds(), null, null)</span>
+<span class="nc" id="L356">                .or(() -&gt; TrelloListRoleValidator.firstOverlap(</span>
+<span class="nc bnc" id="L357" title="All 2 branches missed.">                        tracker.activeListIds().isEmpty() ? tracker.activeStates() : List.of(),</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                        tracker.terminalListIds().isEmpty() ? tracker.terminalStates() : List.of(),</span>
+<span class="nc" id="L359">                        tracker.inProgressState(),</span>
+<span class="nc" id="L360">                        tracker.blockedState()));</span>
     }
 
     private static String optionalString(Map&lt;String, Object&gt; root, String key) {
-<span class="fc" id="L336">        String value = string(root, key, null);</span>
-<span class="pc bpc" id="L337" title="1 of 2 branches missed.">        return blank(value) ? null : value;</span>
+<span class="fc" id="L364">        String value = string(root, key, null);</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">        return blank(value) ? null : value;</span>
     }
 
     private String environmentString(Map&lt;String, Object&gt; root, String key, String defaultValue) {
-<span class="fc" id="L341">        String configured = string(root, key, defaultValue);</span>
-<span class="fc" id="L342">        Optional&lt;String&gt; reference = EnvironmentReferences.referenceName(configured);</span>
+<span class="fc" id="L369">        String configured = string(root, key, defaultValue);</span>
+<span class="fc" id="L370">        Optional&lt;String&gt; reference = EnvironmentReferences.referenceName(configured);</span>
         // Plain branching because an unresolved reference must yield the nullable default, which
         // Optional.map would silently turn back into the raw reference text.
-<span class="pc bpc" id="L345" title="1 of 2 branches missed.">        if (reference.isPresent()) {</span>
-<span class="nc" id="L346">            return environmentValueOrDefault(reference.get(), defaultValue);</span>
+<span class="pc bpc" id="L373" title="1 of 2 branches missed.">        if (reference.isPresent()) {</span>
+<span class="nc" id="L374">            return environmentValueOrDefault(reference.get(), defaultValue);</span>
         }
-<span class="fc" id="L348">        return configured;</span>
+<span class="fc" id="L376">        return configured;</span>
     }
 
     private String optionalEnvironmentString(Map&lt;String, Object&gt; root, String key) {
-<span class="fc" id="L352">        String configured = optionalString(root, key);</span>
-<span class="fc" id="L353">        Optional&lt;String&gt; reference = EnvironmentReferences.referenceName(configured);</span>
-<span class="pc bpc" id="L354" title="1 of 2 branches missed.">        if (reference.isPresent()) {</span>
-<span class="nc" id="L355">            return nonBlankEnvironmentValue(reference.get()).orElse(null);</span>
+<span class="fc" id="L380">        String configured = optionalString(root, key);</span>
+<span class="fc" id="L381">        Optional&lt;String&gt; reference = EnvironmentReferences.referenceName(configured);</span>
+<span class="pc bpc" id="L382" title="1 of 2 branches missed.">        if (reference.isPresent()) {</span>
+<span class="nc" id="L383">            return nonBlankEnvironmentValue(reference.get()).orElse(null);</span>
         }
-<span class="fc" id="L357">        return configured;</span>
+<span class="fc" id="L385">        return configured;</span>
     }
 
     private EffectiveConfig.RepositoryConfig repositoryConfig(
             Path workflowDirectory, Map&lt;String, Object&gt; repository, TypedWorkflowConfig typedWorkflow) {
-<span class="fc" id="L362">        EffectiveConfig.CodexReviewConfig codexReview = codexReviewConfig(repository, typedWorkflow);</span>
-<span class="fc" id="L363">        String defaultUrl = optionalEnvironmentString(repository, &quot;default_url&quot;);</span>
-<span class="pc bpc" id="L364" title="1 of 2 branches missed.">        if (defaultUrl != null) {</span>
-<span class="nc" id="L365">            return new EffectiveConfig.RepositoryConfig(</span>
-<span class="nc" id="L366">                    defaultUrl, optionalLowerPriorityRepositoryPath(workflowDirectory, repository), codexReview);</span>
+<span class="fc" id="L390">        EffectiveConfig.CodexReviewConfig codexReview = codexReviewConfig(repository, typedWorkflow);</span>
+<span class="fc" id="L391">        String defaultUrl = optionalEnvironmentString(repository, &quot;default_url&quot;);</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">        if (defaultUrl != null) {</span>
+<span class="nc" id="L393">            return new EffectiveConfig.RepositoryConfig(</span>
+<span class="nc" id="L394">                    defaultUrl, optionalLowerPriorityRepositoryPath(workflowDirectory, repository), codexReview);</span>
         }
-<span class="fc" id="L368">        return new EffectiveConfig.RepositoryConfig(</span>
-<span class="fc" id="L369">                null, optionalRepositoryPath(workflowDirectory, repository), codexReview);</span>
+<span class="fc" id="L396">        return new EffectiveConfig.RepositoryConfig(</span>
+<span class="fc" id="L397">                null, optionalRepositoryPath(workflowDirectory, repository), codexReview);</span>
     }
 
     private static EffectiveConfig.CodexReviewConfig codexReviewConfig(
             Map&lt;String, Object&gt; repository, TypedWorkflowConfig typedWorkflow) {
-<span class="fc" id="L374">        int maxRounds =</span>
-<span class="fc" id="L375">                integer(typedWorkflow.repositoryCodexReviewMaxRounds(), ConfigDefaults.DEFAULT_CODEX_REVIEW_MAX_ROUNDS);</span>
+<span class="fc" id="L402">        int maxRounds =</span>
+<span class="fc" id="L403">                integer(typedWorkflow.repositoryCodexReviewMaxRounds(), ConfigDefaults.DEFAULT_CODEX_REVIEW_MAX_ROUNDS);</span>
         // Without its own key the hard limit follows a round limit set above the default.
-<span class="fc" id="L377">        int extendedMaxRounds = integer(</span>
-<span class="fc" id="L378">                typedWorkflow.repositoryCodexReviewExtendedMaxRounds(),</span>
-<span class="fc" id="L379">                Math.max(ConfigDefaults.DEFAULT_CODEX_REVIEW_EXTENDED_MAX_ROUNDS, maxRounds));</span>
-<span class="pc bpc" id="L380" title="1 of 2 branches missed.">        if (extendedMaxRounds &lt; maxRounds) {</span>
-<span class="nc" id="L381">            throw new ConfigException(</span>
+<span class="fc" id="L405">        int extendedMaxRounds = integer(</span>
+<span class="fc" id="L406">                typedWorkflow.repositoryCodexReviewExtendedMaxRounds(),</span>
+<span class="fc" id="L407">                Math.max(ConfigDefaults.DEFAULT_CODEX_REVIEW_EXTENDED_MAX_ROUNDS, maxRounds));</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">        if (extendedMaxRounds &lt; maxRounds) {</span>
+<span class="nc" id="L409">            throw new ConfigException(</span>
                     &quot;config_value_error&quot;,
                     &quot;%s (%d) must be at least %s (%d)&quot;
-<span class="nc" id="L384">                            .formatted(</span>
+<span class="nc" id="L412">                            .formatted(</span>
                                     EffectiveConfig.CodexReviewConfig.EXTENDED_MAX_ROUNDS_PATH,
-<span class="nc" id="L386">                                    extendedMaxRounds,</span>
+<span class="nc" id="L414">                                    extendedMaxRounds,</span>
                                     EffectiveConfig.CodexReviewConfig.MAX_ROUNDS_PATH,
-<span class="nc" id="L388">                                    maxRounds));</span>
+<span class="nc" id="L416">                                    maxRounds));</span>
         }
-<span class="fc" id="L390">        return new EffectiveConfig.CodexReviewConfig(</span>
+<span class="fc" id="L418">        return new EffectiveConfig.CodexReviewConfig(</span>
                 maxRounds,
                 extendedMaxRounds,
-<span class="fc" id="L393">                millis(</span>
-<span class="fc" id="L394">                        typedWorkflow.repositoryCodexReviewTimeoutMs(),</span>
+<span class="fc" id="L421">                millis(</span>
+<span class="fc" id="L422">                        typedWorkflow.repositoryCodexReviewTimeoutMs(),</span>
                         EffectiveConfig.CodexReviewConfig.TIMEOUT_MS_PATH,
                         ConfigDefaults.DEFAULT_CODEX_REVIEW_TIMEOUT_MS),
-<span class="fc" id="L397">                codexReviewToken(repository, EffectiveConfig.CodexReviewConfig.MODEL_KEY),</span>
-<span class="fc" id="L398">                codexReviewToken(repository, EffectiveConfig.CodexReviewConfig.REASONING_EFFORT_KEY));</span>
+<span class="fc" id="L425">                codexReviewToken(repository, EffectiveConfig.CodexReviewConfig.MODEL_KEY),</span>
+<span class="fc" id="L426">                codexReviewToken(repository, EffectiveConfig.CodexReviewConfig.REASONING_EFFORT_KEY));</span>
     }
 
     /// Reads an optional reviewer model or reasoning effort; blank means &quot;use the workflow's own&quot;.
     private static @Nullable String codexReviewToken(Map&lt;String, Object&gt; repository, String key) {
-<span class="fc" id="L403">        String value = optionalString(repository, key);</span>
-<span class="pc bpc" id="L404" title="1 of 2 branches missed.">        if (value == null) {</span>
-<span class="fc" id="L405">            return null;</span>
+<span class="fc" id="L431">        String value = optionalString(repository, key);</span>
+<span class="pc bpc" id="L432" title="1 of 2 branches missed.">        if (value == null) {</span>
+<span class="fc" id="L433">            return null;</span>
         }
-<span class="nc" id="L407">        String stripped = value.strip();</span>
-<span class="nc bnc" id="L408" title="All 2 branches missed.">        if (!EffectiveConfig.CodexReviewConfig.commandToken(stripped)) {</span>
-<span class="nc" id="L409">            throw new ConfigException(</span>
+<span class="nc" id="L435">        String stripped = value.strip();</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">        if (!EffectiveConfig.CodexReviewConfig.commandToken(stripped)) {</span>
+<span class="nc" id="L437">            throw new ConfigException(</span>
                     &quot;config_value_error&quot;,
                     &quot;repository.&quot; + key + &quot; must be &quot; + EffectiveConfig.CodexReviewConfig.COMMAND_TOKEN_DESCRIPTION
                             + &quot;, or blank to use the workflow's codex setting&quot;);
         }
-<span class="nc" id="L414">        return stripped;</span>
+<span class="nc" id="L442">        return stripped;</span>
     }
 
     private Path optionalLowerPriorityRepositoryPath(Path workflowDirectory, Map&lt;String, Object&gt; repository) {
         try {
-<span class="nc" id="L419">            return optionalRepositoryPath(workflowDirectory, repository);</span>
-<span class="nc" id="L420">        } catch (ConfigException ignored) {</span>
+<span class="nc" id="L447">            return optionalRepositoryPath(workflowDirectory, repository);</span>
+<span class="nc" id="L448">        } catch (ConfigException ignored) {</span>
             // The URL remains the selected source. An unusable lower-priority path cannot be a
             // checkout candidate and retains the existing URL-over-path compatibility behavior.
-<span class="nc" id="L423">            return null;</span>
+<span class="nc" id="L451">            return null;</span>
         }
     }
 
-    private String secret(
+    private Secret secret(
             Path workflowDirectory, Map&lt;String, Object&gt; root, String key, String displayName, String defaultEnv) {
-<span class="fc" id="L429">        String configured = string(root, key, &quot;$&quot; + defaultEnv);</span>
-<span class="fc" id="L430">        Optional&lt;String&gt; reference = EnvironmentReferences.referenceName(configured);</span>
-<span class="fc bfc" id="L431" title="All 2 branches covered.">        if (reference.isPresent()) {</span>
-<span class="fc" id="L432">            return environmentValueOrDefault(reference.get(), null);</span>
+<span class="fc" id="L457">        String configured = string(root, key, &quot;$&quot; + defaultEnv);</span>
+<span class="fc" id="L458">        return EnvironmentReferences.referenceName(configured)</span>
+<span class="fc" id="L459">                .map(this::environmentSecret)</span>
+<span class="fc" id="L460">                .orElseGet(() -&gt; configuredSecret(workflowDirectory, displayName, configured));</span>
+    }
+
+    private Secret environmentSecret(String name) {
+<span class="fc" id="L464">        return environment.lookup(name).map(Secret::fromEnvironment).orElse(Secret.NONE);</span>
+    }
+
+    private Secret configuredSecret(Path workflowDirectory, String displayName, @Nullable String configured) {
+<span class="pc bpc" id="L468" title="2 of 4 branches missed.">        if (configured != null &amp;&amp; configured.startsWith(FILE_SECRET_PREFIX)) {</span>
+<span class="nc" id="L469">            return new Secret(</span>
+<span class="nc" id="L470">                    fileSecret(workflowDirectory, displayName, configured.substring(FILE_SECRET_PREFIX.length())),</span>
+                    null);
         }
-<span class="pc bpc" id="L434" title="2 of 4 branches missed.">        if (configured != null &amp;&amp; configured.startsWith(FILE_SECRET_PREFIX)) {</span>
-<span class="nc" id="L435">            return fileSecret(workflowDirectory, displayName, configured.substring(FILE_SECRET_PREFIX.length()));</span>
+<span class="fc" id="L473">        return new Secret(configured, null);</span>
+    }
+
+    /// The credentials an environment source supplied, which the endpoint binding covers. A literal
+    /// or `file:` value came from the workflow itself, so the workflow's endpoint is its endpoint.
+    private static List&lt;EnvironmentValue&gt; environmentCredentials(Secret apiKey, Secret apiToken) {
+<span class="fc" id="L479">        return Stream.of(apiKey.environmentValue(), apiToken.environmentValue())</span>
+<span class="fc" id="L480">                .flatMap(Optional::stream)</span>
+<span class="fc" id="L481">                .toList();</span>
+    }
+
+    /// A resolved `tracker.api_key` or `tracker.api_token`, with the environment value behind it
+    /// when the setting referenced one.
+<span class="fc" id="L486">    private record Secret(@Nullable String value, @Nullable EnvironmentValue origin) {</span>
+<span class="fc" id="L487">        static final Secret NONE = new Secret(null, null);</span>
+
+        static Secret fromEnvironment(EnvironmentValue environmentValue) {
+<span class="fc" id="L490">            return new Secret(environmentValue.value(), environmentValue);</span>
         }
-<span class="fc" id="L437">        return configured;</span>
+
+        Optional&lt;EnvironmentValue&gt; environmentValue() {
+<span class="fc" id="L494">            return Optional.ofNullable(origin);</span>
+        }
     }
 
     private String environmentValueOrDefault(String environmentName, String defaultValue) {
-<span class="fc" id="L441">        return environmentValue(environmentName).orElse(defaultValue);</span>
+<span class="nc" id="L499">        return environmentValue(environmentName).orElse(defaultValue);</span>
     }
 
     private Optional&lt;String&gt; environmentValue(String environmentName) {
-<span class="fc" id="L445">        return environmentResolver.apply(environmentName);</span>
+<span class="fc" id="L503">        return environmentResolver.apply(environmentName);</span>
     }
 
     private String fileSecret(Path workflowDirectory, String displayName, String configuredPath) {
-<span class="nc" id="L449">        Path secretPath = pathFailingOnMissingVariable(workflowDirectory, displayName + &quot; secret file&quot;, configuredPath);</span>
+<span class="nc" id="L507">        Path secretPath = pathFailingOnMissingVariable(workflowDirectory, displayName + &quot; secret file&quot;, configuredPath);</span>
         try {
-<span class="nc" id="L451">            long size = secretFiles.size(secretPath);</span>
-<span class="nc bnc" id="L452" title="All 2 branches missed.">            if (size &gt; MAX_SECRET_BYTES) {</span>
-<span class="nc" id="L453">                throw new ConfigException(</span>
-                        &quot;secret_file_too_large&quot;, displayName + &quot; secret file is too large: &quot; + secretPath);
+<span class="nc" id="L509">            long size = secretFiles.size(secretPath);</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">            if (size &gt; MAX_SECRET_BYTES) {</span>
+<span class="nc" id="L511">                throw secretFileTooLarge(displayName, secretPath);</span>
             }
-<span class="nc" id="L456">            return stripTrailingLineBreaks(secretFiles.readString(secretPath));</span>
-<span class="nc" id="L457">        } catch (IOException e) {</span>
-<span class="nc" id="L458">            throw new ConfigException(</span>
+<span class="nc" id="L513">            try (InputStream input = secretFiles.newInputStream(secretPath)) {</span>
+                // Metadata can understate content, including devices, pipes, and growing files.
+<span class="nc" id="L515">                byte[] content = input.readNBytes(MAX_SECRET_BYTES + 1);</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">                if (content.length &gt; MAX_SECRET_BYTES) {</span>
+<span class="nc" id="L517">                    throw secretFileTooLarge(displayName, secretPath);</span>
+                }
+<span class="nc" id="L519">                String value =</span>
+<span class="nc" id="L520">                        UTF_8.newDecoder().decode(ByteBuffer.wrap(content)).toString();</span>
+<span class="nc" id="L521">                return stripTrailingLineBreaks(value);</span>
+            }
+<span class="nc" id="L523">        } catch (IOException e) {</span>
+<span class="nc" id="L524">            throw new ConfigException(</span>
                     &quot;secret_file_read_error&quot;, displayName + &quot; secret file cannot be read: &quot; + secretPath, e);
         }
     }
 
+    private static ConfigException secretFileTooLarge(String displayName, Path secretPath) {
+<span class="nc" id="L530">        return new ConfigException(&quot;secret_file_too_large&quot;, displayName + &quot; secret file is too large: &quot; + secretPath);</span>
+    }
+
     private static String stripTrailingLineBreaks(String value) {
-<span class="nc" id="L464">        return LINE_BREAK.trimTrailingFrom(value);</span>
+<span class="nc" id="L534">        return LINE_BREAK.trimTrailingFrom(value);</span>
     }
 
     private static void validateEndpoint(String endpoint) {
-<span class="nc bnc" id="L468" title="All 2 branches missed.">        if (blank(endpoint)) {</span>
-<span class="nc" id="L469">            throw new ConfigException(&quot;invalid_tracker_endpoint&quot;, &quot;tracker.endpoint must not be blank&quot;);</span>
+<span class="pc bpc" id="L538" title="1 of 2 branches missed.">        if (blank(endpoint)) {</span>
+<span class="nc" id="L539">            throw new ConfigException(&quot;invalid_tracker_endpoint&quot;, &quot;tracker.endpoint must not be blank&quot;);</span>
         }
         URI uri;
         try {
-<span class="nc" id="L473">            uri = new URI(endpoint);</span>
-<span class="nc" id="L474">        } catch (URISyntaxException e) {</span>
-<span class="nc" id="L475">            throw new ConfigException(&quot;invalid_tracker_endpoint&quot;, &quot;tracker.endpoint must be a valid http(s) URL&quot;, e);</span>
-<span class="nc" id="L476">        }</span>
+<span class="fc" id="L543">            uri = new URI(endpoint);</span>
+<span class="nc" id="L544">        } catch (URISyntaxException e) {</span>
+<span class="nc" id="L545">            throw new ConfigException(&quot;invalid_tracker_endpoint&quot;, &quot;tracker.endpoint must be a valid http(s) URL&quot;, e);</span>
+<span class="fc" id="L546">        }</span>
         // Scheme comparison is case-insensitive like TrelloApiEndpoint.normalize on the setup
         // side, so a workflow endpoint accepted during setup cannot fail here over letter case.
-<span class="nc bnc" id="L479" title="All 2 branches missed.">        String scheme = uri.getScheme() == null ? null : uri.getScheme().toLowerCase(Locale.ROOT);</span>
-<span class="nc bnc" id="L480" title="All 4 branches missed.">        boolean httpScheme = &quot;http&quot;.equals(scheme) || &quot;https&quot;.equals(scheme);</span>
-<span class="nc bnc" id="L481" title="All 2 branches missed.">        boolean hasHost = uri.getHost() != null;</span>
-<span class="nc bnc" id="L482" title="All 4 branches missed.">        if (!httpScheme || !hasHost) {</span>
-<span class="nc" id="L483">            throw new ConfigException(</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">        String scheme = uri.getScheme() == null ? null : uri.getScheme().toLowerCase(Locale.ROOT);</span>
+<span class="pc bpc" id="L550" title="2 of 4 branches missed.">        boolean httpScheme = &quot;http&quot;.equals(scheme) || &quot;https&quot;.equals(scheme);</span>
+<span class="pc bpc" id="L551" title="1 of 2 branches missed.">        boolean hasHost = uri.getHost() != null;</span>
+<span class="pc bpc" id="L552" title="2 of 4 branches missed.">        if (!httpScheme || !hasHost) {</span>
+<span class="nc" id="L553">            throw new ConfigException(</span>
                     &quot;invalid_tracker_endpoint&quot;, &quot;tracker.endpoint must be an absolute http(s) URL with a host&quot;);
         }
-<span class="nc" id="L486">    }</span>
+<span class="fc" id="L556">    }</span>
 
     private static Duration positiveMillis(WorkflowIntegerSetting setting, String key, long defaultValue) {
-<span class="fc" id="L489">        Duration value = millis(setting, key, defaultValue);</span>
-<span class="pc bpc" id="L490" title="1 of 2 branches missed.">        if (value.isZero()) {</span>
-<span class="nc" id="L491">            throw new ConfigException(&quot;config_value_error&quot;, key + &quot; must be positive&quot;);</span>
+<span class="fc" id="L559">        Duration value = millis(setting, key, defaultValue);</span>
+<span class="pc bpc" id="L560" title="1 of 2 branches missed.">        if (value.isZero()) {</span>
+<span class="nc" id="L561">            throw new ConfigException(&quot;config_value_error&quot;, key + &quot; must be positive&quot;);</span>
         }
-<span class="fc" id="L493">        return value;</span>
+<span class="fc" id="L563">        return value;</span>
     }
 
     private static Duration millis(WorkflowIntegerSetting setting, String key, long defaultValue) {
-<span class="fc" id="L497">        int value = integer(setting, (int) defaultValue);</span>
-<span class="pc bpc" id="L498" title="1 of 2 branches missed.">        if (value &lt; 0) {</span>
-<span class="nc" id="L499">            throw new ConfigException(&quot;config_value_error&quot;, key + &quot; must be non-negative&quot;);</span>
+<span class="fc" id="L567">        int value = integer(setting, (int) defaultValue);</span>
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">        if (value &lt; 0) {</span>
+<span class="nc" id="L569">            throw new ConfigException(&quot;config_value_error&quot;, key + &quot; must be non-negative&quot;);</span>
         }
-<span class="fc" id="L501">        return Duration.ofMillis(value);</span>
+<span class="fc" id="L571">        return Duration.ofMillis(value);</span>
     }
 
     private static int integer(WorkflowIntegerSetting setting, int defaultValue) {
-<span class="fc" id="L505">        setting.finding().filter(WorkflowConfigFinding::strict).ifPresent(finding -&gt; {</span>
-<span class="nc" id="L506">            throw new ConfigException(&quot;config_value_error&quot;, finding.message());</span>
+<span class="fc" id="L575">        setting.finding().filter(WorkflowConfigFinding::strict).ifPresent(finding -&gt; {</span>
+<span class="nc" id="L576">            throw new ConfigException(&quot;config_value_error&quot;, finding.message());</span>
         });
-<span class="fc" id="L508">        return setting.value().orElse(defaultValue);</span>
+<span class="fc" id="L578">        return setting.value().orElse(defaultValue);</span>
     }
 
     private static OptionalInt optionalInt(WorkflowIntegerSetting setting) {
-<span class="fc" id="L512">        setting.finding().filter(WorkflowConfigFinding::strict).ifPresent(finding -&gt; {</span>
-<span class="nc" id="L513">            throw new ConfigException(&quot;config_value_error&quot;, finding.message());</span>
+<span class="fc" id="L582">        setting.finding().filter(WorkflowConfigFinding::strict).ifPresent(finding -&gt; {</span>
+<span class="nc" id="L583">            throw new ConfigException(&quot;config_value_error&quot;, finding.message());</span>
         });
-<span class="fc" id="L515">        return setting.value().map(OptionalInt::of).orElseGet(OptionalInt::empty);</span>
+<span class="fc" id="L585">        return setting.value().map(OptionalInt::of).orElseGet(OptionalInt::empty);</span>
     }
 
     private static boolean bool(Map&lt;String, Object&gt; root, String key, boolean defaultValue) {
-<span class="fc" id="L519">        Object value = root.get(key);</span>
-<span class="fc bfc" id="L520" title="All 2 branches covered.">        return value == null ? defaultValue : Boolean.parseBoolean(value.toString());</span>
+<span class="fc" id="L589">        Object value = root.get(key);</span>
+<span class="fc bfc" id="L590" title="All 2 branches covered.">        return value == null ? defaultValue : Boolean.parseBoolean(value.toString());</span>
     }
 
     @SuppressWarnings(&quot;unchecked&quot;)
     private static List&lt;String&gt; list(Map&lt;String, Object&gt; root, String key, List&lt;String&gt; defaultValue) {
-<span class="fc" id="L525">        Object value = root.get(key);</span>
-<span class="fc bfc" id="L526" title="All 2 branches covered.">        if (value == null) {</span>
-<span class="fc" id="L527">            return defaultValue;</span>
+<span class="fc" id="L595">        Object value = root.get(key);</span>
+<span class="fc bfc" id="L596" title="All 2 branches covered.">        if (value == null) {</span>
+<span class="fc" id="L597">            return defaultValue;</span>
         }
-<span class="pc bpc" id="L529" title="1 of 2 branches missed.">        if (value instanceof List&lt;?&gt; list) {</span>
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">        if (value instanceof List&lt;?&gt; list) {</span>
             // YAML turns an empty list item such as &quot;- &quot; into null. List.contains(null) throws for
             // immutable lists, so the check streams instead.
-<span class="pc bpc" id="L532" title="1 of 2 branches missed.">            if (list.stream().anyMatch(Objects::isNull)) {</span>
-<span class="nc" id="L533">                throw new ConfigException(&quot;config_type_error&quot;, key + &quot; must not contain empty items&quot;);</span>
+<span class="pc bpc" id="L602" title="1 of 2 branches missed.">            if (list.stream().anyMatch(Objects::isNull)) {</span>
+<span class="nc" id="L603">                throw new ConfigException(&quot;config_type_error&quot;, key + &quot; must not contain empty items&quot;);</span>
             }
-<span class="fc" id="L535">            return list.stream().map(Object::toString).toList();</span>
+<span class="fc" id="L605">            return list.stream().map(Object::toString).toList();</span>
         }
-<span class="nc" id="L537">        return List.of(value.toString());</span>
+<span class="nc" id="L607">        return List.of(value.toString());</span>
     }
 
     private static List&lt;String&gt; normalizedList(Map&lt;String, Object&gt; root, String key, List&lt;String&gt; defaultValue) {
-<span class="fc" id="L541">        return list(root, key, defaultValue).stream().map(StateNames::normalize).toList();</span>
+<span class="fc" id="L611">        return list(root, key, defaultValue).stream().map(StateNames::normalize).toList();</span>
     }
 
     private List&lt;Path&gt; additionalWritableRoots(Path workflowDirectory, Map&lt;String, Object&gt; codex) {
-<span class="fc" id="L545">        Stream&lt;Path&gt; configuredRoots = list(codex, &quot;additional_writable_roots&quot;, List.of()).stream()</span>
-<span class="fc" id="L546">                .map(value -&gt;</span>
-<span class="nc" id="L547">                        pathFailingOnMissingVariable(workflowDirectory, &quot;codex.additional_writable_roots&quot;, value));</span>
-<span class="fc" id="L548">        Stream&lt;Path&gt; environmentRoots = environmentValue(ADDITIONAL_WRITABLE_ROOTS_ENVIRONMENT).stream()</span>
-<span class="fc" id="L549">                .flatMap(PATH_SEPARATOR::splitToStream)</span>
-<span class="fc" id="L550">                .map(String::trim)</span>
-<span class="fc bfc" id="L551" title="All 2 branches covered.">                .filter(value -&gt; !value.isBlank())</span>
-<span class="fc" id="L552">                .map(value -&gt;</span>
-<span class="fc" id="L553">                        pathFailingOnMissingVariable(workflowDirectory, ADDITIONAL_WRITABLE_ROOTS_ENVIRONMENT, value));</span>
-<span class="fc" id="L554">        return Stream.concat(configuredRoots, environmentRoots).distinct().toList();</span>
+<span class="fc" id="L615">        Stream&lt;Path&gt; configuredRoots = list(codex, &quot;additional_writable_roots&quot;, List.of()).stream()</span>
+<span class="fc" id="L616">                .map(value -&gt;</span>
+<span class="nc" id="L617">                        pathFailingOnMissingVariable(workflowDirectory, &quot;codex.additional_writable_roots&quot;, value));</span>
+<span class="fc" id="L618">        Stream&lt;Path&gt; environmentRoots = environmentValue(ADDITIONAL_WRITABLE_ROOTS_ENVIRONMENT).stream()</span>
+<span class="fc" id="L619">                .flatMap(PATH_SEPARATOR::splitToStream)</span>
+<span class="fc" id="L620">                .map(String::trim)</span>
+<span class="fc bfc" id="L621" title="All 2 branches covered.">                .filter(value -&gt; !value.isBlank())</span>
+<span class="fc" id="L622">                .map(value -&gt;</span>
+<span class="fc" id="L623">                        pathFailingOnMissingVariable(workflowDirectory, ADDITIONAL_WRITABLE_ROOTS_ENVIRONMENT, value));</span>
+<span class="fc" id="L624">        return Stream.concat(configuredRoots, environmentRoots).distinct().toList();</span>
     }
 
     /// Fails on an unset or blank leading variable instead of creating a literal `$NAME` directory;
     /// see docs/adr/0112-fail-path-settings-on-missing-environment-variables.md.
     private Path pathFailingOnMissingVariable(Path workflowDirectory, String setting, String value) {
-<span class="fc" id="L560">        return absolutePath(</span>
+<span class="fc" id="L630">        return absolutePath(</span>
                 workflowDirectory,
                 setting,
-<span class="pc" id="L563">                expandPath(value, environmentName -&gt; Optional.of(requiredPathVariable(setting, environmentName))));</span>
+<span class="pc" id="L633">                expandPath(value, environmentName -&gt; Optional.of(requiredPathVariable(setting, environmentName))));</span>
     }
 
     private String requiredPathVariable(String setting, String environmentName) {
-<span class="nc" id="L567">        return nonBlankEnvironmentValue(environmentName)</span>
-<span class="nc" id="L568">                .orElseThrow(() -&gt; new ConfigException(</span>
+<span class="nc" id="L637">        return nonBlankEnvironmentValue(environmentName)</span>
+<span class="nc" id="L638">                .orElseThrow(() -&gt; new ConfigException(</span>
                         &quot;missing_path_environment_variable&quot;,
                         setting + MISSING_PATH_ENVIRONMENT_MARKER + environmentName));
     }
@@ -573,80 +643,81 @@ public class ConfigResolver {
     private static Path absolutePath(Path workflowDirectory, String setting, String expanded) {
         Path path;
         try {
-<span class="fc" id="L576">            path = Path.of(expanded);</span>
-<span class="nc" id="L577">        } catch (InvalidPathException e) {</span>
-<span class="nc" id="L578">            throw new ConfigException(&quot;config_value_error&quot;, setting + &quot; must be a valid local path&quot;, e);</span>
-<span class="fc" id="L579">        }</span>
-<span class="fc bfc" id="L580" title="All 2 branches covered.">        if (!path.isAbsolute()) {</span>
-<span class="fc" id="L581">            path = workflowDirectory.resolve(path);</span>
+<span class="fc" id="L646">            path = Path.of(expanded);</span>
+<span class="nc" id="L647">        } catch (InvalidPathException e) {</span>
+<span class="nc" id="L648">            throw new ConfigException(&quot;config_value_error&quot;, setting + &quot; must be a valid local path&quot;, e);</span>
+<span class="fc" id="L649">        }</span>
+<span class="fc bfc" id="L650" title="All 2 branches covered.">        if (!path.isAbsolute()) {</span>
+<span class="fc" id="L651">            path = workflowDirectory.resolve(path);</span>
         }
-<span class="fc" id="L583">        return path.toAbsolutePath().normalize();</span>
+<span class="fc" id="L653">        return path.toAbsolutePath().normalize();</span>
     }
 
     private Path optionalRepositoryPath(Path workflowDirectory, Map&lt;String, Object&gt; repository) {
-<span class="fc" id="L587">        String resolved = optionalEnvironmentPathValue(optionalString(repository, &quot;default_path&quot;));</span>
-<span class="pc bpc" id="L588" title="1 of 2 branches missed.">        Path path = resolved == null</span>
-<span class="fc" id="L589">                ? null</span>
-<span class="pc" id="L590">                : absolutePath(workflowDirectory, &quot;repository.default_path&quot;, expandPath(resolved));</span>
-<span class="pc bpc" id="L591" title="3 of 4 branches missed.">        if (path != null &amp;&amp; !EffectiveConfig.RepositoryConfig.usableDefaultPath(path)) {</span>
-<span class="nc" id="L592">            throw new ConfigException(</span>
+<span class="fc" id="L657">        String resolved = optionalEnvironmentPathValue(optionalString(repository, &quot;default_path&quot;));</span>
+<span class="pc bpc" id="L658" title="1 of 2 branches missed.">        Path path = resolved == null</span>
+<span class="fc" id="L659">                ? null</span>
+<span class="pc" id="L660">                : absolutePath(workflowDirectory, &quot;repository.default_path&quot;, expandPath(resolved));</span>
+<span class="pc bpc" id="L661" title="3 of 4 branches missed.">        if (path != null &amp;&amp; !EffectiveConfig.RepositoryConfig.usableDefaultPath(path)) {</span>
+<span class="nc" id="L662">            throw new ConfigException(</span>
                     &quot;config_value_error&quot;,
                     &quot;repository.default_path must not contain control characters or line separators&quot;);
         }
-<span class="fc" id="L596">        return path;</span>
+<span class="fc" id="L666">        return path;</span>
     }
 
     private String optionalEnvironmentPathValue(String configured) {
-<span class="pc bpc" id="L600" title="1 of 2 branches missed.">        if (configured == null) {</span>
-<span class="fc" id="L601">            return null;</span>
+<span class="pc bpc" id="L670" title="1 of 2 branches missed.">        if (configured == null) {</span>
+<span class="fc" id="L671">            return null;</span>
         }
         // ADR 0058 makes a missing or blank variable leave this optional path absent.
-<span class="nc" id="L604">        return EnvironmentReferences.pathValue(configured)</span>
-<span class="nc" id="L605">                .resolve(this::nonBlankEnvironmentValue)</span>
-<span class="nc" id="L606">                .orElse(null);</span>
+<span class="nc" id="L674">        return EnvironmentReferences.pathValue(configured)</span>
+<span class="nc" id="L675">                .resolve(this::nonBlankEnvironmentValue)</span>
+<span class="nc" id="L676">                .orElse(null);</span>
     }
 
     private Optional&lt;String&gt; nonBlankEnvironmentValue(String environmentName) {
-<span class="nc bnc" id="L610" title="All 2 branches missed.">        return environmentValue(environmentName).filter(value -&gt; !blank(value));</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">        return environmentValue(environmentName).filter(value -&gt; !blank(value));</span>
     }
 
     public static String expandPath(String value, Function&lt;String, Optional&lt;String&gt;&gt; environmentResolver) {
-<span class="pc bpc" id="L614" title="1 of 2 branches missed.">        String homeExpanded = value.startsWith(&quot;~/&quot;) ? System.getProperty(&quot;user.home&quot;) + value.substring(1) : value;</span>
-<span class="fc" id="L615">        return EnvironmentReferences.pathValue(homeExpanded)</span>
-<span class="fc" id="L616">                .resolve(environmentResolver)</span>
-<span class="fc" id="L617">                .orElse(homeExpanded);</span>
+<span class="pc bpc" id="L684" title="1 of 2 branches missed.">        String homeExpanded = value.startsWith(&quot;~/&quot;) ? System.getProperty(&quot;user.home&quot;) + value.substring(1) : value;</span>
+<span class="fc" id="L685">        return EnvironmentReferences.pathValue(homeExpanded)</span>
+<span class="fc" id="L686">                .resolve(environmentResolver)</span>
+<span class="fc" id="L687">                .orElse(homeExpanded);</span>
     }
 
     private String expandPath(String value) {
-<span class="nc" id="L621">        return expandPath(value, this::environmentValue);</span>
+<span class="nc" id="L691">        return expandPath(value, this::environmentValue);</span>
     }
 
     private static String systemTempRoot() {
-<span class="fc" id="L625">        return Path.of(System.getProperty(&quot;java.io.tmpdir&quot;), &quot;symphony_workspaces&quot;)</span>
-<span class="fc" id="L626">                .toString();</span>
+<span class="fc" id="L695">        return Path.of(System.getProperty(&quot;java.io.tmpdir&quot;), &quot;symphony_workspaces&quot;)</span>
+<span class="fc" id="L696">                .toString();</span>
     }
 
     private static boolean blank(String value) {
-<span class="pc bpc" id="L630" title="1 of 4 branches missed.">        return value == null || value.isBlank();</span>
+<span class="pc bpc" id="L700" title="1 of 4 branches missed.">        return value == null || value.isBlank();</span>
     }
 
     /// Reads the files behind `file:` secret references.
     public interface SecretFiles {
-<span class="fc" id="L635">        SecretFiles HOST = new SecretFiles() {</span>
+<span class="fc" id="L705">        SecretFiles HOST = new SecretFiles() {</span>
             @Override
             public long size(Path path) throws IOException {
-<span class="nc" id="L638">                return Files.size(path);</span>
+<span class="nc" id="L708">                return Files.size(path);</span>
             }
 
             @Override
-            public String readString(Path path) throws IOException {
-<span class="nc" id="L643">                return Files.readString(path);</span>
+            public InputStream newInputStream(Path path) throws IOException {
+<span class="nc" id="L713">                return Files.newInputStream(path);</span>
             }
         };
 
         long size(Path path) throws IOException;
 
-        String readString(Path path) throws IOException;
+        /// Opens a secret stream that the resolver owns and closes after its bounded read.
+        InputStream newInputStream(Path path) throws IOException;
     }
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

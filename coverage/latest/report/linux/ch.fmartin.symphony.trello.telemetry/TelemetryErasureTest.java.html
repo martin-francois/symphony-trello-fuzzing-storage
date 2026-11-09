@@ -1,0 +1,634 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryErasureTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryErasureTest.java</span></div><h1>TelemetryErasureTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import ch.fmartin.symphony.trello.telemetry.TelemetryOwnership.Phase;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import ch.fmartin.symphony.trello.testsupport.MutableClock;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+<span class="nc" id="L44">final class TelemetryErasureTest {</span>
+<span class="nc" id="L45">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+    private static final String AUDIENCE = &quot;test:erasure&quot;;
+    private static final String ISSUE_REQUEST = &quot;{\&quot;payload\&quot;:\&quot;issue-v1\&quot;}&quot;;
+    private static final String SIGNED_REQUEST = &quot;h2|&quot;;
+<span class="nc" id="L49">    private static final TelemetryCredential CREDENTIAL =</span>
+<span class="nc" id="L50">            new TelemetryCredential(UUID.fromString(&quot;5095b32f-dbe1-4704-a625-5a241d331cd6&quot;), &quot;k1&quot;, &quot;ab&quot;.repeat(32));</span>
+
+    @TempDir
+    Path tempDir;
+
+    private HttpServer server;
+    private TelemetryStateStore store;
+    private TelemetryInstallation installation;
+    private TelemetryErasure erasure;
+<span class="nc" id="L59">    private final MutableClock clock = new MutableClock(TelemetryFixture.NOON);</span>
+<span class="nc" id="L60">    private final AtomicReference&lt;String&gt; status = new AtomicReference&lt;&gt;(&quot;pending&quot;);</span>
+<span class="nc" id="L61">    private final AtomicReference&lt;Runnable&gt; onIssue = new AtomicReference&lt;&gt;(() -&gt; {});</span>
+<span class="nc" id="L62">    private final AtomicReference&lt;Runnable&gt; onStatus = new AtomicReference&lt;&gt;(() -&gt; {});</span>
+<span class="nc" id="L63">    private final AtomicBoolean issuerDown = new AtomicBoolean();</span>
+<span class="nc" id="L64">    private final AtomicBoolean signatureRejected = new AtomicBoolean();</span>
+    // The fake server records on its own threads while the test reads; a snapshot-safe list avoids
+    // a concurrent modification during assertions.
+<span class="nc" id="L67">    private final List&lt;String&gt; requests = new CopyOnWriteArrayList&lt;&gt;();</span>
+
+    @BeforeEach
+    void setUp() throws IOException {
+<span class="nc" id="L71">        Path stateDir = TelemetryFixture.installedStateDir(tempDir);</span>
+<span class="nc" id="L72">        store = new TelemetryStateStore(stateDir);</span>
+<span class="nc" id="L73">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L74">        server.createContext(&quot;/&quot;, this::respond);</span>
+<span class="nc" id="L75">        server.start();</span>
+<span class="nc" id="L76">        URI base = URI.create(&quot;http://127.0.0.1:&quot; + server.getAddress().getPort());</span>
+<span class="nc" id="L77">        var distribution = new TelemetryDistribution(</span>
+<span class="nc" id="L78">                base.resolve(&quot;/i/v0/e/&quot;),</span>
+<span class="nc" id="L79">                Optional.of(TelemetryFixture.TEST_TOKEN),</span>
+<span class="nc" id="L80">                Optional.empty(),</span>
+<span class="nc" id="L81">                Optional.of(new TelemetryErasureEndpoint(base.resolve(&quot;/ownership&quot;), AUDIENCE)));</span>
+<span class="nc" id="L82">        installation = TelemetryFixture.installation(stateDir, TelemetryEnvironment.none(), distribution);</span>
+<span class="nc" id="L83">        erasure = new TelemetryErasure(installation, clock);</span>
+<span class="nc" id="L84">    }</span>
+
+    @AfterEach
+    void stop() {
+<span class="nc" id="L88">        server.stop(0);</span>
+<span class="nc" id="L89">    }</span>
+
+    @Test
+    void queuedReceiptDoesNotAuthorizeResumeAndCompletedErasurePreservesInstallationWithNewPeriod() {
+        // given
+<span class="nc" id="L94">        erasure.maintain(store);</span>
+<span class="nc" id="L95">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L96">        TelemetryOwnership original = store.read().stateOrInitial().ownership();</span>
+<span class="nc" id="L97">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L98">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L99">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+
+        // when
+<span class="nc" id="L102">        int requested = service.erase(out, out);</span>
+<span class="nc" id="L103">        int prematureEnable = service.enable(out, out);</span>
+<span class="nc" id="L104">        TelemetryState pending = store.read().stateOrInitial();</span>
+<span class="nc" id="L105">        status.set(&quot;accepted&quot;);</span>
+<span class="nc" id="L106">        clock.advance(Duration.ofMinutes(1));</span>
+<span class="nc" id="L107">        erasure.maintain(store);</span>
+<span class="nc" id="L108">        TelemetryState accepted = store.read().stateOrInitial();</span>
+<span class="nc" id="L109">        status.set(&quot;complete&quot;);</span>
+<span class="nc" id="L110">        clock.advance(Duration.ofMinutes(1));</span>
+<span class="nc" id="L111">        erasure.maintain(store);</span>
+<span class="nc" id="L112">        TelemetryState complete = store.read().stateOrInitial();</span>
+<span class="nc" id="L113">        int enabled = service.enable(out, out);</span>
+<span class="nc" id="L114">        TelemetryState resumed = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L117">        assertThat(requested).isZero();</span>
+<span class="nc" id="L118">        assertThat(prematureEnable).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L119">        assertThat(pending.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L120">        assertThat(pending.ownership().erasure().phase()).isEqualTo(Phase.REQUESTED);</span>
+<span class="nc" id="L121">        assertThat(accepted.ownership().erasure().phase()).isEqualTo(Phase.ACCEPTED);</span>
+<span class="nc" id="L122">        assertThat(complete.ownership().erasure().phase()).isEqualTo(Phase.COMPLETE);</span>
+<span class="nc" id="L123">        assertThat(complete.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L124">        assertThat(enabled).isZero();</span>
+<span class="nc" id="L125">        assertThat(resumed.ownership().credential()).isEqualTo(original.credential());</span>
+<span class="nc" id="L126">        assertThat(resumed.ownership().period()).isNotEqualTo(original.period());</span>
+<span class="nc" id="L127">        assertThat(resumed.ownership().erasure()).isNull();</span>
+<span class="nc" id="L128">        assertThat(requests).noneMatch(request -&gt; request.contains(CREDENTIAL.secret()));</span>
+<span class="nc" id="L129">        assertThat(output.toString(StandardCharsets.UTF_8)).doesNotContain(CREDENTIAL.secret());</span>
+<span class="nc" id="L130">    }</span>
+
+    @Test
+    void rejectedSignatureNamesTheClockAndCredentialAndKeepsTheBackoff() {
+        // given
+<span class="nc" id="L135">        erasure.maintain(store);</span>
+<span class="nc" id="L136">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L137">        signatureRejected.set(true);</span>
+<span class="nc" id="L138">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L139">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L140">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+
+        // when
+<span class="nc" id="L143">        int requested = service.erase(out, out);</span>
+<span class="nc" id="L144">        int checked = service.erasureStatus(out, out);</span>
+<span class="nc" id="L145">        TelemetryOwnership.Erasure job =</span>
+<span class="nc" id="L146">                store.read().stateOrInitial().ownership().erasure();</span>
+
+        // then
+<span class="nc" id="L149">        assertThat(requested).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L150">        assertThat(checked).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L151">        assertThat(output.toString(StandardCharsets.UTF_8))</span>
+<span class="nc" id="L152">                .contains(&quot;Erasure could not be confirmed: &quot; + TelemetryErasureClient.SIGNATURE_REJECTED)</span>
+<span class="nc" id="L153">                .contains(&quot;system clock&quot;)</span>
+<span class="nc" id="L154">                .contains(&quot;credential&quot;);</span>
+<span class="nc" id="L155">        assertThat(job.phase()).isEqualTo(Phase.REQUESTED);</span>
+<span class="nc" id="L156">        assertThat(job.notBefore())</span>
+<span class="nc" id="L157">                .as(&quot;a rejected attempt still reserves the next retry instead of spinning&quot;)</span>
+<span class="nc" id="L158">                .isAfter(clock.instant());</span>
+<span class="nc" id="L159">    }</span>
+
+    @Test
+    void concurrentDisableWinsOverIssuanceAndNoStateLockIsHeldDuringHttp() {
+        // given
+<span class="nc" id="L164">        onIssue.set(() -&gt; store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null)));</span>
+
+        // when
+<span class="nc" id="L167">        erasure.maintain(store);</span>
+<span class="nc" id="L168">        TelemetryState state = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L171">        assertThat(state.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L172">        assertThat(state.installation()).isEmpty();</span>
+<span class="nc" id="L173">        assertThat(state.ownership()).isNull();</span>
+<span class="nc" id="L174">    }</span>
+
+    @Test
+    void restartRetriesTheSamePeriodAndOperationWithoutSendingTheSecret() {
+        // given
+<span class="nc" id="L179">        erasure.maintain(store);</span>
+<span class="nc" id="L180">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L181">        erasure.request(store);</span>
+<span class="nc" id="L182">        TelemetryOwnership before = store.read().stateOrInitial().ownership();</span>
+<span class="nc" id="L183">        clock.advance(Duration.ofMinutes(1));</span>
+
+        // when
+<span class="nc" id="L186">        new TelemetryErasure(installation, clock).maintain(store);</span>
+<span class="nc" id="L187">        TelemetryOwnership after = store.read().stateOrInitial().ownership();</span>
+
+        // then
+<span class="nc" id="L190">        assertThat(after.period()).isEqualTo(before.period());</span>
+<span class="nc" id="L191">        assertThat(after.erasure().operation()).isEqualTo(before.erasure().operation());</span>
+<span class="nc" id="L192">        assertThat(requests)</span>
+<span class="nc" id="L193">                .filteredOn(request -&gt; request.contains(SIGNED_REQUEST + &quot;erase|&quot;))</span>
+<span class="nc" id="L194">                .hasSize(2)</span>
+<span class="nc" id="L195">                .allSatisfy(request -&gt; assertThat(request)</span>
+<span class="nc" id="L196">                        .contains(</span>
+<span class="nc" id="L197">                                before.period().toString(),</span>
+<span class="nc" id="L198">                                before.erasure().operation().toString())</span>
+<span class="nc" id="L199">                        .doesNotContain(CREDENTIAL.secret()));</span>
+<span class="nc" id="L200">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;unknown&quot;, &quot;&quot;, &quot;pending&quot;})
+    void missingOrUnrecognizedStatusNeverCompletesErasure(String providerStatus) {
+        // given
+<span class="nc" id="L206">        erasure.maintain(store);</span>
+<span class="nc" id="L207">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L208">        status.set(providerStatus);</span>
+
+        // when
+<span class="nc" id="L211">        erasure.request(store);</span>
+
+        // then
+<span class="nc" id="L214">        assertThat(store.read().stateOrInitial().ownership().erasure().phase()).isEqualTo(Phase.REQUESTED);</span>
+<span class="nc" id="L215">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void unavailableErasureDisablesOnlyOnAnEraseRequest(boolean request) {
+        // given
+<span class="nc" id="L221">        store.update(state -&gt; Update.write(state.withIdentity(UUID.randomUUID(), LocalDate.of(2026, 9, 20)), null));</span>
+<span class="nc" id="L222">        var distribution = new TelemetryDistribution(</span>
+<span class="nc" id="L223">                installation.distribution().endpoint(), Optional.of(TelemetryFixture.TEST_TOKEN));</span>
+<span class="nc" id="L224">        TelemetryInstallation unavailable =</span>
+<span class="nc" id="L225">                TelemetryFixture.installation(store.stateFile().getParent(), TelemetryEnvironment.none(), distribution);</span>
+<span class="nc" id="L226">        var service = new TelemetryService(unavailable, TelemetryFixture.snapshots(unavailable), clock);</span>
+<span class="nc" id="L227">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L228">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+
+        // when
+<span class="nc bnc" id="L231" title="All 2 branches missed.">        int result = request ? service.erase(out, out) : service.erasureStatus(out, out);</span>
+
+        // then
+<span class="nc" id="L234">        assertThat(result).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L235">        assertThat(store.read().stateOrInitial().mode())</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                .isEqualTo(request ? TelemetryMode.DISABLED : TelemetryMode.ENABLED);</span>
+<span class="nc" id="L237">        assertThat(requests).isEmpty();</span>
+<span class="nc" id="L238">    }</span>
+
+    @Test
+    void legacyIdentityCannotBeClaimedThroughTheIssuer() {
+        // given
+<span class="nc" id="L243">        UUID legacy = UUID.randomUUID();</span>
+<span class="nc" id="L244">        store.update(state -&gt; Update.write(state.withIdentity(legacy, LocalDate.of(2026, 9, 22)), null));</span>
+
+        // when
+<span class="nc" id="L247">        ThrowingCallable request = () -&gt; erasure.request(store);</span>
+
+        // then
+<span class="nc" id="L250">        assertThatThrownBy(request)</span>
+<span class="nc" id="L251">                .isInstanceOf(TelemetryStateException.class)</span>
+<span class="nc" id="L252">                .hasMessageContaining(&quot;maintainer-assisted&quot;);</span>
+<span class="nc" id="L253">        assertThat(requests).isEmpty();</span>
+<span class="nc" id="L254">        assertThat(store.read().stateOrInitial().installation()).hasValue(legacy);</span>
+<span class="nc" id="L255">    }</span>
+
+    @Test
+    void lateStatusCannotReattachAnErasureToANewerReportingPeriod() {
+        // given
+<span class="nc" id="L260">        erasure.maintain(store);</span>
+<span class="nc" id="L261">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L262">        erasure.request(store);</span>
+<span class="nc" id="L263">        UUID oldPeriod = store.read().stateOrInitial().ownership().period();</span>
+<span class="nc" id="L264">        onStatus.set(() -&gt; store.update(state -&gt; {</span>
+<span class="nc" id="L265">            TelemetryOwnership owner = state.ownership();</span>
+<span class="nc" id="L266">            TelemetryOwnership completed = owner.withErasure(owner.erasure().next(Phase.COMPLETE, clock.instant()));</span>
+<span class="nc" id="L267">            return Update.write(state.withMode(TelemetryMode.ENABLED).withOwnership(completed.resume()), null);</span>
+        }));
+<span class="nc" id="L269">        status.set(&quot;complete&quot;);</span>
+<span class="nc" id="L270">        clock.advance(Duration.ofMinutes(1));</span>
+
+        // when
+<span class="nc" id="L273">        erasure.maintain(store);</span>
+<span class="nc" id="L274">        TelemetryState resumed = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L277">        assertThat(resumed.mode()).isEqualTo(TelemetryMode.ENABLED);</span>
+<span class="nc" id="L278">        assertThat(resumed.ownership().period()).isNotEqualTo(oldPeriod);</span>
+<span class="nc" id="L279">        assertThat(resumed.ownership().erasure()).isNull();</span>
+<span class="nc" id="L280">    }</span>
+
+    @Test
+    void workerPersistsOwnershipBeforeFirstHeartbeatAndStopsAfterErase() {
+        // given
+<span class="nc" id="L285">        HeartbeatReporter worker = worker(Runnable::run);</span>
+
+        // when
+<span class="nc" id="L288">        worker.check();</span>
+<span class="nc" id="L289">        List&lt;String&gt; beforeGrace = List.copyOf(requests);</span>
+<span class="nc" id="L290">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE);</span>
+<span class="nc" id="L291">        worker.check();</span>
+<span class="nc" id="L292">        TelemetryState issued = store.read().stateOrInitial();</span>
+<span class="nc" id="L293">        worker.check();</span>
+<span class="nc" id="L294">        TelemetryState reported = store.read().stateOrInitial();</span>
+<span class="nc" id="L295">        erasure.request(store);</span>
+<span class="nc" id="L296">        int afterErase = requests.size();</span>
+<span class="nc" id="L297">        worker.check();</span>
+
+        // then
+<span class="nc" id="L300">        assertThat(beforeGrace).isEmpty();</span>
+<span class="nc" id="L301">        assertThat(issued.ownership().credential()).isEqualTo(CREDENTIAL);</span>
+<span class="nc" id="L302">        assertThat(reported.lastReportedDate()).isEqualTo(LocalDate.of(2026, 9, 22));</span>
+<span class="nc" id="L303">        assertThat(requests)</span>
+<span class="nc" id="L304">                .filteredOn(request -&gt; request.contains(&quot;installation_heartbeat&quot;))</span>
+<span class="nc" id="L305">                .singleElement()</span>
+<span class="nc" id="L306">                .satisfies(body -&gt; assertThat(body)</span>
+<span class="nc" id="L307">                        .contains(reported.analyticsId().orElseThrow())</span>
+<span class="nc" id="L308">                        .doesNotContain(CREDENTIAL.secret(), SIGNED_REQUEST));</span>
+<span class="nc" id="L309">        assertThat(requests).hasSize(afterErase);</span>
+<span class="nc" id="L310">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L311">    }</span>
+
+    @Test
+    void disableThenEraseWaitsForTheDispatchedHeartbeatToDrainAndBeIngested() {
+        // given
+<span class="nc" id="L316">        Deque&lt;Runnable&gt; deliveries = deferredDeliveries();</span>
+<span class="nc" id="L317">        HeartbeatReporter worker = worker(deliveries::add);</span>
+<span class="nc" id="L318">        worker.check();</span>
+<span class="nc" id="L319">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE);</span>
+<span class="nc" id="L320">        worker.check();</span>
+<span class="nc" id="L321">        deliveries.remove().run();</span>
+<span class="nc" id="L322">        worker.check();</span>
+<span class="nc" id="L323">        var drainUntil = store.read().stateOrInitial().claim().expiresAt();</span>
+<span class="nc" id="L324">        store.update(state -&gt; Update.write(state.withMode(TelemetryMode.DISABLED), null));</span>
+
+        // when
+<span class="nc" id="L327">        new TelemetryErasure(installation, clock).request(store);</span>
+
+        // then
+<span class="nc" id="L330">        assertThat(store.read().stateOrInitial().ownership().erasure().notBefore())</span>
+<span class="nc" id="L331">                .isEqualTo(drainUntil.plus(TelemetryOwnership.INGESTION_GRACE));</span>
+<span class="nc" id="L332">        assertThat(requests).containsExactly(ISSUE_REQUEST);</span>
+<span class="nc" id="L333">    }</span>
+
+    @Test
+    void completedErasureMakesNoFurtherBackgroundRequests() {
+        // given
+<span class="nc" id="L338">        erasure.maintain(store);</span>
+<span class="nc" id="L339">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L340">        erasure.request(store);</span>
+<span class="nc" id="L341">        status.set(&quot;complete&quot;);</span>
+<span class="nc" id="L342">        clock.advance(Duration.ofMinutes(1));</span>
+<span class="nc" id="L343">        erasure.maintain(store);</span>
+<span class="nc" id="L344">        int completedRequests = requests.size();</span>
+<span class="nc" id="L345">        clock.advance(Duration.ofDays(2));</span>
+
+        // when
+<span class="nc" id="L348">        erasure.maintain(store);</span>
+
+        // then
+<span class="nc" id="L351">        assertThat(requests).hasSize(completedRequests);</span>
+<span class="nc" id="L352">        assertThat(store.read().stateOrInitial().ownership().erasure().phase()).isEqualTo(Phase.COMPLETE);</span>
+<span class="nc" id="L353">    }</span>
+
+    @Test
+    void delayedDeliveryDoesNotStartWithoutItsFullTransportBudget() {
+        // given
+<span class="nc" id="L358">        Deque&lt;Runnable&gt; deliveries = deferredDeliveries();</span>
+<span class="nc" id="L359">        HeartbeatReporter worker = worker(deliveries::add);</span>
+<span class="nc" id="L360">        worker.check();</span>
+<span class="nc" id="L361">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE);</span>
+<span class="nc" id="L362">        worker.check();</span>
+<span class="nc" id="L363">        deliveries.remove().run();</span>
+<span class="nc" id="L364">        worker.check();</span>
+<span class="nc" id="L365">        clock.advance(HeartbeatReporter.CLAIM_LIFETIME.minusSeconds(5));</span>
+
+        // when
+<span class="nc" id="L368">        deliveries.remove().run();</span>
+
+        // then
+<span class="nc" id="L371">        assertThat(requests).containsExactly(ISSUE_REQUEST);</span>
+<span class="nc" id="L372">        assertThat(store.read().stateOrInitial().lastReportedDate()).isNull();</span>
+<span class="nc" id="L373">    }</span>
+
+    @Test
+    void pendingDeletionIsPolledWithGrowingIntervalsInsteadOfEveryMinute() {
+        // given
+<span class="nc" id="L378">        erasure.maintain(store);</span>
+<span class="nc" id="L379">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L380">        erasure.request(store);</span>
+<span class="nc" id="L381">        status.set(&quot;accepted&quot;);</span>
+
+        // when
+<span class="nc bnc" id="L384" title="All 2 branches missed.">        for (int minute = 0; minute &lt; Duration.ofDays(1).toMinutes(); minute++) {</span>
+<span class="nc" id="L385">            clock.advance(Duration.ofMinutes(1));</span>
+<span class="nc" id="L386">            erasure.maintain(store);</span>
+        }
+<span class="nc" id="L388">        clock.advance(Duration.ofDays(2));</span>
+<span class="nc" id="L389">        erasure.maintain(store);</span>
+
+        // then
+<span class="nc" id="L392">        assertThat(requests)</span>
+<span class="nc" id="L393">                .filteredOn(request -&gt; request.contains(SIGNED_REQUEST))</span>
+<span class="nc" id="L394">                .hasSizeLessThan((int) Duration.ofDays(1).toHours());</span>
+<span class="nc" id="L395">        assertThat(store.read().stateOrInitial().erasure().notBefore())</span>
+<span class="nc" id="L396">                .isEqualTo(clock.instant().plus(TelemetryErasure.RETRY_CEILING));</span>
+<span class="nc" id="L397">    }</span>
+
+    @Test
+    void manualStatusSkipsTheBackgroundBackoffButWaitsForTheHeartbeatToSettle() {
+        // given
+<span class="nc" id="L402">        Deque&lt;Runnable&gt; deliveries = deferredDeliveries();</span>
+<span class="nc" id="L403">        HeartbeatReporter worker = worker(deliveries::add);</span>
+<span class="nc" id="L404">        worker.check();</span>
+<span class="nc" id="L405">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE);</span>
+<span class="nc" id="L406">        worker.check();</span>
+<span class="nc" id="L407">        deliveries.remove().run();</span>
+<span class="nc" id="L408">        worker.check();</span>
+<span class="nc" id="L409">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+<span class="nc" id="L410">        var out = new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L411">        erasure.request(store);</span>
+
+        // when
+<span class="nc" id="L414">        service.erasureStatus(out, out);</span>
+<span class="nc" id="L415">        long duringDrain = signedRequests();</span>
+<span class="nc" id="L416">        clock.advance(HeartbeatReporter.CLAIM_LIFETIME);</span>
+<span class="nc" id="L417">        service.erasureStatus(out, out);</span>
+<span class="nc" id="L418">        long duringIngestion = signedRequests();</span>
+<span class="nc" id="L419">        clock.advance(TelemetryOwnership.INGESTION_GRACE);</span>
+<span class="nc" id="L420">        service.erasureStatus(out, out);</span>
+<span class="nc" id="L421">        long afterDrain = signedRequests();</span>
+<span class="nc" id="L422">        service.erasureStatus(out, out);</span>
+<span class="nc" id="L423">        long repeated = signedRequests();</span>
+
+        // then
+<span class="nc" id="L426">        assertThat(duringDrain).isZero();</span>
+<span class="nc" id="L427">        assertThat(duringIngestion).isZero();</span>
+<span class="nc" id="L428">        assertThat(afterDrain).isOne();</span>
+<span class="nc" id="L429">        assertThat(repeated).isEqualTo(2);</span>
+<span class="nc" id="L430">    }</span>
+
+    @Test
+    void failedIssuanceBacksOffInsteadOfRetryingEveryMinute() {
+        // given
+<span class="nc" id="L435">        issuerDown.set(true);</span>
+<span class="nc" id="L436">        HeartbeatReporter worker = worker(Runnable::run);</span>
+<span class="nc" id="L437">        worker.check();</span>
+<span class="nc" id="L438">        clock.advance(TelemetryNotice.FIRST_REPORT_GRACE);</span>
+
+        // when
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        for (int minute = 0; minute &lt; Duration.ofHours(1).toMinutes(); minute++) {</span>
+<span class="nc" id="L442">            worker.check();</span>
+<span class="nc" id="L443">            clock.advance(Duration.ofMinutes(1));</span>
+        }
+
+        // then
+<span class="nc" id="L447">        assertThat(requests).containsOnly(ISSUE_REQUEST).hasSameSizeAs(HeartbeatReporter.RETRY_BACKOFF);</span>
+<span class="nc" id="L448">        assertThat(store.read().stateOrInitial().ownership()).isNull();</span>
+<span class="nc" id="L449">    }</span>
+
+    @Test
+    void eraseBeforeAnyReportDisablesAndSucceedsWithoutContactingTheService() {
+        // given
+<span class="nc" id="L454">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+<span class="nc" id="L455">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L456">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+
+        // when
+<span class="nc" id="L459">        int result = service.erase(out, out);</span>
+
+        // then
+<span class="nc" id="L462">        assertThat(result).isEqualTo(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L463">        assertThat(output.toString(StandardCharsets.UTF_8)).contains(&quot;nothing to erase&quot;);</span>
+<span class="nc" id="L464">        assertThat(store.read().stateOrInitial().mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L465">        assertThat(requests).isEmpty();</span>
+<span class="nc" id="L466">    }</span>
+
+    @Test
+    void eraseThatCannotStoreTheDisabledPreferenceSaysTheOldPreferenceStillApplies() throws IOException {
+        // given
+<span class="nc" id="L471">        Path stateDirectory = store.stateFile().getParent();</span>
+<span class="nc" id="L472">        assumeTrue(Files.getFileStore(stateDirectory).supportsFileAttributeView(&quot;posix&quot;));</span>
+<span class="nc" id="L473">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+<span class="nc" id="L474">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L475">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+<span class="nc" id="L476">        Set&lt;PosixFilePermission&gt; writable = Files.getPosixFilePermissions(stateDirectory);</span>
+<span class="nc" id="L477">        Files.setPosixFilePermissions(stateDirectory, PosixFilePermissions.fromString(&quot;r-x------&quot;));</span>
+
+        // when
+        int result;
+        try {
+<span class="nc" id="L482">            result = service.erase(out, out);</span>
+        } finally {
+<span class="nc" id="L484">            Files.setPosixFilePermissions(stateDirectory, writable);</span>
+        }
+
+        // then
+<span class="nc" id="L488">        assertThat(result).isEqualTo(TelemetryService.EXIT_FAILURE);</span>
+<span class="nc" id="L489">        assertThat(output.toString(StandardCharsets.UTF_8))</span>
+<span class="nc" id="L490">                .contains(&quot;Erasure could not be confirmed&quot;)</span>
+<span class="nc" id="L491">                .contains(&quot;The previous preference is unchanged. Set &quot; + TelemetryEnvironment.DISABLED_VARIABLE);</span>
+<span class="nc" id="L492">        assertThat(requests).isEmpty();</span>
+<span class="nc" id="L493">    }</span>
+
+    @Test
+    void enableAfterARefusedErasureResumesUnderANewPeriodAndLeavesTheOldOneToTheMaintainer() {
+        // given
+<span class="nc" id="L498">        erasure.maintain(store);</span>
+<span class="nc" id="L499">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L500">        status.set(&quot;refused&quot;);</span>
+<span class="nc" id="L501">        erasure.request(store);</span>
+<span class="nc" id="L502">        TelemetryState refused = store.read().stateOrInitial();</span>
+<span class="nc" id="L503">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+<span class="nc" id="L504">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L505">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+
+        // when
+<span class="nc" id="L508">        int result = service.enable(out, out);</span>
+<span class="nc" id="L509">        TelemetryState resumed = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L512">        assertThat(refused.erasure().phase()).isEqualTo(Phase.REFUSED);</span>
+<span class="nc" id="L513">        assertThat(result).isEqualTo(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L514">        assertThat(resumed.mode()).isEqualTo(TelemetryMode.ENABLED);</span>
+<span class="nc" id="L515">        assertThat(resumed.ownership().credential())</span>
+<span class="nc" id="L516">                .isEqualTo(refused.ownership().credential());</span>
+<span class="nc" id="L517">        assertThat(resumed.ownership().period())</span>
+<span class="nc" id="L518">                .isNotEqualTo(refused.ownership().period());</span>
+<span class="nc" id="L519">        assertThat(resumed.erasure()).isNull();</span>
+<span class="nc" id="L520">        assertThat(output.toString(StandardCharsets.UTF_8)).contains(&quot;not deleted yet&quot;, &quot;new analytics ID&quot;);</span>
+<span class="nc" id="L521">    }</span>
+
+    @Test
+    void incompleteErasureIsFinalPromisesDeletionWithinThirtyDaysAndIsNeverAcknowledged() {
+        // given
+<span class="nc" id="L526">        erasure.maintain(store);</span>
+<span class="nc" id="L527">        store.update(state -&gt; Update.write(state.withOwnership(state.ownership().markUsed()), null));</span>
+<span class="nc" id="L528">        status.set(&quot;incomplete&quot;);</span>
+<span class="nc" id="L529">        var service = new TelemetryService(installation, TelemetryFixture.snapshots(installation), clock);</span>
+<span class="nc" id="L530">        var output = new ByteArrayOutputStream();</span>
+<span class="nc" id="L531">        var out = new PrintStream(output, true, StandardCharsets.UTF_8);</span>
+
+        // when
+<span class="nc" id="L534">        int requested = service.erase(out, out);</span>
+<span class="nc" id="L535">        TelemetryState incomplete = store.read().stateOrInitial();</span>
+<span class="nc" id="L536">        clock.advance(Duration.ofDays(2));</span>
+<span class="nc" id="L537">        erasure.maintain(store);</span>
+<span class="nc" id="L538">        int checked = service.erasureStatus(out, out);</span>
+<span class="nc" id="L539">        int enabled = service.enable(out, out);</span>
+<span class="nc" id="L540">        TelemetryState resumed = store.read().stateOrInitial();</span>
+
+        // then
+<span class="nc" id="L543">        assertThat(incomplete.erasure().phase()).isEqualTo(Phase.INCOMPLETE);</span>
+<span class="nc" id="L544">        assertThat(incomplete.mode()).isEqualTo(TelemetryMode.DISABLED);</span>
+<span class="nc" id="L545">        assertThat(requested).isEqualTo(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L546">        assertThat(checked).isEqualTo(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L547">        assertThat(signedRequests())</span>
+<span class="nc" id="L548">                .as(&quot;a final result is neither retried nor acknowledged&quot;)</span>
+<span class="nc" id="L549">                .isOne();</span>
+<span class="nc" id="L550">        assertThat(requests).noneMatch(request -&gt; request.contains(&quot;|ack|&quot;));</span>
+<span class="nc" id="L551">        assertThat(enabled).isEqualTo(TelemetryService.EXIT_OK);</span>
+<span class="nc" id="L552">        assertThat(resumed.ownership().period())</span>
+<span class="nc" id="L553">                .isNotEqualTo(incomplete.ownership().period());</span>
+<span class="nc" id="L554">        assertThat(resumed.erasure()).isNull();</span>
+<span class="nc" id="L555">        assertThat(output.toString(StandardCharsets.UTF_8))</span>
+<span class="nc" id="L556">                .contains(&quot;still being processed&quot;)</span>
+<span class="nc" id="L557">                .contains(&quot;within 30 days of the request&quot;)</span>
+<span class="nc" id="L558">                .contains(&quot;within 30 days of the erasure request&quot;, &quot;new analytics ID&quot;)</span>
+<span class="nc" id="L559">                .doesNotContain(&quot;Erasure complete&quot;)</span>
+<span class="nc" id="L560">                .doesNotContain(&quot;maintainer&quot;);</span>
+<span class="nc" id="L561">    }</span>
+
+    private long signedRequests() {
+<span class="nc" id="L564">        long signed = 0;</span>
+<span class="nc bnc" id="L565" title="All 2 branches missed.">        for (String request : requests) {</span>
+<span class="nc bnc" id="L566" title="All 2 branches missed.">            if (request.contains(SIGNED_REQUEST)) {</span>
+<span class="nc" id="L567">                signed++;</span>
+            }
+<span class="nc" id="L569">        }</span>
+<span class="nc" id="L570">        return signed;</span>
+    }
+
+    private HeartbeatReporter worker(Executor executor) {
+<span class="nc" id="L574">        return new HeartbeatReporter(</span>
+                installation,
+<span class="nc" id="L576">                TelemetryFixture.snapshots(installation),</span>
+<span class="nc" id="L577">                new PostHogCaptureClient(installation.distribution().endpoint()),</span>
+                clock,
+                executor,
+<span class="nc" id="L580">                () -&gt; 0,</span>
+<span class="nc" id="L581">                TelemetryOutput.none());</span>
+    }
+
+    private void respond(HttpExchange exchange) throws IOException {
+<span class="nc" id="L585">        var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);</span>
+<span class="nc" id="L586">        requests.add(body);</span>
+        String response;
+<span class="nc" id="L588">        int code = 200;</span>
+<span class="nc bnc" id="L589" title="All 2 branches missed.">        if (exchange.getRequestURI().getPath().equals(&quot;/flags&quot;)) {</span>
+<span class="nc" id="L590">            onStatus.get().run();</span>
+<span class="nc" id="L591">            String key =</span>
+<span class="nc" id="L592">                    JSON.readTree(body).path(&quot;flag_keys_to_evaluate&quot;).path(0).asText();</span>
+<span class="nc" id="L593">            response = JSON.createObjectNode()</span>
+<span class="nc" id="L594">                    .put(&quot;errorsWhileComputingFlags&quot;, false)</span>
+<span class="nc" id="L595">                    .set(</span>
+                            &quot;flags&quot;,
+<span class="nc" id="L597">                            JSON.createObjectNode()</span>
+<span class="nc" id="L598">                                    .set(key, JSON.createObjectNode().put(&quot;variant&quot;, status.get())))</span>
+<span class="nc" id="L599">                    .toString();</span>
+<span class="nc bnc" id="L600" title="All 2 branches missed.">        } else if (exchange.getRequestURI().getPath().equals(&quot;/i/v0/e/&quot;)) {</span>
+<span class="nc" id="L601">            response = &quot;{\&quot;status\&quot;:\&quot;Ok\&quot;}&quot;;</span>
+<span class="nc bnc" id="L602" title="All 4 branches missed.">        } else if (body.equals(ISSUE_REQUEST) &amp;&amp; issuerDown.get()) {</span>
+<span class="nc" id="L603">            code = 503;</span>
+<span class="nc" id="L604">            response = &quot;{}&quot;;</span>
+<span class="nc bnc" id="L605" title="All 2 branches missed.">        } else if (body.equals(ISSUE_REQUEST)) {</span>
+<span class="nc" id="L606">            onIssue.get().run();</span>
+<span class="nc" id="L607">            response = JSON.createObjectNode()</span>
+<span class="nc" id="L608">                    .put(&quot;status&quot;, &quot;issued&quot;)</span>
+<span class="nc" id="L609">                    .put(</span>
+                            TelemetryCredential.INSTALLATION_ID_FIELD,
+<span class="nc" id="L611">                            CREDENTIAL.installationId().toString())</span>
+<span class="nc" id="L612">                    .put(TelemetryCredential.KEY_VERSION_FIELD, CREDENTIAL.keyVersion())</span>
+<span class="nc" id="L613">                    .put(TelemetryCredential.SECRET_FIELD, CREDENTIAL.secret())</span>
+<span class="nc" id="L614">                    .toString();</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">        } else if (signatureRejected.get()) {</span>
+<span class="nc" id="L616">            code = 401;</span>
+<span class="nc" id="L617">            response = &quot;{\&quot;status\&quot;:\&quot;rejected\&quot;}&quot;;</span>
+        } else {
+<span class="nc" id="L619">            code = 201;</span>
+<span class="nc" id="L620">            response = &quot;{\&quot;status\&quot;:\&quot;queued\&quot;}&quot;;</span>
+        }
+<span class="nc" id="L622">        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L623">        exchange.sendResponseHeaders(code, bytes.length);</span>
+<span class="nc" id="L624">        try (var output = exchange.getResponseBody()) {</span>
+<span class="nc" id="L625">            output.write(bytes);</span>
+        }
+<span class="nc" id="L627">    }</span>
+
+    /// Deliveries run later in FIFO order, like the worker executor, so the test controls timing.
+    private static Deque&lt;Runnable&gt; deferredDeliveries() {
+<span class="nc" id="L631">        return new ArrayDeque&lt;&gt;();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

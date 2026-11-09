@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HeartbeatSnapshots.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">HeartbeatSnapshots.java</span></div><h1>HeartbeatSnapshots.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.OptionalInt;
+import java.util.UUID;
+import org.jspecify.annotations.Nullable;
+
+/// Builds heartbeat bodies from local state and platform facts. Preview and transmission use the
+/// same builder so what the user sees is what is sent.
+public final class HeartbeatSnapshots {
+    private final TelemetryInstallation installation;
+    private final PlatformDetector platform;
+
+<span class="nc" id="L16">    public HeartbeatSnapshots(TelemetryInstallation installation, PlatformDetector platform) {</span>
+<span class="nc" id="L17">        this.installation = installation;</span>
+<span class="nc" id="L18">        this.platform = platform;</span>
+<span class="nc" id="L19">    }</span>
+
+    /// The production wiring: real platform detection, run lazily and cached per process.
+    public static HeartbeatSnapshots detectingPlatform(TelemetryInstallation installation) {
+<span class="nc" id="L23">        return new HeartbeatSnapshots(installation, new PlatformDetector());</span>
+    }
+
+    public HeartbeatProperties properties(TelemetryState state) {
+<span class="nc" id="L27">        return properties(state, observe());</span>
+    }
+
+    /// The parts of a snapshot that need file or native reads. Callers take an observation before
+    /// entering the state lock so the locked transaction stays short.
+    public Observation observe() {
+<span class="nc" id="L33">        OptionalInt boards = installation.boards().distinctBoardCount();</span>
+<span class="nc" id="L34">        InstallContext context = installation.installContext().get();</span>
+<span class="nc" id="L35">        return new Observation(</span>
+<span class="nc" id="L36">                platform.platform(),</span>
+<span class="nc" id="L37">                context.appVersion().orElse(null),</span>
+<span class="nc" id="L38">                context.installOverrides().orElse(null),</span>
+<span class="nc bnc" id="L39" title="All 2 branches missed.">                boards.isPresent() ? boards.getAsInt() : null);</span>
+    }
+
+    public HeartbeatProperties properties(TelemetryState state, Observation observation) {
+<span class="nc" id="L43">        Platform detected = observation.platform();</span>
+<span class="nc" id="L44">        return new HeartbeatProperties(</span>
+                HeartbeatProperties.SCHEMA_VERSION,
+<span class="nc" id="L46">                state.registration().map(Object::toString).orElse(null),</span>
+<span class="nc" id="L47">                observation.installedVersion(),</span>
+<span class="nc" id="L48">                detected.osFamily().wireName(),</span>
+<span class="nc" id="L49">                detected.osRelease(),</span>
+<span class="nc" id="L50">                detected.linuxDistribution(),</span>
+<span class="nc" id="L51">                detected.runtimeArch().wireName(),</span>
+<span class="nc" id="L52">                observation.installOverrides(),</span>
+<span class="nc" id="L53">                observation.connectedBoardCount(),</span>
+<span class="nc" id="L54">                state.boardImportsTotal(),</span>
+<span class="nc" id="L55">                state.boardCreationsTotal());</span>
+    }
+
+    /// Platform, installer record, and board count as seen at one moment.
+    public record Observation(
+            Platform platform,
+            @Nullable String installedVersion,
+            @Nullable List&lt;String&gt; installOverrides,
+            @Nullable Integer connectedBoardCount) {
+<span class="nc" id="L64">        public Observation {</span>
+<span class="nc bnc" id="L65" title="All 2 branches missed.">            installOverrides = installOverrides == null ? null : List.copyOf(installOverrides);</span>
+<span class="nc" id="L66">        }</span>
+    }
+
+    /// A body built now for inspection. Missing identity fields stay `null`; such a body is not
+    /// sendable and [HeartbeatEvent#requireSendable] rejects it.
+    public HeartbeatEvent preview(TelemetryState state, Instant now) {
+<span class="nc" id="L72">        return event(state, UUID.randomUUID(), now, properties(state));</span>
+    }
+
+    public HeartbeatEvent event(
+            TelemetryState state, UUID eventUuid, Instant timestamp, HeartbeatProperties properties) {
+<span class="nc" id="L77">        return event(installation.distribution().projectToken().orElse(null), state, eventUuid, timestamp, properties);</span>
+    }
+
+    private static HeartbeatEvent event(
+            @Nullable String token,
+            TelemetryState state,
+            UUID eventUuid,
+            Instant timestamp,
+            HeartbeatProperties properties) {
+<span class="nc" id="L86">        return new HeartbeatEvent(</span>
+                token,
+                HeartbeatEvent.EVENT_NAME,
+<span class="nc" id="L89">                state.analyticsId().orElse(null),</span>
+<span class="nc" id="L90">                eventUuid.toString(),</span>
+                // Whole seconds are enough for a daily report and keep the wire value short.
+<span class="nc" id="L92">                timestamp.truncatedTo(ChronoUnit.SECONDS).toString(),</span>
+                properties);
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

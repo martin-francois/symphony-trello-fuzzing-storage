@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryErasure.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryErasure.java</span></div><h1>TelemetryErasure.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import ch.fmartin.symphony.trello.telemetry.TelemetryErasureClient.Action;
+import ch.fmartin.symphony.trello.telemetry.TelemetryOwnership.Erasure;
+import ch.fmartin.symphony.trello.telemetry.TelemetryOwnership.Phase;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.function.Predicate;
+import org.jspecify.annotations.Nullable;
+
+/// Coordinates local durable state and the native service without holding a state lock during IO.
+final class TelemetryErasure {
+    // Provider deletion can take days. Waiting half the time since the request grows the interval
+    // geometrically without persisting an attempt count, and the ceiling keeps status reasonably fresh.
+<span class="nc" id="L21">    static final Duration RETRY_FLOOR = Duration.ofMinutes(1);</span>
+<span class="nc" id="L22">    static final Duration RETRY_CEILING = Duration.ofHours(6);</span>
+    private static final int RETRY_DIVISOR = 2;
+
+    private final TelemetryInstallation installation;
+    private final Clock clock;
+
+<span class="nc" id="L28">    TelemetryErasure(TelemetryInstallation installation, Clock clock) {</span>
+<span class="nc" id="L29">        this.installation = installation;</span>
+<span class="nc" id="L30">        this.clock = clock;</span>
+<span class="nc" id="L31">    }</span>
+
+    /// Outcome of an erase request that did not fail.
+<span class="nc" id="L34">    enum Request {</span>
+        /// No report ever left this installation, so there is nothing to erase.
+<span class="nc" id="L36">        NOTHING_SENT,</span>
+        /// The operation is saved and the service was contacted if it was due.
+<span class="nc" id="L38">        SUBMITTED</span>
+    }
+
+    boolean needsMaintenance(TelemetryState state) {
+<span class="nc bnc" id="L42" title="All 2 branches missed.">        if (installation.distribution().erasure().isEmpty()) {</span>
+<span class="nc" id="L43">            return false;</span>
+        }
+<span class="nc" id="L45">        Erasure job = state.erasure();</span>
+<span class="nc bnc" id="L46" title="All 2 branches missed.">        if (job != null) {</span>
+<span class="nc bnc" id="L47" title="All 4 branches missed.">            return job.phase().inProgress() &amp;&amp; !job.notBefore().isAfter(clock.instant());</span>
+        }
+<span class="nc bnc" id="L49" title="All 4 branches missed.">        return !state.hasIdentity() &amp;&amp; installation.effective(state.mode()).sendsReports();</span>
+    }
+
+    /// Background retry by workers, bounded by the stored retry time.
+    void maintain(TelemetryStateStore store) {
+<span class="nc" id="L54">        run(store, this::needsMaintenance);</span>
+<span class="nc" id="L55">    }</span>
+
+    /// Status check a person asked for. It skips the background backoff but still waits until a
+    /// dispatched heartbeat has settled.
+    void refresh(TelemetryStateStore store) {
+<span class="nc" id="L60">        run(store, this::refreshDue);</span>
+<span class="nc" id="L61">    }</span>
+
+    private boolean refreshDue(TelemetryState state) {
+<span class="nc" id="L64">        Erasure job = state.erasure();</span>
+<span class="nc" id="L65">        TelemetryOwnership ownership = state.ownership();</span>
+<span class="nc bnc" id="L66" title="All 8 branches missed.">        return job != null &amp;&amp; ownership != null &amp;&amp; job.phase().inProgress() &amp;&amp; ownership.settled(clock.instant());</span>
+    }
+
+    private void run(TelemetryStateStore store, Predicate&lt;TelemetryState&gt; due) {
+<span class="nc" id="L70">        installation.distribution().erasure().ifPresent(endpoint -&gt; run(store, endpoint, due));</span>
+<span class="nc" id="L71">    }</span>
+
+    private void run(TelemetryStateStore store, TelemetryErasureEndpoint endpoint, Predicate&lt;TelemetryState&gt; due) {
+<span class="nc" id="L74">        try (var client = new TelemetryErasureClient(endpoint, installation.distribution())) {</span>
+<span class="nc" id="L75">            run(store, client, due);</span>
+        }
+<span class="nc" id="L77">    }</span>
+
+    private void run(TelemetryStateStore store, TelemetryErasureClient client, Predicate&lt;TelemetryState&gt; due) {
+<span class="nc" id="L80">        TelemetryState state = readable(store);</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (!due.test(state)) {</span>
+<span class="nc" id="L82">            return;</span>
+        }
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (!state.hasIdentity()) {</span>
+<span class="nc" id="L85">            TelemetryCredential credential = client.issue();</span>
+<span class="nc" id="L86">            store.update(current -&gt; adoptCredential(current, state, credential));</span>
+<span class="nc" id="L87">            return;</span>
+        }
+<span class="nc" id="L89">        TelemetryOwnership ownership = Objects.requireNonNull(state.ownership());</span>
+<span class="nc" id="L90">        Erasure job = Objects.requireNonNull(ownership.erasure());</span>
+        // Reserve the next attempt before IO. A failed or interrupted process cannot spin on every tick.
+<span class="nc" id="L92">        Erasure attempt = job.next(job.phase(), retryAt(job));</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (!replace(store, ownership, job, attempt)) {</span>
+<span class="nc" id="L94">            return;</span>
+        }
+<span class="nc" id="L96">        client.request(</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                attempt.phase() == Phase.REQUESTED ? Action.ERASE : Action.STATUS, ownership, attempt, clock.instant());</span>
+<span class="nc" id="L98">        Phase phase = client.status(ownership).orElse(attempt.phase());</span>
+<span class="nc" id="L99">        boolean saved = replace(store, ownership, attempt, attempt.next(phase, retryAt(attempt)));</span>
+<span class="nc bnc" id="L100" title="All 4 branches missed.">        if (saved &amp;&amp; phase == Phase.COMPLETE) {</span>
+            // Completion is already durable, so a lost acknowledgment is not retried. The operator
+            // archives a status flag that stays behind.
+<span class="nc" id="L103">            client.acknowledge(ownership, attempt, clock.instant());</span>
+        }
+<span class="nc" id="L105">    }</span>
+
+    /// Adopts the issued credential unless the state moved on while the issuer was called: an
+    /// identity that appeared meanwhile, a changed preference, or reporting turned off.
+    private Update&lt;@Nullable Void&gt; adoptCredential(
+            TelemetryState current, TelemetryState observed, TelemetryCredential credential) {
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (current.hasIdentity()</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">                || current.preferenceRevision() != observed.preferenceRevision()</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                || !installation.effective(current.mode()).sendsReports()) {</span>
+<span class="nc" id="L114">            return Update.unchanged(null);</span>
+        }
+<span class="nc" id="L116">        return Update.write(</span>
+<span class="nc" id="L117">                current.withIdentity(credential.installationId(), LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC))</span>
+<span class="nc" id="L118">                        .withOwnership(TelemetryOwnership.issued(credential)),</span>
+                null);
+    }
+
+    /// @throws NotDisabledException when the disabled preference could not be written
+    Request request(TelemetryStateStore store) {
+        OwnershipCase ownershipCase;
+        try {
+<span class="nc" id="L126">            ownershipCase = store.update(this::disableAndRequestTransaction);</span>
+<span class="nc" id="L127">        } catch (TelemetryStateException exception) {</span>
+<span class="nc" id="L128">            throw new NotDisabledException(exception);</span>
+<span class="nc" id="L129">        }</span>
+<span class="nc bnc" id="L130" title="All 3 branches missed.">        return switch (ownershipCase) {</span>
+            case LEGACY -&gt;
+<span class="nc" id="L132">                throw new TelemetryStateException(</span>
+                        &quot;reporting is off; this installation has no ownership credential; use maintainer-assisted erasure&quot;);
+<span class="nc" id="L134">            case NOTHING_SENT -&gt; Request.NOTHING_SENT;</span>
+            case OWNED -&gt; {
+<span class="nc" id="L136">                maintain(store);</span>
+<span class="nc" id="L137">                yield Request.SUBMITTED;</span>
+            }
+        };
+    }
+
+    /// The erase request could not store the disabled preference, so the previous preference,
+    /// possibly enabled, still applies. The cause carries the state-store problem.
+    static final class NotDisabledException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        NotDisabledException(TelemetryStateException cause) {
+<span class="nc" id="L148">            super(cause.getMessage(), cause);</span>
+<span class="nc" id="L149">        }</span>
+    }
+
+    /// What the installation can prove about its reports when erasure is requested.
+<span class="nc" id="L153">    private enum OwnershipCase {</span>
+<span class="nc" id="L154">        LEGACY,</span>
+<span class="nc" id="L155">        NOTHING_SENT,</span>
+<span class="nc" id="L156">        OWNED</span>
+    }
+
+    static TelemetryState readable(TelemetryStateStore store) {
+<span class="nc" id="L160">        TelemetryStateStore.StateRead read = store.read();</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        if (read instanceof TelemetryStateStore.StateRead.Unreadable) {</span>
+<span class="nc" id="L162">            throw new TelemetryStateException(&quot;telemetry state is unreadable; reporting remains off&quot;);</span>
+        }
+<span class="nc" id="L164">        return read.stateOrInitial();</span>
+    }
+
+    private Instant retryAt(Erasure job) {
+<span class="nc" id="L168">        Instant now = clock.instant();</span>
+<span class="nc" id="L169">        Duration waited = Duration.between(job.requestedAt(), now).dividedBy(RETRY_DIVISOR);</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">        Duration delay = waited.compareTo(RETRY_FLOOR) &lt; 0</span>
+<span class="nc" id="L171">                ? RETRY_FLOOR</span>
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                : waited.compareTo(RETRY_CEILING) &gt; 0 ? RETRY_CEILING : waited;</span>
+<span class="nc" id="L173">        return now.plus(delay);</span>
+    }
+
+    /// Stores the disabled preference and, for an owned period, the deletion request itself.
+    private Update&lt;OwnershipCase&gt; disableAndRequestTransaction(TelemetryState state) {
+<span class="nc" id="L178">        TelemetryOwnership owner = state.ownership();</span>
+<span class="nc" id="L179">        TelemetryState disabled = state.withMode(TelemetryMode.DISABLED);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (owner == null) {</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">            return Update.write(disabled, state.hasIdentity() ? OwnershipCase.LEGACY : OwnershipCase.NOTHING_SENT);</span>
+        }
+<span class="nc bnc" id="L183" title="All 2 branches missed.">        if (owner.erasure() != null) {</span>
+<span class="nc" id="L184">            return Update.write(disabled, OwnershipCase.OWNED);</span>
+        }
+<span class="nc" id="L186">        Instant now = clock.instant();</span>
+        // Let a dispatched heartbeat finish its transport and ingestion before looking up its profile.
+<span class="nc" id="L188">        Instant notBefore = owner.settledAt(now);</span>
+<span class="nc bnc" id="L189" title="All 2 branches missed.">        Phase phase = owner.used() ? Phase.REQUESTED : Phase.COMPLETE;</span>
+<span class="nc" id="L190">        var job = new Erasure(UUID.randomUUID(), now, notBefore, phase);</span>
+<span class="nc" id="L191">        return Update.write(disabled.withOwnership(owner.withErasure(job)), OwnershipCase.OWNED);</span>
+    }
+
+    private static boolean replace(
+            TelemetryStateStore store, TelemetryOwnership owner, Erasure expected, Erasure next) {
+<span class="nc" id="L196">        return store.update(state -&gt; replaceTransaction(state, owner, expected, next));</span>
+    }
+
+    /// Replaces the erasure job only while the period and the job the caller saw are still current.
+    private static Update&lt;Boolean&gt; replaceTransaction(
+            TelemetryState state, TelemetryOwnership owner, Erasure expected, Erasure next) {
+<span class="nc" id="L202">        TelemetryOwnership current = state.ownership();</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (current == null</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">                || !current.period().equals(owner.period())</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                || !Objects.equals(current.erasure(), expected)) {</span>
+<span class="nc" id="L206">            return Update.unchanged(false);</span>
+        }
+<span class="nc" id="L208">        return Update.write(state.withOwnership(current.withErasure(next)), true);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

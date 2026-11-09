@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryStateStore.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryStateStore.java</span></div><h1>TelemetryStateStore.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import com.google.common.util.concurrent.Striped;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.function.Function;
+import org.jspecify.annotations.Nullable;
+
+/// Owns `telemetry.json` and `telemetry.lock` in the state directory. Every change is a short
+/// transaction under an OS file lock on the stable lock file plus a JVM-local lock for threads of
+/// the same process, followed by an atomic replacement of the JSON file. The lock is never held
+/// across a network request or a console prompt.
+public final class TelemetryStateStore {
+    public static final String STATE_FILE = &quot;telemetry.json&quot;;
+    private static final String TEMPORARY_PREFIX = &quot;telemetry-&quot;;
+    private static final String TEMPORARY_SUFFIX = &quot;.tmp&quot;;
+    public static final String LOCK_FILE = &quot;telemetry.lock&quot;;
+<span class="nc" id="L33">    static final Duration LOCK_WAIT = Duration.ofSeconds(10);</span>
+<span class="nc" id="L34">    private static final Duration LOCK_POLL = Duration.ofMillis(25);</span>
+    private static final int JVM_LOCK_STRIPES = 64;
+<span class="nc" id="L36">    private static final Striped&lt;Lock&gt; JVM_LOCKS = Striped.lazyWeakLock(JVM_LOCK_STRIPES);</span>
+<span class="nc" id="L37">    private static final Set&lt;PosixFilePermission&gt; OWNER_ONLY = PosixFilePermissions.fromString(&quot;rw-------&quot;);</span>
+<span class="nc" id="L38">    private static final Set&lt;PosixFilePermission&gt; OWNER_ONLY_DIRECTORY = PosixFilePermissions.fromString(&quot;rwx------&quot;);</span>
+
+    private final Path directory;
+    private final Path stateFile;
+    private final Path lockFile;
+    private final Duration lockWait;
+
+    public TelemetryStateStore(Path stateDir) {
+<span class="nc" id="L46">        this(stateDir, LOCK_WAIT);</span>
+<span class="nc" id="L47">    }</span>
+
+<span class="nc" id="L49">    TelemetryStateStore(Path stateDir, Duration lockWait) {</span>
+<span class="nc" id="L50">        this.directory = stateDir.toAbsolutePath().normalize();</span>
+<span class="nc" id="L51">        this.stateFile = directory.resolve(STATE_FILE);</span>
+<span class="nc" id="L52">        this.lockFile = directory.resolve(LOCK_FILE);</span>
+<span class="nc" id="L53">        this.lockWait = lockWait;</span>
+<span class="nc" id="L54">    }</span>
+
+    public Path stateFile() {
+<span class="nc" id="L57">        return stateFile;</span>
+    }
+
+    /// Reads without locking. Callers that decide anything must re-read inside [#update].
+    public StateRead read() {
+        String json;
+        try {
+<span class="nc" id="L64">            json = Files.readString(stateFile);</span>
+<span class="nc" id="L65">        } catch (NoSuchFileException exception) {</span>
+<span class="nc" id="L66">            return new StateRead.Absent();</span>
+<span class="nc" id="L67">        } catch (IOException | SecurityException exception) {</span>
+<span class="nc" id="L68">            return new StateRead.Unreadable(&quot;telemetry state could not be read: &quot; + exception.getMessage());</span>
+<span class="nc" id="L69">        }</span>
+<span class="nc" id="L70">        return parse(json);</span>
+    }
+
+    /// Applies `transaction` to the current state under the cross-process lock. The transaction sees
+    /// the initial state when no file exists, returns the new state to persist or `null` to leave
+    /// the file untouched, and its result is returned to the caller.
+    public &lt;T extends @Nullable Object&gt; T update(Function&lt;TelemetryState, Update&lt;T&gt;&gt; transaction) {
+        // One time budget covers both locks, so a transaction stuck in this JVM cannot block a
+        // second store on the same file forever.
+<span class="nc" id="L79">        long deadline = System.nanoTime() + lockWait.toNanos();</span>
+<span class="nc" id="L80">        Lock jvmLock = JVM_LOCKS.get(lockFile.toString());</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (!tryLockWithin(jvmLock, deadline)) {</span>
+<span class="nc" id="L82">            throw new TelemetryStateException(&quot;telemetry state lock is held by another transaction of this process&quot;);</span>
+        }
+        try {
+<span class="nc" id="L85">            ensureDirectory();</span>
+<span class="nc" id="L86">            try (FileChannel channel = FileChannel.open(</span>
+                            lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ);
+<span class="nc" id="L88">                    FileLock ignored = acquire(channel, deadline)) {</span>
+<span class="nc" id="L89">                TelemetryState current = currentForUpdate();</span>
+<span class="nc" id="L90">                Update&lt;T&gt; update = transaction.apply(current);</span>
+<span class="nc" id="L91">                TelemetryState next = update.next();</span>
+<span class="nc bnc" id="L92" title="All 4 branches missed.">                if (next != null &amp;&amp; !next.equals(current)) {</span>
+<span class="nc" id="L93">                    write(next);</span>
+                }
+<span class="nc" id="L95">                return update.result();</span>
+<span class="nc" id="L96">            } catch (IOException exception) {</span>
+<span class="nc" id="L97">                throw new TelemetryStateException(</span>
+<span class="nc" id="L98">                        &quot;telemetry state could not be updated: &quot; + exception.getMessage(), exception);</span>
+            }
+        } finally {
+<span class="nc" id="L101">            jvmLock.unlock();</span>
+        }
+    }
+
+    private TelemetryState currentForUpdate() {
+<span class="nc bnc" id="L106" title="All 3 branches missed.">        return switch (read()) {</span>
+<span class="nc" id="L107">            case StateRead.Absent _ -&gt; TelemetryState.initial();</span>
+<span class="nc" id="L108">            case StateRead.Valid valid -&gt; valid.state();</span>
+<span class="nc" id="L109">            case StateRead.Unreadable unreadable -&gt; throw new TelemetryStateException(unreadable.problem());</span>
+        };
+    }
+
+    private StateRead parse(String json) {
+        TelemetryState state;
+        try {
+<span class="nc" id="L116">            state = TelemetryStateJson.read(json);</span>
+<span class="nc" id="L117">        } catch (IOException | RuntimeException exception) {</span>
+<span class="nc" id="L118">            return new StateRead.Unreadable(&quot;telemetry state is not valid JSON or contains invalid values&quot;);</span>
+<span class="nc" id="L119">        }</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        if (state.formatVersion() != TelemetryState.FORMAT_VERSION) {</span>
+<span class="nc" id="L121">            return new StateRead.Unreadable(&quot;telemetry state format version &quot; + state.formatVersion()</span>
+                    + &quot; is not supported by this release (expected &quot; + TelemetryState.FORMAT_VERSION + &quot;)&quot;);
+        }
+<span class="nc" id="L124">        return state.invariantProblem()</span>
+<span class="nc" id="L125">                .&lt;StateRead&gt;map(problem -&gt; new StateRead.Unreadable(&quot;telemetry state is inconsistent: &quot; + problem))</span>
+<span class="nc" id="L126">                .orElseGet(() -&gt; new StateRead.Valid(state));</span>
+    }
+
+    private static boolean tryLockWithin(Lock lock, long deadline) {
+        try {
+<span class="nc" id="L131">            return lock.tryLock(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L132">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L133">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L134">            throw new TelemetryStateException(&quot;interrupted while waiting for the telemetry state lock&quot;, exception);</span>
+        }
+    }
+
+    private FileLock acquire(FileChannel channel, long deadline) throws IOException {
+        while (true) {
+<span class="nc" id="L140">            FileLock lock = tryLockUnlessHeldByThisJvm(channel);</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (lock != null) {</span>
+<span class="nc" id="L142">                return lock;</span>
+            }
+<span class="nc bnc" id="L144" title="All 2 branches missed.">            if (System.nanoTime() &gt;= deadline) {</span>
+<span class="nc" id="L145">                throw new TelemetryStateException(&quot;telemetry state lock is held by another process&quot;);</span>
+            }
+<span class="nc" id="L147">            pollDelayForBoundedLockWait();</span>
+<span class="nc" id="L148">        }</span>
+    }
+
+    /// Another thread of this JVM holding the OS lock is treated like another process: wait.
+    private static @Nullable FileLock tryLockUnlessHeldByThisJvm(FileChannel channel) throws IOException {
+        try {
+<span class="nc" id="L154">            return channel.tryLock();</span>
+<span class="nc" id="L155">        } catch (OverlappingFileLockException heldByThisJvm) {</span>
+<span class="nc" id="L156">            return null;</span>
+        }
+    }
+
+    private static void pollDelayForBoundedLockWait() {
+        try {
+<span class="nc" id="L162">            TimeUnit.NANOSECONDS.sleep(LOCK_POLL.toNanos());</span>
+<span class="nc" id="L163">        } catch (InterruptedException exception) {</span>
+<span class="nc" id="L164">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L165">            throw new TelemetryStateException(&quot;interrupted while waiting for the telemetry state lock&quot;, exception);</span>
+<span class="nc" id="L166">        }</span>
+<span class="nc" id="L167">    }</span>
+
+    private void ensureDirectory() {
+        try {
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            if (posix()) {</span>
+<span class="nc" id="L172">                Files.createDirectories(directory, PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));</span>
+            } else {
+<span class="nc" id="L174">                Files.createDirectories(directory);</span>
+            }
+<span class="nc" id="L176">        } catch (IOException exception) {</span>
+<span class="nc" id="L177">            throw new TelemetryStateException(&quot;telemetry state directory could not be created&quot;, exception);</span>
+<span class="nc" id="L178">        }</span>
+<span class="nc" id="L179">    }</span>
+
+    private void write(TelemetryState state) throws IOException {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        Path temporary = posix()</span>
+<span class="nc" id="L183">                ? Files.createTempFile(</span>
+<span class="nc" id="L184">                        directory, TEMPORARY_PREFIX, TEMPORARY_SUFFIX, PosixFilePermissions.asFileAttribute(OWNER_ONLY))</span>
+<span class="nc" id="L185">                : Files.createTempFile(directory, TEMPORARY_PREFIX, TEMPORARY_SUFFIX);</span>
+        try {
+<span class="nc" id="L187">            Files.writeString(temporary, TelemetryStateJson.write(state));</span>
+<span class="nc" id="L188">            try (FileChannel written = FileChannel.open(temporary, StandardOpenOption.WRITE)) {</span>
+<span class="nc" id="L189">                written.force(true);</span>
+            }
+<span class="nc" id="L191">            Files.move(temporary, stateFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);</span>
+<span class="nc" id="L192">        } catch (AtomicMoveNotSupportedException exception) {</span>
+<span class="nc" id="L193">            throw new IOException(&quot;atomic replacement of &quot; + STATE_FILE + &quot; is not supported here&quot;, exception);</span>
+        } finally {
+<span class="nc" id="L195">            Files.deleteIfExists(temporary);</span>
+        }
+<span class="nc" id="L197">    }</span>
+
+    private static boolean posix() {
+<span class="nc" id="L200">        return FileSystems.getDefault().supportedFileAttributeViews().contains(&quot;posix&quot;);</span>
+    }
+
+    /// The outcome of a transaction: the state to persist (or `null` for no write) and a result.
+<span class="nc" id="L204">    public record Update&lt;T extends @Nullable Object&gt;(@Nullable TelemetryState next, T result) {</span>
+        public static &lt;T extends @Nullable Object&gt; Update&lt;T&gt; unchanged(T result) {
+<span class="nc" id="L206">            return new Update&lt;&gt;(null, result);</span>
+        }
+
+        public static &lt;T extends @Nullable Object&gt; Update&lt;T&gt; write(TelemetryState next, T result) {
+<span class="nc" id="L210">            return new Update&lt;&gt;(next, result);</span>
+        }
+    }
+
+    /// A lock-free read of the state file.
+    public sealed interface StateRead {
+        /// No state file exists yet.
+<span class="nc" id="L217">        record Absent() implements StateRead {}</span>
+
+<span class="nc" id="L219">        record Valid(TelemetryState state) implements StateRead {}</span>
+
+        /// The file exists but cannot be used; reporting stays off until it is repaired.
+<span class="nc" id="L222">        record Unreadable(String problem) implements StateRead {}</span>
+
+        /// The state to reason about when nothing usable is stored: the initial defaults.
+        default TelemetryState stateOrInitial() {
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            return this instanceof Valid valid ? valid.state() : TelemetryState.initial();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

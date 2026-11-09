@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WorkflowFrontMatterYamlCostTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.workflow</a> &gt; <span class="el_source">WorkflowFrontMatterYamlCostTest.java</span></div><h1>WorkflowFrontMatterYamlCostTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.workflow;
+
+import static ch.fmartin.symphony.trello.workflow.FrontMatterWorkflows.WORKFLOW;
+import static ch.fmartin.symphony.trello.workflow.FrontMatterWorkflows.workflow;
+import static ch.fmartin.symphony.trello.workflow.WorkflowFrontMatterYaml.MAX_ALIAS_COPIED_CHARACTERS;
+import static ch.fmartin.symphony.trello.workflow.WorkflowFrontMatterYaml.MAX_ALIAS_EXPANDED_NODES;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Named.named;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
+
+import ch.fmartin.symphony.trello.config.TypedWorkflowConfig;
+import ch.fmartin.symphony.trello.config.WorkflowConfigIngestion;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.sun.management.ThreadMXBean;
+import java.lang.management.ManagementFactory;
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Optional;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.ThrowingSupplier;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+/// Front matter costs about what Jackson's own YAML reader costs, however its anchors nest, and
+/// hostile front matter fails as a normal parse error in every caller instead of exhausting memory.
+<span class="nc" id="L32">final class WorkflowFrontMatterYamlCostTest {</span>
+<span class="nc" id="L33">    private static final ObjectMapper JACKSON_YAML = new ObjectMapper(new YAMLFactory());</span>
+<span class="nc" id="L34">    private static final TypeReference&lt;LinkedHashMap&lt;String, Object&gt;&gt; MAP_TYPE = new TypeReference&lt;&gt;() {};</span>
+<span class="nc" id="L35">    private static final ThreadMXBean THREADS = ManagementFactory.getPlatformMXBean(ThreadMXBean.class);</span>
+    // A reader whose memory grows with anchor depth times scalar count allocates several times what
+    // Jackson allocates for these anchors; a reader that stores each event once stays close to it.
+    private static final int NESTED_ANCHORS = 200;
+    private static final int SCALARS = 100_000;
+    private static final double ALLOCATION_RATIO_LIMIT = 2.0;
+    // A reader that kept a copy of the scalars per anchor would hold 600 copies of 400,000 scalars,
+    // more than a 1 GB heap.
+    private static final int DEEP_NESTED_ANCHORS = 600;
+    private static final int MANY_SCALARS = 400_000;
+    // One copy of this scalar fits the character limit; 10,000 copies are 2 billion characters.
+    private static final int LONG_SCALAR_LENGTH = 200_000;
+    private static final int DEEP_NESTING_LEVELS = 20_000;
+    // Jackson's default nesting limit; the anchored node stays below it and its copy passes it.
+    private static final int JACKSON_MAX_NESTING_DEPTH = 1_000;
+    private static final int ANCHORED_NODE_DEPTH = JACKSON_MAX_NESTING_DEPTH - 5;
+    // The root map is level 1, so a copy under this many sequences reaches exactly the limit.
+    private static final int ALIAS_DEPTH_AT_THE_LIMIT = JACKSON_MAX_NESTING_DEPTH - 1 - ANCHORED_NODE_DEPTH;
+<span class="nc" id="L53">    private static final Duration FAIL_FAST_LIMIT = Duration.ofSeconds(10);</span>
+    private static final int LAUGH_LEVELS = 9;
+    private static final int LAUGHS_PER_LEVEL = 9;
+
+<span class="nc" id="L57">    private final WorkflowLoader loader = new WorkflowLoader();</span>
+
+    @Test
+    void deeplyNestedAnchorsAllocateAboutWhatJacksonAllocates() throws Throwable {
+        // given
+<span class="nc" id="L62">        String frontMatter = nestedAnchors(NESTED_ANCHORS, SCALARS);</span>
+
+        // when
+<span class="nc" id="L65">        long jackson = allocatedBytes(() -&gt; JACKSON_YAML.readValue(frontMatter, MAP_TYPE));</span>
+<span class="nc" id="L66">        long frontMatterReader = allocatedBytes(() -&gt; WorkflowFrontMatterYaml.readMap(frontMatter));</span>
+
+        // then
+<span class="nc" id="L69">        assertThat((double) frontMatterReader)</span>
+<span class="nc" id="L70">                .as(&quot;bytes the front matter reader allocates, against %d bytes for plain Jackson&quot;, jackson)</span>
+<span class="nc" id="L71">                .isLessThanOrEqualTo(jackson * ALLOCATION_RATIO_LIMIT);</span>
+<span class="nc" id="L72">    }</span>
+
+    @Test
+    void anchorsNestedAroundManyScalarsLoadInEveryCaller() {
+        // given
+<span class="nc" id="L77">        String frontMatter = nestedAnchors(DEEP_NESTED_ANCHORS, MANY_SCALARS);</span>
+
+        // when
+<span class="nc" id="L80">        Throwable loaderFailure = assertTimeoutPreemptively(</span>
+<span class="nc" id="L81">                FAIL_FAST_LIMIT, () -&gt; catchThrowable(() -&gt; loader.parse(WORKFLOW, workflow(frontMatter))));</span>
+<span class="nc" id="L82">        Optional&lt;TypedWorkflowConfig&gt; startupRead =</span>
+<span class="nc" id="L83">                assertTimeoutPreemptively(FAIL_FAST_LIMIT, () -&gt; startupRead(frontMatter));</span>
+
+        // then
+<span class="nc" id="L86">        assertThat(loaderFailure).isNull();</span>
+<span class="nc" id="L87">        assertThat(startupRead).isPresent();</span>
+<span class="nc" id="L88">    }</span>
+
+    @Test
+    void aCopyMayNestTheFrontMatterExactlyToTheDepthLimit() {
+        // given
+<span class="nc" id="L93">        byte[] workflow = workflow(copyNestedUnder(ALIAS_DEPTH_AT_THE_LIMIT));</span>
+
+        // when
+<span class="nc" id="L96">        Throwable failure = catchThrowable(() -&gt; loader.parse(WORKFLOW, workflow));</span>
+
+        // then
+<span class="nc" id="L99">        assertThat(failure)</span>
+<span class="nc" id="L100">                .as(&quot;a copy that reaches exactly %d levels loads&quot;, JACKSON_MAX_NESTING_DEPTH)</span>
+<span class="nc" id="L101">                .isNull();</span>
+<span class="nc" id="L102">    }</span>
+
+    @MethodSource(&quot;hostileFrontMatter&quot;)
+    @ParameterizedTest
+    void hostileFrontMatterIsAParseErrorInEveryCaller(String frontMatter, String expectedMessageStart) {
+        // given
+<span class="nc" id="L108">        byte[] workflow = workflow(frontMatter);</span>
+
+        // when
+<span class="nc" id="L111">        Throwable loaderFailure = assertTimeoutPreemptively(</span>
+<span class="nc" id="L112">                FAIL_FAST_LIMIT, () -&gt; catchThrowable(() -&gt; loader.parse(WORKFLOW, workflow)));</span>
+<span class="nc" id="L113">        Optional&lt;TypedWorkflowConfig&gt; startupRead =</span>
+<span class="nc" id="L114">                assertTimeoutPreemptively(FAIL_FAST_LIMIT, () -&gt; startupRead(frontMatter));</span>
+
+        // then
+<span class="nc" id="L117">        assertThat(loaderFailure)</span>
+<span class="nc" id="L118">                .isInstanceOf(WorkflowException.class)</span>
+<span class="nc" id="L119">                .hasMessageStartingWith(expectedMessageStart)</span>
+<span class="nc" id="L120">                .extracting(failure -&gt; ((WorkflowException) failure).code())</span>
+<span class="nc" id="L121">                .isEqualTo(&quot;workflow_parse_error&quot;);</span>
+<span class="nc" id="L122">        assertThat(startupRead).isEmpty();</span>
+<span class="nc" id="L123">    }</span>
+
+    private static Stream&lt;Arguments&gt; hostileFrontMatter() {
+<span class="nc" id="L126">        String longScalar = &quot;x&quot;.repeat(LONG_SCALAR_LENGTH);</span>
+<span class="nc" id="L127">        return Stream.of(</span>
+<span class="nc" id="L128">                arguments(</span>
+<span class="nc" id="L129">                        named(&quot;nine levels of nine aliases&quot;, billionLaughs()),</span>
+                        &quot;Workflow front matter aliases expand to more than &quot; + MAX_ALIAS_EXPANDED_NODES
+                                + &quot; YAML nodes&quot;),
+<span class="nc" id="L132">                arguments(</span>
+<span class="nc" id="L133">                        named(</span>
+                                &quot;one long scalar copied by many aliases&quot;,
+<span class="nc" id="L135">                                &quot;a: &amp;x &quot; + longScalar + &quot;\nb: [&quot; + &quot;*x,&quot;.repeat(MAX_ALIAS_EXPANDED_NODES - 1) + &quot;]\n&quot;),</span>
+                        &quot;Workflow front matter aliases copy more than &quot; + MAX_ALIAS_COPIED_CHARACTERS + &quot; characters&quot;),
+<span class="nc" id="L137">                arguments(</span>
+<span class="nc" id="L138">                        named(</span>
+                                &quot;sequences nested 20,000 deep&quot;,
+<span class="nc" id="L140">                                &quot;a: &quot; + &quot;[&quot;.repeat(DEEP_NESTING_LEVELS) + &quot;]&quot;.repeat(DEEP_NESTING_LEVELS) + &quot;\n&quot;),</span>
+                        &quot;Workflow front matter is invalid YAML&quot;),
+<span class="nc" id="L142">                arguments(</span>
+<span class="nc" id="L143">                        named(&quot;a copy that nests past the depth limit&quot;, copyNestedUnder(ALIAS_DEPTH_AT_THE_LIMIT + 1)),</span>
+                        &quot;Workflow front matter aliases nest the front matter deeper than &quot; + JACKSON_MAX_NESTING_DEPTH
+                                + &quot; levels (alias *x, front matter line 2)&quot;));
+    }
+
+    private static Optional&lt;TypedWorkflowConfig&gt; startupRead(String frontMatter) {
+<span class="nc" id="L149">        return WorkflowConfigIngestion.collectFrontMatter(</span>
+<span class="nc" id="L150">                frontMatter, ignored -&gt; Optional.empty(), WorkflowConfigIngestion.UnresolvedEnvironmentPolicy.OMIT);</span>
+    }
+
+    private static long allocatedBytes(ThrowingSupplier&lt;?&gt; read) throws Throwable {
+<span class="nc" id="L154">        long before = THREADS.getCurrentThreadAllocatedBytes();</span>
+<span class="nc" id="L155">        read.get();</span>
+<span class="nc" id="L156">        return THREADS.getCurrentThreadAllocatedBytes() - before;</span>
+    }
+
+    private static String nestedAnchors(int depth, int scalars) {
+<span class="nc" id="L160">        var yaml = new StringBuilder(&quot;a: &quot;);</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        for (int level = 0; level &lt; depth; level++) {</span>
+<span class="nc" id="L162">            yaml.append(&quot;&amp;a&quot;).append(level).append(&quot; [&quot;);</span>
+        }
+<span class="nc" id="L164">        yaml.repeat(&quot;x,&quot;, scalars);</span>
+<span class="nc" id="L165">        yaml.repeat(&quot;]&quot;, depth);</span>
+<span class="nc" id="L166">        return yaml.append('\n').toString();</span>
+    }
+
+    // The anchored sequence alone stays below the nesting limit; its copy sits aliasDepth levels deeper.
+    private static String copyNestedUnder(int aliasDepth) {
+<span class="nc" id="L171">        return &quot;a: &amp;x &quot; + &quot;[&quot;.repeat(ANCHORED_NODE_DEPTH) + &quot;]&quot;.repeat(ANCHORED_NODE_DEPTH) + &quot;\nb: &quot;</span>
+<span class="nc" id="L172">                + &quot;[&quot;.repeat(aliasDepth) + &quot;*x&quot; + &quot;]&quot;.repeat(aliasDepth) + &quot;\n&quot;;</span>
+    }
+
+    // Nine levels of nine aliases would expand to 9^9 scalars.
+    private static String billionLaughs() {
+<span class="nc" id="L177">        var yaml = new StringBuilder(&quot;lol0: &amp;lol0 lol\n&quot;);</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        for (int level = 1; level &lt;= LAUGH_LEVELS; level++) {</span>
+<span class="nc" id="L179">            yaml.append(&quot;lol&quot;).append(level).append(&quot;: &amp;lol&quot;).append(level).append(&quot; [&quot;);</span>
+<span class="nc" id="L180">            yaml.repeat(&quot;*lol&quot; + (level - 1) + &quot;, &quot;, LAUGHS_PER_LEVEL);</span>
+<span class="nc" id="L181">            yaml.append(&quot;]\n&quot;);</span>
+        }
+<span class="nc" id="L183">        return yaml.toString();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

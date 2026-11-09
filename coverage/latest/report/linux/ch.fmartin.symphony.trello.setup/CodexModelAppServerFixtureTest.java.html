@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodexModelAppServerFixtureTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">CodexModelAppServerFixtureTest.java</span></div><h1>CodexModelAppServerFixtureTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+
+import ch.fmartin.symphony.trello.testsupport.BoundedWait;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+
+<span class="nc" id="L22">final class CodexModelAppServerFixtureTest {</span>
+<span class="nc" id="L23">    private static final Duration WAIT = Duration.ofSeconds(5);</span>
+    private static final String STUCK_PROBE =
+            &quot;&quot;&quot;
+            echo $$ &gt; &quot;${0}.pid.tmp&quot;
+            mv &quot;${0}.pid.tmp&quot; &quot;${0}.pid&quot;
+            exec sleep 30
+            &quot;&quot;&quot;;
+
+    @TempDir
+    Path directory;
+
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void waitsForAnInheritedWritableHandleToClose() throws Exception {
+        // given
+<span class="nc" id="L38">        Path script = probe(&quot;exit 0\n&quot;);</span>
+<span class="nc" id="L39">        var busy = new CountDownLatch(1);</span>
+<span class="nc" id="L40">        var task = new FutureTask&lt;Void&gt;(() -&gt; {</span>
+<span class="nc" id="L41">            CodexModelAppServerFixture.awaitExecutable(script, WAIT, busy::countDown);</span>
+<span class="nc" id="L42">            return null;</span>
+        });
+<span class="nc" id="L44">        Thread thread = Thread.ofPlatform().unstarted(task);</span>
+
+        try {
+<span class="nc" id="L47">            try (var writer = FileChannel.open(script, StandardOpenOption.WRITE)) {</span>
+<span class="nc" id="L48">                assertThat(writer.isOpen())</span>
+<span class="nc" id="L49">                        .as(&quot;a writable descriptor must prevent executable launch&quot;)</span>
+<span class="nc" id="L50">                        .isTrue();</span>
+
+                // when
+<span class="nc" id="L53">                thread.start();</span>
+<span class="nc" id="L54">                assertThat(busy.await(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L55">                        .as(&quot;probe must observe ETXTBSY while the writable descriptor is held&quot;)</span>
+<span class="nc" id="L56">                        .isTrue();</span>
+<span class="nc" id="L57">                assertThat(task.isDone())</span>
+<span class="nc" id="L58">                        .as(&quot;busy fixture must not be returned before its writer closes&quot;)</span>
+<span class="nc" id="L59">                        .isFalse();</span>
+            }
+
+            // then
+<span class="nc" id="L63">            assertThat(task.get(5, TimeUnit.SECONDS)).isNull();</span>
+        } finally {
+<span class="nc" id="L65">            thread.interrupt();</span>
+<span class="nc" id="L66">            thread.join(WAIT);</span>
+        }
+<span class="nc" id="L68">    }</span>
+
+    @Test
+    void preparationDoesNotRunTheCatalogScenario() throws Exception {
+        // given
+<span class="nc" id="L73">        String scenario = &quot;echo scenario &gt; \&quot;${0}.scenario\&quot;\n&quot;;</span>
+
+        // when
+<span class="nc" id="L76">        Path script = CodexModelAppServerFixture.create(directory, scenario);</span>
+
+        // then
+<span class="nc" id="L79">        Path marker = script.resolveSibling(script.getFileName() + &quot;.scenario&quot;);</span>
+<span class="nc" id="L80">        assertThat(marker).doesNotExist();</span>
+<span class="nc" id="L81">        assertThat(new ProcessCommandRunner(WAIT).run(script.toString()).exitCode())</span>
+<span class="nc" id="L82">                .isZero();</span>
+<span class="nc" id="L83">        assertThat(marker).hasContent(&quot;scenario\n&quot;);</span>
+<span class="nc" id="L84">    }</span>
+
+    @Test
+    void rejectsANonzeroProbeExit() throws Exception {
+        // given
+<span class="nc" id="L89">        Path script = probe(&quot;exit 7\n&quot;);</span>
+
+        // when
+<span class="nc" id="L92">        Throwable failure = catchThrowable(() -&gt; CodexModelAppServerFixture.awaitExecutable(script, WAIT));</span>
+
+        // then
+<span class="nc" id="L95">        assertThat(failure).isInstanceOf(IOException.class).hasMessageContaining(&quot;expected exit code zero&quot;);</span>
+<span class="nc" id="L96">    }</span>
+
+    @Test
+    void boundsAndTerminatesAStuckProbe() throws Exception {
+        // given
+<span class="nc" id="L101">        Path script = probe(STUCK_PROBE);</span>
+
+        // when
+        try {
+<span class="nc" id="L105">            Throwable failure =</span>
+<span class="nc" id="L106">                    catchThrowable(() -&gt; CodexModelAppServerFixture.awaitExecutable(script, Duration.ofSeconds(1)));</span>
+
+            // then
+<span class="nc" id="L109">            assertThat(failure)</span>
+<span class="nc" id="L110">                    .isInstanceOf(IOException.class)</span>
+<span class="nc" id="L111">                    .hasMessageContaining(&quot;expected completion before the deadline&quot;);</span>
+<span class="nc" id="L112">            long pid = probePid(script);</span>
+<span class="nc" id="L113">            BoundedWait.until(</span>
+                    WAIT,
+<span class="nc" id="L115">                    () -&gt; ProcessHandle.of(pid).filter(ProcessHandle::isAlive).isEmpty(),</span>
+                    &quot;timed-out fixture probe must terminate&quot;);
+        } finally {
+<span class="nc" id="L118">            cleanupProbe(script);</span>
+        }
+<span class="nc" id="L120">    }</span>
+
+    @Test
+    void terminatesAProbeWhenInterrupted() throws Exception {
+        // given
+<span class="nc" id="L125">        Path script = probe(STUCK_PROBE);</span>
+<span class="nc" id="L126">        var task = new FutureTask&lt;Void&gt;(() -&gt; {</span>
+<span class="nc" id="L127">            CodexModelAppServerFixture.awaitExecutable(script, Duration.ofSeconds(30));</span>
+<span class="nc" id="L128">            return null;</span>
+        });
+<span class="nc" id="L130">        Thread thread = Thread.ofPlatform().start(task);</span>
+
+        try {
+<span class="nc" id="L133">            BoundedWait.until(</span>
+<span class="nc" id="L134">                    WAIT, () -&gt; Files.exists(pidFile(script)), &quot;fixture probe must start before interruption&quot;);</span>
+<span class="nc" id="L135">            long pid = probePid(script);</span>
+
+            // when
+<span class="nc" id="L138">            thread.interrupt();</span>
+
+            // then
+<span class="nc" id="L141">            assertThatThrownBy(() -&gt; task.get(5, TimeUnit.SECONDS))</span>
+<span class="nc" id="L142">                    .hasCauseInstanceOf(IOException.class)</span>
+<span class="nc" id="L143">                    .hasRootCauseInstanceOf(InterruptedException.class);</span>
+<span class="nc" id="L144">            BoundedWait.until(</span>
+                    WAIT,
+<span class="nc" id="L146">                    () -&gt; ProcessHandle.of(pid).filter(ProcessHandle::isAlive).isEmpty(),</span>
+                    &quot;interrupted fixture probe must terminate&quot;);
+        } finally {
+<span class="nc" id="L149">            thread.interrupt();</span>
+<span class="nc" id="L150">            thread.join(WAIT);</span>
+<span class="nc" id="L151">            cleanupProbe(script);</span>
+        }
+<span class="nc" id="L153">    }</span>
+
+    private Path probe(String body) throws IOException {
+<span class="nc" id="L156">        Path script = directory.resolve(&quot;probe&quot;);</span>
+<span class="nc" id="L157">        Files.writeString(script, &quot;#!/usr/bin/env bash\n&quot; + body);</span>
+<span class="nc" id="L158">        assertThat(script.toFile().setExecutable(true))</span>
+<span class="nc" id="L159">                .as(&quot;probe script must be executable&quot;)</span>
+<span class="nc" id="L160">                .isTrue();</span>
+<span class="nc" id="L161">        return script;</span>
+    }
+
+    private static Path pidFile(Path script) {
+<span class="nc" id="L165">        return script.resolveSibling(script.getFileName() + &quot;.pid&quot;);</span>
+    }
+
+    private static long probePid(Path script) throws IOException {
+<span class="nc" id="L169">        return Long.parseLong(Files.readString(pidFile(script)).strip());</span>
+    }
+
+    private static void cleanupProbe(Path script) throws IOException {
+<span class="nc bnc" id="L173" title="All 2 branches missed.">        if (Files.exists(pidFile(script))) {</span>
+<span class="nc" id="L174">            ProcessHandle.of(Long.parseLong(Files.readString(pidFile(script)).strip()))</span>
+<span class="nc" id="L175">                    .ifPresent(ProcessHandle::destroyForcibly);</span>
+        }
+<span class="nc" id="L177">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

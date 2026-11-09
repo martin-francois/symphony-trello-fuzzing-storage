@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LocalSetupTelemetryTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.setup</a> &gt; <span class="el_source">LocalSetupTelemetryTest.java</span></div><h1>LocalSetupTelemetryTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.setup;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.telemetry.InstalledVersion;
+import ch.fmartin.symphony.trello.telemetry.TelemetryDistribution;
+import ch.fmartin.symphony.trello.telemetry.TelemetryEnvironment;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore;
+import ch.fmartin.symphony.trello.testsupport.SetupRunResult;
+import ch.fmartin.symphony.trello.testsupport.TestEnv;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/// Guided setup shows the usage-reporting notice before the Trello work and counts the first
+/// successful creation, but only inside an installed context that is not disabled.
+<span class="nc" id="L25">final class LocalSetupTelemetryTest extends LocalSetupFixtureSupport {</span>
+<span class="nc" id="L26">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+
+    private Path stateDir;
+
+    @BeforeEach
+    void installContext() throws IOException {
+<span class="nc" id="L32">        stateDir = Files.createDirectories(tempDir.resolve(&quot;.local/state/symphony-trello&quot;));</span>
+<span class="nc" id="L33">        Files.writeString(InstalledVersion.installContextPath(stateDir), &quot;installer=install.sh\napp_version=1.2.0\n&quot;);</span>
+<span class="nc" id="L34">    }</span>
+
+    @Test
+    void guidedSetupPrintsTheNoticeBeforeTrelloAndCountsTheFirstCreation() throws IOException {
+        // given
+<span class="nc" id="L39">        LocalSetup installed = setupWithEnvironment(installedEnvironment());</span>
+
+        // when
+<span class="nc" id="L42">        SetupRunResult result = createBoard(installed, fixture.envPath());</span>
+<span class="nc" id="L43">        JsonNode state = JSON.readTree(Files.readString(stateDir.resolve(TelemetryStateStore.STATE_FILE)));</span>
+
+        // then
+<span class="nc" id="L46">        result.assertSuccess()</span>
+<span class="nc" id="L47">                .stdoutContainsSubsequence(</span>
+                        &quot;Checking prerequisites&quot;,
+                        &quot;Optional usage reporting is enabled.&quot;,
+                        &quot;Preview: symphony-trello telemetry preview&quot;,
+                        &quot;Validating Trello&quot;,
+                        &quot;Board connected:&quot;);
+<span class="nc" id="L53">        assertThat(state.get(&quot;board_creations_total&quot;).asLong()).isOne();</span>
+<span class="nc" id="L54">        assertThat(state.get(&quot;board_imports_total&quot;).asLong()).isZero();</span>
+<span class="nc" id="L55">        assertThat(state.get(&quot;installation_id&quot;).isTextual())</span>
+<span class="nc" id="L56">                .as(&quot;the installation is registered&quot;)</span>
+<span class="nc" id="L57">                .isTrue();</span>
+<span class="nc" id="L58">    }</span>
+
+    @Test
+    void guidedSetupUsesExplicitDotenvOptOutBeforeNoticeAndCounters() throws IOException {
+        // given
+<span class="nc" id="L63">        Map&lt;String, String&gt; environment = installedEnvironment();</span>
+<span class="nc" id="L64">        Files.createDirectories(fixture.configDir());</span>
+<span class="nc" id="L65">        Path configured = Files.writeString(fixture.envPath(), TelemetryEnvironment.DISABLED_VARIABLE + &quot;=0\n&quot;);</span>
+<span class="nc" id="L66">        environment.put(&quot;SYMPHONY_TRELLO_DOTENV&quot;, configured.toString());</span>
+<span class="nc" id="L67">        Path selected = Files.writeString(</span>
+<span class="nc" id="L68">                tempDir.resolve(&quot;.env.selected&quot;),</span>
+<span class="nc" id="L69">                TestEnv.trelloApiEndpoint(trello.endpoint()) + TelemetryEnvironment.DISABLED_VARIABLE + &quot;=1\n&quot;);</span>
+<span class="nc" id="L70">        LocalSetup installed = setupWithEnvironment(environment);</span>
+
+        // when
+<span class="nc" id="L73">        SetupRunResult result = createBoard(installed, selected);</span>
+
+        // then
+<span class="nc" id="L76">        result.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting is enabled.&quot;);</span>
+<span class="nc" id="L77">        assertThat(stateDir.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L78">    }</span>
+
+    @Test
+    void aSeparateConfigDirectoryDoesNotUseTheInstalledTelemetryState() {
+        // given
+<span class="nc" id="L83">        LocalSetup installed = setupWithEnvironment(installedEnvironment());</span>
+<span class="nc" id="L84">        Path isolatedConfig = tempDir.resolve(&quot;isolated/config&quot;);</span>
+
+        // when
+<span class="nc" id="L87">        SetupRunResult result = withTestToken(() -&gt; runSetup(</span>
+                installed,
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L91">                fixture.endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;Isolated Board&quot;,
+                &quot;--config-dir&quot;,
+<span class="nc" id="L99">                isolatedConfig.toString(),</span>
+                &quot;--workflow&quot;,
+<span class="nc" id="L101">                isolatedConfig.resolve(&quot;WORKFLOW.md&quot;).toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L103">                isolatedConfig.resolve(&quot;.env&quot;).toString(),</span>
+                &quot;--no-start&quot;,
+                &quot;--no-github&quot;));
+
+        // then
+<span class="nc" id="L108">        result.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting is enabled.&quot;);</span>
+<span class="nc" id="L109">        assertThat(stateDir.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L110">        assertThat(isolatedConfig.resolveSibling(&quot;state&quot;).resolve(TelemetryStateStore.STATE_FILE))</span>
+<span class="nc" id="L111">                .doesNotExist();</span>
+<span class="nc" id="L112">    }</span>
+
+    @Test
+    void disconnectingABoardKeepsTheOperationTotals() throws IOException {
+        // given
+<span class="nc" id="L117">        LocalSetup installed = setupWithEnvironment(installedEnvironment());</span>
+<span class="nc" id="L118">        withTestToken(() -&gt; runSetup(</span>
+                installed,
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L122">                fixture.endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;Disconnected Board&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L130">                fixture.workflowPath().toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L132">                fixture.envPath().toString(),</span>
+                &quot;--no-github&quot;));
+
+        // when
+<span class="nc" id="L136">        SetupRunResult disconnect = withTestToken(() -&gt; runSetupWithInput(</span>
+                installed,
+                &quot;3\n1\n&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L140">                fixture.endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--env&quot;,
+<span class="nc" id="L146">                fixture.envPath().toString(),</span>
+                &quot;--no-github&quot;));
+<span class="nc" id="L148">        JsonNode state = JSON.readTree(Files.readString(stateDir.resolve(TelemetryStateStore.STATE_FILE)));</span>
+
+        // then
+<span class="nc" id="L151">        disconnect.assertSuccess().stdoutContains(&quot;Symphony will stop managing \&quot;Disconnected Board\&quot;&quot;);</span>
+<span class="nc" id="L152">        assertThat(state.get(&quot;board_creations_total&quot;).asLong())</span>
+<span class="nc" id="L153">                .as(&quot;operation totals are never decremented&quot;)</span>
+<span class="nc" id="L154">                .isOne();</span>
+<span class="nc" id="L155">    }</span>
+
+    @Test
+    void disabledEnvironmentOrMissingInstallContextShowsNoNoticeAndWritesNoState() throws IOException {
+        // given
+<span class="nc" id="L160">        Map&lt;String, String&gt; disabled = installedEnvironment();</span>
+<span class="nc" id="L161">        disabled.put(TelemetryEnvironment.DISABLED_VARIABLE, &quot;true&quot;);</span>
+<span class="nc" id="L162">        LocalSetup disabledSetup = setupWithEnvironment(disabled);</span>
+<span class="nc" id="L163">        Files.delete(InstalledVersion.installContextPath(stateDir));</span>
+<span class="nc" id="L164">        LocalSetup developmentSetup = setupWithEnvironment(installedEnvironment());</span>
+
+        // when
+<span class="nc" id="L167">        SetupRunResult first = withTestToken(() -&gt; runSetup(</span>
+<span class="nc" id="L168">                disabledSetup, &quot;--dry-run&quot;, &quot;--workflow&quot;, fixture.workflowPath().toString()));</span>
+<span class="nc" id="L169">        SetupRunResult second = withTestToken(() -&gt; runSetup(</span>
+                developmentSetup,
+                &quot;--dry-run&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L173">                fixture.workflowPath().toString()));</span>
+
+        // then
+<span class="nc" id="L176">        first.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting&quot;);</span>
+<span class="nc" id="L177">        second.assertSuccess().stdoutDoesNotContain(&quot;Optional usage reporting&quot;);</span>
+<span class="nc" id="L178">        assertThat(stateDir.resolve(TelemetryStateStore.STATE_FILE)).doesNotExist();</span>
+<span class="nc" id="L179">    }</span>
+
+    private SetupRunResult createBoard(LocalSetup installed, Path envPath) {
+<span class="nc" id="L182">        return withTestToken(() -&gt; runSetup(</span>
+                installed,
+                &quot;--non-interactive&quot;,
+                &quot;--endpoint&quot;,
+<span class="nc" id="L186">                fixture.endpoint(),</span>
+                &quot;--key&quot;,
+                &quot;key&quot;,
+                &quot;--token&quot;,
+                &quot;token&quot;,
+                &quot;--board-name&quot;,
+                &quot;Telemetry Board&quot;,
+                &quot;--workflow&quot;,
+<span class="nc" id="L194">                fixture.workflowPath().toString(),</span>
+                &quot;--env&quot;,
+<span class="nc" id="L196">                envPath.toString(),</span>
+                &quot;--no-github&quot;));
+    }
+
+    /// The source tree ships without a live token; the setup path only registers when one exists.
+    private SetupRunResult withTestToken(Supplier&lt;SetupRunResult&gt; run) {
+<span class="nc" id="L202">        var result = new AtomicReference&lt;SetupRunResult&gt;();</span>
+<span class="nc" id="L203">        Map&lt;String, String&gt; properties = Map.of(</span>
+<span class="nc" id="L204">                TelemetryDistribution.TOKEN_PROPERTY, &quot;phc_&quot; + &quot;localsetup0&quot;.repeat(4),</span>
+                InstalledCliDefaults.INSTALLED_CONFIG_DIR_PROPERTY,
+<span class="nc" id="L206">                        fixture.configDir().toString(),</span>
+<span class="nc" id="L207">                InstalledCliDefaults.INSTALLED_STATE_HOME_PROPERTY, stateDir.toString());</span>
+<span class="nc" id="L208">        SetupSystemProperties.withLookup(properties::get, () -&gt; {</span>
+<span class="nc" id="L209">            result.set(run.get());</span>
+<span class="nc" id="L210">            return 0;</span>
+        });
+<span class="nc" id="L212">        return result.get();</span>
+    }
+
+    private Map&lt;String, String&gt; installedEnvironment() {
+<span class="nc" id="L216">        Map&lt;String, String&gt; environment = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L217">        environment.put(&quot;SYMPHONY_TRELLO_CONFIG_DIR&quot;, fixture.configDir().toString());</span>
+<span class="nc" id="L218">        environment.put(&quot;SYMPHONY_TRELLO_STATE_HOME&quot;, stateDir.toString());</span>
+<span class="nc" id="L219">        environment.put(&quot;SYMPHONY_TRELLO_COMMAND&quot;, &quot;symphony-trello&quot;);</span>
+<span class="nc" id="L220">        return environment;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

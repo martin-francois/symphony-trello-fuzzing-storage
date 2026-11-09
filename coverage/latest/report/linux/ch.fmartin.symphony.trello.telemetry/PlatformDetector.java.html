@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlatformDetector.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">PlatformDetector.java</span></div><h1>PlatformDetector.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import com.google.common.base.Suppliers;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
+import org.jboss.logging.Logger;
+import org.jspecify.annotations.Nullable;
+import oshi.ffm.SystemInfo;
+import oshi.software.os.OperatingSystem;
+
+/// Collects raw platform facts once per process: JVM properties, the OSHI operating-system version
+/// through the Foreign Function and Memory implementation, and the standard `/etc/os-release`
+/// entries on Linux. Detection failures degrade to unknown fields and never throw.
+public final class PlatformDetector {
+<span class="nc" id="L21">    private static final Logger LOG = Logger.getLogger(PlatformDetector.class);</span>
+<span class="nc" id="L22">    private static final Path OS_RELEASE = Path.of(&quot;/etc/os-release&quot;);</span>
+<span class="nc" id="L23">    private static final Set&lt;String&gt; OS_RELEASE_KEYS = Set.of(&quot;ID&quot;, &quot;VERSION_ID&quot;);</span>
+    private static final int MAX_OS_RELEASE_VALUE_LENGTH = 64;
+
+    private final Supplier&lt;Platform&gt; platform;
+
+    public PlatformDetector() {
+<span class="nc" id="L29">        this(PlatformDetector::detectSystem);</span>
+<span class="nc" id="L30">    }</span>
+
+<span class="nc" id="L32">    PlatformDetector(Supplier&lt;PlatformFacts&gt; facts) {</span>
+<span class="nc" id="L33">        this.platform = Suppliers.memoize(() -&gt; PlatformNormalizer.normalize(factsOrEmpty(facts)));</span>
+<span class="nc" id="L34">    }</span>
+
+    public Platform platform() {
+<span class="nc" id="L37">        return platform.get();</span>
+    }
+
+    private static PlatformFacts factsOrEmpty(Supplier&lt;PlatformFacts&gt; facts) {
+        try {
+<span class="nc" id="L42">            return facts.get();</span>
+<span class="nc" id="L43">        } catch (RuntimeException | LinkageError exception) {</span>
+<span class="nc" id="L44">            LOG.debugf(exception, &quot;platform detection failed&quot;);</span>
+<span class="nc" id="L45">            return PlatformFacts.empty();</span>
+        }
+    }
+
+    static PlatformFacts detectSystem() {
+<span class="nc" id="L50">        String osName = System.getProperty(&quot;os.name&quot;);</span>
+<span class="nc" id="L51">        String osArch = System.getProperty(&quot;os.arch&quot;);</span>
+        Map&lt;String, String&gt; osRelease =
+<span class="nc bnc" id="L53" title="All 2 branches missed.">                OsFamily.fromOsName(osName) == OsFamily.LINUX ? readOsRelease(OS_RELEASE) : Map.of();</span>
+<span class="nc" id="L54">        return new PlatformFacts(osName, osArch, oshiVersion(), osRelease);</span>
+    }
+
+    private static @Nullable String oshiVersion() {
+        try {
+<span class="nc" id="L59">            OperatingSystem operatingSystem = new SystemInfo().getOperatingSystem();</span>
+<span class="nc" id="L60">            return operatingSystem.getVersionInfo().getVersion();</span>
+<span class="nc" id="L61">        } catch (RuntimeException | LinkageError exception) {</span>
+            // Native access can be unavailable or restricted; the heartbeat then reports unknown fields.
+<span class="nc" id="L63">            LOG.debugf(exception, &quot;platform detection unavailable&quot;);</span>
+<span class="nc" id="L64">            return null;</span>
+        }
+    }
+
+    static Map&lt;String, String&gt; readOsRelease(Path path) {
+        List&lt;String&gt; lines;
+        try {
+<span class="nc" id="L71">            lines = Files.readAllLines(path);</span>
+<span class="nc" id="L72">        } catch (IOException | RuntimeException exception) {</span>
+            // Not every Linux system ships this file; without it the distribution is reported as unknown.
+<span class="nc" id="L74">            return Map.of();</span>
+<span class="nc" id="L75">        }</span>
+<span class="nc" id="L76">        Map&lt;String, String&gt; entries = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">        for (String line : lines) {</span>
+<span class="nc" id="L78">            int separator = line.indexOf('=');</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            if (separator &lt;= 0) {</span>
+<span class="nc" id="L80">                continue;</span>
+            }
+<span class="nc" id="L82">            String key = line.substring(0, separator).strip();</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">            if (!OS_RELEASE_KEYS.contains(key)) {</span>
+<span class="nc" id="L84">                continue;</span>
+            }
+<span class="nc" id="L86">            String value = unquote(line.substring(separator + 1).strip());</span>
+<span class="nc bnc" id="L87" title="All 4 branches missed.">            if (!value.isEmpty() &amp;&amp; value.length() &lt;= MAX_OS_RELEASE_VALUE_LENGTH) {</span>
+<span class="nc" id="L88">                entries.putIfAbsent(key, value);</span>
+            }
+<span class="nc" id="L90">        }</span>
+<span class="nc" id="L91">        return Map.copyOf(entries);</span>
+    }
+
+    private static String unquote(String value) {
+<span class="nc bnc" id="L95" title="All 2 branches missed.">        if (value.length() &gt;= 2</span>
+<span class="nc bnc" id="L96" title="All 4 branches missed.">                &amp;&amp; (value.charAt(0) == '&quot;' || value.charAt(0) == '\'')</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">                &amp;&amp; value.charAt(value.length() - 1) == value.charAt(0)) {</span>
+<span class="nc" id="L98">            return value.substring(1, value.length() - 1);</span>
+        }
+<span class="nc" id="L100">        return value;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

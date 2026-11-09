@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExperimentCheckpoint.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">ExperimentCheckpoint.java</span></div><h1>ExperimentCheckpoint.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import org.jspecify.annotations.Nullable;
+
+/// The private, resumable record of one experiment run: which phase it reached, which synthetic
+/// IDs it owns, and what the provider answered. It holds run metadata only, never a credential.
+/// Every destructive request is checked against the distinct IDs listed here.
+<span class="nc" id="L19">record ExperimentCheckpoint(</span>
+        @JsonProperty(&quot;run_id&quot;) String runId,
+        @JsonProperty(&quot;project_id&quot;) long projectId,
+        @JsonProperty(&quot;phase&quot;) Phase phase,
+        @JsonProperty(&quot;started_at&quot;) String startedAt,
+        @JsonProperty(&quot;updated_at&quot;) String updatedAt,
+        @JsonProperty(&quot;subjects&quot;) Map&lt;String, Subject&gt; subjects,
+        @JsonProperty(&quot;notes&quot;) List&lt;String&gt; notes) {
+
+    static final String FILE_NAME = &quot;checkpoint.json&quot;;
+<span class="nc" id="L29">    private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);</span>
+
+<span class="nc" id="L31">    enum Phase {</span>
+<span class="nc" id="L32">        CREATED,</span>
+<span class="nc" id="L33">        BASELINE_SENT,</span>
+<span class="nc" id="L34">        BASELINE_VERIFIED,</span>
+<span class="nc" id="L35">        DISABLED,</span>
+<span class="nc" id="L36">        ERASURE_REQUESTED,</span>
+<span class="nc" id="L37">        ERASURE_VERIFIED,</span>
+<span class="nc" id="L38">        REUSE_A_SENT,</span>
+<span class="nc" id="L39">        RESET_B_DONE,</span>
+<span class="nc" id="L40">        REUSE_B_SENT,</span>
+<span class="nc" id="L41">        REUSE_OBSERVED,</span>
+<span class="nc" id="L42">        REPAIR_AWAITING_HEARTBEAT,</span>
+<span class="nc" id="L43">        REPAIR_DONE,</span>
+<span class="nc" id="L44">        CLEANUP_REQUESTED,</span>
+<span class="nc" id="L45">        COMPLETE</span>
+    }
+
+    static ExperimentCheckpoint load(Path file) {
+        try {
+<span class="nc" id="L50">            return JSON.readValue(Files.readString(file), ExperimentCheckpoint.class);</span>
+<span class="nc" id="L51">        } catch (IOException exception) {</span>
+<span class="nc" id="L52">            throw new IllegalStateException(&quot;checkpoint unreadable: &quot; + file.getFileName(), exception);</span>
+        }
+    }
+
+    /// Written to a sibling file and moved into place so a crash never leaves a torn checkpoint.
+    void save(Path file) {
+<span class="nc" id="L58">        Path temp = file.resolveSibling(file.getFileName() + &quot;.tmp&quot;);</span>
+        try {
+<span class="nc" id="L60">            Files.writeString(temp, JSON.writeValueAsString(this));</span>
+<span class="nc" id="L61">            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);</span>
+<span class="nc" id="L62">        } catch (IOException exception) {</span>
+<span class="nc" id="L63">            throw new IllegalStateException(&quot;checkpoint not saved: &quot; + file.getFileName(), exception);</span>
+<span class="nc" id="L64">        }</span>
+<span class="nc" id="L65">    }</span>
+
+    ExperimentCheckpoint withPhase(Phase next, String now) {
+<span class="nc" id="L68">        return new ExperimentCheckpoint(runId, projectId, next, startedAt, now, subjects, notes);</span>
+    }
+
+    ExperimentCheckpoint withSubject(Subject subject, String now) {
+        // Keeps the checkpoint's field order stable across rewrites.
+<span class="nc" id="L73">        Map&lt;String, Subject&gt; updated = new LinkedHashMap&lt;&gt;(subjects);</span>
+<span class="nc" id="L74">        updated.put(subject.name(), subject);</span>
+<span class="nc" id="L75">        return new ExperimentCheckpoint(runId, projectId, phase, startedAt, now, updated, notes);</span>
+    }
+
+    ExperimentCheckpoint withNote(String note, String now) {
+<span class="nc" id="L79">        List&lt;String&gt; updated = new ArrayList&lt;&gt;(notes);</span>
+<span class="nc" id="L80">        updated.add(now + &quot; &quot; + note);</span>
+<span class="nc" id="L81">        return new ExperimentCheckpoint(runId, projectId, phase, startedAt, now, subjects, updated);</span>
+    }
+
+    Subject subject(String name) {
+<span class="nc" id="L85">        Subject subject = subjects.get(name);</span>
+<span class="nc bnc" id="L86" title="All 2 branches missed.">        if (subject == null) {</span>
+<span class="nc" id="L87">            throw new IllegalStateException(&quot;checkpoint has no subject &quot; + name);</span>
+        }
+<span class="nc" id="L89">        return subject;</span>
+    }
+
+    /// All installation IDs this run created; the only IDs any deletion may target.
+    List&lt;String&gt; ownedDistinctIds() {
+<span class="nc" id="L94">        return subjects.values().stream().map(Subject::distinctId).toList();</span>
+    }
+
+    /// One synthetic installation. `personUuid` and `personId` are PostHog's own identifiers for
+    /// the profile, distinct from the installation UUID the application sends as `distinct_id`.
+<span class="nc" id="L99">    record Subject(</span>
+            @JsonProperty(&quot;name&quot;) String name,
+            @JsonProperty(&quot;distinct_id&quot;) String distinctId,
+            @JsonProperty(&quot;registered_on&quot;) String registeredOn,
+            @JsonProperty(&quot;old_event_uuids&quot;) List&lt;String&gt; oldEventUuids,
+            @JsonProperty(&quot;new_event_uuids&quot;) List&lt;String&gt; newEventUuids,
+            @JsonProperty(&quot;baseline_person_uuid&quot;) @Nullable String baselinePersonUuid,
+            @JsonProperty(&quot;baseline_person_id&quot;) @Nullable String baselinePersonId,
+            @JsonProperty(&quot;erasure&quot;) @Nullable DeletionRecord erasure,
+            @JsonProperty(&quot;cleanup&quot;) @Nullable DeletionRecord cleanup,
+            @JsonProperty(&quot;facts&quot;) Map&lt;String, String&gt; facts) {
+
+        static Subject create(String name, String distinctId, String registeredOn) {
+<span class="nc" id="L112">            return new Subject(name, distinctId, registeredOn, List.of(), List.of(), null, null, null, null, Map.of());</span>
+        }
+
+        Subject withOldEvent(String eventUuid) {
+<span class="nc" id="L116">            List&lt;String&gt; updated = new ArrayList&lt;&gt;(oldEventUuids);</span>
+<span class="nc" id="L117">            updated.add(eventUuid);</span>
+<span class="nc" id="L118">            return new Subject(</span>
+                    name,
+                    distinctId,
+                    registeredOn,
+                    updated,
+                    newEventUuids,
+                    baselinePersonUuid,
+                    baselinePersonId,
+                    erasure,
+                    cleanup,
+                    facts);
+        }
+
+        Subject withNewEvent(String eventUuid) {
+<span class="nc" id="L132">            List&lt;String&gt; updated = new ArrayList&lt;&gt;(newEventUuids);</span>
+<span class="nc" id="L133">            updated.add(eventUuid);</span>
+<span class="nc" id="L134">            return new Subject(</span>
+                    name,
+                    distinctId,
+                    registeredOn,
+                    oldEventUuids,
+                    updated,
+                    baselinePersonUuid,
+                    baselinePersonId,
+                    erasure,
+                    cleanup,
+                    facts);
+        }
+
+        Subject withBaselinePerson(String personUuid, String personId) {
+<span class="nc" id="L148">            return new Subject(</span>
+                    name,
+                    distinctId,
+                    registeredOn,
+                    oldEventUuids,
+                    newEventUuids,
+                    personUuid,
+                    personId,
+                    erasure,
+                    cleanup,
+                    facts);
+        }
+
+        Subject withErasure(DeletionRecord record) {
+<span class="nc" id="L162">            return new Subject(</span>
+                    name,
+                    distinctId,
+                    registeredOn,
+                    oldEventUuids,
+                    newEventUuids,
+                    baselinePersonUuid,
+                    baselinePersonId,
+                    record,
+                    cleanup,
+                    facts);
+        }
+
+        Subject withCleanup(DeletionRecord record) {
+<span class="nc" id="L176">            return new Subject(</span>
+                    name,
+                    distinctId,
+                    registeredOn,
+                    oldEventUuids,
+                    newEventUuids,
+                    baselinePersonUuid,
+                    baselinePersonId,
+                    erasure,
+                    record,
+                    facts);
+        }
+
+        Subject withFact(String key, String value) {
+            // Keeps the checkpoint's field order stable across rewrites.
+<span class="nc" id="L191">            Map&lt;String, String&gt; updated = new LinkedHashMap&lt;&gt;(facts);</span>
+<span class="nc" id="L192">            updated.put(key, value);</span>
+<span class="nc" id="L193">            return new Subject(</span>
+                    name,
+                    distinctId,
+                    registeredOn,
+                    oldEventUuids,
+                    newEventUuids,
+                    baselinePersonUuid,
+                    baselinePersonId,
+                    erasure,
+                    cleanup,
+                    updated);
+        }
+
+        String fact(String key) {
+<span class="nc" id="L207">            return facts.getOrDefault(key, &quot;&quot;);</span>
+        }
+    }
+
+    /// What one bulk deletion request returned and when its event deletion was verified.
+<span class="nc" id="L212">    record DeletionRecord(</span>
+            @JsonProperty(&quot;requested_at&quot;) String requestedAt,
+            @JsonProperty(&quot;persons_found&quot;) int personsFound,
+            @JsonProperty(&quot;persons_queued&quot;) int personsQueued,
+            @JsonProperty(&quot;events_queued&quot;) boolean eventsQueued,
+            @JsonProperty(&quot;deletion_errors&quot;) int deletionErrors,
+            @JsonProperty(&quot;verified_at&quot;) @Nullable String verifiedAt) {
+
+        DeletionRecord verified(String at) {
+<span class="nc" id="L221">            return new DeletionRecord(requestedAt, personsFound, personsQueued, eventsQueued, deletionErrors, at);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

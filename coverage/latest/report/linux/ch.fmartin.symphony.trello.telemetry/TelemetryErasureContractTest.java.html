@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryErasureContractTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryErasureContractTest.java</span></div><h1>TelemetryErasureContractTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import ch.fmartin.symphony.trello.telemetry.TelemetryOwnership.Phase;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.junit.jupiter.api.Test;
+
+/// The client and the PostHog handler run in different languages and cannot share constants. These
+/// checks fail when one side of the wire contract changes without the other.
+<span class="nc" id="L17">final class TelemetryErasureContractTest {</span>
+<span class="nc" id="L18">    private static final Path HANDLER = Path.of(&quot;infra/posthog/erasure-service.hog.tftpl&quot;);</span>
+<span class="nc" id="L19">    private static final Path MODULE = Path.of(&quot;infra/posthog/modules/project/erasure.tf&quot;);</span>
+<span class="nc" id="L20">    private static final Path RENDERER = Path.of(&quot;scripts/erasure-service.ts&quot;);</span>
+<span class="nc" id="L21">    private static final Path LIFECYCLE_RUNNER = Path.of(&quot;scripts/erasure-lifecycle-live.ts&quot;);</span>
+<span class="nc" id="L22">    private static final Path RELEASE_PACKAGER = Path.of(&quot;scripts/package-release-assets.sh&quot;);</span>
+<span class="nc" id="L23">    private static final Path FLAG_PRUNER = Path.of(&quot;scripts/posthog-erasure-flags.ts&quot;);</span>
+<span class="nc" id="L24">    private static final Path API_MODULE = Path.of(&quot;scripts/posthog-api.ts&quot;);</span>
+<span class="nc" id="L25">    private static final Pattern HANDLER_STATUS = Pattern.compile(&quot;(?:state := |'key': )'([a-z]+)'&quot;);</span>
+<span class="nc" id="L26">    private static final Pattern PRUNER_STATUS = Pattern.compile(&quot;state === \&quot;([a-z]+)\&quot;&quot;);</span>
+<span class="nc" id="L27">    private static final Pattern RUNNER_STATUS =</span>
+<span class="nc" id="L28">            Pattern.compile(&quot;(?:observed ===|observed =|\\?\\?|\\) ===) \&quot;([a-z]+)\&quot;&quot;);</span>
+
+    @Test
+    void handlerAcceptsExactlyTheSignatureLifetimeTheClientRequests() throws IOException {
+        // given
+<span class="nc" id="L33">        String handler = Files.readString(HANDLER);</span>
+
+        // when
+<span class="nc" id="L36">        long lifetime = TelemetryErasureClient.SIGNATURE_LIFETIME.toSeconds();</span>
+
+        // then
+<span class="nc" id="L39">        assertThat(handler).contains(&quot;expires - issued &gt; &quot; + lifetime + &quot; &quot;);</span>
+<span class="nc" id="L40">    }</span>
+
+    @Test
+    void lifecycleRunnerSignsWithTheClientSignatureLifetime() throws IOException {
+        // given
+<span class="nc" id="L45">        String runner = Files.readString(LIFECYCLE_RUNNER);</span>
+
+        // when
+<span class="nc" id="L48">        long lifetime = TelemetryErasureClient.SIGNATURE_LIFETIME.toSeconds();</span>
+
+        // then
+<span class="nc" id="L51">        assertThat(runner).contains(&quot;export const SIGNATURE_LIFETIME_SECONDS = &quot; + lifetime + &quot;;&quot;);</span>
+<span class="nc" id="L52">    }</span>
+
+    @Test
+    void handlerAcceptsTheClientIssuancePayloadSignedFormatAndActions() throws IOException {
+        // given
+<span class="nc" id="L57">        String handler = Files.readString(HANDLER);</span>
+
+        // when
+<span class="nc" id="L60">        String runner = Files.readString(LIFECYCLE_RUNNER);</span>
+
+        // then
+<span class="nc" id="L63">        String separator = TelemetryErasureClient.SIGNED_FIELD_SEPARATOR;</span>
+<span class="nc" id="L64">        assertThat(handler)</span>
+<span class="nc" id="L65">                .contains(&quot;if (p == '&quot; + TelemetryErasureClient.ISSUE_PAYLOAD + &quot;')&quot;)</span>
+<span class="nc" id="L66">                .contains(&quot;'&quot; + TelemetryCredential.INSTALLATION_ID_FIELD + &quot;': installation, '&quot;</span>
+                        + TelemetryCredential.KEY_VERSION_FIELD + &quot;': '${active_key}', '&quot;
+                        + TelemetryCredential.SECRET_FIELD + &quot;': secret&quot;)
+<span class="nc" id="L69">                .contains(&quot;splitByString('&quot; + separator + &quot;', p)&quot;)</span>
+<span class="nc" id="L70">                .contains(&quot;parts[7], parts[8]], '&quot; + separator + &quot;')&quot;)</span>
+<span class="nc" id="L71">                .contains(&quot;parts[1] != '&quot; + TelemetryErasureClient.SIGNED_FORMAT + &quot;'&quot;);</span>
+<span class="nc" id="L72">        assertThat(TelemetryErasureClient.Action.values())</span>
+<span class="nc" id="L73">                .allSatisfy(action -&gt; assertThat(handler).contains(&quot;parts[2] != '&quot; + action.wireName() + &quot;'&quot;));</span>
+<span class="nc" id="L74">        assertThat(runner)</span>
+<span class="nc" id="L75">                .contains(&quot;call(\&quot;&quot; + TelemetryErasureClient.ISSUE_PAYLOAD + &quot;\&quot;)&quot;)</span>
+<span class="nc" id="L76">                .contains(&quot;[\&quot;&quot; + TelemetryErasureClient.SIGNED_FORMAT</span>
+                        + &quot;\&quot;, action, scope, subject, period, operation, now, now + SIGNATURE_LIFETIME_SECONDS].join(\&quot;&quot;
+                        + separator + &quot;\&quot;)&quot;);
+<span class="nc" id="L79">    }</span>
+
+    @Test
+    void handlerAndLifecycleRunnerDeriveTheStatusFlagKeyLikeTheClient() throws IOException {
+        // given
+<span class="nc" id="L84">        String prefix = TelemetryErasureClient.STATUS_FLAG_PREFIX;</span>
+<span class="nc" id="L85">        String context = TelemetryErasureClient.STATUS_KEY_CONTEXT;</span>
+<span class="nc" id="L86">        String separator = TelemetryErasureClient.SIGNED_FIELD_SEPARATOR;</span>
+
+        // when
+<span class="nc" id="L89">        String handler = Files.readString(HANDLER);</span>
+<span class="nc" id="L90">        String runner = Files.readString(LIFECYCLE_RUNNER);</span>
+
+        // then
+<span class="nc" id="L93">        assertThat(handler)</span>
+<span class="nc" id="L94">                .contains(&quot;concat('&quot; + prefix + &quot;', sha256HmacChainHex([key, concat('&quot; + context + &quot;${scope}&quot;</span>
+                        + separator + &quot;', parts[5])]))&quot;);
+<span class="nc" id="L96">        assertThat(runner).contains(&quot;`&quot; + prefix + &quot;${hmac(owner.secret, `&quot; + context + &quot;${scope}&quot; + separator);</span>
+<span class="nc" id="L97">    }</span>
+
+    @Test
+    void releasePackagerWritesAndVerifiesTheErasureKeysTheClientReads() throws IOException {
+        // given
+<span class="nc" id="L102">        String packager = Files.readString(RELEASE_PACKAGER);</span>
+
+        // when
+<span class="nc" id="L105">        String endpoint = TelemetryDistribution.ERASURE_ENDPOINT_KEY;</span>
+<span class="nc" id="L106">        String audience = TelemetryDistribution.ERASURE_AUDIENCE_KEY;</span>
+
+        // then
+<span class="nc" id="L109">        assertThat(packager)</span>
+<span class="nc" id="L110">                .contains(&quot;TELEMETRY_ERASURE_ENDPOINT_KEY=\&quot;&quot; + endpoint + &quot;\&quot;&quot;)</span>
+<span class="nc" id="L111">                .contains(&quot;TELEMETRY_ERASURE_AUDIENCE_KEY=\&quot;&quot; + audience + &quot;\&quot;&quot;);</span>
+<span class="nc" id="L112">    }</span>
+
+    @Test
+    void handlerModuleAndRendererAcceptTheClientKeyVersions() throws IOException {
+        // given
+<span class="nc" id="L117">        String pattern = TelemetryCredential.KEY_VERSION.pattern();</span>
+
+        // when
+<span class="nc" id="L120">        String handler = Files.readString(HANDLER);</span>
+<span class="nc" id="L121">        String module = Files.readString(MODULE);</span>
+<span class="nc" id="L122">        String renderer = Files.readString(RENDERER);</span>
+
+        // then
+<span class="nc" id="L125">        assertThat(handler).contains(&quot;^h1-&quot; + pattern + &quot;-&quot;);</span>
+<span class="nc" id="L126">        assertThat(module).contains(&quot;^&quot; + pattern + &quot;$&quot;);</span>
+<span class="nc" id="L127">        assertThat(renderer).contains(&quot;^&quot; + pattern + &quot;$&quot;);</span>
+<span class="nc" id="L128">    }</span>
+
+    @Test
+    void handlerSignaturesHaveTheShapeOfTheClientSecret() throws IOException {
+        // given
+<span class="nc" id="L133">        String pattern = TelemetryCredential.SECRET.pattern();</span>
+
+        // when
+<span class="nc" id="L136">        String handler = Files.readString(HANDLER);</span>
+
+        // then
+<span class="nc" id="L139">        assertThat(handler).contains(&quot;match(parts[9], '^&quot; + pattern + &quot;$')&quot;);</span>
+<span class="nc" id="L140">    }</span>
+
+    @Test
+    void deploymentScopeIsAValidClientAudience() throws IOException {
+        // given
+<span class="nc" id="L145">        String module = Files.readString(MODULE);</span>
+<span class="nc" id="L146">        String renderer = Files.readString(RENDERER);</span>
+
+        // when
+<span class="nc" id="L149">        String sampleScope = &quot;symphony:12345&quot;;</span>
+
+        // then
+<span class="nc" id="L152">        assertThat(module).contains(&quot;erasure_scope = \&quot;symphony:${posthog_project.this.id}\&quot;&quot;);</span>
+<span class="nc" id="L153">        assertThat(renderer).contains(&quot;/^&quot; + TelemetryErasureEndpoint.AUDIENCE.pattern() + &quot;$/&quot;);</span>
+<span class="nc" id="L154">        assertThat(sampleScope).matches(TelemetryErasureEndpoint.AUDIENCE);</span>
+<span class="nc" id="L155">    }</span>
+
+    @Test
+    void handlerAndScriptsUseExactlyTheClientStatusValues() throws IOException {
+        // given
+<span class="nc" id="L160">        List&lt;String&gt; wireNames = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">        for (Phase phase : Phase.values()) {</span>
+<span class="nc" id="L162">            wireNames.add(phase.wireName());</span>
+        }
+
+        // when
+<span class="nc" id="L166">        List&lt;String&gt; handler = statuses(HANDLER_STATUS, Files.readString(HANDLER));</span>
+<span class="nc" id="L167">        List&lt;String&gt; pruner = statuses(PRUNER_STATUS, Files.readString(FLAG_PRUNER));</span>
+<span class="nc" id="L168">        List&lt;String&gt; runner = statuses(RUNNER_STATUS, Files.readString(LIFECYCLE_RUNNER));</span>
+
+        // then
+<span class="nc" id="L171">        assertThat(handler).as(&quot;statuses the handler publishes&quot;).hasSameElementsAs(wireNames);</span>
+<span class="nc" id="L172">        assertThat(pruner).as(&quot;statuses the flag pruner compares&quot;).isNotEmpty().isSubsetOf(wireNames);</span>
+<span class="nc" id="L173">        assertThat(runner)</span>
+<span class="nc" id="L174">                .as(&quot;statuses the lifecycle runner compares&quot;)</span>
+<span class="nc" id="L175">                .isNotEmpty()</span>
+<span class="nc" id="L176">                .isSubsetOf(wireNames);</span>
+<span class="nc" id="L177">    }</span>
+
+    @Test
+    void lifecycleRunnerEvaluatesTheStatusFlagWhereTheClientDoes() throws IOException {
+        // given
+<span class="nc" id="L182">        String api = Files.readString(API_MODULE);</span>
+<span class="nc" id="L183">        String runner = Files.readString(LIFECYCLE_RUNNER);</span>
+
+        // when
+<span class="nc" id="L186">        String flagsEndpoint = TelemetryDistribution.PRODUCTION_ENDPOINT</span>
+<span class="nc" id="L187">                .resolve(TelemetryErasureClient.FLAGS_PATH)</span>
+<span class="nc" id="L188">                .toString();</span>
+
+        // then
+<span class="nc" id="L191">        assertThat(api)</span>
+<span class="nc" id="L192">                .contains(&quot;new URL(\&quot;&quot; + TelemetryErasureClient.FLAGS_PATH + &quot;\&quot;, DEFAULT_CAPTURE_ENDPOINT)&quot;)</span>
+<span class="nc" id="L193">                .contains(&quot;DEFAULT_CAPTURE_ENDPOINT = \&quot;&quot; + TelemetryDistribution.PRODUCTION_ENDPOINT + &quot;\&quot;&quot;)</span>
+<span class="nc" id="L194">                .contains(&quot;STATUS_DISTINCT_ID = \&quot;&quot; + TelemetryErasureClient.STATUS_DISTINCT_ID + &quot;\&quot;&quot;);</span>
+<span class="nc" id="L195">        assertThat(runner)</span>
+<span class="nc" id="L196">                .contains(&quot;fetch(DEFAULT_FLAGS_ENDPOINT, &quot;)</span>
+<span class="nc" id="L197">                .contains(&quot;distinct_id: STATUS_DISTINCT_ID, flag_keys_to_evaluate&quot;);</span>
+<span class="nc" id="L198">        assertThat(flagsEndpoint).isEqualTo(&quot;https://eu.i.posthog.com/flags?v=2&quot;);</span>
+<span class="nc" id="L199">    }</span>
+
+    private static List&lt;String&gt; statuses(Pattern pattern, String text) {
+<span class="nc" id="L202">        List&lt;String&gt; found = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L203">        Matcher matcher = pattern.matcher(text);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">        while (matcher.find()) {</span>
+<span class="nc" id="L205">            found.add(matcher.group(1));</span>
+        }
+<span class="nc" id="L207">        return found;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

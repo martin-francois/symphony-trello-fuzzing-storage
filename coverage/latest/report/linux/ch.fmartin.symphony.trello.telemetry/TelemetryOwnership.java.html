@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TelemetryOwnership.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">TelemetryOwnership.java</span></div><h1>TelemetryOwnership.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.UUID;
+import org.jspecify.annotations.Nullable;
+
+/// The credential survives erasure; a completed reporting period never sends another heartbeat.
+public record TelemetryOwnership(
+        @JsonProperty(&quot;credential&quot;) TelemetryCredential credential,
+        @JsonProperty(&quot;period&quot;) UUID period,
+        @JsonProperty(&quot;used&quot;) boolean used,
+        @JsonProperty(&quot;drain_until&quot;) @Nullable Instant drainUntil,
+        @JsonProperty(&quot;erasure&quot;) @Nullable Erasure erasure) {
+<span class="nc" id="L17">    public TelemetryOwnership {</span>
+<span class="nc" id="L18">        Objects.requireNonNull(credential, &quot;credential&quot;);</span>
+<span class="nc" id="L19">        requireRandom(period);</span>
+<span class="nc" id="L20">    }</span>
+
+    /// PostHog can store an accepted capture well after answering it. An erasure lookup waits this
+    /// long after the drain deadline, so a first heartbeat still in ingestion is not mistaken for an
+    /// empty period that completes without deleting it.
+<span class="nc" id="L25">    static final Duration INGESTION_GRACE = Duration.ofHours(1);</span>
+
+    public static TelemetryOwnership issued(TelemetryCredential credential) {
+<span class="nc" id="L28">        return new TelemetryOwnership(credential, UUID.randomUUID(), false, null, null);</span>
+    }
+
+    /// Joins the installation ID and the reporting period; HeartbeatEvent splits on the same character.
+    static final char ANALYTICS_ID_SEPARATOR = '.';
+
+    public String analyticsId() {
+<span class="nc" id="L35">        return credential.installationId() + String.valueOf(ANALYTICS_ID_SEPARATOR) + period;</span>
+    }
+
+    public TelemetryOwnership markUsed() {
+<span class="nc" id="L39">        return new TelemetryOwnership(credential, period, true, drainUntil, erasure);</span>
+    }
+
+    public TelemetryOwnership markDispatched(Instant expiresAt) {
+<span class="nc" id="L43">        return new TelemetryOwnership(credential, period, true, drainedAt(expiresAt), erasure);</span>
+    }
+
+    /// The later of the stored drain deadline and the given instant.
+    public Instant drainedAt(Instant instant) {
+<span class="nc bnc" id="L48" title="All 4 branches missed.">        return drainUntil != null &amp;&amp; drainUntil.isAfter(instant) ? drainUntil : instant;</span>
+    }
+
+    /// The earliest time an erasure may look up this period's profile.
+    public Instant settledAt(Instant now) {
+<span class="nc bnc" id="L53" title="All 2 branches missed.">        if (drainUntil == null) {</span>
+<span class="nc" id="L54">            return now;</span>
+        }
+<span class="nc" id="L56">        Instant settled = drainUntil.plus(INGESTION_GRACE);</span>
+<span class="nc bnc" id="L57" title="All 2 branches missed.">        return settled.isAfter(now) ? settled : now;</span>
+    }
+
+    public boolean settled(Instant now) {
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        return !settledAt(now).isAfter(now);</span>
+    }
+
+    public TelemetryOwnership withErasure(Erasure next) {
+<span class="nc" id="L65">        return new TelemetryOwnership(credential, period, used, drainUntil, next);</span>
+    }
+
+    public boolean blocksReporting() {
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        return erasure != null;</span>
+    }
+
+    public TelemetryOwnership resume() {
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (erasure == null) {</span>
+<span class="nc" id="L74">            return this;</span>
+        }
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (erasure.phase().inProgress()) {</span>
+<span class="nc" id="L77">            throw new IllegalStateException(&quot;erasure is still in progress&quot;);</span>
+        }
+<span class="nc" id="L79">        return issued(credential);</span>
+    }
+
+<span class="nc" id="L82">    public enum Phase implements WireVocabulary {</span>
+<span class="nc" id="L83">        REQUESTED(&quot;pending&quot;),</span>
+<span class="nc" id="L84">        ACCEPTED(&quot;accepted&quot;),</span>
+<span class="nc" id="L85">        COMPLETE(&quot;complete&quot;),</span>
+        /// PostHog reported the deletion verified, yet the service still counted a report. A verified
+        /// request cannot be queued again, so the leftover goes to the maintainer, not to a retry.
+<span class="nc" id="L88">        INCOMPLETE(&quot;incomplete&quot;),</span>
+<span class="nc" id="L89">        REFUSED(&quot;refused&quot;);</span>
+
+        private final String wireName;
+
+<span class="nc" id="L93">        Phase(String wireName) {</span>
+<span class="nc" id="L94">            this.wireName = wireName;</span>
+<span class="nc" id="L95">        }</span>
+
+        /// The status variant the erasure service publishes for this phase; local state stores the
+        /// constant name instead.
+        @Override
+        public String wireName() {
+<span class="nc" id="L101">            return wireName;</span>
+        }
+
+        /// Whether the provider may still act on the request; complete, incomplete and refused are
+        /// final.
+        public boolean inProgress() {
+<span class="nc bnc" id="L107" title="All 4 branches missed.">            return this == REQUESTED || this == ACCEPTED;</span>
+        }
+    }
+
+    public record Erasure(
+            @JsonProperty(&quot;operation&quot;) UUID operation,
+            @JsonProperty(&quot;requested_at&quot;) Instant requestedAt,
+            @JsonProperty(&quot;not_before&quot;) Instant notBefore,
+            @JsonProperty(&quot;phase&quot;) Phase phase) {
+<span class="nc" id="L116">        public Erasure {</span>
+<span class="nc" id="L117">            requireRandom(operation);</span>
+<span class="nc" id="L118">            Objects.requireNonNull(requestedAt, &quot;requestedAt&quot;);</span>
+<span class="nc" id="L119">            Objects.requireNonNull(notBefore, &quot;notBefore&quot;);</span>
+<span class="nc" id="L120">            Objects.requireNonNull(phase, &quot;phase&quot;);</span>
+<span class="nc" id="L121">        }</span>
+
+        public Erasure next(Phase next, Instant retryAt) {
+<span class="nc" id="L124">            return new Erasure(operation, requestedAt, retryAt, next);</span>
+        }
+    }
+
+    private static void requireRandom(UUID value) {
+<span class="nc bnc" id="L129" title="All 2 branches missed.">        if (!TelemetryCredential.isRandom(value)) {</span>
+<span class="nc" id="L130">            throw new IllegalArgumentException(&quot;ownership state requires a random UUID&quot;);</span>
+        }
+<span class="nc" id="L132">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

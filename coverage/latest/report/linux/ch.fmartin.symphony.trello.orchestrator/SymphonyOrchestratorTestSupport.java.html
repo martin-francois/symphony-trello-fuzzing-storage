@@ -20,6 +20,7 @@ import ch.fmartin.symphony.trello.domain.BlockerRef;
 import ch.fmartin.symphony.trello.domain.Card;
 import ch.fmartin.symphony.trello.prompt.PromptRenderer;
 import ch.fmartin.symphony.trello.testsupport.BoundedWait;
+import ch.fmartin.symphony.trello.testsupport.MutableClock;
 import ch.fmartin.symphony.trello.time.ApplicationClock;
 import ch.fmartin.symphony.trello.tracker.CardLookupResult;
 import ch.fmartin.symphony.trello.tracker.RateLimitPressure;
@@ -39,7 +40,6 @@ import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -735,389 +735,367 @@ final class SymphonyOrchestratorTestSupport {
 <span class="nc" id="L735">    }</span>
 
     /// Pauses an operation inside a test hook until the test resumes it, and remembers the paused
-    /// thread so the test can resume it only once a competing operation is blocked behind it.
+    /// thread. The test resumes it either once a competing operation is blocked behind it
+    /// ([#resumeWhenContendedOr(BooleanSupplier)]) or right away when the competitor has already
+    /// returned ([#resume()]).
     static final class PausePoint {
         private final String pausedOperation;
-<span class="nc" id="L741">        private final CountDownLatch paused = new CountDownLatch(1);</span>
-<span class="nc" id="L742">        private final CountDownLatch resume = new CountDownLatch(1);</span>
-<span class="nc" id="L743">        private final AtomicReference&lt;Thread&gt; pausedThread = new AtomicReference&lt;&gt;();</span>
+<span class="nc" id="L743">        private final CountDownLatch paused = new CountDownLatch(1);</span>
+<span class="nc" id="L744">        private final CountDownLatch resume = new CountDownLatch(1);</span>
+<span class="nc" id="L745">        private final AtomicReference&lt;Thread&gt; pausedThread = new AtomicReference&lt;&gt;();</span>
 
-<span class="nc" id="L745">        PausePoint(String pausedOperation) {</span>
-<span class="nc" id="L746">            this.pausedOperation = pausedOperation;</span>
-<span class="nc" id="L747">        }</span>
+<span class="nc" id="L747">        PausePoint(String pausedOperation) {</span>
+<span class="nc" id="L748">            this.pausedOperation = pausedOperation;</span>
+<span class="nc" id="L749">        }</span>
 
         /// Runs on the operation's thread. Once the test resumed, later calls return at once.
         void pause() {
-<span class="nc" id="L751">            pausedThread.compareAndSet(null, Thread.currentThread());</span>
-<span class="nc" id="L752">            paused.countDown();</span>
-<span class="nc" id="L753">            awaitRelease(resume, pausedOperation);</span>
-<span class="nc" id="L754">        }</span>
+<span class="nc" id="L753">            pausedThread.compareAndSet(null, Thread.currentThread());</span>
+<span class="nc" id="L754">            paused.countDown();</span>
+<span class="nc" id="L755">            awaitRelease(resume, pausedOperation);</span>
+<span class="nc" id="L756">        }</span>
 
         void awaitPaused() throws InterruptedException {
-<span class="nc" id="L757">            assertThat(paused.await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
-<span class="nc" id="L758">                    .as(&quot;%s should pause within %d seconds&quot;, pausedOperation, WAIT_TIMEOUT.toSeconds())</span>
-<span class="nc" id="L759">                    .isTrue();</span>
-<span class="nc" id="L760">        }</span>
+<span class="nc" id="L759">            assertThat(paused.await(WAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))</span>
+<span class="nc" id="L760">                    .as(&quot;%s should pause within %d seconds&quot;, pausedOperation, WAIT_TIMEOUT.toSeconds())</span>
+<span class="nc" id="L761">                    .isTrue();</span>
+<span class="nc" id="L762">        }</span>
 
         /// Resumes the paused operation once another thread waits for a lock it holds, or once the
         /// event that lock prevents has already happened, as `waitUntilContendedOr` describes.
         void resumeWhenContendedOr(BooleanSupplier forbiddenEvent) throws InterruptedException {
             try {
-<span class="nc" id="L766">                waitUntilContendedOr(pausedThread.get(), forbiddenEvent);</span>
+<span class="nc" id="L768">                waitUntilContendedOr(pausedThread.get(), forbiddenEvent);</span>
             } finally {
-<span class="nc" id="L768">                resume.countDown();</span>
+<span class="nc" id="L770">                resume.countDown();</span>
             }
-<span class="nc" id="L770">        }</span>
+<span class="nc" id="L772">        }</span>
+
+        /// Resumes the paused operation at once, for a competing operation that already returned.
+        void resume() {
+<span class="nc" id="L776">            resume.countDown();</span>
+<span class="nc" id="L777">        }</span>
+
+        Thread pausedThread() {
+<span class="nc" id="L780">            return pausedThread.get();</span>
+        }
     }
 
     static boolean containsRetryingCard(RuntimeSnapshot snapshot, String cardIdentifier) {
-<span class="nc" id="L774">        return snapshot.retrying().stream().anyMatch(row -&gt; row.cardIdentifier().equals(cardIdentifier));</span>
+<span class="nc" id="L785">        return snapshot.retrying().stream().anyMatch(row -&gt; row.cardIdentifier().equals(cardIdentifier));</span>
     }
 
     static void blockUntilInterruptedOrTimedOut(Duration timeout) throws InterruptedException {
-<span class="nc" id="L778">        new CountDownLatch(1).await(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
-<span class="nc" id="L779">    }</span>
+<span class="nc" id="L789">        new CountDownLatch(1).await(timeout.toMillis(), TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L790">    }</span>
 
-<span class="nc" id="L781">    record ScopedRelease(String endpoint, String boardId, Path workspaceRoot, String cardId) {}</span>
+<span class="nc" id="L792">    record ScopedRelease(String endpoint, String boardId, Path workspaceRoot, String cardId) {}</span>
 
-<span class="nc" id="L783">    static final class ScopedTracker implements TrackerClient {</span>
-<span class="nc" id="L784">        final Map&lt;String, List&lt;Card&gt;&gt; candidatesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
-<span class="nc" id="L785">        final Map&lt;String, Map&lt;String, CardLookupResult&gt;&gt; statesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
-<span class="nc" id="L786">        final List&lt;String&gt; candidateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L787">        final List&lt;String&gt; stateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L788">        final List&lt;ScopedRelease&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L794">    static final class ScopedTracker implements TrackerClient {</span>
+<span class="nc" id="L795">        final Map&lt;String, List&lt;Card&gt;&gt; candidatesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L796">        final Map&lt;String, Map&lt;String, CardLookupResult&gt;&gt; statesByTarget = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L797">        final List&lt;String&gt; candidateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L798">        final List&lt;String&gt; stateFetchTargets = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L799">        final List&lt;ScopedRelease&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
 
         void setCandidates(String endpoint, String boardId, List&lt;Card&gt; candidates) {
-<span class="nc" id="L791">            String target = targetLabel(endpoint, boardId);</span>
-<span class="nc" id="L792">            candidatesByTarget.put(target, List.copyOf(candidates));</span>
-<span class="nc" id="L793">            Map&lt;String, CardLookupResult&gt; states = new ConcurrentHashMap&lt;&gt;();</span>
-<span class="nc" id="L794">            candidates.forEach(card -&gt; states.put(card.id(), new CardLookupResult.Found(card)));</span>
-<span class="nc" id="L795">            statesByTarget.put(target, states);</span>
-<span class="nc" id="L796">        }</span>
+<span class="nc" id="L802">            String target = targetLabel(endpoint, boardId);</span>
+<span class="nc" id="L803">            candidatesByTarget.put(target, List.copyOf(candidates));</span>
+<span class="nc" id="L804">            Map&lt;String, CardLookupResult&gt; states = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L805">            candidates.forEach(card -&gt; states.put(card.id(), new CardLookupResult.Found(card)));</span>
+<span class="nc" id="L806">            statesByTarget.put(target, states);</span>
+<span class="nc" id="L807">        }</span>
 
         void setCardState(String endpoint, String boardId, Card card) {
-<span class="nc" id="L799">            states(endpoint, boardId).put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L800">        }</span>
+<span class="nc" id="L810">            states(endpoint, boardId).put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L811">        }</span>
 
         void removeCardState(String endpoint, String boardId, String cardId) {
-<span class="nc" id="L803">            states(endpoint, boardId).remove(cardId);</span>
-<span class="nc" id="L804">        }</span>
+<span class="nc" id="L814">            states(endpoint, boardId).remove(cardId);</span>
+<span class="nc" id="L815">        }</span>
 
         Map&lt;String, CardLookupResult&gt; states(String endpoint, String boardId) {
-<span class="nc" id="L807">            return statesByTarget.computeIfAbsent(targetLabel(endpoint, boardId), ignored -&gt; new ConcurrentHashMap&lt;&gt;());</span>
+<span class="nc" id="L818">            return statesByTarget.computeIfAbsent(targetLabel(endpoint, boardId), ignored -&gt; new ConcurrentHashMap&lt;&gt;());</span>
         }
 
         static String target(EffectiveConfig config) {
-<span class="nc" id="L811">            return targetLabel(config.tracker().endpoint(), config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L822">            return targetLabel(config.tracker().endpoint(), config.tracker().resolvedBoardId());</span>
         }
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L816">            return config.tracker().boardId();</span>
+<span class="nc" id="L827">            return config.tracker().boardId();</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L821">            String target = target(config);</span>
-<span class="nc" id="L822">            candidateFetchTargets.add(target);</span>
-<span class="nc" id="L823">            return candidatesByTarget.getOrDefault(target, List.of());</span>
+<span class="nc" id="L832">            String target = target(config);</span>
+<span class="nc" id="L833">            candidateFetchTargets.add(target);</span>
+<span class="nc" id="L834">            return candidatesByTarget.getOrDefault(target, List.of());</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L828">            return List.of();</span>
+<span class="nc" id="L839">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L833">            String target = target(config);</span>
-<span class="nc" id="L834">            stateFetchTargets.add(target);</span>
-<span class="nc" id="L835">            Map&lt;String, CardLookupResult&gt; states = statesByTarget.getOrDefault(target, Map.of());</span>
-<span class="nc" id="L836">            Map&lt;String, CardLookupResult&gt; result = new LinkedHashMap&lt;&gt;();</span>
-<span class="nc" id="L837">            cardIds.forEach(</span>
-<span class="nc" id="L838">                    cardId -&gt; result.put(cardId, states.getOrDefault(cardId, new CardLookupResult.Missing(cardId))));</span>
-<span class="nc" id="L839">            return result;</span>
+<span class="nc" id="L844">            String target = target(config);</span>
+<span class="nc" id="L845">            stateFetchTargets.add(target);</span>
+<span class="nc" id="L846">            Map&lt;String, CardLookupResult&gt; states = statesByTarget.getOrDefault(target, Map.of());</span>
+<span class="nc" id="L847">            Map&lt;String, CardLookupResult&gt; result = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L848">            cardIds.forEach(</span>
+<span class="nc" id="L849">                    cardId -&gt; result.put(cardId, states.getOrDefault(cardId, new CardLookupResult.Missing(cardId))));</span>
+<span class="nc" id="L850">            return result;</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesForPromptByIds(
                 EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L845">            return fetchCardStatesByIds(config, cardIds);</span>
+<span class="nc" id="L856">            return fetchCardStatesByIds(config, cardIds);</span>
         }
 
         @Override
         public Card prepareForDispatch(EffectiveConfig config, Card card) {
-<span class="nc bnc" id="L850" title="All 2 branches missed.">            String state = config.tracker().inProgressState().isBlank()</span>
-<span class="nc" id="L851">                    ? card.state()</span>
-<span class="nc" id="L852">                    : config.tracker().inProgressState();</span>
-<span class="nc" id="L853">            Card prepared = cardOnBoard(</span>
-<span class="nc" id="L854">                    card.id(), card.identifier(), state, config.tracker().resolvedBoardId());</span>
-<span class="nc" id="L855">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), prepared);</span>
-<span class="nc" id="L856">            return prepared;</span>
+<span class="nc bnc" id="L861" title="All 2 branches missed.">            String state = config.tracker().inProgressState().isBlank()</span>
+<span class="nc" id="L862">                    ? card.state()</span>
+<span class="nc" id="L863">                    : config.tracker().inProgressState();</span>
+<span class="nc" id="L864">            Card prepared = cardOnBoard(</span>
+<span class="nc" id="L865">                    card.id(), card.identifier(), state, config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L866">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), prepared);</span>
+<span class="nc" id="L867">            return prepared;</span>
         }
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card, Card dispatchSource) {
-<span class="nc" id="L861">            releases.add(new ScopedRelease(</span>
-<span class="nc" id="L862">                    config.tracker().endpoint(),</span>
-<span class="nc" id="L863">                    config.tracker().resolvedBoardId(),</span>
-<span class="nc" id="L864">                    config.workspace().root(),</span>
-<span class="nc" id="L865">                    card.id()));</span>
-<span class="nc" id="L866">            Card released = cardOnBoard(</span>
-<span class="nc" id="L867">                    card.id(),</span>
-<span class="nc" id="L868">                    card.identifier(),</span>
-<span class="nc" id="L869">                    dispatchSource.state(),</span>
-<span class="nc" id="L870">                    config.tracker().resolvedBoardId());</span>
-<span class="nc" id="L871">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), released);</span>
-<span class="nc" id="L872">        }</span>
+<span class="nc" id="L872">            releases.add(new ScopedRelease(</span>
+<span class="nc" id="L873">                    config.tracker().endpoint(),</span>
+<span class="nc" id="L874">                    config.tracker().resolvedBoardId(),</span>
+<span class="nc" id="L875">                    config.workspace().root(),</span>
+<span class="nc" id="L876">                    card.id()));</span>
+<span class="nc" id="L877">            Card released = cardOnBoard(</span>
+<span class="nc" id="L878">                    card.id(),</span>
+<span class="nc" id="L879">                    card.identifier(),</span>
+<span class="nc" id="L880">                    dispatchSource.state(),</span>
+<span class="nc" id="L881">                    config.tracker().resolvedBoardId());</span>
+<span class="nc" id="L882">            setCardState(config.tracker().endpoint(), config.tracker().resolvedBoardId(), released);</span>
+<span class="nc" id="L883">        }</span>
     }
 
     static final class FakeTracker implements TrackerClient {
         volatile List&lt;Card&gt; candidates;
         volatile Map&lt;String, CardLookupResult&gt; cardStates;
-<span class="nc" id="L878">        volatile Map&lt;String, CardLookupResult&gt; promptCardStateOverrides = Map.of();</span>
-<span class="nc" id="L879">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
-<span class="nc" id="L880">        final AtomicInteger boardResolutions = new AtomicInteger();</span>
-<span class="nc" id="L881">        final AtomicInteger stateFetches = new AtomicInteger();</span>
-<span class="nc" id="L882">        final AtomicInteger promptStateFetches = new AtomicInteger();</span>
-<span class="nc" id="L883">        final AtomicInteger prepareForDispatchCalls = new AtomicInteger();</span>
-<span class="nc" id="L884">        final List&lt;String&gt; releasedCards = new CopyOnWriteArrayList&lt;&gt;();</span>
-<span class="nc" id="L885">        final List&lt;ReleaseRecord&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L889">        volatile Map&lt;String, CardLookupResult&gt; promptCardStateOverrides = Map.of();</span>
+<span class="nc" id="L890">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
+<span class="nc" id="L891">        final AtomicInteger boardResolutions = new AtomicInteger();</span>
+<span class="nc" id="L892">        final AtomicInteger stateFetches = new AtomicInteger();</span>
+<span class="nc" id="L893">        final AtomicInteger promptStateFetches = new AtomicInteger();</span>
+<span class="nc" id="L894">        final AtomicInteger prepareForDispatchCalls = new AtomicInteger();</span>
+<span class="nc" id="L895">        final List&lt;String&gt; releasedCards = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L896">        final List&lt;ReleaseRecord&gt; releases = new CopyOnWriteArrayList&lt;&gt;();</span>
         volatile Card preparedCard;
         volatile RuntimeException resolveBoardIdFailure;
         volatile RuntimeException prepareForDispatchFailure;
-<span class="nc" id="L889">        volatile Runnable stateFetchHook = () -&gt; {};</span>
+<span class="nc" id="L900">        volatile Runnable stateFetchHook = () -&gt; {};</span>
         volatile boolean resolveConfiguredBoardId;
-<span class="nc" id="L891">        final AtomicReference&lt;RateLimitPressure&gt; rateLimitPressure = new AtomicReference&lt;&gt;(RateLimitPressure.NONE);</span>
+<span class="nc" id="L902">        final AtomicReference&lt;RateLimitPressure&gt; rateLimitPressure = new AtomicReference&lt;&gt;(RateLimitPressure.NONE);</span>
 
-<span class="nc" id="L893">        FakeTracker(List&lt;Card&gt; candidates) {</span>
-<span class="nc" id="L894">            setCandidates(candidates);</span>
-<span class="nc" id="L895">        }</span>
+<span class="nc" id="L904">        FakeTracker(List&lt;Card&gt; candidates) {</span>
+<span class="nc" id="L905">            setCandidates(candidates);</span>
+<span class="nc" id="L906">        }</span>
 
         void setCandidates(List&lt;Card&gt; candidates) {
-<span class="nc" id="L898">            setCandidateList(candidates);</span>
-<span class="nc" id="L899">            this.cardStates = candidates.stream().collect(toImmutableMap(Card::id, CardLookupResult.Found::new));</span>
-<span class="nc" id="L900">        }</span>
+<span class="nc" id="L909">            setCandidateList(candidates);</span>
+<span class="nc" id="L910">            this.cardStates = candidates.stream().collect(toImmutableMap(Card::id, CardLookupResult.Found::new));</span>
+<span class="nc" id="L911">        }</span>
 
         void setCandidateList(List&lt;Card&gt; candidates) {
-<span class="nc" id="L903">            this.candidates = new ArrayList&lt;&gt;(candidates);</span>
-<span class="nc" id="L904">        }</span>
+<span class="nc" id="L914">            this.candidates = new ArrayList&lt;&gt;(candidates);</span>
+<span class="nc" id="L915">        }</span>
 
         void setCardState(Card card) {
-<span class="nc" id="L907">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.cardStates);</span>
-<span class="nc" id="L908">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L909">            this.cardStates = updated;</span>
-<span class="nc" id="L910">        }</span>
+<span class="nc" id="L918">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.cardStates);</span>
+<span class="nc" id="L919">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L920">            this.cardStates = updated;</span>
+<span class="nc" id="L921">        }</span>
 
         void setPromptCardState(Card card) {
-<span class="nc" id="L913">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.promptCardStateOverrides);</span>
-<span class="nc" id="L914">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
-<span class="nc" id="L915">            this.promptCardStateOverrides = Map.copyOf(updated);</span>
-<span class="nc" id="L916">        }</span>
+<span class="nc" id="L924">            Map&lt;String, CardLookupResult&gt; updated = new LinkedHashMap&lt;&gt;(this.promptCardStateOverrides);</span>
+<span class="nc" id="L925">            updated.put(card.id(), new CardLookupResult.Found(card));</span>
+<span class="nc" id="L926">            this.promptCardStateOverrides = Map.copyOf(updated);</span>
+<span class="nc" id="L927">        }</span>
 
         Card cardState(String cardId) {
-<span class="nc" id="L919">            return ((CardLookupResult.Found) cardStates.get(cardId)).card();</span>
+<span class="nc" id="L930">            return ((CardLookupResult.Found) cardStates.get(cardId)).card();</span>
         }
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L924">            boardResolutions.incrementAndGet();</span>
-<span class="nc bnc" id="L925" title="All 2 branches missed.">            if (resolveBoardIdFailure != null) {</span>
-<span class="nc" id="L926">                throw resolveBoardIdFailure;</span>
+<span class="nc" id="L935">            boardResolutions.incrementAndGet();</span>
+<span class="nc bnc" id="L936" title="All 2 branches missed.">            if (resolveBoardIdFailure != null) {</span>
+<span class="nc" id="L937">                throw resolveBoardIdFailure;</span>
             }
-<span class="nc bnc" id="L928" title="All 2 branches missed.">            return resolveConfiguredBoardId ? config.tracker().boardId() : &quot;board-1&quot;;</span>
+<span class="nc bnc" id="L939" title="All 2 branches missed.">            return resolveConfiguredBoardId ? config.tracker().boardId() : &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L933">            candidateFetches.incrementAndGet();</span>
-<span class="nc" id="L934">            return candidates;</span>
+<span class="nc" id="L944">            candidateFetches.incrementAndGet();</span>
+<span class="nc" id="L945">            return candidates;</span>
         }
 
         @Override
         public RateLimitPressure drainRateLimitPressure() {
-<span class="nc" id="L939">            return rateLimitPressure.getAndSet(RateLimitPressure.NONE);</span>
+<span class="nc" id="L950">            return rateLimitPressure.getAndSet(RateLimitPressure.NONE);</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L944">            return List.of();</span>
+<span class="nc" id="L955">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L949">            stateFetches.incrementAndGet();</span>
-<span class="nc" id="L950">            stateFetchHook.run();</span>
-<span class="nc" id="L951">            return cardStates.entrySet().stream()</span>
-<span class="nc" id="L952">                    .filter(entry -&gt; cardIds.contains(entry.getKey()))</span>
-<span class="nc" id="L953">                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));</span>
+<span class="nc" id="L960">            stateFetches.incrementAndGet();</span>
+<span class="nc" id="L961">            stateFetchHook.run();</span>
+<span class="nc" id="L962">            return cardStates.entrySet().stream()</span>
+<span class="nc" id="L963">                    .filter(entry -&gt; cardIds.contains(entry.getKey()))</span>
+<span class="nc" id="L964">                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesForPromptByIds(
                 EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L959">            promptStateFetches.incrementAndGet();</span>
-<span class="nc" id="L960">            Map&lt;String, CardLookupResult&gt; results = new LinkedHashMap&lt;&gt;(fetchCardStatesByIds(config, cardIds));</span>
-<span class="nc" id="L961">            cardIds.forEach(cardId -&gt; {</span>
-<span class="nc" id="L962">                CardLookupResult promptOverride = promptCardStateOverrides.get(cardId);</span>
-<span class="nc bnc" id="L963" title="All 2 branches missed.">                if (promptOverride != null) {</span>
-<span class="nc" id="L964">                    results.put(cardId, promptOverride);</span>
+<span class="nc" id="L970">            promptStateFetches.incrementAndGet();</span>
+<span class="nc" id="L971">            Map&lt;String, CardLookupResult&gt; results = new LinkedHashMap&lt;&gt;(fetchCardStatesByIds(config, cardIds));</span>
+<span class="nc" id="L972">            cardIds.forEach(cardId -&gt; {</span>
+<span class="nc" id="L973">                CardLookupResult promptOverride = promptCardStateOverrides.get(cardId);</span>
+<span class="nc bnc" id="L974" title="All 2 branches missed.">                if (promptOverride != null) {</span>
+<span class="nc" id="L975">                    results.put(cardId, promptOverride);</span>
                 }
-<span class="nc" id="L966">            });</span>
-<span class="nc" id="L967">            return Map.copyOf(results);</span>
+<span class="nc" id="L977">            });</span>
+<span class="nc" id="L978">            return Map.copyOf(results);</span>
         }
 
         @Override
         public Card prepareForDispatch(EffectiveConfig config, Card card) {
-<span class="nc" id="L972">            prepareForDispatchCalls.incrementAndGet();</span>
-<span class="nc bnc" id="L973" title="All 2 branches missed.">            if (preparedCard == null) {</span>
-<span class="nc" id="L974">                return card;</span>
+<span class="nc" id="L983">            prepareForDispatchCalls.incrementAndGet();</span>
+<span class="nc bnc" id="L984" title="All 2 branches missed.">            if (preparedCard == null) {</span>
+<span class="nc" id="L985">                return card;</span>
             }
-<span class="nc" id="L976">            setCardState(preparedCard);</span>
-<span class="nc bnc" id="L977" title="All 2 branches missed.">            if (prepareForDispatchFailure != null) {</span>
-<span class="nc" id="L978">                throw prepareForDispatchFailure;</span>
+<span class="nc" id="L987">            setCardState(preparedCard);</span>
+<span class="nc bnc" id="L988" title="All 2 branches missed.">            if (prepareForDispatchFailure != null) {</span>
+<span class="nc" id="L989">                throw prepareForDispatchFailure;</span>
             }
-<span class="nc" id="L980">            return preparedCard;</span>
+<span class="nc" id="L991">            return preparedCard;</span>
         }
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card) {
-<span class="nc" id="L985">            releaseFromDispatch(config, card, card);</span>
-<span class="nc" id="L986">        }</span>
+<span class="nc" id="L996">            releaseFromDispatch(config, card, card);</span>
+<span class="nc" id="L997">        }</span>
 
         @Override
         public void releaseFromDispatch(EffectiveConfig config, Card card, Card dispatchSource) {
-<span class="nc" id="L990">            releases.add(new ReleaseRecord(card.state(), dispatchSource.state()));</span>
-<span class="nc" id="L991">            releasedCards.add(card.identifier());</span>
-<span class="nc bnc" id="L992" title="All 2 branches missed.">            String releaseState = card.state().equals(dispatchSource.state()) ? &quot;Todo&quot; : dispatchSource.state();</span>
-<span class="nc" id="L993">            setCardState(TestCards.card(card.id(), card.identifier(), releaseState));</span>
-<span class="nc" id="L994">        }</span>
+<span class="nc" id="L1001">            releases.add(new ReleaseRecord(card.state(), dispatchSource.state()));</span>
+<span class="nc" id="L1002">            releasedCards.add(card.identifier());</span>
+<span class="nc bnc" id="L1003" title="All 2 branches missed.">            String releaseState = card.state().equals(dispatchSource.state()) ? &quot;Todo&quot; : dispatchSource.state();</span>
+<span class="nc" id="L1004">            setCardState(TestCards.card(card.id(), card.identifier(), releaseState));</span>
+<span class="nc" id="L1005">        }</span>
     }
 
     static final class ThrowingWorkspaceManager extends WorkspaceManager {
-<span class="nc" id="L998">        final AtomicInteger removalAttempts = new AtomicInteger();</span>
+<span class="nc" id="L1009">        final AtomicInteger removalAttempts = new AtomicInteger();</span>
 
         ThrowingWorkspaceManager() {
-<span class="nc" id="L1001">            super(new HookRunner());</span>
-<span class="nc" id="L1002">        }</span>
+<span class="nc" id="L1012">            super(new HookRunner());</span>
+<span class="nc" id="L1013">        }</span>
 
         @Override
         public void removeForIdentifierIfPresent(String cardIdentifier, EffectiveConfig config) {
-<span class="nc" id="L1006">            removalAttempts.incrementAndGet();</span>
-<span class="nc" id="L1007">            throw new IllegalStateException(&quot;workspace cleanup failed&quot;);</span>
+<span class="nc" id="L1017">            removalAttempts.incrementAndGet();</span>
+<span class="nc" id="L1018">            throw new IllegalStateException(&quot;workspace cleanup failed&quot;);</span>
         }
     }
 
-<span class="nc" id="L1011">    static final class StartBlockingTracker implements TrackerClient {</span>
-<span class="nc" id="L1012">        final CountDownLatch terminalFetchStarted = new CountDownLatch(1);</span>
-<span class="nc" id="L1013">        final CountDownLatch releaseTerminalFetch = new CountDownLatch(1);</span>
+<span class="nc" id="L1022">    static final class StartBlockingTracker implements TrackerClient {</span>
+<span class="nc" id="L1023">        final CountDownLatch terminalFetchStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1024">        final CountDownLatch releaseTerminalFetch = new CountDownLatch(1);</span>
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L1017">            return &quot;board-1&quot;;</span>
+<span class="nc" id="L1028">            return &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc" id="L1022">            return List.of();</span>
+<span class="nc" id="L1033">            return List.of();</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L1027">            terminalFetchStarted.countDown();</span>
-<span class="nc" id="L1028">            awaitRelease(releaseTerminalFetch, &quot;the blocked terminal-card fetch&quot;);</span>
-<span class="nc" id="L1029">            return List.of();</span>
+<span class="nc" id="L1038">            terminalFetchStarted.countDown();</span>
+<span class="nc" id="L1039">            awaitRelease(releaseTerminalFetch, &quot;the blocked terminal-card fetch&quot;);</span>
+<span class="nc" id="L1040">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L1034">            return Map.of();</span>
+<span class="nc" id="L1045">            return Map.of();</span>
         }
     }
 
-<span class="nc" id="L1038">    static final class BlockingTracker implements TrackerClient {</span>
-<span class="nc" id="L1039">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
-<span class="nc" id="L1040">        final CountDownLatch firstFetchStarted = new CountDownLatch(1);</span>
-<span class="nc" id="L1041">        final CountDownLatch releaseFirstFetch = new CountDownLatch(1);</span>
-<span class="nc" id="L1042">        final CompletableFuture&lt;Void&gt; firstFetchCompleted = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1049">    static final class BlockingTracker implements TrackerClient {</span>
+<span class="nc" id="L1050">        final AtomicInteger candidateFetches = new AtomicInteger();</span>
+<span class="nc" id="L1051">        final CountDownLatch firstFetchStarted = new CountDownLatch(1);</span>
+<span class="nc" id="L1052">        final CountDownLatch releaseFirstFetch = new CountDownLatch(1);</span>
+<span class="nc" id="L1053">        final CompletableFuture&lt;Void&gt; firstFetchCompleted = new CompletableFuture&lt;&gt;();</span>
 
         @Override
         public String resolveBoardId(EffectiveConfig config) {
-<span class="nc" id="L1046">            return &quot;board-1&quot;;</span>
+<span class="nc" id="L1057">            return &quot;board-1&quot;;</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchCandidateCards(EffectiveConfig config) {
-<span class="nc bnc" id="L1051" title="All 2 branches missed.">            if (candidateFetches.incrementAndGet() == 1) {</span>
-<span class="nc" id="L1052">                firstFetchStarted.countDown();</span>
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">            if (candidateFetches.incrementAndGet() == 1) {</span>
+<span class="nc" id="L1063">                firstFetchStarted.countDown();</span>
                 try {
-<span class="nc" id="L1054">                    awaitRelease(releaseFirstFetch, &quot;the first blocked candidate-card fetch&quot;, BLOCKED_WORKER_TIMEOUT);</span>
-<span class="nc" id="L1055">                    firstFetchCompleted.complete(null);</span>
-<span class="nc" id="L1056">                } catch (RuntimeException | Error failure) {</span>
-<span class="nc" id="L1057">                    firstFetchCompleted.completeExceptionally(failure);</span>
-<span class="nc" id="L1058">                    throw failure;</span>
-<span class="nc" id="L1059">                }</span>
+<span class="nc" id="L1065">                    awaitRelease(releaseFirstFetch, &quot;the first blocked candidate-card fetch&quot;, BLOCKED_WORKER_TIMEOUT);</span>
+<span class="nc" id="L1066">                    firstFetchCompleted.complete(null);</span>
+<span class="nc" id="L1067">                } catch (RuntimeException | Error failure) {</span>
+<span class="nc" id="L1068">                    firstFetchCompleted.completeExceptionally(failure);</span>
+<span class="nc" id="L1069">                    throw failure;</span>
+<span class="nc" id="L1070">                }</span>
             }
-<span class="nc" id="L1061">            return List.of();</span>
+<span class="nc" id="L1072">            return List.of();</span>
         }
 
         @Override
         public List&lt;Card&gt; fetchTerminalCards(EffectiveConfig config) {
-<span class="nc" id="L1066">            return List.of();</span>
+<span class="nc" id="L1077">            return List.of();</span>
         }
 
         @Override
         public Map&lt;String, CardLookupResult&gt; fetchCardStatesByIds(EffectiveConfig config, List&lt;String&gt; cardIds) {
-<span class="nc" id="L1071">            return Map.of();</span>
-        }
-    }
-
-    static final class MutableClock extends Clock {
-        final AtomicReference&lt;Instant&gt; now;
-        final ZoneId zone;
-
-        MutableClock(Instant now) {
-<span class="nc" id="L1080">            this(now, ZoneOffset.UTC);</span>
-<span class="nc" id="L1081">        }</span>
-
-<span class="nc" id="L1083">        MutableClock(Instant now, ZoneId zone) {</span>
-<span class="nc" id="L1084">            this.now = new AtomicReference&lt;&gt;(now);</span>
-<span class="nc" id="L1085">            this.zone = zone;</span>
-<span class="nc" id="L1086">        }</span>
-
-        void advance(Duration duration) {
-<span class="nc" id="L1089">            now.updateAndGet(instant -&gt; instant.plus(duration));</span>
-<span class="nc" id="L1090">        }</span>
-
-        @Override
-        public ZoneId getZone() {
-<span class="nc" id="L1094">            return zone;</span>
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-<span class="nc" id="L1099">            return new MutableClock(now.get(), zone);</span>
-        }
-
-        @Override
-        public Instant instant() {
-<span class="nc" id="L1104">            return now.get();</span>
+<span class="nc" id="L1082">            return Map.of();</span>
         }
     }
 
     /// Returns a chosen draw for every bound, so a test can pin the smallest or largest jitter.
-<span class="nc" id="L1109">    record FixedRandom(LongUnaryOperator drawForBound) implements RandomGenerator {</span>
+<span class="nc" id="L1087">    record FixedRandom(LongUnaryOperator drawForBound) implements RandomGenerator {</span>
         @Override
         public long nextLong() {
-<span class="nc" id="L1112">            throw new UnsupportedOperationException(&quot;the poll interval only draws bounded values&quot;);</span>
+<span class="nc" id="L1090">            throw new UnsupportedOperationException(&quot;the poll interval only draws bounded values&quot;);</span>
         }
 
         @Override
         public long nextLong(long bound) {
-<span class="nc" id="L1117">            return drawForBound.applyAsLong(bound);</span>
+<span class="nc" id="L1095">            return drawForBound.applyAsLong(bound);</span>
         }
     }
 
     private SymphonyOrchestratorTestSupport() {}
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

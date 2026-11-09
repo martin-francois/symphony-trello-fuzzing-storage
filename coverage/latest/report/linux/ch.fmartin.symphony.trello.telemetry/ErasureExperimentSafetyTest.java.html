@@ -1,0 +1,528 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ErasureExperimentSafetyTest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">ErasureExperimentSafetyTest.java</span></div><h1>ErasureExperimentSafetyTest.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
+
+import ch.fmartin.symphony.trello.telemetry.ErasureExperiment.Outcome;
+import ch.fmartin.symphony.trello.telemetry.ExperimentCheckpoint.Phase;
+import ch.fmartin.symphony.trello.testsupport.MutableClock;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/// Deterministic guards of the live erasure harness, run against an in-memory PostHog. They prove
+/// the harness refuses the wrong project, foreign identities, and missing scopes, never mistakes
+/// a queued or absent status for completion, resumes without reseeding, and keeps secrets out of
+/// everything it writes. Nothing here reaches the network.
+<span class="nc" id="L33">final class ErasureExperimentSafetyTest {</span>
+<span class="nc" id="L34">    private static final Instant START = Instant.parse(&quot;2026-09-22T09:00:00Z&quot;);</span>
+    private static final int REQUEST_BUDGET = 400;
+<span class="nc" id="L36">    private static final Duration WAIT_BUDGET = Duration.ofMinutes(15);</span>
+
+    @TempDir
+    Path tempDir;
+
+    private FakePostHog posthog;
+    private Path keyFile;
+    private MutableClock clock;
+    private ByteArrayOutputStream console;
+
+    @BeforeEach
+    void start() throws IOException {
+<span class="nc" id="L48">        posthog = new FakePostHog();</span>
+<span class="nc" id="L49">        keyFile = tempDir.resolve(&quot;key&quot;);</span>
+<span class="nc" id="L50">        Files.writeString(keyFile, FakePostHog.KEY + &quot;\n&quot;);</span>
+<span class="nc" id="L51">        clock = new MutableClock(START);</span>
+<span class="nc" id="L52">        posthog.clock = clock;</span>
+<span class="nc" id="L53">        console = new ByteArrayOutputStream();</span>
+<span class="nc" id="L54">    }</span>
+
+    @AfterEach
+    void stop() {
+<span class="nc" id="L58">        posthog.close();</span>
+<span class="nc" id="L59">    }</span>
+
+    @Test
+    void aForbiddenProjectIsRefusedBeforeAnyRequest() throws IOException {
+        // given
+<span class="nc" id="L64">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of(FakePostHog.PROJECT_ID));</span>
+
+        // when
+<span class="nc" id="L67">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L70">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L71">        assertThat(outcome.message()).contains(&quot;forbidden&quot;);</span>
+<span class="nc" id="L72">        assertThat(posthog.requests()).isEmpty();</span>
+<span class="nc" id="L73">    }</span>
+
+    @Test
+    void aProjectNameMismatchStopsBeforeAnyCapture() throws IOException {
+        // given
+<span class="nc" id="L78">        posthog.projectName = &quot;Symphony for Trello&quot;;</span>
+<span class="nc" id="L79">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L82">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L85">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L86">        assertThat(outcome.message()).contains(&quot;identity mismatch&quot;);</span>
+<span class="nc" id="L87">        assertThat(posthog.count(&quot;capture&quot;)).isZero();</span>
+<span class="nc" id="L88">    }</span>
+
+    @Test
+    void aProfileMappedToAForeignIdIsNeverDeleted() throws IOException {
+        // given
+<span class="nc" id="L93">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L94">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L95">        ExperimentCheckpoint checkpoint =</span>
+<span class="nc" id="L96">                ExperimentCheckpoint.load(binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME));</span>
+<span class="nc" id="L97">        posthog.mergedDistinctId =</span>
+<span class="nc" id="L98">                checkpoint.subject(ErasureExperiment.SUBJECT_A).distinctId();</span>
+
+        // when
+<span class="nc" id="L101">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L104">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L105">        assertThat(outcome.message()).contains(&quot;refusing&quot;);</span>
+<span class="nc" id="L106">        assertThat(posthog.count(&quot;POST /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/bulk_delete/&quot;))</span>
+<span class="nc" id="L107">                .isZero();</span>
+<span class="nc" id="L108">    }</span>
+
+    @Test
+    void aMissingScopeFailsWithoutRetriesOrDeletion() throws IOException {
+        // given
+<span class="nc" id="L113">        posthog.personsForbidden = true;</span>
+<span class="nc" id="L114">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L117">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L120">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L121">        assertThat(outcome.message()).contains(&quot;HTTP 403&quot;).contains(&quot;person:read&quot;);</span>
+<span class="nc" id="L122">        assertThat(posthog.count(&quot;POST /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/bulk_delete/&quot;))</span>
+<span class="nc" id="L123">                .isZero();</span>
+<span class="nc" id="L124">        assertThat(posthog.count(&quot;GET /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/&quot;))</span>
+<span class="nc" id="L125">                .isOne();</span>
+<span class="nc" id="L126">    }</span>
+
+    @Test
+    void anEmptyDeletionStatusIsPendingNotComplete() throws IOException {
+        // given
+<span class="nc" id="L131">        posthog.emptyDeletionStatus = true;</span>
+<span class="nc" id="L132">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L135">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L138">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L139">        assertThat(outcome.phase()).isEqualTo(Phase.ERASURE_REQUESTED);</span>
+<span class="nc" id="L140">        assertThat(outcome.message()).contains(&quot;event deletion not complete&quot;);</span>
+<span class="nc" id="L141">    }</span>
+
+    @Test
+    void aDeletionErrorFailsTheRequestPhaseSoAResumeRetriesIt() throws IOException {
+        // given
+<span class="nc" id="L146">        posthog.deletionErrors = true;</span>
+<span class="nc" id="L147">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L150">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L153">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L154">        assertThat(outcome.phase()).isEqualTo(Phase.DISABLED);</span>
+<span class="nc" id="L155">        assertThat(outcome.message()).contains(&quot;errors=1&quot;);</span>
+<span class="nc" id="L156">    }</span>
+
+    @Test
+    void aCachedQueryAnswerIsRejected() throws IOException {
+        // given
+<span class="nc" id="L161">        posthog.staleQueries = true;</span>
+<span class="nc" id="L162">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L165">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L168">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L169">        assertThat(outcome.message()).contains(&quot;cache&quot;);</span>
+<span class="nc" id="L170">    }</span>
+
+    @Test
+    void anInterruptedRunResumesFromItsCheckpointWithoutReseeding() throws IOException {
+        // given
+<span class="nc" id="L175">        posthog.completeDeletionsImmediately = false;</span>
+<span class="nc" id="L176">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L177">        Outcome first = experiment(binding).run();</span>
+<span class="nc" id="L178">        long capturesBefore = posthog.count(&quot;capture&quot;);</span>
+<span class="nc" id="L179">        ExperimentCheckpoint pending =</span>
+<span class="nc" id="L180">                ExperimentCheckpoint.load(binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME));</span>
+<span class="nc" id="L181">        posthog.completeDeletions();</span>
+
+        // when
+<span class="nc" id="L184">        Outcome second = experiment(binding).run();</span>
+<span class="nc" id="L185">        ExperimentCheckpoint done =</span>
+<span class="nc" id="L186">                ExperimentCheckpoint.load(binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME));</span>
+
+        // then
+<span class="nc" id="L189">        assertThat(first.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L190">        assertThat(first.phase()).isEqualTo(Phase.ERASURE_REQUESTED);</span>
+<span class="nc" id="L191">        assertThat(capturesBefore).isEqualTo(5);</span>
+<span class="nc" id="L192">        assertThat(second.kind()).as(&quot;second run: %s&quot;, second.message()).isNotEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L193">        assertThat(done.subject(ErasureExperiment.SUBJECT_A).oldEventUuids())</span>
+<span class="nc" id="L194">                .containsExactlyElementsOf(</span>
+<span class="nc" id="L195">                        pending.subject(ErasureExperiment.SUBJECT_A).oldEventUuids());</span>
+<span class="nc" id="L196">        assertThat(done.subject(ErasureExperiment.SUBJECT_A).distinctId())</span>
+<span class="nc" id="L197">                .isEqualTo(pending.subject(ErasureExperiment.SUBJECT_A).distinctId());</span>
+<span class="nc" id="L198">        assertThat(done.phase().compareTo(Phase.REUSE_A_SENT))</span>
+<span class="nc" id="L199">                .as(&quot;resumed past the erasure&quot;)</span>
+<span class="nc" id="L200">                .isNotNegative();</span>
+<span class="nc" id="L201">        assertThat(posthog.count(&quot;capture&quot;))</span>
+<span class="nc" id="L202">                .as(&quot;only the reuse heartbeats were added&quot;)</span>
+<span class="nc" id="L203">                .isBetween(capturesBefore + 2, capturesBefore + 4);</span>
+<span class="nc" id="L204">        assertThat(posthog.count(&quot;POST /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/bulk_delete/&quot;))</span>
+<span class="nc" id="L205">                .isBetween(1L, 2L);</span>
+<span class="nc" id="L206">    }</span>
+
+    @Test
+    void aCompleteRunPassesEveryRowAndKeepsSecretsOutOfItsOutput() throws IOException {
+        // given
+<span class="nc" id="L211">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L214">        Outcome outcome = experiment(binding).run();</span>
+<span class="nc" id="L215">        String evidence = Files.readString(binding.experimentDir().resolve(EvidenceLog.FILE_NAME));</span>
+<span class="nc" id="L216">        String summary = Files.readString(binding.experimentDir().resolve(&quot;summary.md&quot;));</span>
+<span class="nc" id="L217">        String checkpoint = Files.readString(binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME));</span>
+<span class="nc" id="L218">        String printed = console.toString(StandardCharsets.UTF_8);</span>
+
+        // then
+<span class="nc" id="L221">        assertThat(outcome.kind()).as(outcome.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L222">        assertThat(summary)</span>
+<span class="nc" id="L223">                .contains(&quot;| 8. Reused ID erasable, fixtures cleaned up | PASS |&quot;)</span>
+<span class="nc" id="L224">                .doesNotContain(&quot;FAIL&quot;);</span>
+<span class="nc" id="L225">        assertThat(List.of(evidence, summary, checkpoint, printed, outcome.message()))</span>
+<span class="nc" id="L226">                .allSatisfy(</span>
+<span class="nc" id="L227">                        text -&gt; assertThat(text).doesNotContain(FakePostHog.KEY).doesNotContain(FakePostHog.TOKEN));</span>
+<span class="nc" id="L228">        assertThat(evidence).contains(&quot;\&quot;phase\&quot;:\&quot;send\&quot;&quot;).contains(&quot;\&quot;http_status\&quot;:\&quot;202\&quot;&quot;);</span>
+<span class="nc" id="L229">        var redactor = new EvidenceLog(</span>
+<span class="nc" id="L230">                tempDir.resolve(&quot;unused&quot;), clock, List.of(() -&gt; FakePostHog.KEY, () -&gt; FakePostHog.TOKEN));</span>
+<span class="nc" id="L231">        assertThat(redactor.redact(&quot;key &quot; + FakePostHog.KEY + &quot; token &quot; + FakePostHog.TOKEN))</span>
+<span class="nc" id="L232">                .isEqualTo(&quot;key &quot; + EvidenceLog.REDACTED + &quot; token &quot; + EvidenceLog.REDACTED);</span>
+<span class="nc" id="L233">    }</span>
+
+    @Test
+    void theBindingNamesEveryMissingVariableAndRefusesAProjectToken() {
+        // given
+<span class="nc" id="L238">        Map&lt;String, String&gt; environment = Map.of(ExperimentBinding.ENABLE_VARIABLE, &quot;1&quot;);</span>
+
+        // when
+<span class="nc" id="L241">        Throwable thrown = catchThrowable(() -&gt; ExperimentBinding.fromEnvironment(environment));</span>
+
+        // then
+<span class="nc" id="L244">        assertThat(thrown)</span>
+<span class="nc" id="L245">                .isInstanceOf(IllegalStateException.class)</span>
+<span class="nc" id="L246">                .hasMessageContaining(ExperimentBinding.KEY_FILE_VARIABLE)</span>
+<span class="nc" id="L247">                .hasMessageContaining(ExperimentBinding.PROJECT_ID_VARIABLE)</span>
+<span class="nc" id="L248">                .hasMessageContaining(ExperimentBinding.FORBIDDEN_PROJECTS_VARIABLE);</span>
+<span class="nc" id="L249">        assertThat(ExperimentBinding.enabled(Map.of()))</span>
+<span class="nc" id="L250">                .as(&quot;normal builds never start the experiment&quot;)</span>
+<span class="nc" id="L251">                .isFalse();</span>
+<span class="nc" id="L252">    }</span>
+
+    @Test
+    void aBrokenReuseReachesTheAfterEventResetWhileTheOtherSubjectsOutcomeSurvives() throws IOException {
+        // given
+<span class="nc" id="L257">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L258">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L259">        ExperimentCheckpoint prepared = checkpoint(binding);</span>
+<span class="nc" id="L260">        String subjectB = prepared.subject(ErasureExperiment.SUBJECT_B).distinctId();</span>
+<span class="nc" id="L261">        posthog.brokenReuseDistinctIds.add(subjectB);</span>
+
+        // when
+<span class="nc" id="L264">        Outcome outcome = experiment(binding).run();</span>
+<span class="nc" id="L265">        ExperimentCheckpoint done = checkpoint(binding);</span>
+<span class="nc" id="L266">        String summary = Files.readString(binding.experimentDir().resolve(&quot;summary.md&quot;));</span>
+
+        // then
+<span class="nc" id="L269">        assertThat(outcome.kind()).as(outcome.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L270">        assertThat(done.subject(ErasureExperiment.SUBJECT_A).facts())</span>
+<span class="nc" id="L271">                .containsEntry(&quot;reuse.person_api&quot;, &quot;resolved&quot;)</span>
+<span class="nc" id="L272">                .containsEntry(&quot;repair&quot;, &quot;not needed&quot;);</span>
+<span class="nc" id="L273">        assertThat(done.subject(ErasureExperiment.SUBJECT_B).facts())</span>
+<span class="nc" id="L274">                .containsEntry(&quot;reuse.person_api&quot;, &quot;resolved&quot;)</span>
+<span class="nc" id="L275">                .containsEntry(&quot;reuse.analytics_person&quot;, &quot;resolved&quot;)</span>
+<span class="nc" id="L276">                .containsEntry(&quot;repair&quot;, &quot;reset after the new event resolved the profile&quot;)</span>
+<span class="nc" id="L277">                .containsKey(&quot;repair.reset_requested_at&quot;);</span>
+<span class="nc" id="L278">        assertThat(posthog.resetRequests())</span>
+<span class="nc" id="L279">                .as(&quot;one reset before reuse (phase RESET_B_DONE) and one after the new event&quot;)</span>
+<span class="nc" id="L280">                .containsExactly(subjectB, subjectB);</span>
+<span class="nc" id="L281">        assertThat(summary)</span>
+<span class="nc" id="L282">                .contains(&quot;| 4. A: reuse without reset | PASS&quot;)</span>
+<span class="nc" id="L283">                .contains(&quot;| 8. Reused ID erasable, fixtures cleaned up | PASS |&quot;);</span>
+<span class="nc" id="L284">    }</span>
+
+    @Test
+    void anApiProfileWithoutAnalyticsLinkageIsRepairedAfterTheEvent() throws IOException {
+        // given
+<span class="nc" id="L289">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L290">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L291">        String subjectA =</span>
+<span class="nc" id="L292">                checkpoint(binding).subject(ErasureExperiment.SUBJECT_A).distinctId();</span>
+<span class="nc" id="L293">        posthog.analyticsOnlyBrokenDistinctIds.add(subjectA);</span>
+
+        // when
+<span class="nc" id="L296">        Outcome outcome = experiment(binding).run();</span>
+<span class="nc" id="L297">        ExperimentCheckpoint done = checkpoint(binding);</span>
+
+        // then
+<span class="nc" id="L300">        assertThat(outcome.kind()).as(outcome.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L301">        assertThat(done.subject(ErasureExperiment.SUBJECT_A).facts())</span>
+<span class="nc" id="L302">                .containsEntry(&quot;reuse.analytics_person&quot;, &quot;resolved&quot;)</span>
+<span class="nc" id="L303">                .containsEntry(&quot;repair&quot;, &quot;reset after the new event resolved the profile&quot;);</span>
+<span class="nc" id="L304">        assertThat(posthog.resetRequests()).as(&quot;A had no reset before reuse&quot;).containsOnlyOnce(subjectA);</span>
+<span class="nc" id="L305">    }</span>
+
+    @Test
+    void aMappingThatConvergesOnItsOwnIsNeverReset() throws IOException {
+        // given
+<span class="nc" id="L310">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L311">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L312">        String subjectA =</span>
+<span class="nc" id="L313">                checkpoint(binding).subject(ErasureExperiment.SUBJECT_A).distinctId();</span>
+<span class="nc" id="L314">        posthog.brokenReuseDistinctIds.add(subjectA);</span>
+<span class="nc" id="L315">        posthog.resolveBrokenAfterPersonsReads = 2;</span>
+
+        // when
+<span class="nc" id="L318">        Outcome outcome = experiment(binding).run();</span>
+<span class="nc" id="L319">        ExperimentCheckpoint done = checkpoint(binding);</span>
+
+        // then
+<span class="nc" id="L322">        assertThat(outcome.kind()).as(outcome.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L323">        assertThat(done.subject(ErasureExperiment.SUBJECT_A).facts())</span>
+<span class="nc" id="L324">                .containsEntry(&quot;reuse.person_api&quot;, &quot;resolved&quot;)</span>
+<span class="nc" id="L325">                .containsEntry(&quot;repair&quot;, &quot;not needed&quot;);</span>
+<span class="nc" id="L326">        assertThat(posthog.resetRequests()).doesNotContain(subjectA);</span>
+<span class="nc" id="L327">    }</span>
+
+    @Test
+    void aRepairThatNeedsAnotherDayParksTheRunAndResumesWithOneMoreHeartbeat() throws IOException {
+        // given
+<span class="nc" id="L332">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L333">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L334">        String subjectB =</span>
+<span class="nc" id="L335">                checkpoint(binding).subject(ErasureExperiment.SUBJECT_B).distinctId();</span>
+<span class="nc" id="L336">        posthog.brokenReuseDistinctIds.add(subjectB);</span>
+<span class="nc" id="L337">        posthog.resetHealsOnNextEvent = true;</span>
+
+        // when
+<span class="nc" id="L340">        Outcome parked = experiment(binding).run();</span>
+<span class="nc" id="L341">        ExperimentCheckpoint parkedCheckpoint = checkpoint(binding);</span>
+<span class="nc" id="L342">        long capturesWhenParked = posthog.count(&quot;capture&quot;);</span>
+<span class="nc" id="L343">        long bulkDeletesWhenParked =</span>
+<span class="nc" id="L344">                posthog.count(&quot;POST /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/bulk_delete/&quot;);</span>
+<span class="nc" id="L345">        Outcome sameDay = experiment(binding).run();</span>
+<span class="nc" id="L346">        long capturesSameDay = posthog.count(&quot;capture&quot;);</span>
+<span class="nc" id="L347">        clock.advance(Duration.ofDays(1));</span>
+<span class="nc" id="L348">        Outcome nextDay = experiment(binding).run();</span>
+<span class="nc" id="L349">        ExperimentCheckpoint done = checkpoint(binding);</span>
+
+        // then
+<span class="nc" id="L352">        assertThat(parked.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L353">        assertThat(parked.phase()).isEqualTo(Phase.REPAIR_AWAITING_HEARTBEAT);</span>
+<span class="nc" id="L354">        assertThat(parkedCheckpoint.subject(ErasureExperiment.SUBJECT_B).facts())</span>
+<span class="nc" id="L355">                .containsEntry(&quot;repair.awaiting_heartbeat&quot;, &quot;true&quot;)</span>
+<span class="nc" id="L356">                .containsEntry(&quot;reuse.person_api&quot;, &quot;missing&quot;);</span>
+<span class="nc" id="L357">        assertThat(bulkDeletesWhenParked)</span>
+<span class="nc" id="L358">                .as(&quot;cleanup waits for the repair outcome&quot;)</span>
+<span class="nc" id="L359">                .isOne();</span>
+<span class="nc" id="L360">        assertThat(sameDay.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L361">        assertThat(sameDay.phase()).isEqualTo(Phase.REPAIR_AWAITING_HEARTBEAT);</span>
+<span class="nc" id="L362">        assertThat(capturesSameDay).as(&quot;no heartbeat on the same day&quot;).isEqualTo(capturesWhenParked);</span>
+<span class="nc" id="L363">        assertThat(posthog.count(&quot;capture&quot;))</span>
+<span class="nc" id="L364">                .as(&quot;one more heartbeat on the next day&quot;)</span>
+<span class="nc" id="L365">                .isEqualTo(capturesWhenParked + 1);</span>
+<span class="nc" id="L366">        assertThat(nextDay.kind()).as(nextDay.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L367">        assertThat(done.subject(ErasureExperiment.SUBJECT_B).newEventUuids()).hasSize(2);</span>
+<span class="nc" id="L368">        assertThat(done.subject(ErasureExperiment.SUBJECT_B).facts())</span>
+<span class="nc" id="L369">                .containsEntry(&quot;reuse.person_api&quot;, &quot;resolved&quot;)</span>
+<span class="nc" id="L370">                .containsEntry(&quot;repair.awaiting_heartbeat&quot;, &quot;&quot;);</span>
+<span class="nc" id="L371">        assertThat(posthog.resetRequests())</span>
+<span class="nc" id="L372">                .as(&quot;the parked resume observes, it does not reset again&quot;)</span>
+<span class="nc" id="L373">                .containsExactly(subjectB, subjectB);</span>
+<span class="nc" id="L374">    }</span>
+
+    @Test
+    void resumingAfterEveryFewRequestsReachesCompletionWithoutDuplicateCapturesOrDeletions() throws IOException {
+        // given
+<span class="nc" id="L379">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+<span class="nc" id="L380">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L381">        String subjectB =</span>
+<span class="nc" id="L382">                checkpoint(binding).subject(ErasureExperiment.SUBJECT_B).distinctId();</span>
+<span class="nc" id="L383">        List&lt;Phase&gt; phases = new ArrayList&lt;&gt;();</span>
+
+        // when
+<span class="nc" id="L386">        Outcome outcome = experiment(binding, 20).run();</span>
+<span class="nc bnc" id="L387" title="All 4 branches missed.">        for (int attempt = 0; attempt &lt; 40 &amp;&amp; outcome.kind() != Outcome.Kind.COMPLETE; attempt++) {</span>
+<span class="nc" id="L388">            phases.add(outcome.phase());</span>
+<span class="nc" id="L389">            outcome = experiment(binding, 20).run();</span>
+        }
+
+        // then
+<span class="nc" id="L393">        assertThat(outcome.kind()).as(outcome.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L394">        assertThat(phases).as(&quot;the run was interrupted at several phases&quot;).hasSizeGreaterThanOrEqualTo(3);</span>
+<span class="nc" id="L395">        assertThat(posthog.count(&quot;capture&quot;))</span>
+<span class="nc" id="L396">                .as(&quot;five baseline and two reuse heartbeats&quot;)</span>
+<span class="nc" id="L397">                .isEqualTo(7);</span>
+<span class="nc" id="L398">        assertThat(posthog.count(&quot;POST /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/bulk_delete/&quot;))</span>
+<span class="nc" id="L399">                .isEqualTo(2);</span>
+<span class="nc" id="L400">        assertThat(posthog.resetRequests()).as(&quot;only the reset before reuse&quot;).containsExactly(subjectB);</span>
+<span class="nc" id="L401">    }</span>
+
+    @Test
+    void aCompletedRowFromAnEarlierOperationDoesNotCertifyAPendingDeletion() throws IOException {
+        // given
+<span class="nc" id="L406">        posthog.completeDeletionsImmediately = false;</span>
+<span class="nc" id="L407">        posthog.staleCompletedRows = true;</span>
+<span class="nc" id="L408">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L411">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L414">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L415">        assertThat(outcome.phase()).isEqualTo(Phase.ERASURE_REQUESTED);</span>
+<span class="nc" id="L416">    }</span>
+
+    @Test
+    void aStatusRowForAnotherPersonIsNotThisDeletion() throws IOException {
+        // given
+<span class="nc" id="L421">        posthog.wrongPersonRows = true;</span>
+<span class="nc" id="L422">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L425">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L428">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L429">        assertThat(outcome.phase()).isEqualTo(Phase.ERASURE_REQUESTED);</span>
+<span class="nc" id="L430">    }</span>
+
+    @EnumSource(
+            value = FakePostHog.VerifiedAtMode.class,
+            names = {&quot;ABSENT&quot;, &quot;NULL&quot;, &quot;BLANK&quot;, &quot;GARBAGE&quot;})
+    @ParameterizedTest
+    void aCompletionWithoutAValidTimestampStaysPending(FakePostHog.VerifiedAtMode mode) throws IOException {
+        // given
+<span class="nc" id="L438">        posthog.verifiedAtMode = mode;</span>
+<span class="nc" id="L439">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L442">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L445">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.PENDING);</span>
+<span class="nc" id="L446">        assertThat(outcome.phase()).isEqualTo(Phase.ERASURE_REQUESTED);</span>
+<span class="nc" id="L447">    }</span>
+
+    @Test
+    void theCompletedRowOfThisRequestSuppliesTheRecordedTimestamp() throws IOException {
+        // given
+<span class="nc" id="L452">        posthog.staleCompletedRows = true;</span>
+<span class="nc" id="L453">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L456">        Outcome outcome = experiment(binding).run();</span>
+<span class="nc" id="L457">        ExperimentCheckpoint done = checkpoint(binding);</span>
+
+        // then
+<span class="nc" id="L460">        assertThat(outcome.kind()).as(outcome.message()).isEqualTo(Outcome.Kind.COMPLETE);</span>
+<span class="nc" id="L461">        assertThat(done.subject(ErasureExperiment.SUBJECT_A).erasure())</span>
+<span class="nc" id="L462">                .as(&quot;the verification time comes from the row created for this request, not the stale one&quot;)</span>
+<span class="nc" id="L463">                .extracting(ExperimentCheckpoint.DeletionRecord::verifiedAt)</span>
+<span class="nc" id="L464">                .isEqualTo(START.toString());</span>
+<span class="nc" id="L465">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;not json&quot;, &quot;{\&quot;results\&quot;: null}&quot;, &quot;{\&quot;results\&quot;: {\&quot;count\&quot;: 0}}&quot;, &quot;[]&quot;})
+    void malformedDeletionStatusEvidenceIsUnavailableNotEmpty(String body) throws IOException {
+        // given
+<span class="nc" id="L471">        posthog.deletionStatusBodyOverride = body;</span>
+<span class="nc" id="L472">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L475">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L478">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L479">        assertThat(outcome.message()).contains(&quot;evidence unavailable&quot;);</span>
+<span class="nc" id="L480">        assertThat(outcome.phase()).isEqualTo(Phase.ERASURE_REQUESTED);</span>
+<span class="nc" id="L481">    }</span>
+
+    @Test
+    void aQueryThatOnlyReportsItsStatusIsUnavailableNotEmpty() throws IOException {
+        // given
+<span class="nc" id="L486">        posthog.queryBodyOverride = &quot;{\&quot;query_status\&quot;: {\&quot;complete\&quot;: false, \&quot;id\&quot;: \&quot;abc\&quot;}}&quot;;</span>
+<span class="nc" id="L487">        ExperimentBinding binding = binding(FakePostHog.PROJECT_ID, Set.of());</span>
+
+        // when
+<span class="nc" id="L490">        Outcome outcome = experiment(binding).run();</span>
+
+        // then
+<span class="nc" id="L493">        assertThat(outcome.kind()).isEqualTo(Outcome.Kind.FAILED);</span>
+<span class="nc" id="L494">        assertThat(outcome.message()).contains(&quot;evidence unavailable&quot;).contains(&quot;query still running&quot;);</span>
+<span class="nc" id="L495">        assertThat(posthog.count(&quot;POST /api/projects/&quot; + FakePostHog.PROJECT_ID + &quot;/persons/bulk_delete/&quot;))</span>
+<span class="nc" id="L496">                .isZero();</span>
+<span class="nc" id="L497">    }</span>
+
+    private ExperimentCheckpoint checkpoint(ExperimentBinding binding) {
+<span class="nc" id="L500">        return ExperimentCheckpoint.load(binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME));</span>
+    }
+
+    private ExperimentBinding binding(long projectId, Set&lt;Long&gt; forbidden) throws IOException {
+<span class="nc" id="L504">        Path experimentDir = Files.createDirectories(tempDir.resolve(&quot;run&quot;));</span>
+<span class="nc" id="L505">        return new ExperimentBinding(</span>
+<span class="nc" id="L506">                posthog.host(),</span>
+<span class="nc" id="L507">                posthog.captureEndpoint(),</span>
+                projectId,
+                FakePostHog.PROJECT_NAME,
+                forbidden,
+                keyFile,
+                experimentDir);
+    }
+
+    private ErasureExperiment experiment(ExperimentBinding binding) throws IOException {
+<span class="nc" id="L516">        return experiment(binding, REQUEST_BUDGET);</span>
+    }
+
+    private ErasureExperiment experiment(ExperimentBinding binding, int requestBudget) throws IOException {
+<span class="nc" id="L520">        ErasureExperiment.prepare(binding, clock);</span>
+<span class="nc" id="L521">        var budget = new ExperimentBudget(requestBudget, WAIT_BUDGET, clock::advance);</span>
+<span class="nc" id="L522">        var client = new PostHogManagementClient(</span>
+<span class="nc" id="L523">                binding.managementHost(), binding.projectId(), binding.keySupplier(), budget);</span>
+<span class="nc" id="L524">        return new ErasureExperiment(</span>
+                binding, client, clock, budget, new PrintStream(console, true, StandardCharsets.UTF_8));
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

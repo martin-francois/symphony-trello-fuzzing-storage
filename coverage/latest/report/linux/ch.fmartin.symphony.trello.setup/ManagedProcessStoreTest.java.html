@@ -7,27 +7,97 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-<span class="nc" id="L11">final class ManagedProcessStoreTest {</span>
+<span class="nc" id="L13">final class ManagedProcessStoreTest {</span>
     @TempDir
     Path tempDir;
 
     @Test
     void namesManagedProcessFilesWithSha3WorkflowPathHash() throws Exception {
         // given
-<span class="nc" id="L18">        Path stateHome = tempDir.resolve(&quot;state&quot;);</span>
-<span class="nc" id="L19">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
-<span class="nc" id="L20">        Files.writeString(workflow, &quot;---\n---\n&quot;);</span>
-<span class="nc" id="L21">        String expectedHash = Sha3.sha3_256(workflow.toRealPath().toString()).substring(0, 12);</span>
+<span class="nc" id="L20">        Path stateHome = tempDir.resolve(&quot;state&quot;);</span>
+<span class="nc" id="L21">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L22">        Files.writeString(workflow, &quot;---\n---\n&quot;);</span>
+<span class="nc" id="L23">        String expectedHash = Sha3.sha3_256(workflow.toRealPath().toString()).substring(0, 12);</span>
 
         // when
-<span class="nc" id="L24">        ManagedProcessStore.ManagedProcessFiles files = new ManagedProcessStore(stateHome).files(workflow);</span>
+<span class="nc" id="L26">        ManagedProcessStore.ManagedProcessFiles files = new ManagedProcessStore(stateHome).files(workflow);</span>
 
         // then
-<span class="nc" id="L27">        assertThat(files.pidFile()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.pid&quot;);</span>
-<span class="nc" id="L28">        assertThat(files.stdoutLog()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.log&quot;);</span>
-<span class="nc" id="L29">        assertThat(files.stderrLog()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.err&quot;);</span>
-<span class="nc" id="L30">        assertThat(files.processLockFile()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.lock&quot;);</span>
-<span class="nc" id="L31">    }</span>
+<span class="nc" id="L29">        assertThat(files.pidFile()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.pid&quot;);</span>
+<span class="nc" id="L30">        assertThat(files.stdoutLog()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.log&quot;);</span>
+<span class="nc" id="L31">        assertThat(files.stderrLog()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.err&quot;);</span>
+<span class="nc" id="L32">        assertThat(files.processLockFile()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.lock&quot;);</span>
+<span class="nc" id="L33">        assertThat(files.workflowPathFile()).hasFileName(&quot;WORKFLOW.md.&quot; + expectedHash + &quot;.workflow&quot;);</span>
+<span class="nc" id="L34">    }</span>
+
+    @ParameterizedTest
+    @ValueSource(strings = {&quot;WORKFLOW.md&quot;, &quot;WORKFLOW.md &quot;})
+    void recordsTheWorkflowPathOfAStartAttemptAsGiven(String filename) throws Exception {
+        // given
+<span class="nc" id="L40">        Path stateHome = tempDir.resolve(&quot;state&quot;);</span>
+<span class="nc" id="L41">        Files.createDirectories(stateHome);</span>
+<span class="nc" id="L42">        Path realDir = tempDir.resolve(&quot;real&quot;);</span>
+<span class="nc" id="L43">        Files.createDirectories(realDir);</span>
+<span class="nc" id="L44">        Files.createSymbolicLink(tempDir.resolve(&quot;link&quot;), realDir);</span>
+<span class="nc" id="L45">        Path workflow = tempDir.resolve(&quot;link&quot;).resolve(filename);</span>
+<span class="nc" id="L46">        Files.writeString(workflow, &quot;---\n---\n&quot;);</span>
+<span class="nc" id="L47">        var store = new ManagedProcessStore(stateHome);</span>
+
+        // when
+<span class="nc" id="L50">        store.recordWorkflowPath(workflow);</span>
+
+        // then
+<span class="nc" id="L53">        assertThat(store.recordedWorkflowPaths())</span>
+<span class="nc" id="L54">                .as(&quot;the record keeps the symbolic link the start was given, like the tokens it printed&quot;)</span>
+<span class="nc" id="L55">                .containsExactly(workflow.toAbsolutePath().normalize());</span>
+<span class="nc" id="L56">        assertThat(store.files(workflow).workflowPathFile()).isRegularFile();</span>
+<span class="nc" id="L57">    }</span>
+
+    @Test
+    void deletesTheRecordOfAStartAttempt() throws Exception {
+        // given
+<span class="nc" id="L62">        Path stateHome = tempDir.resolve(&quot;state&quot;);</span>
+<span class="nc" id="L63">        Files.createDirectories(stateHome);</span>
+<span class="nc" id="L64">        Path workflow = tempDir.resolve(&quot;WORKFLOW.md&quot;);</span>
+<span class="nc" id="L65">        Files.writeString(workflow, &quot;---\n---\n&quot;);</span>
+<span class="nc" id="L66">        var store = new ManagedProcessStore(stateHome);</span>
+<span class="nc" id="L67">        store.recordWorkflowPath(workflow);</span>
+
+        // when
+<span class="nc" id="L70">        boolean deleted = store.deleteWorkflowPathRecord(store.files(workflow));</span>
+
+        // then
+<span class="nc" id="L73">        assertThat(deleted).as(&quot;the record existed and is gone&quot;).isTrue();</span>
+<span class="nc" id="L74">        assertThat(store.recordedWorkflowPaths()).isEmpty();</span>
+<span class="nc" id="L75">    }</span>
+
+    @Test
+    void listsNoRecordedWorkflowsWithoutAStateHome() throws Exception {
+        // given
+<span class="nc" id="L80">        var store = new ManagedProcessStore(tempDir.resolve(&quot;missing-state&quot;));</span>
+
+        // when
+<span class="nc" id="L83">        var recorded = store.recordedWorkflowPaths();</span>
+
+        // then
+<span class="nc" id="L86">        assertThat(recorded).isEmpty();</span>
+<span class="nc" id="L87">    }</span>
+
+    @Test
+    void skipsAnEmptyRecord() throws Exception {
+        // given
+<span class="nc" id="L92">        Path stateHome = tempDir.resolve(&quot;state&quot;);</span>
+<span class="nc" id="L93">        Files.createDirectories(stateHome);</span>
+<span class="nc" id="L94">        Files.writeString(stateHome.resolve(&quot;WORKFLOW.md.000000000000.workflow&quot;), &quot; \n&quot;);</span>
+
+        // when
+<span class="nc" id="L97">        var recorded = new ManagedProcessStore(stateHome).recordedWorkflowPaths();</span>
+
+        // then
+<span class="nc" id="L100">        assertThat(recorded).isEmpty();</span>
+<span class="nc" id="L101">    }</span>
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

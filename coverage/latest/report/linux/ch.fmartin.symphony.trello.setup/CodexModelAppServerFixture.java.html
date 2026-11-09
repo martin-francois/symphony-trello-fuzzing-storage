@@ -3,12 +3,14 @@
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.concurrent.locks.LockSupport;
 
 final class CodexModelAppServerFixture {
     private CodexModelAppServerFixture() {}
 
     static Path createPaginated(Path directory, String firstPageData, String secondPageData) throws IOException {
-<span class="nc" id="L11">        return create(</span>
+<span class="nc" id="L13">        return create(</span>
                 directory,
                 &quot;&quot;&quot;
                 while IFS= read -r line; do
@@ -25,15 +27,69 @@ final class CodexModelAppServerFixture {
                   esac
                 done
                 &quot;&quot;&quot;
-<span class="nc" id="L28">                        .replace(&quot;__FIRST_PAGE_DATA__&quot;, firstPageData.strip())</span>
-<span class="nc" id="L29">                        .replace(&quot;__SECOND_PAGE_DATA__&quot;, secondPageData.strip()));</span>
+<span class="nc" id="L30">                        .replace(&quot;__FIRST_PAGE_DATA__&quot;, firstPageData.strip())</span>
+<span class="nc" id="L31">                        .replace(&quot;__SECOND_PAGE_DATA__&quot;, secondPageData.strip()));</span>
     }
 
+    private static final String PROBE_VARIABLE = &quot;SYMPHONY_TRELLO_FIXTURE_PROBE&quot;;
+<span class="nc" id="L35">    private static final Duration PROBE_TIMEOUT = Duration.ofSeconds(10);</span>
+
     static Path create(Path directory, String body) throws IOException {
-<span class="nc" id="L33">        Path appServer = directory.resolve(&quot;codex-app-server&quot;);</span>
-<span class="nc" id="L34">        Files.writeString(appServer, &quot;#!/usr/bin/env bash\nset -euo pipefail\n&quot; + body);</span>
-<span class="nc" id="L35">        appServer.toFile().setExecutable(true);</span>
-<span class="nc" id="L36">        return appServer;</span>
+<span class="nc" id="L38">        Path appServer = directory.resolve(&quot;codex-app-server&quot;);</span>
+<span class="nc" id="L39">        Files.writeString(</span>
+                appServer,
+                &quot;#!/usr/bin/env bash\nset -euo pipefail\nif [ \&quot;${&quot; + PROBE_VARIABLE + &quot;:-}\&quot; = 1 ]; then exit 0; fi\n&quot;
+                        + body);
+<span class="nc" id="L43">        appServer.toFile().setExecutable(true);</span>
+<span class="nc" id="L44">        awaitExecutable(appServer, PROBE_TIMEOUT);</span>
+<span class="nc" id="L45">        return appServer;</span>
+    }
+
+    /// Parallel tests fork while this file's write handle is open, and a forked child holds that handle
+    /// until its own exec. Launching the file before then fails with &quot;Text file busy&quot; (ETXTBSY), which
+    /// the resolver turns into its fallback defaults. Once the script has started cleanly, no child
+    /// holds it open any more.
+    static void awaitExecutable(Path appServer, Duration timeout) throws IOException {
+<span class="nc" id="L53">        awaitExecutable(appServer, timeout, () -&gt; {});</span>
+<span class="nc" id="L54">    }</span>
+
+    /// The observer lets the fixture regression release its held writer only after a real ETXTBSY.
+    static void awaitExecutable(Path appServer, Duration timeout, Runnable executableBusy) throws IOException {
+<span class="nc" id="L58">        long deadline = System.nanoTime() + timeout.toNanos();</span>
+        while (true) {
+            try {
+<span class="nc" id="L61">                var probe = new ProcessBuilder(appServer.toString());</span>
+<span class="nc" id="L62">                probe.environment().put(PROBE_VARIABLE, &quot;1&quot;);</span>
+<span class="nc" id="L63">                probe.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);</span>
+<span class="nc" id="L64">                Process process = probe.start();</span>
+                try {
+<span class="nc" id="L66">                    Duration remaining = Duration.ofNanos(Math.max(1, deadline - System.nanoTime()));</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                    if (!process.waitFor(remaining)) {</span>
+<span class="nc" id="L68">                        throw new IOException(&quot;cannot probe fixture: expected completion before the deadline&quot;);</span>
+                    }
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                    if (process.exitValue() != 0) {</span>
+<span class="nc" id="L71">                        throw new IOException(&quot;cannot probe fixture: expected exit code zero&quot;);</span>
+                    }
+<span class="nc" id="L73">                    return;</span>
+                } finally {
+<span class="nc" id="L75">                    process.destroyForcibly();</span>
+                }
+<span class="nc" id="L77">            } catch (IOException e) {</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                if (e.getMessage() == null</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                        || !e.getMessage().contains(&quot;Text file busy&quot;)</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">                        || System.nanoTime() - deadline &gt;= 0) {</span>
+<span class="nc" id="L81">                    throw e;</span>
+                }
+<span class="nc" id="L83">                executableBusy.run();</span>
+<span class="nc" id="L84">                LockSupport.parkNanos(Duration.ofMillis(1).toNanos());</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                if (Thread.currentThread().isInterrupted()) {</span>
+<span class="nc" id="L86">                    throw new IOException(&quot;cannot probe fixture: interrupted before executable launch&quot;, e);</span>
+                }
+<span class="nc" id="L88">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L89">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L90">                throw new IOException(&quot;cannot probe fixture: interrupted while awaiting completion&quot;, e);</span>
+<span class="nc" id="L91">            }</span>
+        }
     }
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

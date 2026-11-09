@@ -1,0 +1,1252 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ErasureExperiment.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">ErasureExperiment.java</span></div><h1>ErasureExperiment.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import ch.fmartin.symphony.trello.telemetry.EvidenceLog.Status;
+import ch.fmartin.symphony.trello.telemetry.ExperimentCheckpoint.DeletionRecord;
+import ch.fmartin.symphony.trello.telemetry.ExperimentCheckpoint.Phase;
+import ch.fmartin.symphony.trello.telemetry.ExperimentCheckpoint.Subject;
+import ch.fmartin.symphony.trello.telemetry.HeartbeatReporter.CheckResult;
+import ch.fmartin.symphony.trello.telemetry.PostHogManagementClient.Response;
+import ch.fmartin.symphony.trello.telemetry.TelemetryService.DisableRequest;
+import ch.fmartin.symphony.trello.telemetry.TelemetryStateStore.Update;
+import ch.fmartin.symphony.trello.testsupport.MutableClock;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
+
+/// The live erasure and same-ID reuse experiment against the dedicated PostHog test project. It
+/// drives the real application components (state store, service, reporter, capture client) for
+/// three synthetic installations, requests deletion through the management API, and records what
+/// the provider does. Every phase transition is checkpointed so an invocation that runs out of
+/// budget, or waits for PostHog's batched event deletion, resumes where it stopped.
+final class ErasureExperiment {
+    static final String SUBJECT_A = &quot;A&quot;;
+    static final String SUBJECT_B = &quot;B&quot;;
+    static final String CONTROL = &quot;C&quot;;
+    static final String OLD_VERSION = &quot;1.2.0&quot;;
+    static final String NEW_VERSION = &quot;1.3.0&quot;;
+    static final long IMPORTS = 4;
+    static final long CREATIONS = 2;
+    static final int BOARDS = 3;
+    static final int OLD_EVENTS_PER_SUBJECT = 2;
+<span class="nc" id="L53">    static final Duration POLL_INTERVAL = Duration.ofSeconds(30);</span>
+<span class="nc" id="L54">    static final Duration INGESTION_WAIT = Duration.ofMinutes(5);</span>
+<span class="nc" id="L55">    static final Duration DELETION_WAIT = Duration.ofMinutes(3);</span>
+<span class="nc" id="L56">    static final Duration REPAIR_WAIT = Duration.ofMinutes(3);</span>
+<span class="nc" id="L57">    static final Duration PROPAGATION_WAIT = Duration.ofMinutes(3);</span>
+    /// How far a status row's creation may precede the recorded request time and still belong to it.
+<span class="nc" id="L59">    static final Duration CLOCK_SKEW = Duration.ofMinutes(5);</span>
+<span class="nc" id="L60">    private static final Duration WINDOW_BEFORE_START = Duration.ofDays(3);</span>
+<span class="nc" id="L61">    private static final Duration TWO_DAYS = Duration.ofDays(2);</span>
+<span class="nc" id="L62">    private static final Duration ONE_DAY = Duration.ofDays(1);</span>
+<span class="nc" id="L63">    private static final Duration PAST_GRACE = TelemetryNotice.FIRST_REPORT_GRACE.plusMinutes(1);</span>
+<span class="nc" id="L64">    private static final DateTimeFormatter HOGQL_TIME =</span>
+<span class="nc" id="L65">            DateTimeFormatter.ofPattern(&quot;yyyy-MM-dd HH:mm:ss&quot;).withZone(ZoneOffset.UTC);</span>
+    private static final String REQUEST_LINE_PREFIX = &quot;telemetry request POST &quot;;
+    private static final String FACT_PERSON_API = &quot;reuse.person_api&quot;;
+    private static final String FACT_ANALYTICS = &quot;reuse.analytics_person&quot;;
+    private static final String FACT_PERSON_UUID = &quot;reuse.person_uuid&quot;;
+    private static final String FACT_RESET_BEFORE = &quot;reset.before_reuse&quot;;
+    private static final String FACT_REPAIR = &quot;repair&quot;;
+    private static final String FACT_REPAIR_RESET_AT = &quot;repair.reset_requested_at&quot;;
+    private static final String FACT_REPAIR_AWAITING = &quot;repair.awaiting_heartbeat&quot;;
+    private static final String CLEANUP_PERSON_UUID = &quot;cleanup.person_uuid&quot;;
+    private static final String EVIDENCE_UNAVAILABLE = &quot;evidence unavailable: &quot;;
+    private static final String RESOLVED = &quot;resolved&quot;;
+    private static final String MISSING = &quot;missing&quot;;
+<span class="nc" id="L78">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+
+    private final ExperimentBinding binding;
+    private final PostHogManagementClient client;
+    private final Clock clock;
+    private final ExperimentBudget budget;
+    private final PrintStream out;
+    private final Path checkpointFile;
+    private final CachedToken token;
+    private @Nullable EvidenceLog evidence;
+    private ExperimentCheckpoint checkpoint;
+
+    ErasureExperiment(
+            ExperimentBinding binding,
+            PostHogManagementClient client,
+            Clock clock,
+            ExperimentBudget budget,
+<span class="nc" id="L95">            PrintStream out) {</span>
+<span class="nc" id="L96">        this.binding = binding;</span>
+<span class="nc" id="L97">        this.client = client;</span>
+<span class="nc" id="L98">        this.clock = clock;</span>
+<span class="nc" id="L99">        this.budget = budget;</span>
+<span class="nc" id="L100">        this.out = out;</span>
+<span class="nc" id="L101">        this.checkpointFile = binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME);</span>
+<span class="nc" id="L102">        this.token = new CachedToken(binding, client);</span>
+<span class="nc" id="L103">        this.checkpoint = ExperimentCheckpoint.load(checkpointFile);</span>
+<span class="nc" id="L104">    }</span>
+
+    /// Creates the run directory and checkpoint if this is the first invocation.
+    static void prepare(ExperimentBinding binding, Clock clock) throws IOException {
+<span class="nc" id="L108">        Files.createDirectories(binding.experimentDir());</span>
+<span class="nc" id="L109">        Path file = binding.experimentDir().resolve(ExperimentCheckpoint.FILE_NAME);</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">        if (Files.exists(file)) {</span>
+<span class="nc" id="L111">            return;</span>
+        }
+<span class="nc" id="L113">        String now = clock.instant().toString();</span>
+        // Insertion order keeps the output stable for assertions.
+<span class="nc" id="L115">        Map&lt;String, Subject&gt; subjects = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B, CONTROL)) {</span>
+<span class="nc" id="L117">            subjects.put(</span>
+                    name,
+<span class="nc" id="L119">                    Subject.create(</span>
+                            name,
+<span class="nc" id="L121">                            UUID.randomUUID().toString(),</span>
+<span class="nc" id="L122">                            registrationDate(clock).toString()));</span>
+<span class="nc" id="L123">        }</span>
+<span class="nc" id="L124">        new ExperimentCheckpoint(</span>
+<span class="nc" id="L125">                        &quot;erasure-&quot; + UUID.randomUUID().toString().substring(0, 8),</span>
+<span class="nc" id="L126">                        binding.projectId(),</span>
+                        Phase.CREATED,
+                        now,
+                        now,
+                        subjects,
+<span class="nc" id="L131">                        List.of())</span>
+<span class="nc" id="L132">                .save(file);</span>
+<span class="nc" id="L133">    }</span>
+
+    private static LocalDate registrationDate(Clock clock) {
+<span class="nc" id="L136">        return LocalDate.ofInstant(clock.instant().minus(WINDOW_BEFORE_START), ZoneOffset.UTC);</span>
+    }
+
+    /// Advances as far as the provider and the budget allow. Never throws for a pending provider
+    /// step; the outcome says what to do next.
+    Outcome run() {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        if (checkpoint.projectId() != binding.projectId()) {</span>
+<span class="nc" id="L143">            return Outcome.failed(checkpoint.phase(), &quot;checkpoint belongs to project &quot; + checkpoint.projectId());</span>
+        }
+<span class="nc" id="L145">        evidence = new EvidenceLog(</span>
+<span class="nc" id="L146">                binding.experimentDir().resolve(EvidenceLog.FILE_NAME), clock, List.of(binding.keySupplier(), token));</span>
+        try {
+<span class="nc" id="L148">            token.verify();</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">            while (checkpoint.phase() != Phase.COMPLETE) {</span>
+<span class="nc" id="L150">                step();</span>
+            }
+<span class="nc" id="L152">            return new Outcome(Phase.COMPLETE, Outcome.Kind.COMPLETE, &quot;experiment complete, fixtures cleaned up&quot;);</span>
+<span class="nc" id="L153">        } catch (PendingException exception) {</span>
+<span class="nc" id="L154">            note(&quot;pending: &quot; + exception.getMessage());</span>
+<span class="nc" id="L155">            return new Outcome(checkpoint.phase(), Outcome.Kind.PENDING, exception.getMessage());</span>
+<span class="nc" id="L156">        } catch (ExperimentBudget.BudgetExhaustedException exception) {</span>
+<span class="nc" id="L157">            note(&quot;budget: &quot; + exception.getMessage());</span>
+<span class="nc" id="L158">            return new Outcome(checkpoint.phase(), Outcome.Kind.PENDING, exception.getMessage());</span>
+<span class="nc" id="L159">        } catch (ExperimentFailure | PostHogManagementClient.ManagementException | IllegalStateException exception) {</span>
+<span class="nc" id="L160">            String message = log().redact(String.valueOf(exception.getMessage()));</span>
+<span class="nc" id="L161">            note(&quot;failed: &quot; + message);</span>
+<span class="nc" id="L162">            return Outcome.failed(checkpoint.phase(), message);</span>
+        } finally {
+<span class="nc" id="L164">            writeSummary();</span>
+        }
+    }
+
+    private void step() {
+<span class="nc bnc" id="L169" title="All 15 branches missed.">        switch (checkpoint.phase()) {</span>
+<span class="nc" id="L170">            case CREATED -&gt; sendBaseline();</span>
+<span class="nc" id="L171">            case BASELINE_SENT -&gt; verifyBaseline();</span>
+<span class="nc" id="L172">            case BASELINE_VERIFIED -&gt; disableSubjects();</span>
+<span class="nc" id="L173">            case DISABLED -&gt; requestErasure();</span>
+<span class="nc" id="L174">            case ERASURE_REQUESTED -&gt; verifyErasure();</span>
+<span class="nc" id="L175">            case ERASURE_VERIFIED -&gt; reuse(SUBJECT_A, Phase.REUSE_A_SENT);</span>
+<span class="nc" id="L176">            case REUSE_A_SENT -&gt; resetBeforeReuse();</span>
+<span class="nc" id="L177">            case RESET_B_DONE -&gt; reuse(SUBJECT_B, Phase.REUSE_B_SENT);</span>
+<span class="nc" id="L178">            case REUSE_B_SENT -&gt; observeReuse();</span>
+<span class="nc" id="L179">            case REUSE_OBSERVED -&gt; repairIfNeeded();</span>
+<span class="nc" id="L180">            case REPAIR_AWAITING_HEARTBEAT -&gt; repairAfterHeartbeat();</span>
+<span class="nc" id="L181">            case REPAIR_DONE -&gt; cleanup();</span>
+<span class="nc" id="L182">            case CLEANUP_REQUESTED -&gt; verifyCleanup();</span>
+<span class="nc" id="L183">            case COMPLETE -&gt; throw new IllegalStateException(&quot;already complete&quot;);</span>
+        }
+<span class="nc" id="L185">    }</span>
+
+    // Phase 1: baseline.
+
+    private void sendBaseline() {
+<span class="nc" id="L190">        Instant start = Instant.parse(checkpoint.startedAt());</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L192">            Subject subject = checkpoint.subject(name);</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">            if (subject.oldEventUuids().isEmpty()) {</span>
+<span class="nc" id="L194">                subject = subject.withOldEvent(sendHeartbeat(subject, OLD_VERSION, start.minus(TWO_DAYS)));</span>
+<span class="nc" id="L195">                save(checkpoint.withSubject(subject, now()));</span>
+            }
+<span class="nc bnc" id="L197" title="All 2 branches missed.">            if (subject.oldEventUuids().size() &lt; OLD_EVENTS_PER_SUBJECT) {</span>
+<span class="nc" id="L198">                subject = subject.withOldEvent(sendHeartbeat(subject, OLD_VERSION, start.minus(ONE_DAY)));</span>
+<span class="nc" id="L199">                save(checkpoint.withSubject(subject, now()));</span>
+            }
+<span class="nc" id="L201">        }</span>
+<span class="nc" id="L202">        Subject control = checkpoint.subject(CONTROL);</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">        if (control.oldEventUuids().isEmpty()) {</span>
+<span class="nc" id="L204">            save(checkpoint.withSubject(</span>
+<span class="nc" id="L205">                    control.withOldEvent(sendHeartbeat(control, OLD_VERSION, start.minus(ONE_DAY))), now()));</span>
+        }
+<span class="nc" id="L207">        save(checkpoint.withPhase(Phase.BASELINE_SENT, now()));</span>
+<span class="nc" id="L208">    }</span>
+
+    private void verifyBaseline() {
+<span class="nc" id="L211">        Observation observation = awaitObservation(&quot;baseline ingestion&quot;, INGESTION_WAIT, current -&gt; {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">            for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L213">                Subject subject = checkpoint.subject(name);</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                if (current.eventsFor(subject).size() != OLD_EVENTS_PER_SUBJECT</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">                        || !current.uuidsFor(subject).containsAll(subject.oldEventUuids())</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">                        || current.personsFor(subject).size() != 1) {</span>
+<span class="nc" id="L217">                    return false;</span>
+                }
+<span class="nc" id="L219">            }</span>
+<span class="nc" id="L220">            return current.uuidsFor(checkpoint.subject(CONTROL))</span>
+<span class="nc" id="L221">                    .containsAll(checkpoint.subject(CONTROL).oldEventUuids());</span>
+        });
+<span class="nc bnc" id="L223" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L224">            Subject subject = checkpoint.subject(name);</span>
+<span class="nc" id="L225">            JsonNode person = requireOwnedPerson(observation.personsFor(subject).getFirst(), subject);</span>
+<span class="nc" id="L226">            String personUuid = person.path(&quot;uuid&quot;).asText();</span>
+<span class="nc" id="L227">            List&lt;String&gt; analyticsPersons = observation.eventsFor(subject).stream()</span>
+<span class="nc" id="L228">                    .map(EventRow::personId)</span>
+<span class="nc" id="L229">                    .distinct()</span>
+<span class="nc" id="L230">                    .toList();</span>
+<span class="nc" id="L231">            require(</span>
+<span class="nc" id="L232">                    analyticsPersons.equals(List.of(personUuid)),</span>
+                    name + &quot; events resolve to &quot; + analyticsPersons + &quot; in analytics, person API says &quot; + personUuid);
+<span class="nc" id="L234">            require(observation.personsTable().contains(personUuid), name + &quot; person missing from the persons table&quot;);</span>
+<span class="nc" id="L235">            save(checkpoint.withSubject(</span>
+<span class="nc" id="L236">                    subject.withBaselinePerson(personUuid, person.path(&quot;id&quot;).asText()), now()));</span>
+<span class="nc" id="L237">            record(</span>
+                    &quot;baseline&quot;,
+                    name + &quot; profile and events&quot;,
+                    Status.OBSERVED,
+<span class="nc" id="L241">                    Map.of(</span>
+<span class="nc" id="L242">                            &quot;distinct_id&quot;, subject.distinctId(),</span>
+                            &quot;person_uuid&quot;, personUuid,
+<span class="nc" id="L244">                            &quot;person_id&quot;, person.path(&quot;id&quot;).asText(),</span>
+<span class="nc" id="L245">                            &quot;event_uuids&quot;, subject.oldEventUuids(),</span>
+                            &quot;analytics_person_ids&quot;, analyticsPersons));
+<span class="nc" id="L247">        }</span>
+<span class="nc" id="L248">        record(</span>
+                &quot;baseline&quot;,
+                &quot;control event visible&quot;,
+                Status.OBSERVED,
+<span class="nc" id="L252">                Map.of(</span>
+<span class="nc" id="L253">                        &quot;distinct_id&quot;, checkpoint.subject(CONTROL).distinctId(),</span>
+<span class="nc" id="L254">                        &quot;event_uuids&quot;, checkpoint.subject(CONTROL).oldEventUuids()));</span>
+<span class="nc" id="L255">        save(checkpoint.withPhase(Phase.BASELINE_VERIFIED, now()));</span>
+<span class="nc" id="L256">    }</span>
+
+    // Phase 2: disable, then erase.
+
+    private void disableSubjects() {
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L262">            Subject subject = checkpoint.subject(name);</span>
+<span class="nc" id="L263">            Installation installation = installation(subject, OLD_VERSION, clock.instant());</span>
+<span class="nc" id="L264">            TelemetryState before = installation.store().read().stateOrInitial();</span>
+<span class="nc" id="L265">            int exit = installation.service().disable(DisableRequest.nonInteractive(), out, out);</span>
+<span class="nc" id="L266">            TelemetryState after = installation.store().read().stateOrInitial();</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            require(exit == TelemetryService.EXIT_OK, name + &quot; disable exited &quot; + exit);</span>
+<span class="nc bnc" id="L268" title="All 2 branches missed.">            require(after.mode() == TelemetryMode.DISABLED, name + &quot; is not disabled&quot;);</span>
+<span class="nc" id="L269">            require(after.installation().equals(before.installation()), name + &quot; identity changed on disable&quot;);</span>
+<span class="nc" id="L270">            require(after.registration().equals(before.registration()), name + &quot; registration changed on disable&quot;);</span>
+<span class="nc" id="L271">            require(</span>
+<span class="nc bnc" id="L272" title="All 4 branches missed.">                    after.boardImportsTotal() == IMPORTS &amp;&amp; after.boardCreationsTotal() == CREATIONS,</span>
+                    name + &quot; counters changed&quot;);
+<span class="nc" id="L274">            require(after.pending().isEmpty(), name + &quot; kept a pending report&quot;);</span>
+            // Ordinary worker restarts and checks past the grace period while disabled: no send.
+<span class="nc" id="L276">            List&lt;String&gt; output = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L277">            HeartbeatReporter restarted =</span>
+<span class="nc" id="L278">                    installation.reporter(new MutableClock(clock.instant().plus(PAST_GRACE)), output);</span>
+<span class="nc" id="L279">            CheckResult first = restarted.check();</span>
+<span class="nc" id="L280">            CheckResult second = installation</span>
+<span class="nc" id="L281">                    .reporter(new MutableClock(clock.instant().plus(PAST_GRACE.plus(ONE_DAY))), output)</span>
+<span class="nc" id="L282">                    .check();</span>
+<span class="nc bnc" id="L283" title="All 4 branches missed.">            require(</span>
+                    first == CheckResult.DISABLED &amp;&amp; second == CheckResult.DISABLED,
+                    name + &quot; restart result &quot; + first + &quot;/&quot; + second);
+<span class="nc" id="L286">            require(</span>
+<span class="nc" id="L287">                    output.stream().noneMatch(line -&gt; line.startsWith(REQUEST_LINE_PREFIX)),</span>
+                    name + &quot; sent while disabled&quot;);
+<span class="nc" id="L289">            TelemetryState afterRestarts = installation.store().read().stateOrInitial();</span>
+<span class="nc" id="L290">            require(</span>
+<span class="nc" id="L291">                    afterRestarts.installation().equals(before.installation()),</span>
+                    name + &quot; identity changed by a restart&quot;);
+<span class="nc" id="L293">            record(</span>
+                    &quot;disable&quot;,
+                    name + &quot; disabled locally&quot;,
+                    Status.OBSERVED,
+<span class="nc" id="L297">                    Map.of(</span>
+<span class="nc" id="L298">                            &quot;distinct_id&quot;, subject.distinctId(),</span>
+<span class="nc" id="L299">                            &quot;mode&quot;, after.mode(),</span>
+                            &quot;registered_on&quot;,
+<span class="nc" id="L301">                                    after.registration().map(Object::toString).orElse(&quot;&quot;),</span>
+<span class="nc" id="L302">                            &quot;board_imports_total&quot;, after.boardImportsTotal(),</span>
+                            &quot;restart_checks&quot;, first + &quot;,&quot; + second,
+                            &quot;in_flight_requests&quot;, &quot;none: the experiment's delivery executor runs inline&quot;));
+<span class="nc" id="L305">        }</span>
+<span class="nc" id="L306">        save(checkpoint.withPhase(Phase.DISABLED, now()));</span>
+<span class="nc" id="L307">    }</span>
+
+    private void requestErasure() {
+<span class="nc" id="L310">        List&lt;String&gt; targets = List.of(</span>
+<span class="nc" id="L311">                checkpoint.subject(SUBJECT_A).distinctId(),</span>
+<span class="nc" id="L312">                checkpoint.subject(SUBJECT_B).distinctId());</span>
+<span class="nc" id="L313">        DeletionRecord record = bulkDelete(&quot;erasure&quot;, targets, targets.size());</span>
+<span class="nc" id="L314">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L316">            updated = updated.withSubject(updated.subject(name).withErasure(record), now());</span>
+<span class="nc" id="L317">        }</span>
+<span class="nc" id="L318">        save(updated.withPhase(Phase.ERASURE_REQUESTED, now()));</span>
+<span class="nc" id="L319">    }</span>
+
+    private void verifyErasure() {
+<span class="nc" id="L322">        List&lt;Subject&gt; erased = List.of(checkpoint.subject(SUBJECT_A), checkpoint.subject(SUBJECT_B));</span>
+<span class="nc" id="L323">        Observation observation = awaitObservation(&quot;event deletion&quot;, DELETION_WAIT, current -&gt; erased.stream()</span>
+<span class="nc" id="L324">                .allMatch(subject -&gt;</span>
+<span class="nc" id="L325">                        erasedAndVerified(current, subject, subject.baselinePersonUuid(), requireErasure(subject))));</span>
+<span class="nc" id="L326">        require(</span>
+                observation
+<span class="nc" id="L328">                        .uuidsFor(checkpoint.subject(CONTROL))</span>
+<span class="nc" id="L329">                        .containsAll(checkpoint.subject(CONTROL).oldEventUuids()),</span>
+                &quot;control event disappeared during the erasure&quot;);
+<span class="nc" id="L331">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc bnc" id="L332" title="All 2 branches missed.">        for (Subject subject : erased) {</span>
+<span class="nc" id="L333">            String verifiedAt = observation</span>
+<span class="nc" id="L334">                    .completionOf(subject.baselinePersonUuid(), requireErasure(subject))</span>
+<span class="nc" id="L335">                    .orElseThrow(() -&gt; new ExperimentFailure(subject.name() + &quot; completion row vanished&quot;));</span>
+<span class="nc" id="L336">            updated = updated.withSubject(</span>
+<span class="nc" id="L337">                    subject.withErasure(requireErasure(subject).verified(verifiedAt)), now());</span>
+<span class="nc" id="L338">            record(</span>
+                    &quot;erasure&quot;,
+<span class="nc" id="L340">                    subject.name() + &quot; deletion verified&quot;,</span>
+                    Status.OBSERVED,
+<span class="nc" id="L342">                    Map.of(</span>
+<span class="nc" id="L343">                            &quot;distinct_id&quot;, subject.distinctId(),</span>
+<span class="nc" id="L344">                            &quot;person_uuid&quot;, String.valueOf(subject.baselinePersonUuid()),</span>
+                            &quot;delete_verified_at&quot;, verifiedAt,
+                            &quot;old_events_remaining&quot;,
+<span class="nc" id="L347">                                    observation.eventsFor(subject).size(),</span>
+<span class="nc" id="L348">                            &quot;persons_remaining&quot;, observation.personsFor(subject).size()));</span>
+<span class="nc" id="L349">        }</span>
+<span class="nc" id="L350">        save(updated.withPhase(Phase.ERASURE_VERIFIED, now()));</span>
+<span class="nc" id="L351">    }</span>
+
+    // Phase 3: same-ID reuse, without and with a prior reset.
+
+    private void reuse(String name, Phase next) {
+<span class="nc" id="L356">        Subject subject = checkpoint.subject(name);</span>
+<span class="nc" id="L357">        Installation installation = installation(subject, NEW_VERSION, clock.instant());</span>
+<span class="nc" id="L358">        TelemetryState before = installation.store().read().stateOrInitial();</span>
+<span class="nc" id="L359">        int exit = installation.service().enable(out, out);</span>
+<span class="nc" id="L360">        TelemetryState after = installation.store().read().stateOrInitial();</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">        require(exit == TelemetryService.EXIT_OK, name + &quot; enable exited &quot; + exit);</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        require(after.mode() == TelemetryMode.ENABLED, name + &quot; is not enabled&quot;);</span>
+<span class="nc" id="L363">        require(after.installation().equals(before.installation()), name + &quot; identity changed on enable&quot;);</span>
+<span class="nc" id="L364">        require(after.registration().equals(before.registration()), name + &quot; registration changed on enable&quot;);</span>
+<span class="nc" id="L365">        require(</span>
+<span class="nc bnc" id="L366" title="All 4 branches missed.">                after.boardImportsTotal() == IMPORTS &amp;&amp; after.boardCreationsTotal() == CREATIONS,</span>
+                name + &quot; counters changed&quot;);
+<span class="nc" id="L368">        require(after.pending().isEmpty(), name + &quot; replayed a pending report&quot;);</span>
+<span class="nc" id="L369">        String eventUuid = sendHeartbeat(subject, NEW_VERSION, clock.instant());</span>
+<span class="nc" id="L370">        save(checkpoint.withSubject(subject.withNewEvent(eventUuid), now()).withPhase(next, now()));</span>
+<span class="nc" id="L371">    }</span>
+
+    private void resetBeforeReuse() {
+<span class="nc" id="L374">        Subject subject = checkpoint.subject(SUBJECT_B);</span>
+<span class="nc" id="L375">        Response response = client.resetPersonDistinctId(subject.distinctId());</span>
+<span class="nc" id="L376">        Response persons = client.persons(subject.distinctId());</span>
+<span class="nc" id="L377">        int personsAfterReset = resultsOf(persons, &quot;person lookup after reset&quot;).size();</span>
+<span class="nc" id="L378">        String outcome = &quot;HTTP &quot; + response.status() + &quot;, persons after reset: &quot; + personsAfterReset;</span>
+<span class="nc" id="L379">        record(</span>
+                &quot;reset&quot;,
+                &quot;B reset before any new event&quot;,
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                response.success() ? Status.OBSERVED : Status.FAILED,</span>
+<span class="nc" id="L383">                Map.of(</span>
+<span class="nc" id="L384">                        &quot;distinct_id&quot;, subject.distinctId(),</span>
+<span class="nc" id="L385">                        &quot;http_status&quot;, response.status(),</span>
+<span class="nc" id="L386">                        &quot;detail&quot;, response.detail(),</span>
+<span class="nc" id="L387">                        &quot;persons_after_reset&quot;, personsAfterReset));</span>
+<span class="nc" id="L388">        require(response.success(), &quot;reset before reuse failed: &quot; + outcome);</span>
+<span class="nc" id="L389">        save(checkpoint</span>
+<span class="nc" id="L390">                .withSubject(subject.withFact(FACT_RESET_BEFORE, outcome), now())</span>
+<span class="nc" id="L391">                .withPhase(Phase.RESET_B_DONE, now()));</span>
+<span class="nc" id="L392">    }</span>
+
+    /// Ingestion readiness and profile reuse are separate questions. The new events must become
+    /// queryable (a provider that is still ingesting is pending); whether PostHog then exposes a
+    /// profile for the reused ID is the observation this experiment exists to record, resolved or
+    /// not, after a bounded propagation window.
+    private void observeReuse() {
+<span class="nc" id="L399">        List&lt;Subject&gt; reused = List.of(checkpoint.subject(SUBJECT_A), checkpoint.subject(SUBJECT_B));</span>
+<span class="nc" id="L400">        awaitObservation(&quot;reuse ingestion&quot;, INGESTION_WAIT, current -&gt; reused.stream()</span>
+<span class="nc" id="L401">                .allMatch(subject -&gt; current.uuidsFor(subject).containsAll(subject.newEventUuids())));</span>
+<span class="nc" id="L402">        Observation observation =</span>
+<span class="nc" id="L403">                awaitObservationOrLast(&quot;reuse profile propagation&quot;, PROPAGATION_WAIT, current -&gt; reused.stream()</span>
+<span class="nc" id="L404">                        .allMatch(subject -&gt; mappingResolved(current, subject)));</span>
+<span class="nc" id="L405">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        for (Subject subject : reused) {</span>
+<span class="nc" id="L407">            updated = updated.withSubject(recordReuse(subject, observation), now());</span>
+<span class="nc" id="L408">        }</span>
+<span class="nc" id="L409">        save(updated.withPhase(Phase.REUSE_OBSERVED, now()));</span>
+<span class="nc" id="L410">    }</span>
+
+    private static boolean mappingResolved(Observation observation, Subject subject) {
+<span class="nc" id="L413">        List&lt;EventRow&gt; rows = observation.eventsFor(subject);</span>
+<span class="nc bnc" id="L414" title="All 2 branches missed.">        return !observation.personsFor(subject).isEmpty()</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">                &amp;&amp; !rows.isEmpty()</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">                &amp;&amp; rows.stream().allMatch(row -&gt; observation.personsTable().contains(row.personId()));</span>
+    }
+
+    private Subject recordReuse(Subject subject, Observation observation) {
+<span class="nc" id="L420">        List&lt;EventRow&gt; rows = observation.eventsFor(subject);</span>
+<span class="nc" id="L421">        require(</span>
+<span class="nc" id="L422">                rows.stream().noneMatch(row -&gt; subject.oldEventUuids().contains(row.uuid())),</span>
+<span class="nc" id="L423">                subject.name() + &quot; old event reappeared&quot;);</span>
+<span class="nc" id="L424">        require(</span>
+<span class="nc" id="L425">                observation.uuidsFor(subject).containsAll(subject.newEventUuids()),</span>
+<span class="nc" id="L426">                subject.name() + &quot; new event not queryable&quot;);</span>
+<span class="nc" id="L427">        List&lt;JsonNode&gt; persons = observation.personsFor(subject);</span>
+<span class="nc bnc" id="L428" title="All 2 branches missed.">        String apiPerson = persons.isEmpty() ? MISSING : RESOLVED;</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        boolean analyticsResolved = !rows.isEmpty()</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">                &amp;&amp; rows.stream().allMatch(row -&gt; observation.personsTable().contains(row.personId()));</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">        String personUuid = persons.isEmpty()</span>
+<span class="nc" id="L432">                ? &quot;&quot;</span>
+<span class="nc" id="L433">                : requireOwnedPerson(persons.getFirst(), subject).path(&quot;uuid&quot;).asText();</span>
+<span class="nc" id="L434">        Subject updated = subject.withFact(FACT_PERSON_API, apiPerson)</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">                .withFact(FACT_ANALYTICS, analyticsResolved ? RESOLVED : MISSING)</span>
+<span class="nc" id="L436">                .withFact(FACT_PERSON_UUID, personUuid);</span>
+<span class="nc" id="L437">        record(</span>
+                &quot;reuse&quot;,
+<span class="nc" id="L439">                subject.name() + &quot; after re-enable&quot;,</span>
+                Status.OBSERVED,
+<span class="nc" id="L441">                Map.of(</span>
+<span class="nc" id="L442">                        &quot;distinct_id&quot;, subject.distinctId(),</span>
+<span class="nc" id="L443">                        &quot;new_event_uuids&quot;, subject.newEventUuids(),</span>
+                        &quot;person_api&quot;, apiPerson,
+                        &quot;person_uuid&quot;, personUuid,
+                        &quot;person_uuid_changed&quot;,
+<span class="nc" id="L447">                                String.valueOf(</span>
+<span class="nc bnc" id="L448" title="All 4 branches missed.">                                        !personUuid.isEmpty() &amp;&amp; !personUuid.equals(subject.baselinePersonUuid())),</span>
+                        &quot;analytics_person_ids&quot;,
+<span class="nc" id="L450">                                rows.stream().map(EventRow::personId).distinct().toList(),</span>
+<span class="nc" id="L451">                        &quot;analytics_person_resolved&quot;, analyticsResolved,</span>
+                        &quot;old_events_remaining&quot;,
+<span class="nc" id="L453">                                rows.stream()</span>
+<span class="nc" id="L454">                                        .filter(row -&gt; subject.oldEventUuids().contains(row.uuid()))</span>
+<span class="nc" id="L455">                                        .count()));</span>
+<span class="nc" id="L456">        return updated;</span>
+    }
+
+    // Phase 4: conditional repair after a real new event.
+
+    /// Resets only a subject whose reuse left the profile or its analytics mapping missing, once,
+    /// after its new event exists. A reset that does not resolve within the window gets one more
+    /// heartbeat when a new UTC day allows it; otherwise the run parks in
+    /// [Phase#REPAIR_AWAITING_HEARTBEAT] and a later invocation sends it.
+    private void repairIfNeeded() {
+<span class="nc" id="L466">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc" id="L467">        boolean awaiting = false;</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L469">            Subject subject = updated.subject(name);</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">            if (mappingFacts(subject)) {</span>
+<span class="nc" id="L471">                updated = updated.withSubject(subject.withFact(FACT_REPAIR, &quot;not needed&quot;), now());</span>
+<span class="nc" id="L472">                record(</span>
+                        &quot;repair&quot;,
+                        name + &quot; needs no repair&quot;,
+                        Status.NOT_EXECUTED,
+<span class="nc" id="L476">                        Map.of(&quot;distinct_id&quot;, subject.distinctId()));</span>
+<span class="nc" id="L477">                continue;</span>
+            }
+<span class="nc" id="L479">            Subject repaired = resetAfterEvent(subject);</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">            if (mappingFacts(repaired)) {</span>
+<span class="nc" id="L481">                repaired = repaired.withFact(FACT_REPAIR, &quot;reset after the new event resolved the profile&quot;);</span>
+<span class="nc bnc" id="L482" title="All 2 branches missed.">            } else if (heartbeatDue(repaired)) {</span>
+<span class="nc" id="L483">                repaired = heartbeatAfterReset(repaired);</span>
+            } else {
+<span class="nc" id="L485">                repaired = repaired.withFact(FACT_REPAIR_AWAITING, &quot;true&quot;)</span>
+<span class="nc" id="L486">                        .withFact(</span>
+                                FACT_REPAIR,
+                                &quot;reset after the new event did not resolve the profile within &quot; + REPAIR_WAIT
+                                        + &quot;; one more heartbeat is due on a later UTC day&quot;);
+<span class="nc" id="L490">                awaiting = true;</span>
+            }
+<span class="nc" id="L492">            record(</span>
+                    &quot;repair&quot;,
+                    name + &quot; reset after a new event&quot;,
+                    Status.OBSERVED,
+<span class="nc" id="L496">                    Map.of(&quot;distinct_id&quot;, subject.distinctId(), &quot;result&quot;, repaired.fact(FACT_REPAIR)));</span>
+<span class="nc" id="L497">            updated = updated.withSubject(repaired, now());</span>
+<span class="nc" id="L498">        }</span>
+<span class="nc bnc" id="L499" title="All 2 branches missed.">        if (awaiting) {</span>
+<span class="nc" id="L500">            save(updated.withPhase(Phase.REPAIR_AWAITING_HEARTBEAT, now()));</span>
+<span class="nc" id="L501">            throw new PendingException(&quot;a repair needs one more heartbeat on a later UTC day; resume then&quot;);</span>
+        }
+<span class="nc" id="L503">        save(updated.withPhase(Phase.REPAIR_DONE, now()));</span>
+<span class="nc" id="L504">    }</span>
+
+    /// The parked continuation of [#repairIfNeeded]: on a new UTC day, one more heartbeat per
+    /// waiting subject, then the observation; on the same day the run stays pending.
+    private void repairAfterHeartbeat() {
+<span class="nc" id="L509">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B)) {</span>
+<span class="nc" id="L511">            Subject subject = updated.subject(name);</span>
+<span class="nc bnc" id="L512" title="All 2 branches missed.">            if (!&quot;true&quot;.equals(subject.fact(FACT_REPAIR_AWAITING))) {</span>
+<span class="nc" id="L513">                continue;</span>
+            }
+<span class="nc bnc" id="L515" title="All 2 branches missed.">            if (!heartbeatDue(subject)) {</span>
+<span class="nc" id="L516">                throw new PendingException(name + &quot; needs a heartbeat on a later UTC day than its last report&quot;);</span>
+            }
+<span class="nc" id="L518">            Subject repaired = heartbeatAfterReset(subject);</span>
+<span class="nc" id="L519">            record(</span>
+                    &quot;repair&quot;,
+                    name + &quot; heartbeat after the reset&quot;,
+                    Status.OBSERVED,
+<span class="nc" id="L523">                    Map.of(&quot;distinct_id&quot;, subject.distinctId(), &quot;result&quot;, repaired.fact(FACT_REPAIR)));</span>
+<span class="nc" id="L524">            updated = updated.withSubject(repaired, now());</span>
+<span class="nc" id="L525">            save(updated);</span>
+<span class="nc" id="L526">        }</span>
+<span class="nc" id="L527">        save(updated.withPhase(Phase.REPAIR_DONE, now()));</span>
+<span class="nc" id="L528">    }</span>
+
+    /// One reset per subject: the request time is checkpointed before the call so a resumed run
+    /// observes instead of resetting again.
+    private Subject resetAfterEvent(Subject subject) {
+<span class="nc" id="L533">        Subject requested = subject;</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">        if (subject.fact(FACT_REPAIR_RESET_AT).isEmpty()) {</span>
+<span class="nc" id="L535">            Response response = client.resetPersonDistinctId(subject.distinctId());</span>
+<span class="nc" id="L536">            require(</span>
+<span class="nc" id="L537">                    response.success(),</span>
+<span class="nc" id="L538">                    subject.name() + &quot; reset after the new event failed with HTTP &quot; + response.status());</span>
+<span class="nc" id="L539">            requested = subject.withFact(FACT_REPAIR_RESET_AT, now());</span>
+<span class="nc" id="L540">            save(checkpoint.withSubject(requested, now()));</span>
+        }
+<span class="nc" id="L542">        Observation observation = awaitObservationOrLast(</span>
+<span class="nc" id="L543">                &quot;repair of &quot; + subject.name(), REPAIR_WAIT, current -&gt; mappingResolved(current, subject));</span>
+<span class="nc" id="L544">        return recordReuse(requested, observation);</span>
+    }
+
+    private Subject heartbeatAfterReset(Subject subject) {
+<span class="nc" id="L548">        String eventUuid = sendHeartbeat(subject, NEW_VERSION, clock.instant());</span>
+<span class="nc" id="L549">        Subject sent = subject.withNewEvent(eventUuid).withFact(FACT_REPAIR_AWAITING, &quot;&quot;);</span>
+<span class="nc" id="L550">        save(checkpoint.withSubject(sent, now()));</span>
+<span class="nc" id="L551">        Observation again = awaitObservationOrLast(</span>
+<span class="nc" id="L552">                &quot;repair of &quot; + subject.name() + &quot; after one more event&quot;,</span>
+                PROPAGATION_WAIT,
+<span class="nc bnc" id="L554" title="All 4 branches missed.">                current -&gt; current.uuidsFor(subject).contains(eventUuid) &amp;&amp; mappingResolved(current, sent));</span>
+<span class="nc" id="L555">        Subject observed = recordReuse(sent, again);</span>
+<span class="nc" id="L556">        return observed.withFact(</span>
+                FACT_REPAIR,
+<span class="nc" id="L558">                &quot;reset after the new event, then one more heartbeat: person_api=&quot; + observed.fact(FACT_PERSON_API)</span>
+<span class="nc" id="L559">                        + &quot;, analytics=&quot; + observed.fact(FACT_ANALYTICS));</span>
+    }
+
+    private boolean heartbeatDue(Subject subject) {
+<span class="nc" id="L563">        return LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC).isAfter(lastReportedDate(subject));</span>
+    }
+
+    private static boolean mappingFacts(Subject subject) {
+<span class="nc bnc" id="L567" title="All 4 branches missed.">        return RESOLVED.equals(subject.fact(FACT_PERSON_API)) &amp;&amp; RESOLVED.equals(subject.fact(FACT_ANALYTICS));</span>
+    }
+
+    private LocalDate lastReportedDate(Subject subject) {
+<span class="nc" id="L571">        return installation(subject, NEW_VERSION, clock.instant())</span>
+<span class="nc" id="L572">                .store()</span>
+<span class="nc" id="L573">                .read()</span>
+<span class="nc" id="L574">                .stateOrInitial()</span>
+<span class="nc" id="L575">                .lastReported()</span>
+<span class="nc" id="L576">                .orElse(LocalDate.MIN);</span>
+    }
+
+    // Phase 5: erasability after reuse, then cleanup.
+
+    private void cleanup() {
+<span class="nc" id="L582">        Observation observation = observe();</span>
+<span class="nc" id="L583">        List&lt;String&gt; targets = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L584">        int resolvable = 0;</span>
+<span class="nc bnc" id="L585" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B, CONTROL)) {</span>
+<span class="nc" id="L586">            Subject subject = checkpoint.subject(name);</span>
+<span class="nc" id="L587">            List&lt;EventRow&gt; rows = observation.eventsFor(subject);</span>
+<span class="nc" id="L588">            require(</span>
+<span class="nc" id="L589">                    rows.stream()</span>
+<span class="nc bnc" id="L590" title="All 4 branches missed.">                            .noneMatch(row -&gt; subject.oldEventUuids().contains(row.uuid()) &amp;&amp; !CONTROL.equals(name)),</span>
+                    name + &quot; old event present before cleanup&quot;);
+<span class="nc bnc" id="L592" title="All 2 branches missed.">            List&lt;String&gt; expected = CONTROL.equals(name) ? subject.oldEventUuids() : subject.newEventUuids();</span>
+<span class="nc" id="L593">            require(</span>
+<span class="nc" id="L594">                    observation.uuidsFor(subject).containsAll(expected),</span>
+                    name + &quot; expected events missing before cleanup&quot;);
+<span class="nc bnc" id="L596" title="All 2 branches missed.">            require(rows.size() == expected.size(), name + &quot; has unexpected extra events: &quot; + rows.size());</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">            if (!observation.personsFor(subject).isEmpty()) {</span>
+<span class="nc" id="L598">                requireOwnedPerson(observation.personsFor(subject).getFirst(), subject);</span>
+<span class="nc" id="L599">                resolvable++;</span>
+            }
+<span class="nc bnc" id="L601" title="All 2 branches missed.">            if (!CONTROL.equals(name)) {</span>
+<span class="nc" id="L602">                Installation installation = installation(subject, NEW_VERSION, clock.instant());</span>
+<span class="nc" id="L603">                require(</span>
+<span class="nc bnc" id="L604" title="All 2 branches missed.">                        installation.service().disable(DisableRequest.nonInteractive(), out, out)</span>
+                                == TelemetryService.EXIT_OK,
+                        name + &quot; could not be disabled before cleanup&quot;);
+            }
+<span class="nc" id="L608">            targets.add(subject.distinctId());</span>
+<span class="nc" id="L609">        }</span>
+<span class="nc" id="L610">        DeletionRecord record = bulkDelete(&quot;cleanup&quot;, targets, resolvable);</span>
+<span class="nc" id="L611">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc bnc" id="L612" title="All 2 branches missed.">        for (String name : List.of(SUBJECT_A, SUBJECT_B, CONTROL)) {</span>
+<span class="nc" id="L613">            Subject subject = updated.subject(name);</span>
+<span class="nc bnc" id="L614" title="All 2 branches missed.">            String personUuid = observation.personsFor(subject).isEmpty()</span>
+<span class="nc" id="L615">                    ? &quot;&quot;</span>
+<span class="nc" id="L616">                    : observation.personsFor(subject).getFirst().path(&quot;uuid&quot;).asText();</span>
+<span class="nc" id="L617">            updated = updated.withSubject(subject.withCleanup(record).withFact(CLEANUP_PERSON_UUID, personUuid), now());</span>
+<span class="nc bnc" id="L618" title="All 2 branches missed.">            if (personUuid.isEmpty()) {</span>
+<span class="nc" id="L619">                updated = updated.withNote(</span>
+<span class="nc" id="L620">                        name + &quot; had no resolvable profile at cleanup; deletion by distinct_id &quot; + subject.distinctId()</span>
+                                + &quot; may not cover orphaned events, check manually&quot;,
+<span class="nc" id="L622">                        now());</span>
+            }
+<span class="nc" id="L624">        }</span>
+<span class="nc" id="L625">        save(updated.withPhase(Phase.CLEANUP_REQUESTED, now()));</span>
+<span class="nc" id="L626">    }</span>
+
+    private void verifyCleanup() {
+<span class="nc" id="L629">        List&lt;Subject&gt; all =</span>
+<span class="nc" id="L630">                List.of(checkpoint.subject(SUBJECT_A), checkpoint.subject(SUBJECT_B), checkpoint.subject(CONTROL));</span>
+        // The control subject had no cleanup deletion to verify; the others need their record verified.
+<span class="nc" id="L632">        Observation observation = awaitObservation(&quot;cleanup deletion&quot;, DELETION_WAIT, current -&gt; all.stream()</span>
+<span class="nc bnc" id="L633" title="All 2 branches missed.">                .allMatch(subject -&gt; subject.fact(CLEANUP_PERSON_UUID).isEmpty()</span>
+<span class="nc" id="L634">                        ? erased(current, subject)</span>
+<span class="nc" id="L635">                        : erasedAndVerified(</span>
+<span class="nc" id="L636">                                current, subject, subject.fact(CLEANUP_PERSON_UUID), requireCleanup(subject))));</span>
+<span class="nc" id="L637">        ExperimentCheckpoint updated = checkpoint;</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">        for (Subject subject : all) {</span>
+<span class="nc bnc" id="L639" title="All 2 branches missed.">            String verifiedAt = subject.fact(CLEANUP_PERSON_UUID).isEmpty()</span>
+<span class="nc" id="L640">                    ? &quot;no profile to verify&quot;</span>
+                    : observation
+<span class="nc" id="L642">                            .completionOf(subject.fact(CLEANUP_PERSON_UUID), requireCleanup(subject))</span>
+<span class="nc" id="L643">                            .orElseThrow(() -&gt; new ExperimentFailure(subject.name() + &quot; completion row vanished&quot;));</span>
+<span class="nc" id="L644">            updated = updated.withSubject(</span>
+<span class="nc" id="L645">                    subject.withCleanup(requireCleanup(subject).verified(verifiedAt)), now());</span>
+<span class="nc" id="L646">            record(</span>
+                    &quot;cleanup&quot;,
+<span class="nc" id="L648">                    subject.name() + &quot; fixtures deleted&quot;,</span>
+                    Status.OBSERVED,
+<span class="nc" id="L650">                    Map.of(</span>
+<span class="nc" id="L651">                            &quot;distinct_id&quot;, subject.distinctId(),</span>
+                            &quot;delete_verified_at&quot;, verifiedAt,
+<span class="nc" id="L653">                            &quot;events_remaining&quot;, observation.eventsFor(subject).size()));</span>
+<span class="nc" id="L654">        }</span>
+<span class="nc" id="L655">        save(updated.withPhase(Phase.COMPLETE, now()));</span>
+<span class="nc" id="L656">    }</span>
+
+    // Shared mechanics.
+
+    private DeletionRecord bulkDelete(String phase, List&lt;String&gt; targets, int expectedFound) {
+<span class="nc" id="L661">        List&lt;String&gt; owned = checkpoint.ownedDistinctIds();</span>
+<span class="nc" id="L662">        require(owned.containsAll(targets), &quot;deletion target outside the run's allowlist&quot;);</span>
+<span class="nc bnc" id="L663" title="All 2 branches missed.">        for (String target : targets) {</span>
+<span class="nc" id="L664">            Response persons = client.persons(target);</span>
+<span class="nc" id="L665">            require(</span>
+<span class="nc" id="L666">                    persons.success(),</span>
+<span class="nc" id="L667">                    &quot;person lookup before deletion failed with HTTP &quot; + persons.status() + &quot;: &quot; + persons.detail());</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">            for (JsonNode person : resultsOf(persons, &quot;person lookup before deletion&quot;)) {</span>
+<span class="nc" id="L669">                requireOwnedPerson(person, subjectByDistinctId(target));</span>
+<span class="nc" id="L670">            }</span>
+<span class="nc" id="L671">        }</span>
+<span class="nc" id="L672">        Response response = client.bulkDelete(targets);</span>
+<span class="nc" id="L673">        JsonNode body = response.json();</span>
+<span class="nc" id="L674">        int errors = body.path(&quot;deletion_errors&quot;).size();</span>
+<span class="nc" id="L675">        var record = new DeletionRecord(</span>
+<span class="nc" id="L676">                now(),</span>
+<span class="nc" id="L677">                body.path(&quot;persons_found&quot;).asInt(-1),</span>
+<span class="nc" id="L678">                body.path(&quot;persons_queued_for_deletion&quot;).asInt(-1),</span>
+<span class="nc" id="L679">                body.path(&quot;events_queued_for_deletion&quot;).asBoolean(false),</span>
+                errors,
+                null);
+<span class="nc bnc" id="L682" title="All 4 branches missed.">        boolean accepted = response.status() == Response.HTTP_ACCEPTED</span>
+                &amp;&amp; errors == 0
+<span class="nc bnc" id="L684" title="All 2 branches missed.">                &amp;&amp; record.personsFound() == expectedFound</span>
+<span class="nc bnc" id="L685" title="All 2 branches missed.">                &amp;&amp; record.eventsQueued();</span>
+<span class="nc" id="L686">        record(</span>
+                phase,
+                &quot;bulk deletion requested&quot;,
+<span class="nc bnc" id="L689" title="All 2 branches missed.">                accepted ? Status.OBSERVED : Status.FAILED,</span>
+<span class="nc" id="L690">                Map.of(</span>
+                        &quot;distinct_ids&quot;, targets,
+<span class="nc" id="L692">                        &quot;http_status&quot;, response.status(),</span>
+<span class="nc" id="L693">                        &quot;persons_found&quot;, record.personsFound(),</span>
+<span class="nc" id="L694">                        &quot;persons_queued_for_deletion&quot;, record.personsQueued(),</span>
+<span class="nc" id="L695">                        &quot;persons_deleted&quot;, body.path(&quot;persons_deleted&quot;).asInt(-1),</span>
+<span class="nc" id="L696">                        &quot;events_queued_for_deletion&quot;, record.eventsQueued(),</span>
+<span class="nc" id="L697">                        &quot;deletion_errors&quot;, body.path(&quot;deletion_errors&quot;).toString(),</span>
+<span class="nc bnc" id="L698" title="All 2 branches missed.">                        &quot;detail&quot;, response.success() ? &quot;&quot; : response.detail()));</span>
+<span class="nc" id="L699">        require(</span>
+                accepted,
+<span class="nc" id="L701">                phase + &quot; deletion not accepted: HTTP &quot; + response.status() + &quot; found=&quot; + record.personsFound()</span>
+                        + &quot; expected=&quot; + expectedFound + &quot; errors=&quot; + errors + &quot; events_queued=&quot;
+<span class="nc" id="L703">                        + record.eventsQueued());</span>
+<span class="nc" id="L704">        return record;</span>
+    }
+
+    private Subject subjectByDistinctId(String distinctId) {
+<span class="nc" id="L708">        return checkpoint.subjects().values().stream()</span>
+<span class="nc" id="L709">                .filter(subject -&gt; subject.distinctId().equals(distinctId))</span>
+<span class="nc" id="L710">                .findFirst()</span>
+<span class="nc" id="L711">                .orElseThrow(() -&gt; new ExperimentFailure(&quot;no subject owns &quot; + distinctId));</span>
+    }
+
+    /// A person may be deleted only when every distinct ID PostHog mapped to it is this subject's.
+    private static JsonNode requireOwnedPerson(JsonNode person, Subject subject) {
+<span class="nc" id="L716">        List&lt;String&gt; ids = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L717">        person.path(&quot;distinct_ids&quot;).forEach(id -&gt; ids.add(id.asText()));</span>
+<span class="nc" id="L718">        require(</span>
+<span class="nc" id="L719">                ids.equals(List.of(subject.distinctId())),</span>
+<span class="nc" id="L720">                subject.name() + &quot; person is mapped to &quot; + ids + &quot;, refusing&quot;);</span>
+<span class="nc" id="L721">        return person;</span>
+    }
+
+    private String sendHeartbeat(Subject subject, String version, Instant at) {
+<span class="nc" id="L725">        Installation installation = installation(subject, version, at);</span>
+<span class="nc" id="L726">        var subjectClock = new MutableClock(at);</span>
+<span class="nc" id="L727">        List&lt;String&gt; output = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L728">        HeartbeatReporter reporter = installation.reporter(subjectClock, output);</span>
+<span class="nc" id="L729">        CheckResult result = reporter.check();</span>
+<span class="nc bnc" id="L730" title="All 2 branches missed.">        if (result == CheckResult.GRACE) {</span>
+<span class="nc" id="L731">            subjectClock.advance(PAST_GRACE);</span>
+<span class="nc" id="L732">            result = reporter.check();</span>
+        }
+<span class="nc" id="L734">        TelemetryState state = installation.store().read().stateOrInitial();</span>
+<span class="nc" id="L735">        LocalDate day = LocalDate.ofInstant(subjectClock.instant(), ZoneOffset.UTC);</span>
+<span class="nc bnc" id="L736" title="All 2 branches missed.">        boolean accepted = result == CheckResult.DISPATCHED</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">                &amp;&amp; state.lastReported().map(day::equals).orElse(false)</span>
+<span class="nc bnc" id="L738" title="All 2 branches missed.">                &amp;&amp; state.pending().isEmpty();</span>
+<span class="nc" id="L739">        String eventUuid = output.stream()</span>
+<span class="nc" id="L740">                .filter(line -&gt; line.startsWith(REQUEST_LINE_PREFIX))</span>
+<span class="nc" id="L741">                .map(ErasureExperiment::eventUuidOf)</span>
+<span class="nc" id="L742">                .findFirst()</span>
+<span class="nc" id="L743">                .orElse(&quot;&quot;);</span>
+<span class="nc" id="L744">        String response = output.stream()</span>
+<span class="nc" id="L745">                .filter(line -&gt; line.startsWith(&quot;telemetry response &quot;))</span>
+<span class="nc" id="L746">                .findFirst()</span>
+<span class="nc" id="L747">                .orElse(&quot;no response line&quot;);</span>
+<span class="nc" id="L748">        record(</span>
+                &quot;send&quot;,
+<span class="nc" id="L750">                subject.name() + &quot; heartbeat&quot;,</span>
+<span class="nc bnc" id="L751" title="All 2 branches missed.">                accepted ? Status.OBSERVED : Status.FAILED,</span>
+<span class="nc" id="L752">                Map.of(</span>
+<span class="nc" id="L753">                        &quot;distinct_id&quot;, subject.distinctId(),</span>
+                        &quot;event_uuid&quot;, eventUuid,
+<span class="nc" id="L755">                        &quot;timestamp&quot;, subjectClock.instant().toString(),</span>
+                        &quot;installed_version&quot;, version,
+                        &quot;check_result&quot;, result,
+                        &quot;response&quot;, response,
+                        &quot;last_reported_date&quot;,
+<span class="nc" id="L760">                                state.lastReported().map(Object::toString).orElse(&quot;&quot;)));</span>
+<span class="nc bnc" id="L761" title="All 2 branches missed.">        require(</span>
+<span class="nc bnc" id="L762" title="All 2 branches missed.">                accepted &amp;&amp; !eventUuid.isEmpty(),</span>
+<span class="nc" id="L763">                subject.name() + &quot; heartbeat not accepted: &quot; + result + &quot;, &quot; + response);</span>
+<span class="nc" id="L764">        return eventUuid;</span>
+    }
+
+    private static String eventUuidOf(String requestLine) {
+<span class="nc" id="L768">        int bodyStart = requestLine.indexOf('\n');</span>
+        try {
+<span class="nc" id="L770">            return JSON.readTree(requestLine.substring(bodyStart + 1))</span>
+<span class="nc" id="L771">                    .path(HeartbeatField.Names.UUID)</span>
+<span class="nc" id="L772">                    .asText(&quot;&quot;);</span>
+<span class="nc" id="L773">        } catch (IOException exception) {</span>
+<span class="nc" id="L774">            return &quot;&quot;;</span>
+        }
+    }
+
+    /// A disposable installation for one subject: its own state directory under the experiment
+    /// directory, the installer marker with the given version, synthetic platform and boards, and
+    /// the verified test project token. Counters are seeded once so snapshots carry real numbers.
+    private Installation installation(Subject subject, String version, Instant at) {
+<span class="nc" id="L782">        Path stateDir = binding.experimentDir()</span>
+<span class="nc" id="L783">                .resolve(&quot;subjects&quot;)</span>
+<span class="nc" id="L784">                .resolve(subject.name())</span>
+<span class="nc" id="L785">                .resolve(&quot;state&quot;);</span>
+        try {
+<span class="nc" id="L787">            Files.createDirectories(stateDir);</span>
+<span class="nc" id="L788">            Files.writeString(</span>
+<span class="nc" id="L789">                    InstalledVersion.installContextPath(stateDir),</span>
+                    &quot;installer=install.sh\ninstall_format_version=2\napp_version=&quot; + version + &quot;\n&quot;);
+<span class="nc" id="L791">        } catch (IOException exception) {</span>
+<span class="nc" id="L792">            throw new ExperimentFailure(&quot;subject state directory not writable: &quot; + exception.getMessage(), exception);</span>
+<span class="nc" id="L793">        }</span>
+<span class="nc bnc" id="L794" title="All 2 branches missed.">        require(!token.get().isEmpty(), &quot;capture token not verified&quot;);</span>
+<span class="nc" id="L795">        TelemetryInstallation installation = TelemetryInstallation.of(</span>
+                stateDir,
+<span class="nc" id="L797">                () -&gt; OptionalInt.of(BOARDS),</span>
+                new TelemetryEnvironment(false, false, true),
+<span class="nc" id="L799">                new TelemetryDistribution(binding.captureEndpoint(), Optional.of(token.get())));</span>
+<span class="nc" id="L800">        require(</span>
+<span class="nc bnc" id="L801" title="All 4 branches missed.">                installation.installed() &amp;&amp; installation.networkEligible(),</span>
+<span class="nc" id="L802">                subject.name() + &quot; installation is not eligible&quot;);</span>
+<span class="nc" id="L803">        TelemetryStateStore store = installation.store().orElseThrow();</span>
+<span class="nc bnc" id="L804" title="All 2 branches missed.">        store.update(state -&gt; state.hasIdentity()</span>
+<span class="nc" id="L805">                ? Update.unchanged(null)</span>
+<span class="nc" id="L806">                : Update.write(</span>
+<span class="nc" id="L807">                        state.withIdentity(</span>
+<span class="nc" id="L808">                                        UUID.fromString(subject.distinctId()), LocalDate.parse(subject.registeredOn()))</span>
+<span class="nc" id="L809">                                .withCounters(IMPORTS, CREATIONS),</span>
+                        null));
+<span class="nc" id="L811">        var snapshots = new HeartbeatSnapshots(installation, TelemetryFixture.fixedPlatform());</span>
+<span class="nc" id="L812">        return new Installation(</span>
+                installation,
+                store,
+                snapshots,
+<span class="nc" id="L816">                new TelemetryService(installation, snapshots, Clock.fixed(at, ZoneOffset.UTC)),</span>
+<span class="nc" id="L817">                binding.captureEndpoint());</span>
+    }
+
+<span class="nc" id="L820">    private record Installation(</span>
+            TelemetryInstallation installation,
+            TelemetryStateStore store,
+            HeartbeatSnapshots snapshots,
+            TelemetryService service,
+            URI captureEndpoint) {
+
+        HeartbeatReporter reporter(Clock clock, List&lt;String&gt; output) {
+<span class="nc" id="L828">            return new HeartbeatReporter(</span>
+                    installation,
+                    snapshots,
+                    new PostHogCaptureClient(captureEndpoint),
+                    clock,
+                    Runnable::run,
+<span class="nc" id="L834">                    () -&gt; 0,</span>
+<span class="nc" id="L835">                    output::add);</span>
+        }
+    }
+
+    /// Polls the provider until the condition holds; a provider that has not finished within the
+    /// phase's wait raises a pending outcome, never a failure.
+    private Observation awaitObservation(String what, Duration maxWait, Predicate&lt;Observation&gt; done) {
+<span class="nc" id="L842">        Observation last = awaitObservationOrLast(what, maxWait, done);</span>
+<span class="nc bnc" id="L843" title="All 2 branches missed.">        if (!done.test(last)) {</span>
+<span class="nc" id="L844">            throw new PendingException(what + &quot; not complete after &quot; + maxWait + &quot;; resume later&quot;);</span>
+        }
+<span class="nc" id="L846">        return last;</span>
+    }
+
+    private Observation awaitObservationOrLast(String what, Duration maxWait, Predicate&lt;Observation&gt; done) {
+<span class="nc" id="L850">        Instant deadline = clock.instant().plus(maxWait);</span>
+<span class="nc" id="L851">        Observation observation = observe();</span>
+<span class="nc bnc" id="L852" title="All 4 branches missed.">        while (!done.test(observation) &amp;&amp; clock.instant().isBefore(deadline)) {</span>
+<span class="nc" id="L853">            budget.await(POLL_INTERVAL, &quot;waiting for &quot; + what);</span>
+<span class="nc" id="L854">            observation = observe();</span>
+        }
+<span class="nc" id="L856">        record(</span>
+                &quot;poll&quot;,
+                what,
+<span class="nc bnc" id="L859" title="All 2 branches missed.">                done.test(observation) ? Status.OBSERVED : Status.PENDING,</span>
+<span class="nc" id="L860">                observation.summary(checkpoint));</span>
+<span class="nc" id="L861">        return observation;</span>
+    }
+
+    /// One consistent look at everything the run owns: every heartbeat for the owned IDs with its
+    /// analytics person, the persons table rows for those persons, the person API answer per ID,
+    /// and the deletion status per known person UUID.
+    private Observation observe() {
+<span class="nc" id="L868">        List&lt;String&gt; ids = checkpoint.ownedDistinctIds();</span>
+<span class="nc" id="L869">        ids.forEach(UUID::fromString);</span>
+<span class="nc" id="L870">        String window = HOGQL_TIME.format(Instant.parse(checkpoint.startedAt()).minus(WINDOW_BEFORE_START));</span>
+<span class="nc" id="L871">        Response events = client.query(&quot;SELECT distinct_id, toString(uuid), toString(person_id), toString(timestamp)&quot;</span>
+<span class="nc" id="L872">                + &quot; FROM events WHERE event = '&quot; + HeartbeatEvent.EVENT_NAME + &quot;' AND distinct_id IN (&quot; + quoted(ids)</span>
+                + &quot;)&quot;
+                + &quot; AND timestamp &gt;= toDateTime('&quot; + window + &quot;') ORDER BY timestamp LIMIT 100&quot;);
+<span class="nc" id="L875">        List&lt;EventRow&gt; rows = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L876" title="All 2 branches missed.">        for (JsonNode row : resultsOf(events, &quot;event query&quot;)) {</span>
+<span class="nc" id="L877">            require(</span>
+<span class="nc bnc" id="L878" title="All 2 branches missed.">                    row.isArray()</span>
+<span class="nc bnc" id="L879" title="All 2 branches missed.">                            &amp;&amp; row.size() == 4</span>
+<span class="nc bnc" id="L880" title="All 2 branches missed.">                            &amp;&amp; row.get(0).isTextual()</span>
+<span class="nc bnc" id="L881" title="All 2 branches missed.">                            &amp;&amp; row.get(1).isTextual(),</span>
+                    EVIDENCE_UNAVAILABLE + &quot;event query row has an unexpected shape&quot;);
+<span class="nc" id="L883">            rows.add(new EventRow(</span>
+<span class="nc" id="L884">                    row.get(0).asText(),</span>
+<span class="nc" id="L885">                    row.get(1).asText(),</span>
+<span class="nc" id="L886">                    row.get(2).asText(),</span>
+<span class="nc" id="L887">                    row.get(3).asText()));</span>
+<span class="nc" id="L888">        }</span>
+<span class="nc" id="L889">        List&lt;String&gt; personIds =</span>
+<span class="nc" id="L890">                new ArrayList&lt;&gt;(rows.stream().map(EventRow::personId).distinct().toList());</span>
+<span class="nc" id="L891">        checkpoint.subjects().values().stream()</span>
+<span class="nc" id="L892">                .map(Subject::baselinePersonUuid)</span>
+<span class="nc bnc" id="L893" title="All 4 branches missed.">                .filter(uuid -&gt; uuid != null &amp;&amp; !personIds.contains(uuid))</span>
+<span class="nc" id="L894">                .forEach(personIds::add);</span>
+<span class="nc" id="L895">        personIds.forEach(UUID::fromString);</span>
+<span class="nc" id="L896">        List&lt;String&gt; personsTable = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L897" title="All 2 branches missed.">        if (!personIds.isEmpty()) {</span>
+<span class="nc" id="L898">            Response persons = client.query(&quot;SELECT toString(id) FROM persons WHERE id IN (&quot; + quoted(personIds) + &quot;)&quot;);</span>
+<span class="nc bnc" id="L899" title="All 2 branches missed.">            for (JsonNode row : resultsOf(persons, &quot;persons query&quot;)) {</span>
+<span class="nc" id="L900">                require(</span>
+<span class="nc bnc" id="L901" title="All 4 branches missed.">                        row.isArray() &amp;&amp; row.size() == 1,</span>
+                        EVIDENCE_UNAVAILABLE + &quot;persons query row has an unexpected shape&quot;);
+<span class="nc" id="L903">                personsTable.add(row.get(0).asText());</span>
+<span class="nc" id="L904">            }</span>
+        }
+        // Insertion order keeps the output stable for assertions.
+<span class="nc" id="L907">        Map&lt;String, List&lt;JsonNode&gt;&gt; personApi = new LinkedHashMap&lt;&gt;();</span>
+        // Insertion order keeps the output stable for assertions.
+<span class="nc" id="L909">        Map&lt;String, JsonNode&gt; deletions = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L910" title="All 2 branches missed.">        for (Subject subject : checkpoint.subjects().values()) {</span>
+<span class="nc" id="L911">            Response persons = client.persons(subject.distinctId());</span>
+<span class="nc" id="L912">            List&lt;JsonNode&gt; results = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L913">            resultsOf(persons, &quot;person lookup&quot;).forEach(results::add);</span>
+<span class="nc" id="L914">            personApi.put(subject.distinctId(), results);</span>
+            for (String personUuid :
+<span class="nc bnc" id="L916" title="All 2 branches missed.">                    List.of(String.valueOf(subject.baselinePersonUuid()), subject.fact(CLEANUP_PERSON_UUID))) {</span>
+<span class="nc bnc" id="L917" title="All 6 branches missed.">                if (personUuid.isEmpty() || &quot;null&quot;.equals(personUuid) || deletions.containsKey(personUuid)) {</span>
+<span class="nc" id="L918">                    continue;</span>
+                }
+<span class="nc" id="L920">                Response status = client.deletionStatus(personUuid);</span>
+<span class="nc" id="L921">                deletions.put(personUuid, resultsOf(status, &quot;deletion status&quot;));</span>
+<span class="nc" id="L922">            }</span>
+<span class="nc" id="L923">        }</span>
+<span class="nc" id="L924">        return new Observation(rows, personsTable, personApi, deletions);</span>
+    }
+
+    /// A listing or query answer is evidence only when it is a successful, well-formed answer with
+    /// a real `results` array. A missing array, a non-array value, malformed JSON, or a query that
+    /// only reports its status is unavailable evidence, never an empty result.
+    private static JsonNode resultsOf(Response response, String context) {
+<span class="nc" id="L931">        require(response.success(), context + &quot; failed with HTTP &quot; + response.status() + &quot;: &quot; + response.detail());</span>
+<span class="nc" id="L932">        JsonNode json = response.json();</span>
+<span class="nc" id="L933">        require(json.isObject(), EVIDENCE_UNAVAILABLE + context + &quot; answered malformed or empty JSON&quot;);</span>
+<span class="nc" id="L934">        JsonNode results = json.get(&quot;results&quot;);</span>
+<span class="nc bnc" id="L935" title="All 2 branches missed.">        require(</span>
+<span class="nc bnc" id="L936" title="All 2 branches missed.">                results != null &amp;&amp; results.isArray(),</span>
+                EVIDENCE_UNAVAILABLE + context + &quot; answered without a results array&quot;
+<span class="nc bnc" id="L938" title="All 2 branches missed.">                        + (json.has(&quot;query_status&quot;) ? &quot; (query still running)&quot; : &quot;&quot;));</span>
+<span class="nc" id="L939">        return results;</span>
+    }
+
+    private static String quoted(List&lt;String&gt; values) {
+<span class="nc" id="L943">        return values.stream().map(value -&gt; &quot;'&quot; + value + &quot;'&quot;).collect(Collectors.joining(&quot;, &quot;));</span>
+    }
+
+<span class="nc" id="L946">    private record EventRow(String distinctId, String uuid, String personId, String timestamp) {}</span>
+
+<span class="nc" id="L948">    private record Observation(</span>
+            List&lt;EventRow&gt; events,
+            List&lt;String&gt; personsTable,
+            Map&lt;String, List&lt;JsonNode&gt;&gt; personApi,
+            Map&lt;String, JsonNode&gt; deletions) {
+
+        List&lt;EventRow&gt; eventsFor(Subject subject) {
+<span class="nc" id="L955">            return events.stream()</span>
+<span class="nc" id="L956">                    .filter(row -&gt; row.distinctId().equals(subject.distinctId()))</span>
+<span class="nc" id="L957">                    .toList();</span>
+        }
+
+        List&lt;String&gt; uuidsFor(Subject subject) {
+<span class="nc" id="L961">            return eventsFor(subject).stream().map(EventRow::uuid).toList();</span>
+        }
+
+        List&lt;JsonNode&gt; personsFor(Subject subject) {
+<span class="nc" id="L965">            return personApi.getOrDefault(subject.distinctId(), List.of());</span>
+        }
+
+        /// The verification timestamp of the status row that belongs to this deletion request: same
+        /// profile UUID, status `completed`, a parseable `delete_verified_at`, and a `created_at` no
+        /// earlier than the request time minus the skew allowance. A row from an earlier operation
+        /// on a reused profile, a row for another person, a missing or blank timestamp, and an absent
+        /// row are all &quot;not complete&quot;.
+        Optional&lt;String&gt; completionOf(@Nullable String personUuid, DeletionRecord request) {
+<span class="nc bnc" id="L974" title="All 2 branches missed.">            if (personUuid == null) {</span>
+<span class="nc" id="L975">                return Optional.empty();</span>
+            }
+<span class="nc" id="L977">            JsonNode rows = deletions.get(personUuid);</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">            if (rows == null) {</span>
+<span class="nc" id="L979">                return Optional.empty();</span>
+            }
+<span class="nc" id="L981">            Instant requestedAt = Instant.parse(request.requestedAt()).minus(CLOCK_SKEW);</span>
+<span class="nc bnc" id="L982" title="All 2 branches missed.">            for (JsonNode row : rows) {</span>
+<span class="nc bnc" id="L983" title="All 2 branches missed.">                if (!row.isObject()</span>
+<span class="nc bnc" id="L984" title="All 2 branches missed.">                        || !personUuid.equals(row.path(&quot;person_uuid&quot;).asText(&quot;&quot;))) {</span>
+<span class="nc" id="L985">                    continue;</span>
+                }
+<span class="nc bnc" id="L987" title="All 2 branches missed.">                if (!&quot;completed&quot;.equals(row.path(&quot;status&quot;).asText(&quot;&quot;))) {</span>
+<span class="nc" id="L988">                    continue;</span>
+                }
+<span class="nc" id="L990">                Optional&lt;Instant&gt; createdAt = instantOf(row.get(&quot;created_at&quot;));</span>
+<span class="nc" id="L991">                Optional&lt;Instant&gt; verifiedAt = instantOf(row.get(&quot;delete_verified_at&quot;));</span>
+<span class="nc bnc" id="L992" title="All 2 branches missed.">                if (createdAt.isPresent()</span>
+<span class="nc bnc" id="L993" title="All 2 branches missed.">                        &amp;&amp; verifiedAt.isPresent()</span>
+<span class="nc bnc" id="L994" title="All 2 branches missed.">                        &amp;&amp; !createdAt.get().isBefore(requestedAt)) {</span>
+<span class="nc" id="L995">                    return Optional.of(row.get(&quot;delete_verified_at&quot;).asText());</span>
+                }
+<span class="nc" id="L997">            }</span>
+<span class="nc" id="L998">            return Optional.empty();</span>
+        }
+
+        private static Optional&lt;Instant&gt; instantOf(@Nullable JsonNode node) {
+<span class="nc bnc" id="L1002" title="All 6 branches missed.">            if (node == null || !node.isTextual() || node.asText().isBlank()) {</span>
+<span class="nc" id="L1003">                return Optional.empty();</span>
+            }
+            try {
+<span class="nc" id="L1006">                return Optional.of(Instant.parse(node.asText()));</span>
+<span class="nc" id="L1007">            } catch (DateTimeParseException exception) {</span>
+<span class="nc" id="L1008">                return Optional.empty();</span>
+            }
+        }
+
+        Map&lt;String, Object&gt; summary(ExperimentCheckpoint checkpoint) {
+            // Insertion order keeps the summary readable in the evidence log.
+<span class="nc" id="L1014">            Map&lt;String, Object&gt; summary = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L1015" title="All 2 branches missed.">            for (Subject subject : checkpoint.subjects().values()) {</span>
+<span class="nc" id="L1016">                summary.put(subject.name() + &quot;.events&quot;, uuidsFor(subject));</span>
+<span class="nc" id="L1017">                summary.put(</span>
+<span class="nc" id="L1018">                        subject.name() + &quot;.analytics_person_ids&quot;,</span>
+<span class="nc" id="L1019">                        eventsFor(subject).stream()</span>
+<span class="nc" id="L1020">                                .map(EventRow::personId)</span>
+<span class="nc" id="L1021">                                .distinct()</span>
+<span class="nc" id="L1022">                                .toList());</span>
+<span class="nc" id="L1023">                summary.put(</span>
+<span class="nc" id="L1024">                        subject.name() + &quot;.person_api&quot;,</span>
+<span class="nc" id="L1025">                        personsFor(subject).stream()</span>
+<span class="nc" id="L1026">                                .map(person -&gt; person.path(&quot;uuid&quot;).asText())</span>
+<span class="nc" id="L1027">                                .toList());</span>
+<span class="nc bnc" id="L1028" title="All 2 branches missed.">                if (subject.baselinePersonUuid() != null) {</span>
+<span class="nc" id="L1029">                    summary.put(</span>
+<span class="nc" id="L1030">                            subject.name() + &quot;.deletion_status&quot;,</span>
+<span class="nc" id="L1031">                            String.valueOf(deletions.get(subject.baselinePersonUuid())));</span>
+                }
+<span class="nc" id="L1033">            }</span>
+<span class="nc" id="L1034">            summary.put(&quot;persons_table&quot;, personsTable);</span>
+<span class="nc" id="L1035">            return summary;</span>
+        }
+    }
+
+    /// No event and no profile of the subject remain.
+    private static boolean erased(Observation current, Subject subject) {
+<span class="nc bnc" id="L1041" title="All 2 branches missed.">        return current.eventsFor(subject).isEmpty()</span>
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">                &amp;&amp; current.personsFor(subject).isEmpty();</span>
+    }
+
+    /// Erased, and PostHog has verified the deletion request made for the person.
+    private static boolean erasedAndVerified(
+            Observation current, Subject subject, @Nullable String personUuid, DeletionRecord request) {
+<span class="nc bnc" id="L1048" title="All 2 branches missed.">        return erased(current, subject)</span>
+<span class="nc bnc" id="L1049" title="All 2 branches missed.">                &amp;&amp; current.completionOf(personUuid, request).isPresent();</span>
+    }
+
+    private DeletionRecord requireErasure(Subject subject) {
+<span class="nc" id="L1053">        DeletionRecord record = subject.erasure();</span>
+<span class="nc bnc" id="L1054" title="All 2 branches missed.">        if (record == null) {</span>
+<span class="nc" id="L1055">            throw new ExperimentFailure(subject.name() + &quot; has no erasure record&quot;);</span>
+        }
+<span class="nc" id="L1057">        return record;</span>
+    }
+
+    private DeletionRecord requireCleanup(Subject subject) {
+<span class="nc" id="L1061">        DeletionRecord record = subject.cleanup();</span>
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">        if (record == null) {</span>
+<span class="nc" id="L1063">            throw new ExperimentFailure(subject.name() + &quot; has no cleanup record&quot;);</span>
+        }
+<span class="nc" id="L1065">        return record;</span>
+    }
+
+    private void save(ExperimentCheckpoint next) {
+<span class="nc" id="L1069">        next.save(checkpointFile);</span>
+<span class="nc" id="L1070">        checkpoint = next;</span>
+<span class="nc" id="L1071">        out.println(&quot;checkpoint: &quot; + next.phase());</span>
+<span class="nc" id="L1072">    }</span>
+
+    private void note(String text) {
+<span class="nc" id="L1075">        save(checkpoint.withNote(text, now()));</span>
+<span class="nc" id="L1076">    }</span>
+
+    private String now() {
+<span class="nc" id="L1079">        return clock.instant().toString();</span>
+    }
+
+    private EvidenceLog log() {
+<span class="nc" id="L1083">        EvidenceLog current = evidence;</span>
+<span class="nc bnc" id="L1084" title="All 2 branches missed.">        if (current == null) {</span>
+<span class="nc" id="L1085">            throw new IllegalStateException(&quot;evidence log not open&quot;);</span>
+        }
+<span class="nc" id="L1087">        return current;</span>
+    }
+
+    private void record(String phase, String step, Status status, Map&lt;String, ?&gt; fields) {
+<span class="nc" id="L1091">        log().record(phase, step, status, fields);</span>
+<span class="nc" id="L1092">        out.println(status + &quot; &quot; + phase + &quot;: &quot; + step);</span>
+<span class="nc" id="L1093">    }</span>
+
+    private static void require(boolean condition, String message) {
+<span class="nc bnc" id="L1096" title="All 2 branches missed.">        if (!condition) {</span>
+<span class="nc" id="L1097">            throw new ExperimentFailure(message);</span>
+        }
+<span class="nc" id="L1099">    }</span>
+
+    /// The result table in the shape the runbook reports, derived from the checkpoint only.
+    private void writeSummary() {
+<span class="nc" id="L1103">        Phase phase = checkpoint.phase();</span>
+        // Insertion order keeps the rows in the order they are reported.
+<span class="nc" id="L1105">        Map&lt;String, String&gt; rows = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L1106">        rows.put(</span>
+                &quot;1. Old event/profile baseline established&quot;,
+<span class="nc" id="L1108">                reached(phase, Phase.BASELINE_VERIFIED, Phase.BASELINE_SENT));</span>
+<span class="nc" id="L1109">        rows.put(</span>
+                &quot;2. Local disable preserves UUID and prevents transmission&quot;,
+<span class="nc" id="L1111">                reached(phase, Phase.DISABLED, Phase.BASELINE_VERIFIED));</span>
+<span class="nc" id="L1112">        rows.put(</span>
+                &quot;3. Old event deletion completed and independently verified&quot;,
+<span class="nc" id="L1114">                reached(phase, Phase.ERASURE_VERIFIED, Phase.ERASURE_REQUESTED));</span>
+<span class="nc" id="L1115">        rows.put(&quot;4. A: reuse without reset&quot;, reuseRow(phase, SUBJECT_A, Phase.REUSE_A_SENT));</span>
+<span class="nc" id="L1116">        rows.put(&quot;5. B: reset before first new event&quot;, reuseRow(phase, SUBJECT_B, Phase.RESET_B_DONE));</span>
+<span class="nc" id="L1117">        rows.put(&quot;6. Conditional reset after a new event&quot;, repairRow(phase));</span>
+<span class="nc" id="L1118">        rows.put(</span>
+                &quot;7. Old events absent and new records usable&quot;,
+<span class="nc" id="L1120">                reached(phase, Phase.CLEANUP_REQUESTED, Phase.REPAIR_DONE));</span>
+<span class="nc" id="L1121">        rows.put(&quot;8. Reused ID erasable, fixtures cleaned up&quot;, reached(phase, Phase.COMPLETE, Phase.CLEANUP_REQUESTED));</span>
+<span class="nc" id="L1122">        StringBuilder text = new StringBuilder(&quot;# Erasure experiment &quot;)</span>
+<span class="nc" id="L1123">                .append(checkpoint.runId())</span>
+<span class="nc" id="L1124">                .append(&quot;\n\n&quot;);</span>
+<span class="nc" id="L1125">        text.append(&quot;Project &quot;)</span>
+<span class="nc" id="L1126">                .append(checkpoint.projectId())</span>
+<span class="nc" id="L1127">                .append(&quot;, phase &quot;)</span>
+<span class="nc" id="L1128">                .append(phase)</span>
+<span class="nc" id="L1129">                .append(&quot;, updated &quot;)</span>
+<span class="nc" id="L1130">                .append(checkpoint.updatedAt())</span>
+<span class="nc" id="L1131">                .append(&quot;, requests &quot;)</span>
+<span class="nc" id="L1132">                .append(budget.requests())</span>
+<span class="nc" id="L1133">                .append(&quot;, waited &quot;)</span>
+<span class="nc" id="L1134">                .append(budget.waited())</span>
+<span class="nc" id="L1135">                .append(&quot;\n\n| Row | Status |\n| --- | --- |\n&quot;);</span>
+<span class="nc" id="L1136">        rows.forEach((row, status) -&gt;</span>
+<span class="nc" id="L1137">                text.append(&quot;| &quot;).append(row).append(&quot; | &quot;).append(status).append(&quot; |\n&quot;));</span>
+<span class="nc" id="L1138">        text.append(&quot;\nSubjects:\n\n&quot;);</span>
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">        for (Subject subject : checkpoint.subjects().values()) {</span>
+<span class="nc" id="L1140">            text.append(&quot;- &quot;)</span>
+<span class="nc" id="L1141">                    .append(subject.name())</span>
+<span class="nc" id="L1142">                    .append(' ')</span>
+<span class="nc" id="L1143">                    .append(subject.distinctId())</span>
+<span class="nc" id="L1144">                    .append(&quot; old=&quot;)</span>
+<span class="nc" id="L1145">                    .append(subject.oldEventUuids())</span>
+<span class="nc" id="L1146">                    .append(&quot; new=&quot;)</span>
+<span class="nc" id="L1147">                    .append(subject.newEventUuids())</span>
+<span class="nc" id="L1148">                    .append(&quot; facts=&quot;)</span>
+<span class="nc" id="L1149">                    .append(subject.facts())</span>
+<span class="nc" id="L1150">                    .append('\n');</span>
+<span class="nc" id="L1151">        }</span>
+<span class="nc bnc" id="L1152" title="All 2 branches missed.">        if (!checkpoint.notes().isEmpty()) {</span>
+<span class="nc" id="L1153">            text.append(&quot;\nNotes:\n\n&quot;);</span>
+<span class="nc" id="L1154">            checkpoint.notes().forEach(note -&gt; text.append(&quot;- &quot;)</span>
+<span class="nc" id="L1155">                    .append(log().redact(note))</span>
+<span class="nc" id="L1156">                    .append('\n'));</span>
+        }
+        try {
+<span class="nc" id="L1159">            Files.writeString(binding.experimentDir().resolve(&quot;summary.md&quot;), text.toString());</span>
+<span class="nc" id="L1160">        } catch (IOException exception) {</span>
+<span class="nc" id="L1161">            out.println(&quot;summary not written: &quot; + exception.getMessage());</span>
+<span class="nc" id="L1162">        }</span>
+<span class="nc" id="L1163">        out.println(text);</span>
+<span class="nc" id="L1164">    }</span>
+
+    private static String reached(Phase current, Phase passAt, Phase pendingAt) {
+<span class="nc bnc" id="L1167" title="All 2 branches missed.">        if (current.compareTo(passAt) &gt;= 0) {</span>
+<span class="nc" id="L1168">            return &quot;PASS&quot;;</span>
+        }
+<span class="nc bnc" id="L1170" title="All 2 branches missed.">        return current.compareTo(pendingAt) &gt;= 0 ? &quot;PENDING&quot; : &quot;NOT RUN&quot;;</span>
+    }
+
+    private String reuseRow(Phase current, String name, Phase sentAt) {
+<span class="nc bnc" id="L1174" title="All 2 branches missed.">        if (current.compareTo(Phase.REUSE_OBSERVED) &lt; 0) {</span>
+<span class="nc bnc" id="L1175" title="All 2 branches missed.">            return current.compareTo(sentAt) &gt;= 0 ? &quot;PENDING&quot; : &quot;NOT RUN&quot;;</span>
+        }
+<span class="nc" id="L1177">        Subject subject = checkpoint.subject(name);</span>
+<span class="nc" id="L1178">        boolean resolved = mappingFacts(subject);</span>
+<span class="nc bnc" id="L1179" title="All 2 branches missed.">        return (resolved ? &quot;PASS&quot; : &quot;FAIL&quot;) + &quot; (person_api=&quot; + subject.fact(FACT_PERSON_API) + &quot;, analytics=&quot;</span>
+<span class="nc" id="L1180">                + subject.fact(FACT_ANALYTICS)</span>
+<span class="nc bnc" id="L1181" title="All 2 branches missed.">                + (SUBJECT_B.equals(name) ? &quot;, reset before reuse: &quot; + subject.fact(FACT_RESET_BEFORE) : &quot;&quot;) + &quot;)&quot;;</span>
+    }
+
+    private String repairRow(Phase current) {
+<span class="nc bnc" id="L1185" title="All 2 branches missed.">        if (current == Phase.REPAIR_AWAITING_HEARTBEAT) {</span>
+<span class="nc" id="L1186">            return &quot;PENDING (waiting for a heartbeat on a later UTC day)&quot;;</span>
+        }
+<span class="nc bnc" id="L1188" title="All 2 branches missed.">        if (current.compareTo(Phase.REPAIR_DONE) &lt; 0) {</span>
+<span class="nc" id="L1189">            return &quot;NOT RUN&quot;;</span>
+        }
+<span class="nc" id="L1191">        String a = checkpoint.subject(SUBJECT_A).fact(FACT_REPAIR);</span>
+<span class="nc" id="L1192">        String b = checkpoint.subject(SUBJECT_B).fact(FACT_REPAIR);</span>
+<span class="nc" id="L1193">        return &quot;A: &quot; + a + &quot;; B: &quot; + b;</span>
+    }
+
+    /// Holds the verified token for the redactor and the installations. Before verification it
+    /// answers an empty string, so redaction can never trigger a network call.
+    private static final class CachedToken implements Supplier&lt;String&gt; {
+        private final ExperimentBinding binding;
+        private final PostHogManagementClient client;
+<span class="nc" id="L1201">        private volatile String value = &quot;&quot;;</span>
+
+<span class="nc" id="L1203">        CachedToken(ExperimentBinding binding, PostHogManagementClient client) {</span>
+<span class="nc" id="L1204">            this.binding = binding;</span>
+<span class="nc" id="L1205">            this.client = client;</span>
+<span class="nc" id="L1206">        }</span>
+
+        void verify() {
+<span class="nc" id="L1209">            value = binding.verifiedCaptureToken(client);</span>
+<span class="nc" id="L1210">        }</span>
+
+        @Override
+        public String get() {
+<span class="nc" id="L1214">            return value;</span>
+        }
+    }
+
+<span class="nc" id="L1218">    record Outcome(Phase phase, Kind kind, String message) {</span>
+<span class="nc" id="L1219">        enum Kind {</span>
+<span class="nc" id="L1220">            COMPLETE,</span>
+<span class="nc" id="L1221">            PENDING,</span>
+<span class="nc" id="L1222">            FAILED</span>
+        }
+
+        static Outcome failed(Phase phase, String message) {
+<span class="nc" id="L1226">            return new Outcome(phase, Kind.FAILED, message);</span>
+        }
+    }
+
+    /// A step's expectation did not hold; the checkpoint stays at the phase that failed.
+    static final class ExperimentFailure extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        ExperimentFailure(String message) {
+<span class="nc" id="L1235">            super(message);</span>
+<span class="nc" id="L1236">        }</span>
+
+        ExperimentFailure(String message, Throwable cause) {
+<span class="nc" id="L1239">            super(message, cause);</span>
+<span class="nc" id="L1240">        }</span>
+    }
+
+    /// The provider has not finished an asynchronous step; resume later from the checkpoint.
+    static final class PendingException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        PendingException(String message) {
+<span class="nc" id="L1248">            super(message);</span>
+<span class="nc" id="L1249">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

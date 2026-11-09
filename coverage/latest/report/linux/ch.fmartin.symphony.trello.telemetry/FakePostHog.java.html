@@ -1,0 +1,438 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FakePostHog.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">FakePostHog.java</span></div><h1>FakePostHog.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import ch.fmartin.symphony.trello.TestHttpExchange;
+import ch.fmartin.symphony.trello.time.ApplicationClock;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.base.Splitter;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
+
+/// An in-memory stand-in for the PostHog capture and management endpoints the erasure experiment
+/// uses. It models only what the safety tests need: profiles per distinct ID, events, queued
+/// deletions with dated status rows, the reuse of a deleted ID with a profile that PostHog does or
+/// does not rebuild, and the two query shapes the harness sends. Switches make it misbehave in the
+/// ways the harness must refuse, wait on, or repair.
+final class FakePostHog implements AutoCloseable {
+    static final long PROJECT_ID = 424242;
+    static final String PROJECT_NAME = &quot;Symphony for Trello (fake)&quot;;
+<span class="nc" id="L39">    static final String TOKEN = &quot;phc_&quot; + &quot;faketoken0&quot;.repeat(4) + &quot;0123&quot;;</span>
+    static final String KEY = &quot;phx_fake_personal_key_0123456789&quot;;
+    private static final int HTTP_OK = 200;
+    private static final int HTTP_ACCEPTED = 202;
+    private static final int HTTP_UNAUTHORIZED = 401;
+    private static final int HTTP_FORBIDDEN = 403;
+    private static final int HTTP_NOT_FOUND = 404;
+<span class="nc" id="L46">    private static final Duration STALE_ROW_AGE = Duration.ofDays(2);</span>
+<span class="nc" id="L47">    private static final Pattern IN_LIST = Pattern.compile(&quot;IN \\(([^)]*)\\)&quot;);</span>
+<span class="nc" id="L48">    private static final ObjectMapper JSON = new ObjectMapper();</span>
+
+    /// How `delete_verified_at` is rendered on a completed status row.
+<span class="nc" id="L51">    enum VerifiedAtMode {</span>
+<span class="nc" id="L52">        VALID,</span>
+<span class="nc" id="L53">        ABSENT,</span>
+<span class="nc" id="L54">        NULL,</span>
+<span class="nc" id="L55">        BLANK,</span>
+<span class="nc" id="L56">        GARBAGE</span>
+    }
+
+    private final HttpServer server;
+    // Insertion order keeps the output stable for assertions.
+<span class="nc" id="L61">    private final Map&lt;String, Person&gt; persons = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L62">    private final List&lt;Event&gt; events = new ArrayList&lt;&gt;();</span>
+    // Insertion order keeps the output stable for assertions.
+<span class="nc" id="L64">    private final Map&lt;String, DeletionJob&gt; deletions = new LinkedHashMap&lt;&gt;();</span>
+    // Recorded on the fake server's threads while the test reads; a snapshot-safe list avoids a concurrent
+    // modification.
+<span class="nc" id="L67">    private final List&lt;String&gt; requests = new CopyOnWriteArrayList&lt;&gt;();</span>
+    // Recorded on the fake server's threads while the test reads; a snapshot-safe list avoids a concurrent
+    // modification.
+<span class="nc" id="L70">    private final List&lt;String&gt; resetRequests = new CopyOnWriteArrayList&lt;&gt;();</span>
+<span class="nc" id="L71">    private long nextPersonId = 1;</span>
+    private int bulkDeleteCalls;
+<span class="nc" id="L73">    volatile Clock clock = ApplicationClock.systemUtc();</span>
+<span class="nc" id="L74">    volatile boolean completeDeletionsImmediately = true;</span>
+<span class="nc" id="L75">    volatile boolean completeCleanupDeletions = true;</span>
+    volatile boolean emptyDeletionStatus;
+    volatile boolean deletionErrors;
+    volatile boolean personsForbidden;
+    volatile boolean staleQueries;
+    volatile boolean staleCompletedRows;
+    volatile boolean wrongPersonRows;
+<span class="nc" id="L82">    volatile VerifiedAtMode verifiedAtMode = VerifiedAtMode.VALID;</span>
+    volatile @Nullable String deletionStatusBodyOverride;
+    volatile @Nullable String queryBodyOverride;
+<span class="nc" id="L85">    volatile String projectName = PROJECT_NAME;</span>
+<span class="nc" id="L86">    volatile String mergedDistinctId = &quot;&quot;;</span>
+    /// Reused IDs whose new profile PostHog exposes neither in the person API nor in the persons
+    /// table until a reset arrives after a new event.
+    // Written by the test while the server threads read it.
+<span class="nc" id="L90">    final Set&lt;String&gt; brokenReuseDistinctIds = ConcurrentHashMap.newKeySet();</span>
+    /// Reused IDs whose profile the person API shows while analytics still lack the mapping.
+    // Written by the test while the server threads read it.
+<span class="nc" id="L93">    final Set&lt;String&gt; analyticsOnlyBrokenDistinctIds = ConcurrentHashMap.newKeySet();</span>
+    /// When positive, a broken mapping heals by itself after this many person API reads.
+    volatile int resolveBrokenAfterPersonsReads;
+    /// When set, a reset marks the profile to heal on the next captured event instead of at once.
+    volatile boolean resetHealsOnNextEvent;
+
+<span class="nc" id="L99">    FakePostHog() throws IOException {</span>
+<span class="nc" id="L100">        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);</span>
+<span class="nc" id="L101">        server.createContext(&quot;/i/v0/e/&quot;, this::capture);</span>
+<span class="nc" id="L102">        server.createContext(&quot;/api/projects/&quot;, this::management);</span>
+<span class="nc" id="L103">        server.start();</span>
+<span class="nc" id="L104">    }</span>
+
+    URI host() {
+<span class="nc" id="L107">        return URI.create(&quot;http://&quot; + server.getAddress().getHostString() + &quot;:&quot;</span>
+<span class="nc" id="L108">                + server.getAddress().getPort());</span>
+    }
+
+    URI captureEndpoint() {
+<span class="nc" id="L112">        return host().resolve(&quot;/i/v0/e/&quot;);</span>
+    }
+
+    List&lt;String&gt; requests() {
+<span class="nc" id="L116">        return requests;</span>
+    }
+
+    /// The distinct IDs reset requests named, in order.
+    List&lt;String&gt; resetRequests() {
+<span class="nc" id="L121">        return resetRequests;</span>
+    }
+
+    long count(String prefix) {
+<span class="nc" id="L125">        long matching = 0;</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        for (String request : requests) {</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (request.startsWith(prefix)) {</span>
+<span class="nc" id="L128">                matching++;</span>
+            }
+<span class="nc" id="L130">        }</span>
+<span class="nc" id="L131">        return matching;</span>
+    }
+
+    synchronized List&lt;String&gt; eventUuids(String distinctId) {
+<span class="nc" id="L135">        return events.stream()</span>
+<span class="nc" id="L136">                .filter(event -&gt; event.distinctId().equals(distinctId))</span>
+<span class="nc" id="L137">                .map(Event::uuid)</span>
+<span class="nc" id="L138">                .toList();</span>
+    }
+
+    /// Finishes every queued deletion: events go away and the status rows turn completed.
+    synchronized void completeDeletions() {
+<span class="nc" id="L143">        List&lt;String&gt; deletedPersons = persons.values().stream()</span>
+<span class="nc" id="L144">                .filter(person -&gt; person.deleted)</span>
+<span class="nc" id="L145">                .map(person -&gt; person.uuid)</span>
+<span class="nc" id="L146">                .toList();</span>
+<span class="nc bnc" id="L147" title="All 4 branches missed.">        events.removeIf(event -&gt; deletedPersons.contains(event.personUuid()) &amp;&amp; event.capturedBeforeDeletion());</span>
+<span class="nc" id="L148">        Instant now = clock.instant();</span>
+<span class="nc" id="L149">        deletions.replaceAll((uuid, job) -&gt; job.completed(now));</span>
+<span class="nc" id="L150">    }</span>
+
+    @Override
+    public void close() {
+<span class="nc" id="L154">        server.stop(0);</span>
+<span class="nc" id="L155">    }</span>
+
+    private void capture(HttpExchange exchange) throws IOException {
+<span class="nc" id="L158">        requests.add(&quot;capture&quot;);</span>
+<span class="nc" id="L159">        JsonNode body = JSON.readTree(exchange.getRequestBody().readAllBytes());</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        if (!TOKEN.equals(body.path(&quot;api_key&quot;).asText())) {</span>
+<span class="nc" id="L161">            TestHttpExchange.respond(exchange, HTTP_UNAUTHORIZED, &quot;{\&quot;type\&quot;:\&quot;authentication_error\&quot;}&quot;);</span>
+<span class="nc" id="L162">            return;</span>
+        }
+<span class="nc" id="L164">        synchronized (this) {</span>
+<span class="nc" id="L165">            String distinctId = body.path(&quot;distinct_id&quot;).asText();</span>
+<span class="nc" id="L166">            Person person = persons.get(distinctId);</span>
+<span class="nc bnc" id="L167" title="All 4 branches missed.">            if (person == null || person.deleted) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                boolean reused = person != null;</span>
+<span class="nc" id="L169">                person = new Person(UUID.randomUUID().toString(), nextPersonId, distinctId);</span>
+<span class="nc" id="L170">                nextPersonId++;</span>
+<span class="nc bnc" id="L171" title="All 4 branches missed.">                if (reused &amp;&amp; brokenReuseDistinctIds.contains(distinctId)) {</span>
+<span class="nc" id="L172">                    person.hiddenInApi = true;</span>
+<span class="nc" id="L173">                    person.hiddenInTable = true;</span>
+                }
+<span class="nc bnc" id="L175" title="All 4 branches missed.">                if (reused &amp;&amp; analyticsOnlyBrokenDistinctIds.contains(distinctId)) {</span>
+<span class="nc" id="L176">                    person.hiddenInTable = true;</span>
+                }
+<span class="nc" id="L178">                persons.put(distinctId, person);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">            } else if (person.healOnNextEvent) {</span>
+<span class="nc" id="L180">                person.heal();</span>
+            }
+<span class="nc" id="L182">            events.add(new Event(</span>
+<span class="nc" id="L183">                    body.path(&quot;uuid&quot;).asText(),</span>
+                    distinctId,
+                    person.uuid,
+<span class="nc" id="L186">                    body.path(&quot;timestamp&quot;).asText(),</span>
+                    false));
+<span class="nc" id="L188">        }</span>
+<span class="nc" id="L189">        TestHttpExchange.respond(exchange, HTTP_OK, &quot;{\&quot;status\&quot;:\&quot;Ok\&quot;}&quot;);</span>
+<span class="nc" id="L190">    }</span>
+
+    private void management(HttpExchange exchange) throws IOException {
+<span class="nc" id="L193">        String path = exchange.getRequestURI().getPath();</span>
+<span class="nc" id="L194">        String method = exchange.getRequestMethod();</span>
+<span class="nc" id="L195">        requests.add(method + &quot; &quot; + path);</span>
+<span class="nc" id="L196">        String authorization = exchange.getRequestHeaders().getFirst(&quot;Authorization&quot;);</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">        if (!(&quot;Bearer &quot; + KEY).equals(authorization)) {</span>
+<span class="nc" id="L198">            TestHttpExchange.respond(exchange, HTTP_UNAUTHORIZED, &quot;{\&quot;detail\&quot;:\&quot;Invalid personal API key.\&quot;}&quot;);</span>
+<span class="nc" id="L199">            return;</span>
+        }
+<span class="nc" id="L201">        String prefix = &quot;/api/projects/&quot; + PROJECT_ID + &quot;/&quot;;</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (!path.startsWith(prefix)) {</span>
+<span class="nc" id="L203">            TestHttpExchange.respond(exchange, HTTP_NOT_FOUND, &quot;{\&quot;detail\&quot;:\&quot;Not found.\&quot;}&quot;);</span>
+<span class="nc" id="L204">            return;</span>
+        }
+<span class="nc" id="L206">        String rest = path.substring(prefix.length());</span>
+        JsonNode body =
+<span class="nc bnc" id="L208" title="All 2 branches missed.">                &quot;POST&quot;.equals(method) ? JSON.readTree(exchange.getRequestBody().readAllBytes()) : JSON.nullNode();</span>
+<span class="nc" id="L209">        synchronized (this) {</span>
+<span class="nc bnc" id="L210" title="All 7 branches missed.">            switch (rest) {</span>
+<span class="nc" id="L211">                case &quot;&quot; -&gt; TestHttpExchange.respond(exchange, HTTP_OK, project());</span>
+<span class="nc" id="L212">                case &quot;persons/&quot; -&gt; persons(exchange);</span>
+<span class="nc" id="L213">                case &quot;persons/bulk_delete/&quot; -&gt; bulkDelete(exchange, body);</span>
+<span class="nc" id="L214">                case &quot;persons/deletion_status/&quot; -&gt; deletionStatus(exchange);</span>
+<span class="nc" id="L215">                case &quot;persons/reset_person_distinct_id/&quot; -&gt; reset(exchange, body);</span>
+<span class="nc" id="L216">                case &quot;query/&quot; -&gt; query(exchange, body);</span>
+<span class="nc" id="L217">                default -&gt; TestHttpExchange.respond(exchange, HTTP_NOT_FOUND, &quot;{\&quot;detail\&quot;:\&quot;Not found.\&quot;}&quot;);</span>
+            }
+<span class="nc" id="L219">        }</span>
+<span class="nc" id="L220">    }</span>
+
+    private String project() {
+<span class="nc" id="L223">        ObjectNode node = JSON.createObjectNode();</span>
+<span class="nc" id="L224">        node.put(&quot;id&quot;, PROJECT_ID).put(&quot;name&quot;, projectName).put(&quot;api_token&quot;, TOKEN);</span>
+<span class="nc" id="L225">        return node.toString();</span>
+    }
+
+    private void persons(HttpExchange exchange) throws IOException {
+<span class="nc bnc" id="L229" title="All 2 branches missed.">        if (personsForbidden) {</span>
+<span class="nc" id="L230">            TestHttpExchange.respond(exchange, HTTP_FORBIDDEN, &quot;{\&quot;detail\&quot;:\&quot;API key missing scope person:read\&quot;}&quot;);</span>
+<span class="nc" id="L231">            return;</span>
+        }
+<span class="nc" id="L233">        String distinctId = TestHttpExchange.query(exchange).getOrDefault(&quot;distinct_id&quot;, &quot;&quot;);</span>
+<span class="nc" id="L234">        ArrayNode results = JSON.createArrayNode();</span>
+<span class="nc" id="L235">        Person person = persons.get(distinctId);</span>
+<span class="nc bnc" id="L236" title="All 8 branches missed.">        if (person != null &amp;&amp; !person.deleted &amp;&amp; person.broken() &amp;&amp; resolveBrokenAfterPersonsReads &gt; 0) {</span>
+<span class="nc" id="L237">            resolveBrokenAfterPersonsReads--;</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">            if (resolveBrokenAfterPersonsReads == 0) {</span>
+<span class="nc" id="L239">                person.heal();</span>
+            }
+        }
+<span class="nc bnc" id="L242" title="All 6 branches missed.">        if (person != null &amp;&amp; !person.deleted &amp;&amp; !person.hiddenInApi) {</span>
+<span class="nc" id="L243">            results.add(personNode(person));</span>
+        }
+<span class="nc" id="L245">        TestHttpExchange.respond(exchange, HTTP_OK, paginated(results));</span>
+<span class="nc" id="L246">    }</span>
+
+    private ObjectNode personNode(Person person) {
+<span class="nc" id="L249">        ObjectNode node = JSON.createObjectNode();</span>
+<span class="nc" id="L250">        node.put(&quot;id&quot;, person.id).put(&quot;uuid&quot;, person.uuid).put(&quot;name&quot;, person.distinctId);</span>
+<span class="nc" id="L251">        ArrayNode ids = node.putArray(&quot;distinct_ids&quot;);</span>
+<span class="nc" id="L252">        ids.add(person.distinctId);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (person.distinctId.equals(mergedDistinctId)) {</span>
+<span class="nc" id="L254">            ids.add(&quot;merged-&quot; + person.distinctId);</span>
+        }
+<span class="nc" id="L256">        return node;</span>
+    }
+
+    /// Mirrors PostHog: a reset finds the ID's current profile and repairs it; with no current
+    /// profile (nothing captured since the deletion) it answers 202 and changes nothing.
+    private void reset(HttpExchange exchange, JsonNode body) throws IOException {
+<span class="nc" id="L262">        String distinctId = body.path(&quot;distinct_id&quot;).asText();</span>
+<span class="nc" id="L263">        resetRequests.add(distinctId);</span>
+<span class="nc" id="L264">        Person person = persons.get(distinctId);</span>
+<span class="nc bnc" id="L265" title="All 6 branches missed.">        if (person != null &amp;&amp; !person.deleted &amp;&amp; person.broken()) {</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (resetHealsOnNextEvent) {</span>
+<span class="nc" id="L267">                person.healOnNextEvent = true;</span>
+            } else {
+<span class="nc" id="L269">                person.heal();</span>
+            }
+        }
+<span class="nc" id="L272">        TestHttpExchange.respond(exchange, HTTP_ACCEPTED, &quot;&quot;);</span>
+<span class="nc" id="L273">    }</span>
+
+    private void bulkDelete(HttpExchange exchange, JsonNode body) throws IOException {
+<span class="nc" id="L276">        bulkDeleteCalls++;</span>
+<span class="nc" id="L277">        List&lt;Person&gt; found = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        for (JsonNode id : body.path(&quot;distinct_ids&quot;)) {</span>
+<span class="nc" id="L279">            Person person = persons.get(id.asText());</span>
+<span class="nc bnc" id="L280" title="All 6 branches missed.">            if (person != null &amp;&amp; !person.deleted &amp;&amp; !person.hiddenInApi) {</span>
+<span class="nc" id="L281">                found.add(person);</span>
+            }
+<span class="nc" id="L283">        }</span>
+<span class="nc" id="L284">        ObjectNode response = JSON.createObjectNode();</span>
+<span class="nc" id="L285">        response.put(&quot;persons_found&quot;, found.size());</span>
+<span class="nc" id="L286">        ArrayNode errors = response.putArray(&quot;deletion_errors&quot;);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">        if (deletionErrors) {</span>
+<span class="nc" id="L288">            response.put(&quot;persons_deleted&quot;, 0)</span>
+<span class="nc" id="L289">                    .put(&quot;persons_queued_for_deletion&quot;, 0)</span>
+<span class="nc" id="L290">                    .put(&quot;events_queued_for_deletion&quot;, false);</span>
+<span class="nc" id="L291">            errors.addObject()</span>
+<span class="nc bnc" id="L292" title="All 2 branches missed.">                    .put(&quot;person_id&quot;, found.isEmpty() ? &quot;&quot; : found.getFirst().uuid)</span>
+<span class="nc" id="L293">                    .put(&quot;step&quot;, &quot;delete_clickhouse&quot;);</span>
+<span class="nc" id="L294">            TestHttpExchange.respond(exchange, HTTP_ACCEPTED, response.toString());</span>
+<span class="nc" id="L295">            return;</span>
+        }
+<span class="nc" id="L297">        Instant now = clock.instant();</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">        for (Person person : found) {</span>
+<span class="nc" id="L299">            person.deleted = true;</span>
+<span class="nc" id="L300">            deletions.put(person.uuid, new DeletionJob(now, null));</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">            events.replaceAll(event -&gt; event.personUuid().equals(person.uuid)</span>
+<span class="nc" id="L302">                    ? new Event(event.uuid(), event.distinctId(), event.personUuid(), event.timestamp(), true)</span>
+<span class="nc" id="L303">                    : event);</span>
+<span class="nc" id="L304">        }</span>
+<span class="nc" id="L305">        response.put(&quot;persons_deleted&quot;, 0)</span>
+<span class="nc" id="L306">                .put(&quot;persons_queued_for_deletion&quot;, found.size())</span>
+<span class="nc" id="L307">                .put(&quot;events_queued_for_deletion&quot;, body.path(&quot;delete_events&quot;).asBoolean(false));</span>
+<span class="nc bnc" id="L308" title="All 6 branches missed.">        if (completeDeletionsImmediately &amp;&amp; (bulkDeleteCalls == 1 || completeCleanupDeletions)) {</span>
+<span class="nc" id="L309">            completeDeletions();</span>
+        }
+<span class="nc" id="L311">        TestHttpExchange.respond(exchange, HTTP_ACCEPTED, response.toString());</span>
+<span class="nc" id="L312">    }</span>
+
+    private void deletionStatus(HttpExchange exchange) throws IOException {
+<span class="nc" id="L315">        String override = deletionStatusBodyOverride;</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">        if (override != null) {</span>
+<span class="nc" id="L317">            TestHttpExchange.respond(exchange, HTTP_OK, override);</span>
+<span class="nc" id="L318">            return;</span>
+        }
+<span class="nc" id="L320">        String personUuid = TestHttpExchange.query(exchange).getOrDefault(&quot;person_uuid&quot;, &quot;&quot;);</span>
+<span class="nc" id="L321">        ArrayNode results = JSON.createArrayNode();</span>
+<span class="nc" id="L322">        DeletionJob job = deletions.get(personUuid);</span>
+<span class="nc bnc" id="L323" title="All 4 branches missed.">        if (job != null &amp;&amp; !emptyDeletionStatus) {</span>
+<span class="nc bnc" id="L324" title="All 2 branches missed.">            if (staleCompletedRows) {</span>
+<span class="nc" id="L325">                ObjectNode stale = results.addObject();</span>
+<span class="nc" id="L326">                stale.put(&quot;person_uuid&quot;, personUuid)</span>
+<span class="nc" id="L327">                        .put(&quot;status&quot;, &quot;completed&quot;)</span>
+<span class="nc" id="L328">                        .put(&quot;created_at&quot;, job.createdAt().minus(STALE_ROW_AGE).toString())</span>
+<span class="nc" id="L329">                        .put(</span>
+                                &quot;delete_verified_at&quot;,
+<span class="nc" id="L331">                                job.createdAt()</span>
+<span class="nc" id="L332">                                        .minus(STALE_ROW_AGE.dividedBy(2))</span>
+<span class="nc" id="L333">                                        .toString());</span>
+            }
+<span class="nc" id="L335">            ObjectNode row = results.addObject();</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            row.put(&quot;person_uuid&quot;, wrongPersonRows ? UUID.randomUUID().toString() : personUuid)</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                    .put(&quot;status&quot;, job.verifiedAt() == null ? &quot;pending&quot; : &quot;completed&quot;)</span>
+<span class="nc" id="L338">                    .put(&quot;created_at&quot;, job.createdAt().toString());</span>
+<span class="nc" id="L339">            renderVerifiedAt(row, job.verifiedAt());</span>
+        }
+<span class="nc" id="L341">        TestHttpExchange.respond(exchange, HTTP_OK, paginated(results));</span>
+<span class="nc" id="L342">    }</span>
+
+    private void renderVerifiedAt(ObjectNode row, @Nullable Instant verifiedAt) {
+<span class="nc bnc" id="L345" title="All 2 branches missed.">        if (verifiedAt == null) {</span>
+<span class="nc" id="L346">            row.putNull(&quot;delete_verified_at&quot;);</span>
+<span class="nc" id="L347">            return;</span>
+        }
+<span class="nc bnc" id="L349" title="All 6 branches missed.">        switch (verifiedAtMode) {</span>
+<span class="nc" id="L350">            case VALID -&gt; row.put(&quot;delete_verified_at&quot;, verifiedAt.toString());</span>
+            case ABSENT -&gt; {
+                // The field is left out entirely.
+<span class="nc" id="L353">            }</span>
+<span class="nc" id="L354">            case NULL -&gt; row.putNull(&quot;delete_verified_at&quot;);</span>
+<span class="nc" id="L355">            case BLANK -&gt; row.put(&quot;delete_verified_at&quot;, &quot;&quot;);</span>
+<span class="nc" id="L356">            case GARBAGE -&gt; row.put(&quot;delete_verified_at&quot;, &quot;soon&quot;);</span>
+        }
+<span class="nc" id="L358">    }</span>
+
+    private void query(HttpExchange exchange, JsonNode body) throws IOException {
+<span class="nc" id="L361">        String override = queryBodyOverride;</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">        if (override != null) {</span>
+<span class="nc" id="L363">            TestHttpExchange.respond(exchange, HTTP_OK, override);</span>
+<span class="nc" id="L364">            return;</span>
+        }
+<span class="nc" id="L366">        String hogql = body.path(&quot;query&quot;).path(&quot;query&quot;).asText();</span>
+<span class="nc" id="L367">        ObjectNode response = JSON.createObjectNode();</span>
+<span class="nc" id="L368">        response.put(&quot;is_cached&quot;, staleQueries);</span>
+<span class="nc" id="L369">        ArrayNode results = response.putArray(&quot;results&quot;);</span>
+<span class="nc" id="L370">        List&lt;String&gt; ids = inList(hogql);</span>
+<span class="nc bnc" id="L371" title="All 2 branches missed.">        if (hogql.contains(&quot;FROM persons&quot;)) {</span>
+<span class="nc" id="L372">            persons.values().stream()</span>
+<span class="nc bnc" id="L373" title="All 6 branches missed.">                    .filter(person -&gt; !person.deleted &amp;&amp; !person.hiddenInTable &amp;&amp; ids.contains(person.uuid))</span>
+<span class="nc" id="L374">                    .forEach(person -&gt; results.addArray().add(person.uuid));</span>
+        } else {
+<span class="nc" id="L376">            events.stream().filter(event -&gt; ids.contains(event.distinctId())).forEach(event -&gt; results.addArray()</span>
+<span class="nc" id="L377">                    .add(event.distinctId())</span>
+<span class="nc" id="L378">                    .add(event.uuid())</span>
+<span class="nc" id="L379">                    .add(event.personUuid())</span>
+<span class="nc" id="L380">                    .add(event.timestamp()));</span>
+        }
+<span class="nc" id="L382">        TestHttpExchange.respond(exchange, HTTP_OK, response.toString());</span>
+<span class="nc" id="L383">    }</span>
+
+    private static List&lt;String&gt; inList(String hogql) {
+<span class="nc" id="L386">        Matcher matcher = IN_LIST.matcher(hogql);</span>
+<span class="nc" id="L387">        List&lt;String&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">        if (matcher.find()) {</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">            for (String value : Splitter.on(',').split(matcher.group(1))) {</span>
+<span class="nc" id="L390">                values.add(value.strip().replace(&quot;'&quot;, &quot;&quot;));</span>
+<span class="nc" id="L391">            }</span>
+        }
+<span class="nc" id="L393">        return values;</span>
+    }
+
+    private static String paginated(ArrayNode results) {
+<span class="nc" id="L397">        ObjectNode node = JSON.createObjectNode();</span>
+<span class="nc" id="L398">        node.put(&quot;count&quot;, results.size()).putNull(&quot;next&quot;).putNull(&quot;previous&quot;).set(&quot;results&quot;, results);</span>
+<span class="nc" id="L399">        return node.toString();</span>
+    }
+
+    /// A profile as the fake tracks it; mutable because PostHog mutates profiles in place.
+    private static final class Person {
+        final String uuid;
+        final long id;
+        final String distinctId;
+        boolean deleted;
+        boolean hiddenInApi;
+        boolean hiddenInTable;
+        boolean healOnNextEvent;
+
+<span class="nc" id="L412">        Person(String uuid, long id, String distinctId) {</span>
+<span class="nc" id="L413">            this.uuid = uuid;</span>
+<span class="nc" id="L414">            this.id = id;</span>
+<span class="nc" id="L415">            this.distinctId = distinctId;</span>
+<span class="nc" id="L416">        }</span>
+
+        boolean broken() {
+<span class="nc bnc" id="L419" title="All 4 branches missed.">            return hiddenInApi || hiddenInTable;</span>
+        }
+
+        void heal() {
+<span class="nc" id="L423">            hiddenInApi = false;</span>
+<span class="nc" id="L424">            hiddenInTable = false;</span>
+<span class="nc" id="L425">            healOnNextEvent = false;</span>
+<span class="nc" id="L426">        }</span>
+    }
+
+<span class="nc" id="L429">    private record Event(</span>
+            String uuid, String distinctId, String personUuid, String timestamp, boolean capturedBeforeDeletion) {}
+
+<span class="nc" id="L432">    private record DeletionJob(Instant createdAt, @Nullable Instant verifiedAt) {</span>
+        DeletionJob completed(Instant at) {
+<span class="nc bnc" id="L434" title="All 2 branches missed.">            return verifiedAt == null ? new DeletionJob(createdAt, at) : this;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

@@ -4,117 +4,214 @@ import ch.fmartin.symphony.trello.Sha3;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 final class ManagedProcessStore {
+    private static final String WORKFLOW_PATH_SUFFIX = &quot;.workflow&quot;;
+
     private final Path stateHome;
 
-<span class="nc" id="L15">    ManagedProcessStore(Path stateHome) {</span>
-<span class="nc" id="L16">        this.stateHome = Objects.requireNonNull(stateHome, &quot;stateHome&quot;);</span>
-<span class="nc" id="L17">    }</span>
+<span class="nc" id="L20">    ManagedProcessStore(Path stateHome) {</span>
+<span class="nc" id="L21">        this.stateHome = Objects.requireNonNull(stateHome, &quot;stateHome&quot;);</span>
+<span class="nc" id="L22">    }</span>
 
     ManagedProcessFiles files(Path workflowPath) {
-<span class="nc" id="L20">        String name = workflowStateName(workflowPath);</span>
-<span class="nc" id="L21">        return filesFor(stateHome, name);</span>
+<span class="nc" id="L25">        String name = workflowStateName(workflowPath);</span>
+<span class="nc" id="L26">        return filesFor(stateHome, name);</span>
     }
 
     List&lt;Path&gt; pidFiles() throws IOException {
-<span class="nc bnc" id="L25" title="All 2 branches missed.">        if (!Files.isDirectory(stateHome)) {</span>
-<span class="nc" id="L26">            return List.of();</span>
+<span class="nc bnc" id="L30" title="All 2 branches missed.">        if (!Files.isDirectory(stateHome)) {</span>
+<span class="nc" id="L31">            return List.of();</span>
         }
-<span class="nc" id="L28">        try (var stream = Files.list(stateHome)) {</span>
-<span class="nc" id="L29">            return stream.filter(path -&gt; PathNames.fileName(path).endsWith(&quot;.pid&quot;))</span>
-<span class="nc" id="L30">                    .sorted()</span>
-<span class="nc" id="L31">                    .toList();</span>
+<span class="nc" id="L33">        try (var stream = Files.list(stateHome)) {</span>
+<span class="nc" id="L34">            return stream.filter(path -&gt; PathNames.fileName(path).endsWith(&quot;.pid&quot;))</span>
+<span class="nc" id="L35">                    .sorted()</span>
+<span class="nc" id="L36">                    .toList();</span>
         }
     }
 
-    ManagedProcessFiles filesFromPidFile(Path pidFile) {
-<span class="nc" id="L36">        String fileName = PathNames.fileName(pidFile);</span>
-<span class="nc" id="L37">        String name = fileName.substring(0, fileName.length() - &quot;.pid&quot;.length());</span>
-<span class="nc" id="L38">        Path parent = pidFile.getParent();</span>
-<span class="nc bnc" id="L39" title="All 2 branches missed.">        if (parent == null) {</span>
-<span class="nc" id="L40">            parent = stateHome;</span>
+    /// Includes failed-start records without a PID so stop can finish their lifecycle too.
+    List&lt;ManagedProcessFiles&gt; stoppableFiles() throws IOException {
+<span class="nc bnc" id="L42" title="All 2 branches missed.">        if (!Files.isDirectory(stateHome)) {</span>
+<span class="nc" id="L43">            return List.of();</span>
         }
-<span class="nc" id="L42">        return filesFor(parent, name, pidFile);</span>
+<span class="nc" id="L45">        try (var stream = Files.list(stateHome)) {</span>
+<span class="nc" id="L46">            return stream.filter(ManagedProcessStore::isProcessStateFile)</span>
+<span class="nc" id="L47">                    .sorted()</span>
+<span class="nc" id="L48">                    .map(this::filesFromStateFile)</span>
+<span class="nc" id="L49">                    .distinct()</span>
+<span class="nc" id="L50">                    .toList();</span>
+        }
+    }
+
+    private static boolean isProcessStateFile(Path path) {
+<span class="nc" id="L55">        String name = PathNames.fileName(path);</span>
+<span class="nc bnc" id="L56" title="All 4 branches missed.">        return name.endsWith(&quot;.pid&quot;) || name.endsWith(WORKFLOW_PATH_SUFFIX);</span>
+    }
+
+    private ManagedProcessFiles filesFromStateFile(Path path) {
+<span class="nc" id="L60">        String name = PathNames.fileName(path);</span>
+<span class="nc" id="L61">        String stem = name.substring(0, name.lastIndexOf('.'));</span>
+<span class="nc" id="L62">        return filesFor(stateHome, stem);</span>
+    }
+
+    boolean deleteStoppedProcessFiles(ManagedProcessFiles files) throws IOException {
+<span class="nc" id="L66">        boolean deletedPid = deletePid(files.pidFile());</span>
+<span class="nc" id="L67">        deleteWorkflowPathRecord(files);</span>
+<span class="nc" id="L68">        return deletedPid;</span>
+    }
+
+    ManagedProcessFiles filesFromPidFile(Path pidFile) {
+<span class="nc" id="L72">        String fileName = PathNames.fileName(pidFile);</span>
+<span class="nc" id="L73">        String name = fileName.substring(0, fileName.length() - &quot;.pid&quot;.length());</span>
+<span class="nc" id="L74">        Path parent = pidFile.getParent();</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (parent == null) {</span>
+<span class="nc" id="L76">            parent = stateHome;</span>
+        }
+<span class="nc" id="L78">        return filesFor(parent, name, pidFile);</span>
     }
 
     Long readPid(Path pidFile) {
         try {
-<span class="nc" id="L47">            String text = Files.readString(pidFile).trim();</span>
-<span class="nc bnc" id="L48" title="All 2 branches missed.">            return text.isBlank() ? null : Long.parseLong(text);</span>
-<span class="nc" id="L49">        } catch (IOException | NumberFormatException e) {</span>
-<span class="nc" id="L50">            return null;</span>
+<span class="nc" id="L83">            String text = Files.readString(pidFile).trim();</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            return text.isBlank() ? null : Long.parseLong(text);</span>
+<span class="nc" id="L85">        } catch (IOException | NumberFormatException e) {</span>
+<span class="nc" id="L86">            return null;</span>
         }
     }
 
     void writePid(Path pidFile, long pid) throws IOException {
-<span class="nc" id="L55">        Path parent = pidFile.toAbsolutePath().normalize().getParent();</span>
-<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (parent != null) {</span>
-<span class="nc" id="L57">            Files.createDirectories(parent);</span>
+<span class="nc" id="L91">        Path parent = pidFile.toAbsolutePath().normalize().getParent();</span>
+<span class="nc bnc" id="L92" title="All 2 branches missed.">        if (parent != null) {</span>
+<span class="nc" id="L93">            Files.createDirectories(parent);</span>
         }
-<span class="nc" id="L59">        Files.writeString(pidFile, Long.toString(pid), StandardCharsets.US_ASCII);</span>
-<span class="nc" id="L60">    }</span>
+<span class="nc" id="L95">        Files.writeString(pidFile, Long.toString(pid), StandardCharsets.US_ASCII);</span>
+<span class="nc" id="L96">    }</span>
 
     boolean deletePid(Path pidFile) throws IOException {
-<span class="nc" id="L63">        return Files.deleteIfExists(pidFile);</span>
+<span class="nc" id="L99">        return Files.deleteIfExists(pidFile);</span>
     }
 
     /// Moves the worker logs aside when a workflow path is reused for a different Trello board, so
     /// diagnostics for the new board do not surface the previous board's history. Rotated files use
     /// a suffix that the diagnostics log selection does not match.
     void rotateLogsForNewBoardIdentity(Path workflowPath) throws IOException {
-<span class="nc" id="L70">        ManagedProcessFiles files = files(workflowPath);</span>
-<span class="nc" id="L71">        rotateLog(files.stdoutLog());</span>
-<span class="nc" id="L72">        rotateLog(files.stderrLog());</span>
-<span class="nc" id="L73">    }</span>
+<span class="nc" id="L106">        ManagedProcessFiles files = files(workflowPath);</span>
+<span class="nc" id="L107">        rotateLog(files.stdoutLog());</span>
+<span class="nc" id="L108">        rotateLog(files.stderrLog());</span>
+<span class="nc" id="L109">    }</span>
 
     private static void rotateLog(Path log) throws IOException {
-<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (Files.isRegularFile(log)) {</span>
-<span class="nc" id="L77">            Files.move(</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (Files.isRegularFile(log)) {</span>
+<span class="nc" id="L113">            Files.move(</span>
                     log,
-<span class="nc" id="L79">                    log.resolveSibling(PathNames.fileName(log) + &quot;.previous&quot;),</span>
+<span class="nc" id="L115">                    log.resolveSibling(PathNames.fileName(log) + &quot;.previous&quot;),</span>
                     StandardCopyOption.REPLACE_EXISTING);
         }
-<span class="nc" id="L82">    }</span>
+<span class="nc" id="L118">    }</span>
 
     private static String workflowStateName(Path workflowPath) {
-<span class="nc" id="L85">        Path resolved = resolvedWorkflowPath(workflowPath);</span>
-<span class="nc" id="L86">        String hash = Sha3.sha3_256(resolved.toString()).substring(0, 12);</span>
-<span class="nc" id="L87">        return PathNames.fileName(resolved) + &quot;.&quot; + hash;</span>
+<span class="nc" id="L121">        Path resolved = resolvedWorkflowPath(workflowPath);</span>
+<span class="nc" id="L122">        String hash = Sha3.sha3_256(resolved.toString()).substring(0, 12);</span>
+<span class="nc" id="L123">        return PathNames.fileName(resolved) + &quot;.&quot; + hash;</span>
     }
 
     private static Path resolvedWorkflowPath(Path workflowPath) {
-<span class="nc" id="L91">        Path absolute = workflowPath.toAbsolutePath().normalize();</span>
+<span class="nc" id="L127">        Path absolute = workflowPath.toAbsolutePath().normalize();</span>
         try {
             // Resolve file and directory symlinks so a symlinked workflow selector shares the
             // managed pid and log files of its target workflow.
-<span class="nc" id="L95">            return absolute.toRealPath();</span>
-<span class="nc" id="L96">        } catch (IOException ignored) {</span>
-<span class="nc" id="L97">            Path parent = absolute.getParent();</span>
-<span class="nc bnc" id="L98" title="All 4 branches missed.">            if (parent == null || !Files.isDirectory(parent)) {</span>
-<span class="nc" id="L99">                return absolute;</span>
+<span class="nc" id="L131">            return absolute.toRealPath();</span>
+<span class="nc" id="L132">        } catch (IOException ignored) {</span>
+<span class="nc" id="L133">            Path parent = absolute.getParent();</span>
+<span class="nc bnc" id="L134" title="All 4 branches missed.">            if (parent == null || !Files.isDirectory(parent)) {</span>
+<span class="nc" id="L135">                return absolute;</span>
             }
             try {
-<span class="nc" id="L102">                return parent.toRealPath().resolve(absolute.getFileName());</span>
-<span class="nc" id="L103">            } catch (IOException alsoIgnored) {</span>
-<span class="nc" id="L104">                return absolute;</span>
+<span class="nc" id="L138">                return parent.toRealPath().resolve(absolute.getFileName());</span>
+<span class="nc" id="L139">            } catch (IOException alsoIgnored) {</span>
+<span class="nc" id="L140">                return absolute;</span>
             }
         }
     }
 
     private static ManagedProcessFiles filesFor(Path parent, String name) {
-<span class="nc" id="L110">        return filesFor(parent, name, parent.resolve(name + &quot;.pid&quot;));</span>
+<span class="nc" id="L146">        return filesFor(parent, name, parent.resolve(name + &quot;.pid&quot;));</span>
     }
 
     private static ManagedProcessFiles filesFor(Path parent, String name, Path pidFile) {
-<span class="nc" id="L114">        return new ManagedProcessFiles(</span>
-<span class="nc" id="L115">                pidFile, parent.resolve(name + &quot;.log&quot;), parent.resolve(name + &quot;.err&quot;), parent.resolve(name + &quot;.lock&quot;));</span>
+<span class="nc" id="L150">        return new ManagedProcessFiles(</span>
+                pidFile,
+<span class="nc" id="L152">                parent.resolve(name + &quot;.log&quot;),</span>
+<span class="nc" id="L153">                parent.resolve(name + &quot;.err&quot;),</span>
+<span class="nc" id="L154">                parent.resolve(name + &quot;.lock&quot;),</span>
+<span class="nc" id="L155">                parent.resolve(name + WORKFLOW_PATH_SUFFIX));</span>
     }
 
-<span class="nc" id="L118">    record ManagedProcessFiles(Path pidFile, Path stdoutLog, Path stderrLog, Path processLockFile) {}</span>
+    /// Remembers which workflow file a start attempt was for, next to the pid and log files whose
+    /// names hash that path. Diagnostics without a selector reads the record back, so the lookup
+    /// hint that a failed start of an unconnected workflow prints resolves as printed. The record
+    /// keeps the path as the start was given it, absolute and normalized but with symbolic links
+    /// in place, because the tokens in that hint come from the same spelling. The write is atomic,
+    /// so a reader never sees a half-written record; see
+    /// docs/adr/0154-record-start-attempts-in-the-state-home.md.
+    void recordWorkflowPath(Path workflowPath) throws IOException {
+<span class="nc" id="L166">        Path record = files(workflowPath).workflowPathFile();</span>
+<span class="nc" id="L167">        Path temporary = AtomicFiles.siblingTemporaryFile(record);</span>
+        try {
+<span class="nc" id="L169">            Files.writeString(</span>
+<span class="nc" id="L170">                    temporary, workflowPath.toAbsolutePath().normalize().toString());</span>
+<span class="nc" id="L171">            AtomicFiles.replace(temporary, record);</span>
+        } finally {
+<span class="nc" id="L173">            AtomicFiles.deleteQuietly(temporary);</span>
+        }
+<span class="nc" id="L175">    }</span>
+
+    /// Forgets a start attempt once its worker is stopped, so the state home does not keep
+    /// records of workflows nobody runs any more.
+    boolean deleteWorkflowPathRecord(ManagedProcessFiles files) throws IOException {
+<span class="nc" id="L180">        return Files.deleteIfExists(files.workflowPathFile());</span>
+    }
+
+    /// Every workflow file a start attempt recorded, in file name order, missing files included.
+    List&lt;Path&gt; recordedWorkflowPaths() throws IOException {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">        if (!Files.isDirectory(stateHome)) {</span>
+<span class="nc" id="L186">            return List.of();</span>
+        }
+<span class="nc" id="L188">        List&lt;Path&gt; recorded = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L189">        try (var stream = Files.list(stateHome)) {</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">            for (Path record : stream.filter(path -&gt; PathNames.fileName(path).endsWith(WORKFLOW_PATH_SUFFIX))</span>
+<span class="nc" id="L191">                    .sorted()</span>
+<span class="nc" id="L192">                    .toList()) {</span>
+<span class="nc" id="L193">                recordedWorkflowPath(record).ifPresent(recorded::add);</span>
+<span class="nc" id="L194">            }</span>
+        }
+<span class="nc" id="L196">        return List.copyOf(recorded);</span>
+    }
+
+    /// A record that cannot be read or does not hold a path is skipped: it is a hint for
+    /// diagnostics, not state the worker depends on.
+    private static Optional&lt;Path&gt; recordedWorkflowPath(Path record) {
+        try {
+<span class="nc" id="L203">            String text = Files.readString(record);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (text.isEmpty()) {</span>
+<span class="nc" id="L205">                return Optional.empty();</span>
+            }
+<span class="nc" id="L207">            Path path = Path.of(text);</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            return path.isAbsolute() ? Optional.of(path) : Optional.empty();</span>
+<span class="nc" id="L209">        } catch (IOException | InvalidPathException unreadable) {</span>
+<span class="nc" id="L210">            return Optional.empty();</span>
+        }
+    }
+
+<span class="nc" id="L214">    record ManagedProcessFiles(</span>
+            Path pidFile, Path stdoutLog, Path stderrLog, Path processLockFile, Path workflowPathFile) {}
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

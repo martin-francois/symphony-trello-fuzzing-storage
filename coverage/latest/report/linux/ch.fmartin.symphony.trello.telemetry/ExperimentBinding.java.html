@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExperimentBinding.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">ch.fmartin.symphony.trello.telemetry</a> &gt; <span class="el_source">ExperimentBinding.java</span></div><h1>ExperimentBinding.java</h1><pre class="source lang-java linenums">package ch.fmartin.symphony.trello.telemetry;
+
+import static ch.fmartin.symphony.trello.CommaSeparatedValues.javaTrimmedNonEmptyFields;
+
+import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+/// Where the live erasure experiment is allowed to run. Everything comes from the environment of
+/// the invocation; there are no runnable defaults for project IDs, so a normal build can never bind
+/// to a real project by accident. The production project is passed as forbidden and refused before
+/// any request.
+<span class="nc" id="L20">record ExperimentBinding(</span>
+        URI managementHost,
+        URI captureEndpoint,
+        long projectId,
+        String expectedProjectName,
+        Set&lt;Long&gt; forbiddenProjectIds,
+        Path keyFile,
+        Path experimentDir) {
+
+    static final String ENABLE_VARIABLE = &quot;SYMPHONY_TRELLO_TELEMETRY_LIVE_EXPERIMENT&quot;;
+    static final String DIR_VARIABLE = &quot;SYMPHONY_TRELLO_TELEMETRY_LIVE_EXPERIMENT_DIR&quot;;
+    static final String KEY_FILE_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_PERSONAL_API_KEY_FILE&quot;;
+    static final String PROJECT_ID_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_TEST_PROJECT_ID&quot;;
+    static final String PROJECT_NAME_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_TEST_PROJECT_NAME&quot;;
+    static final String FORBIDDEN_PROJECTS_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_FORBIDDEN_PROJECT_IDS&quot;;
+    static final String MANAGEMENT_HOST_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_MANAGEMENT_HOST&quot;;
+    static final String CAPTURE_ENDPOINT_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_CAPTURE_ENDPOINT&quot;;
+<span class="nc" id="L37">    static final URI DEFAULT_MANAGEMENT_HOST = URI.create(&quot;https://eu.posthog.com&quot;);</span>
+    static final String PERSONAL_KEY_PREFIX = &quot;phx_&quot;;
+    static final String PROJECT_TOKEN_PREFIX = &quot;phc_&quot;;
+
+    static boolean enabled(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L42">        return &quot;1&quot;.equals(environment.get(ENABLE_VARIABLE));</span>
+    }
+
+    /// Fails with every missing variable named at once; nothing is guessed.
+    static ExperimentBinding fromEnvironment(Map&lt;String, String&gt; environment) {
+<span class="nc" id="L47">        List&lt;String&gt; missing = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L48" title="All 2 branches missed.">        for (String variable : List.of(</span>
+                DIR_VARIABLE,
+                KEY_FILE_VARIABLE,
+                PROJECT_ID_VARIABLE,
+                PROJECT_NAME_VARIABLE,
+                FORBIDDEN_PROJECTS_VARIABLE)) {
+<span class="nc bnc" id="L54" title="All 2 branches missed.">            if (environment.getOrDefault(variable, &quot;&quot;).isBlank()) {</span>
+<span class="nc" id="L55">                missing.add(variable);</span>
+            }
+<span class="nc" id="L57">        }</span>
+<span class="nc bnc" id="L58" title="All 2 branches missed.">        if (!missing.isEmpty()) {</span>
+<span class="nc" id="L59">            throw new IllegalStateException(&quot;live experiment needs &quot; + String.join(&quot;, &quot;, missing));</span>
+        }
+<span class="nc" id="L61">        URI managementHost =</span>
+<span class="nc" id="L62">                URI.create(environment.getOrDefault(MANAGEMENT_HOST_VARIABLE, DEFAULT_MANAGEMENT_HOST.toString()));</span>
+<span class="nc" id="L63">        URI captureEndpoint = URI.create(environment.getOrDefault(</span>
+<span class="nc" id="L64">                CAPTURE_ENDPOINT_VARIABLE, TelemetryDistribution.PRODUCTION_ENDPOINT.toString()));</span>
+<span class="nc" id="L65">        Set&lt;Long&gt; forbidden = javaTrimmedNonEmptyFields(environment.get(FORBIDDEN_PROJECTS_VARIABLE)).stream()</span>
+<span class="nc" id="L66">                .map(Long::parseLong)</span>
+<span class="nc" id="L67">                .collect(Collectors.toUnmodifiableSet());</span>
+<span class="nc" id="L68">        return new ExperimentBinding(</span>
+                managementHost,
+                captureEndpoint,
+<span class="nc" id="L71">                Long.parseLong(environment.get(PROJECT_ID_VARIABLE).strip()),</span>
+<span class="nc" id="L72">                environment.get(PROJECT_NAME_VARIABLE).strip(),</span>
+                forbidden,
+<span class="nc" id="L74">                Path.of(environment.get(KEY_FILE_VARIABLE)),</span>
+<span class="nc" id="L75">                Path.of(environment.get(DIR_VARIABLE)));</span>
+    }
+
+    /// Reads the key from its file on every use so it is never held in a field or printed.
+    Supplier&lt;String&gt; keySupplier() {
+<span class="nc" id="L80">        return () -&gt; {</span>
+            String value;
+            try {
+<span class="nc" id="L83">                value = Files.readString(keyFile).strip();</span>
+<span class="nc" id="L84">            } catch (IOException exception) {</span>
+<span class="nc" id="L85">                throw new IllegalStateException(</span>
+<span class="nc" id="L86">                        &quot;personal API key file is unreadable: &quot; + keyFile.getFileName(), exception);</span>
+<span class="nc" id="L87">            }</span>
+<span class="nc bnc" id="L88" title="All 2 branches missed.">            if (!value.startsWith(PERSONAL_KEY_PREFIX)) {</span>
+<span class="nc" id="L89">                throw new IllegalStateException(&quot;personal API key file does not hold a personal key&quot;);</span>
+            }
+<span class="nc" id="L91">            return value;</span>
+        };
+    }
+
+    /// The only way the experiment learns a capture token: from the verified project's own
+    /// metadata. A forbidden ID, a different ID, or a different name stops the run before any
+    /// mutation; the bundled release token is never consulted.
+    String verifiedCaptureToken(PostHogManagementClient client) {
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (forbiddenProjectIds.contains(projectId)) {</span>
+<span class="nc" id="L100">            throw new IllegalStateException(&quot;project &quot; + projectId + &quot; is forbidden for the experiment&quot;);</span>
+        }
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if (client.projectId() != projectId) {</span>
+<span class="nc" id="L103">            throw new IllegalStateException(</span>
+<span class="nc" id="L104">                    &quot;client is bound to project &quot; + client.projectId() + &quot;, expected &quot; + projectId);</span>
+        }
+<span class="nc" id="L106">        PostHogManagementClient.Response response = client.project();</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">        if (!response.success()) {</span>
+<span class="nc" id="L108">            throw new IllegalStateException(</span>
+<span class="nc" id="L109">                    &quot;project lookup failed with HTTP &quot; + response.status() + &quot;: &quot; + response.detail());</span>
+        }
+<span class="nc" id="L111">        long liveId = response.json().path(&quot;id&quot;).asLong(-1);</span>
+<span class="nc" id="L112">        String liveName = response.json().path(&quot;name&quot;).asText(&quot;&quot;);</span>
+<span class="nc bnc" id="L113" title="All 4 branches missed.">        if (liveId != projectId || !expectedProjectName.equals(liveName)) {</span>
+<span class="nc" id="L114">            throw new IllegalStateException(&quot;project identity mismatch: live id &quot; + liveId + &quot; name \&quot;&quot; + liveName</span>
+                    + &quot;\&quot;, expected id &quot; + projectId + &quot; name \&quot;&quot; + expectedProjectName + &quot;\&quot;&quot;);
+        }
+<span class="nc" id="L117">        String token = response.json().path(&quot;api_token&quot;).asText(&quot;&quot;);</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">        if (!token.startsWith(PROJECT_TOKEN_PREFIX)) {</span>
+<span class="nc" id="L119">            throw new IllegalStateException(&quot;verified project exposes no capture token&quot;);</span>
+        }
+<span class="nc" id="L121">        return token;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>

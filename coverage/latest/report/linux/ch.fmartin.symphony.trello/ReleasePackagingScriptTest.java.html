@@ -3,15 +3,19 @@
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
+import ch.fmartin.symphony.trello.telemetry.TelemetryDistribution;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.function.UnaryOperator;
+import java.util.jar.JarFile;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -20,8 +24,42 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
-<span class="nc" id="L23">final class ReleasePackagingScriptTest {</span>
+<span class="nc" id="L27">final class ReleasePackagingScriptTest {</span>
     private static final String VERSION = &quot;1.2.3&quot;;
+
+    private static final String TELEMETRY_PROPERTIES = &quot;src/main/resources/&quot; + TelemetryDistribution.RESOURCE;
+    private static final String PACKAGED_JAR = &quot;target/quarkus-app/app/symphony-trello.jar&quot;;
+    private static final String TELEMETRY_PROPERTIES_SOURCE = &quot;# public capture token\n&quot;
+            + TelemetryDistribution.TOKEN_KEY + &quot;=&quot; + TelemetryDistribution.TOKEN_PLACEHOLDER + &quot;\n&quot;;
+    private static final String TELEMETRY_TOKEN_VARIABLE = &quot;SYMPHONY_TRELLO_POSTHOG_PROJECT_TOKEN&quot;;
+    private static final String ERASURE_ENDPOINT_VARIABLE = &quot;SYMPHONY_TRELLO_ERASURE_ENDPOINT&quot;;
+    private static final String ERASURE_AUDIENCE_VARIABLE = &quot;SYMPHONY_TRELLO_ERASURE_AUDIENCE&quot;;
+    /// Every variable the packager reads from the release workflow environment.
+<span class="nc" id="L38">    private static final List&lt;String&gt; RELEASE_ASSET_VARIABLES =</span>
+<span class="nc" id="L39">            List.of(TELEMETRY_TOKEN_VARIABLE, ERASURE_ENDPOINT_VARIABLE, ERASURE_AUDIENCE_VARIABLE);</span>
+<span class="nc" id="L40">    private static final String SYNTHETIC_TOKEN = &quot;phc_&quot; + &quot;0&quot;.repeat(44);</span>
+    private static final String PRODUCTION_PROJECT_FILE = &quot;infra/posthog/production-project-id&quot;;
+    private static final String SYNTHETIC_PRODUCTION_PROJECT = &quot;12345&quot;;
+    /// A fake mvnw that packages only the telemetry properties file, so a test can read what the
+    /// packager injected into the jar.
+<span class="nc" id="L45">    private static final String MVNW_PACKAGING_TELEMETRY_PROPERTIES =</span>
+            &quot;&quot;&quot;
+            #!/usr/bin/env bash
+            set -euo pipefail
+            echo &quot;$*&quot; &gt;&gt; mvnw.log
+            rm -rf target
+            mkdir -p target/quarkus-app/app
+            printf 'app' &gt; target/quarkus-app/application.txt
+            jar --create --file %s --no-manifest -C src/main/resources %s
+            &quot;&quot;&quot;
+<span class="nc" id="L55">                    .formatted(PACKAGED_JAR, TelemetryDistribution.RESOURCE);</span>
+<span class="nc" id="L56">    private static final Map&lt;String, String&gt; ERASURE_FOR_ANOTHER_PROJECT = Map.of(</span>
+            TELEMETRY_TOKEN_VARIABLE,
+            SYNTHETIC_TOKEN,
+            ERASURE_ENDPOINT_VARIABLE,
+            &quot;https://webhooks.eu.posthog.com/public/webhooks/00000000-0000-4000-8000-000000000001&quot;,
+            ERASURE_AUDIENCE_VARIABLE,
+            &quot;symphony:54321&quot;);
 
     @TempDir
     Path tempDir;
@@ -29,115 +67,200 @@ import org.junit.jupiter.params.provider.MethodSource;
     @Test
     void writesExpectedAssetsToDefaultDestination() throws Exception {
         // given
-<span class="nc" id="L32">        TestProject project = createProject();</span>
+<span class="nc" id="L70">        TestProject project = createProject();</span>
 
         // when
-<span class="nc" id="L35">        ProcessResult result = project.run(VERSION);</span>
+<span class="nc" id="L73">        ProcessResult result = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L38">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
-<span class="nc" id="L39">        assertExpectedAssets(project.root().resolve(&quot;dist/release-assets&quot;));</span>
-<span class="nc" id="L40">        assertThat(project.mvnwLog()).contains(&quot;-q -DskipTests clean package&quot;);</span>
-<span class="nc" id="L41">    }</span>
+<span class="nc" id="L76">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L77">        assertExpectedAssets(project.root().resolve(&quot;dist/release-assets&quot;));</span>
+<span class="nc" id="L78">        assertThat(project.mvnwLog()).contains(&quot;-q -DskipTests clean package&quot;);</span>
+<span class="nc" id="L79">    }</span>
+
+    @Test
+    void injectsTheUsageReportingTokenOnlyIntoThePackagedApplication() throws Exception {
+        // given
+<span class="nc" id="L84">        TestProject project = createProject();</span>
+<span class="nc" id="L85">        Path properties = project.writeTelemetryPropertiesSource();</span>
+<span class="nc" id="L86">        project.writeMavenWrapper(MVNW_PACKAGING_TELEMETRY_PROPERTIES);</span>
+
+        // when
+<span class="nc" id="L89">        ProcessResult result = project.run(Map.of(TELEMETRY_TOKEN_VARIABLE, SYNTHETIC_TOKEN), VERSION);</span>
+
+        // then
+<span class="nc" id="L92">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L93">        assertThat(result.output()).contains(&quot;Usage-reporting token injected for this release archive&quot;);</span>
+<span class="nc" id="L94">        assertThat(properties).content().isEqualTo(TELEMETRY_PROPERTIES_SOURCE);</span>
+<span class="nc" id="L95">        assertThat(project.packagedTelemetryProperties())</span>
+<span class="nc" id="L96">                .contains(TelemetryDistribution.TOKEN_KEY + &quot;=&quot; + SYNTHETIC_TOKEN)</span>
+<span class="nc" id="L97">                .doesNotContain(TelemetryDistribution.TOKEN_PLACEHOLDER);</span>
+<span class="nc" id="L98">    }</span>
+
+    @Test
+    void refusesAMalformedUsageReportingTokenBeforeBuilding() throws Exception {
+        // given
+<span class="nc" id="L103">        TestProject project = createProject();</span>
+<span class="nc" id="L104">        Path properties = project.writeTelemetryPropertiesSource();</span>
+
+        // when
+<span class="nc" id="L107">        ProcessResult result = project.run(Map.of(TELEMETRY_TOKEN_VARIABLE, &quot;phx_personal-key&quot;), VERSION);</span>
+
+        // then
+<span class="nc" id="L110">        assertThat(result.exitCode()).isEqualTo(2);</span>
+<span class="nc" id="L111">        assertThat(result.output()).contains(&quot;is not a PostHog project token&quot;);</span>
+<span class="nc" id="L112">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
+<span class="nc" id="L113">        assertThat(properties).content().isEqualTo(TELEMETRY_PROPERTIES_SOURCE);</span>
+<span class="nc" id="L114">    }</span>
+
+    @Test
+    void refusesAnErasureAudienceForAnyProjectButProductionBeforeBuilding() throws Exception {
+        // given
+<span class="nc" id="L119">        TestProject project = createProject();</span>
+<span class="nc" id="L120">        Path properties = project.writeTelemetryPropertiesSource();</span>
+<span class="nc" id="L121">        project.writeProductionProject();</span>
+
+        // when
+<span class="nc" id="L124">        ProcessResult result = project.run(ERASURE_FOR_ANOTHER_PROJECT, VERSION);</span>
+
+        // then
+<span class="nc" id="L127">        assertThat(result.exitCode()).isEqualTo(2);</span>
+<span class="nc" id="L128">        assertThat(result.output())</span>
+<span class="nc" id="L129">                .contains(&quot;must name the production project&quot;, &quot;symphony:&quot; + SYNTHETIC_PRODUCTION_PROJECT);</span>
+<span class="nc" id="L130">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
+<span class="nc" id="L131">        assertThat(properties).content().isEqualTo(TELEMETRY_PROPERTIES_SOURCE);</span>
+<span class="nc" id="L132">    }</span>
+
+    @Test
+    void packagesTheErasureConfigurationForTheProductionProject() throws Exception {
+        // given
+<span class="nc" id="L137">        TestProject project = createProject();</span>
+<span class="nc" id="L138">        project.writeTelemetryPropertiesSource();</span>
+<span class="nc" id="L139">        project.writeProductionProject();</span>
+<span class="nc" id="L140">        project.writeMavenWrapper(MVNW_PACKAGING_TELEMETRY_PROPERTIES);</span>
+<span class="nc" id="L141">        var environment = new HashMap&lt;&gt;(ERASURE_FOR_ANOTHER_PROJECT);</span>
+<span class="nc" id="L142">        environment.put(ERASURE_AUDIENCE_VARIABLE, &quot;symphony:&quot; + SYNTHETIC_PRODUCTION_PROJECT);</span>
+
+        // when
+<span class="nc" id="L145">        ProcessResult result = project.run(environment, VERSION);</span>
+
+        // then
+<span class="nc" id="L148">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L149">        assertThat(project.packagedTelemetryProperties())</span>
+<span class="nc" id="L150">                .contains(TelemetryDistribution.ERASURE_AUDIENCE_KEY + &quot;=symphony:&quot; + SYNTHETIC_PRODUCTION_PROJECT);</span>
+<span class="nc" id="L151">    }</span>
+
+    @Test
+    void buildsWithoutATokenAndSaysTheArchiveNeverSends() throws Exception {
+        // given
+<span class="nc" id="L156">        TestProject project = createProject();</span>
+
+        // when
+<span class="nc" id="L159">        ProcessResult result = project.run(VERSION);</span>
+
+        // then
+<span class="nc" id="L162">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L163">        assertThat(result.output()).contains(&quot;this release archive never sends usage reports&quot;);</span>
+<span class="nc" id="L164">    }</span>
 
     @Test
     void stampsRepositoryInstallerTemplates() throws Exception {
         // given
-<span class="nc" id="L46">        TestProject project = createProjectWithRepositoryInstallerTemplates();</span>
+<span class="nc" id="L169">        TestProject project = createProjectWithRepositoryInstallerTemplates();</span>
 
         // when
-<span class="nc" id="L49">        ProcessResult result = project.run(VERSION);</span>
+<span class="nc" id="L172">        ProcessResult result = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L52">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
-<span class="nc" id="L53">        assertExpectedAssets(project.root().resolve(&quot;dist/release-assets&quot;));</span>
-<span class="nc" id="L54">    }</span>
+<span class="nc" id="L175">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L176">        assertExpectedAssets(project.root().resolve(&quot;dist/release-assets&quot;));</span>
+<span class="nc" id="L177">    }</span>
 
     @Test
     void stampsRepositoryInstallerTemplatesForCurrentDefaultVersion() throws Exception {
         // given
-<span class="nc" id="L59">        TestProject project = createProjectWithRepositoryInstallerTemplates();</span>
+<span class="nc" id="L182">        TestProject project = createProjectWithRepositoryInstallerTemplates();</span>
 
         // when
-<span class="nc" id="L62">        ProcessResult result = project.run(&quot;0.2.0&quot;);</span>
+<span class="nc" id="L185">        ProcessResult result = project.run(&quot;0.2.0&quot;);</span>
 
         // then
-<span class="nc" id="L65">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
-<span class="nc" id="L66">        assertExpectedAssets(project.root().resolve(&quot;dist/release-assets&quot;), &quot;0.2.0&quot;);</span>
-<span class="nc" id="L67">    }</span>
+<span class="nc" id="L188">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L189">        assertExpectedAssets(project.root().resolve(&quot;dist/release-assets&quot;), &quot;0.2.0&quot;);</span>
+<span class="nc" id="L190">    }</span>
 
     @Test
     void writesExpectedAssetsToNewRelativeDestination() throws Exception {
         // given
-<span class="nc" id="L72">        TestProject project = createProject();</span>
+<span class="nc" id="L195">        TestProject project = createProject();</span>
 
         // when
-<span class="nc" id="L75">        ProcessResult result = project.run(VERSION, &quot;dist/custom-assets&quot;);</span>
+<span class="nc" id="L198">        ProcessResult result = project.run(VERSION, &quot;dist/custom-assets&quot;);</span>
 
         // then
-<span class="nc" id="L78">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
-<span class="nc" id="L79">        assertExpectedAssets(project.root().resolve(&quot;dist/custom-assets&quot;));</span>
-<span class="nc" id="L80">    }</span>
+<span class="nc" id="L201">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L202">        assertExpectedAssets(project.root().resolve(&quot;dist/custom-assets&quot;));</span>
+<span class="nc" id="L203">    }</span>
 
     @Test
     void writesExpectedAssetsToNewAbsoluteDestinationInsideCheckout() throws Exception {
         // given
-<span class="nc" id="L85">        TestProject project = createProject();</span>
-<span class="nc" id="L86">        Path destination = project.root().resolve(&quot;release output/with spaces&quot;);</span>
+<span class="nc" id="L208">        TestProject project = createProject();</span>
+<span class="nc" id="L209">        Path destination = project.root().resolve(&quot;release output/with spaces&quot;);</span>
 
         // when
-<span class="nc" id="L89">        ProcessResult result = project.run(VERSION, destination.toString());</span>
+<span class="nc" id="L212">        ProcessResult result = project.run(VERSION, destination.toString());</span>
 
         // then
-<span class="nc" id="L92">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
-<span class="nc" id="L93">        assertExpectedAssets(destination);</span>
-<span class="nc" id="L94">    }</span>
+<span class="nc" id="L215">        assertThat(result.exitCode()).as(result.output()).isZero();</span>
+<span class="nc" id="L216">        assertExpectedAssets(destination);</span>
+<span class="nc" id="L217">    }</span>
 
     @Test
     void repeatedRunReplacesOnlyGeneratedAssets() throws Exception {
         // given
-<span class="nc" id="L99">        TestProject project = createProject();</span>
-<span class="nc" id="L100">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
-<span class="nc" id="L101">        ProcessResult first = project.run(VERSION);</span>
-<span class="nc" id="L102">        assertThat(first.exitCode()).as(first.output()).isZero();</span>
-<span class="nc" id="L103">        Files.writeString(destination.resolve(&quot;install.sh&quot;), &quot;stale&quot;);</span>
+<span class="nc" id="L222">        TestProject project = createProject();</span>
+<span class="nc" id="L223">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
+<span class="nc" id="L224">        ProcessResult first = project.run(VERSION);</span>
+<span class="nc" id="L225">        assertThat(first.exitCode()).as(first.output()).isZero();</span>
+<span class="nc" id="L226">        Files.writeString(destination.resolve(&quot;install.sh&quot;), &quot;stale&quot;);</span>
 
         // when
-<span class="nc" id="L106">        ProcessResult second = project.run(VERSION);</span>
+<span class="nc" id="L229">        ProcessResult second = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L109">        assertThat(second.exitCode()).as(second.output()).isZero();</span>
-<span class="nc" id="L110">        assertExpectedAssets(destination);</span>
-<span class="nc" id="L111">        assertThat(destination.resolve(&quot;install.sh&quot;))</span>
-<span class="nc" id="L112">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L113">                .contains(&quot;1.2.3&quot;);</span>
-<span class="nc" id="L114">    }</span>
+<span class="nc" id="L232">        assertThat(second.exitCode()).as(second.output()).isZero();</span>
+<span class="nc" id="L233">        assertExpectedAssets(destination);</span>
+<span class="nc" id="L234">        assertThat(destination.resolve(&quot;install.sh&quot;))</span>
+<span class="nc" id="L235">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L236">                .contains(&quot;1.2.3&quot;);</span>
+<span class="nc" id="L237">    }</span>
 
     @Test
     void repeatedRunReplacesOwnedAssetsFromPriorVersion() throws Exception {
         // given
-<span class="nc" id="L119">        TestProject project = createProject();</span>
-<span class="nc" id="L120">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
-<span class="nc" id="L121">        ProcessResult first = project.run(&quot;1.2.2&quot;);</span>
-<span class="nc" id="L122">        assertThat(first.exitCode()).as(first.output()).isZero();</span>
+<span class="nc" id="L242">        TestProject project = createProject();</span>
+<span class="nc" id="L243">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
+<span class="nc" id="L244">        ProcessResult first = project.run(&quot;1.2.2&quot;);</span>
+<span class="nc" id="L245">        assertThat(first.exitCode()).as(first.output()).isZero();</span>
 
         // when
-<span class="nc" id="L125">        ProcessResult second = project.run(VERSION);</span>
+<span class="nc" id="L248">        ProcessResult second = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L128">        assertThat(second.exitCode()).as(second.output()).isZero();</span>
-<span class="nc" id="L129">        assertExpectedAssets(destination);</span>
-<span class="nc" id="L130">        assertThat(destination.resolve(&quot;symphony-trello-1.2.2.tar.gz&quot;)).doesNotExist();</span>
-<span class="nc" id="L131">        assertThat(destination.resolve(&quot;symphony-trello-1.2.2.zip&quot;)).doesNotExist();</span>
-<span class="nc" id="L132">    }</span>
+<span class="nc" id="L251">        assertThat(second.exitCode()).as(second.output()).isZero();</span>
+<span class="nc" id="L252">        assertExpectedAssets(destination);</span>
+<span class="nc" id="L253">        assertThat(destination.resolve(&quot;symphony-trello-1.2.2.tar.gz&quot;)).doesNotExist();</span>
+<span class="nc" id="L254">        assertThat(destination.resolve(&quot;symphony-trello-1.2.2.zip&quot;)).doesNotExist();</span>
+<span class="nc" id="L255">    }</span>
 
     @Test
     void defaultDestinationRejectsUnownedGeneratedAssetsWithoutOwnershipMarker() throws Exception {
         // given
-<span class="nc" id="L137">        TestProject project = createProject();</span>
-<span class="nc" id="L138">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
-<span class="nc" id="L139">        Files.createDirectories(destination);</span>
-<span class="nc bnc" id="L140" title="All 2 branches missed.">        for (String asset : List.of(</span>
+<span class="nc" id="L260">        TestProject project = createProject();</span>
+<span class="nc" id="L261">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
+<span class="nc" id="L262">        Files.createDirectories(destination);</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">        for (String asset : List.of(</span>
                 &quot;install.sh&quot;,
                 &quot;install.ps1&quot;,
                 &quot;uninstall.sh&quot;,
@@ -145,358 +268,358 @@ import org.junit.jupiter.params.provider.MethodSource;
                 &quot;checksums.txt&quot;,
                 &quot;symphony-trello-1.2.2.tar.gz&quot;,
                 &quot;symphony-trello-1.2.2.zip&quot;)) {
-<span class="nc" id="L148">            Files.writeString(destination.resolve(asset), &quot;unowned&quot;);</span>
-<span class="nc" id="L149">        }</span>
+<span class="nc" id="L271">            Files.writeString(destination.resolve(asset), &quot;unowned&quot;);</span>
+<span class="nc" id="L272">        }</span>
 
         // when
-<span class="nc" id="L152">        ProcessResult result = project.run(VERSION);</span>
+<span class="nc" id="L275">        ProcessResult result = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L155">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
-<span class="nc" id="L156">        assertThat(result.output()).contains(&quot;Release asset destination contains files not managed&quot;);</span>
-<span class="nc" id="L157">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
-<span class="nc" id="L158">        assertThat(destination.resolve(&quot;install.sh&quot;))</span>
-<span class="nc" id="L159">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L160">                .isEqualTo(&quot;unowned&quot;);</span>
-<span class="nc" id="L161">        assertThat(destination.resolve(&quot;symphony-trello-1.2.2.tar.gz&quot;))</span>
-<span class="nc" id="L162">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L163">                .isEqualTo(&quot;unowned&quot;);</span>
-<span class="nc" id="L164">    }</span>
+<span class="nc" id="L278">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
+<span class="nc" id="L279">        assertThat(result.output()).contains(&quot;Release asset destination contains files not managed&quot;);</span>
+<span class="nc" id="L280">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
+<span class="nc" id="L281">        assertThat(destination.resolve(&quot;install.sh&quot;))</span>
+<span class="nc" id="L282">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L283">                .isEqualTo(&quot;unowned&quot;);</span>
+<span class="nc" id="L284">        assertThat(destination.resolve(&quot;symphony-trello-1.2.2.tar.gz&quot;))</span>
+<span class="nc" id="L285">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L286">                .isEqualTo(&quot;unowned&quot;);</span>
+<span class="nc" id="L287">    }</span>
 
     @Test
     void failedBuildDoesNotPublishPartialDestination() throws Exception {
         // given
-<span class="nc" id="L169">        TestProject project = createProject();</span>
-<span class="nc" id="L170">        project.writeFailingMavenWrapper();</span>
-<span class="nc" id="L171">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
+<span class="nc" id="L292">        TestProject project = createProject();</span>
+<span class="nc" id="L293">        project.writeFailingMavenWrapper();</span>
+<span class="nc" id="L294">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
 
         // when
-<span class="nc" id="L174">        ProcessResult result = project.run(VERSION);</span>
+<span class="nc" id="L297">        ProcessResult result = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L177">        assertThat(result.exitCode()).as(result.output()).isNotZero();</span>
-<span class="nc" id="L178">        assertThat(destination).doesNotExist();</span>
-<span class="nc" id="L179">    }</span>
+<span class="nc" id="L300">        assertThat(result.exitCode()).as(result.output()).isNotZero();</span>
+<span class="nc" id="L301">        assertThat(destination).doesNotExist();</span>
+<span class="nc" id="L302">    }</span>
 
     @MethodSource(&quot;invalidInstallerMarkerCases&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
     void rejectsInvalidInstallerMarkersBeforeBuild(InvalidInstallerMarkerCase invalidCase) throws Exception {
         // given
-<span class="nc" id="L185">        TestProject project = createProject();</span>
-<span class="nc" id="L186">        invalidCase.apply(project.root());</span>
-<span class="nc" id="L187">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
+<span class="nc" id="L308">        TestProject project = createProject();</span>
+<span class="nc" id="L309">        invalidCase.apply(project.root());</span>
+<span class="nc" id="L310">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
 
         // when
-<span class="nc" id="L190">        ProcessResult result = project.run(VERSION);</span>
+<span class="nc" id="L313">        ProcessResult result = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L193">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
-<span class="nc" id="L194">        assertThat(result.output()).contains(invalidCase.expectedMessage());</span>
-<span class="nc" id="L195">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
-<span class="nc" id="L196">        assertThat(destination).doesNotExist();</span>
-<span class="nc" id="L197">    }</span>
+<span class="nc" id="L316">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
+<span class="nc" id="L317">        assertThat(result.output()).contains(invalidCase.expectedMessage());</span>
+<span class="nc" id="L318">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
+<span class="nc" id="L319">        assertThat(destination).doesNotExist();</span>
+<span class="nc" id="L320">    }</span>
 
     @Test
     void failsClosedWhenAValidatedMarkerIsNotSubstituted() throws Exception {
         // given
-<span class="nc" id="L202">        TestProject project = createProject();</span>
-<span class="nc" id="L203">        rewrite(</span>
-<span class="nc" id="L204">                project.root().resolve(&quot;install.sh&quot;),</span>
-<span class="nc" id="L205">                content -&gt; content.replace(</span>
+<span class="nc" id="L325">        TestProject project = createProject();</span>
+<span class="nc" id="L326">        rewrite(</span>
+<span class="nc" id="L327">                project.root().resolve(&quot;install.sh&quot;),</span>
+<span class="nc" id="L328">                content -&gt; content.replace(</span>
                         &quot;DEFAULT_VERSION=\&quot;0.0.0\&quot; # x-release-please-version&quot;,
                         &quot;  DEFAULT_VERSION=\&quot;0.0.0\&quot; # x-release-please-version&quot;));
-<span class="nc" id="L208">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
+<span class="nc" id="L331">        Path destination = project.root().resolve(&quot;dist/release-assets&quot;);</span>
 
         // when
-<span class="nc" id="L211">        ProcessResult result = project.run(VERSION);</span>
+<span class="nc" id="L334">        ProcessResult result = project.run(VERSION);</span>
 
         // then
-<span class="nc" id="L214">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
-<span class="nc" id="L215">        assertThat(result.output()).contains(&quot;install.sh DEFAULT_VERSION was not stamped&quot;);</span>
-<span class="nc" id="L216">        assertThat(project.mvnwLogPath()).exists();</span>
-<span class="nc" id="L217">        assertThat(destination).doesNotExist();</span>
-<span class="nc" id="L218">    }</span>
+<span class="nc" id="L337">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
+<span class="nc" id="L338">        assertThat(result.output()).contains(&quot;install.sh DEFAULT_VERSION was not stamped&quot;);</span>
+<span class="nc" id="L339">        assertThat(project.mvnwLogPath()).exists();</span>
+<span class="nc" id="L340">        assertThat(destination).doesNotExist();</span>
+<span class="nc" id="L341">    }</span>
 
     @Test
     void packagingScriptAvoidsGnuOnlyFilesystemOptions() throws Exception {
         // given
-<span class="nc" id="L223">        Path scriptPath = Path.of(&quot;scripts/package-release-assets.sh&quot;);</span>
+<span class="nc" id="L346">        Path scriptPath = Path.of(&quot;scripts/package-release-assets.sh&quot;);</span>
 
         // when
-<span class="nc" id="L226">        String script = Files.readString(scriptPath);</span>
+<span class="nc" id="L349">        String script = Files.readString(scriptPath);</span>
 
         // then
-<span class="nc" id="L229">        assertThat(script).doesNotContain(&quot;realpath -m&quot;, &quot;-printf&quot;);</span>
-<span class="nc" id="L230">    }</span>
+<span class="nc" id="L352">        assertThat(script).doesNotContain(&quot;realpath -m&quot;, &quot;-printf&quot;);</span>
+<span class="nc" id="L353">    }</span>
 
     @MethodSource(&quot;invalidDestinationCases&quot;)
     @ParameterizedTest(name = &quot;{0}&quot;)
     void rejectsUnsafeDestinationsBeforeBuild(InvalidDestinationCase invalidCase) throws Exception {
         // given
-<span class="nc" id="L236">        TestProject project = createProject();</span>
-<span class="nc" id="L237">        PreparedDestination destination = invalidCase.prepare(tempDir, project.root());</span>
-<span class="nc" id="L238">        destination.assertPreconditions();</span>
+<span class="nc" id="L359">        TestProject project = createProject();</span>
+<span class="nc" id="L360">        PreparedDestination destination = invalidCase.prepare(tempDir, project.root());</span>
+<span class="nc" id="L361">        destination.assertPreconditions();</span>
 
         // when
-<span class="nc" id="L241">        ProcessResult result = project.run(VERSION, destination.path().toString());</span>
+<span class="nc" id="L364">        ProcessResult result = project.run(VERSION, destination.path().toString());</span>
 
         // then
-<span class="nc" id="L244">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
-<span class="nc" id="L245">        assertThat(result.output()).contains(invalidCase.expectedMessage());</span>
-<span class="nc" id="L246">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
-<span class="nc" id="L247">        assertNoPublicationAttempt(project.root());</span>
-<span class="nc" id="L248">        assertNoPublicationAttempt(tempDir);</span>
-<span class="nc" id="L249">        destination.assertSentinelSurvived();</span>
-<span class="nc" id="L250">    }</span>
+<span class="nc" id="L367">        assertThat(result.exitCode()).as(result.output()).isEqualTo(2);</span>
+<span class="nc" id="L368">        assertThat(result.output()).contains(invalidCase.expectedMessage());</span>
+<span class="nc" id="L369">        assertThat(project.mvnwLogPath()).doesNotExist();</span>
+<span class="nc" id="L370">        assertNoPublicationAttempt(project.root());</span>
+<span class="nc" id="L371">        assertNoPublicationAttempt(tempDir);</span>
+<span class="nc" id="L372">        destination.assertSentinelSurvived();</span>
+<span class="nc" id="L373">    }</span>
 
     static Stream&lt;InvalidDestinationCase&gt; invalidDestinationCases() {
-<span class="nc" id="L253">        return Stream.of(</span>
+<span class="nc" id="L376">        return Stream.of(</span>
                 new InvalidDestinationCase(
                         &quot;parent alias escapes checkout&quot;, &quot;Release asset destination must be inside&quot;, (temp, root) -&gt; {
-<span class="nc" id="L256">                            Path victim = temp.resolve(&quot;victim&quot;);</span>
-<span class="nc" id="L257">                            Files.createDirectories(victim);</span>
-<span class="nc" id="L258">                            return PreparedDestination.withSentinel(root.resolve(&quot;../victim&quot;), victim);</span>
+<span class="nc" id="L379">                            Path victim = temp.resolve(&quot;victim&quot;);</span>
+<span class="nc" id="L380">                            Files.createDirectories(victim);</span>
+<span class="nc" id="L381">                            return PreparedDestination.withSentinel(root.resolve(&quot;../victim&quot;), victim);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;absolute unrelated directory&quot;, &quot;Release asset destination must be inside&quot;, (temp, root) -&gt; {
-<span class="nc" id="L262">                            Path destination = temp.resolve(&quot;outside&quot;);</span>
-<span class="nc" id="L263">                            Files.createDirectories(destination);</span>
-<span class="nc" id="L264">                            return PreparedDestination.withSentinel(destination, destination);</span>
+<span class="nc" id="L385">                            Path destination = temp.resolve(&quot;outside&quot;);</span>
+<span class="nc" id="L386">                            Files.createDirectories(destination);</span>
+<span class="nc" id="L387">                            return PreparedDestination.withSentinel(destination, destination);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;repository root&quot;,
                         &quot;must not be the source checkout&quot;,
-<span class="nc" id="L269">                        (temp, root) -&gt; PreparedDestination.withSentinel(root, root)),</span>
+<span class="nc" id="L392">                        (temp, root) -&gt; PreparedDestination.withSentinel(root, root)),</span>
                 new InvalidDestinationCase(
                         &quot;repository parent&quot;,
                         &quot;Release asset destination must be inside&quot;,
-<span class="nc" id="L273">                        (temp, root) -&gt; PreparedDestination.withSentinel(root.getParent(), root.getParent())),</span>
+<span class="nc" id="L396">                        (temp, root) -&gt; PreparedDestination.withSentinel(root.getParent(), root.getParent())),</span>
                 new InvalidDestinationCase(
                         &quot;filesystem root&quot;,
                         &quot;must not be the filesystem root&quot;,
-<span class="nc" id="L277">                        (temp, root) -&gt; PreparedDestination.withoutSentinel(Path.of(&quot;/&quot;))),</span>
+<span class="nc" id="L400">                        (temp, root) -&gt; PreparedDestination.withoutSentinel(Path.of(&quot;/&quot;))),</span>
                 new InvalidDestinationCase(
                         &quot;inside Maven target&quot;, &quot;must not be inside Maven build output&quot;, (temp, root) -&gt; {
-<span class="nc" id="L280">                            Path destination = root.resolve(&quot;target/release-assets&quot;);</span>
-<span class="nc" id="L281">                            Files.createDirectories(destination);</span>
-<span class="nc" id="L282">                            return PreparedDestination.withSentinel(destination, destination);</span>
+<span class="nc" id="L403">                            Path destination = root.resolve(&quot;target/release-assets&quot;);</span>
+<span class="nc" id="L404">                            Files.createDirectories(destination);</span>
+<span class="nc" id="L405">                            return PreparedDestination.withSentinel(destination, destination);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;destination contains Maven target&quot;,
                         &quot;must not be the source checkout&quot;,
-<span class="nc" id="L287">                        (temp, root) -&gt; PreparedDestination.withSentinel(root.resolve(&quot;target/..&quot;), root)),</span>
+<span class="nc" id="L410">                        (temp, root) -&gt; PreparedDestination.withSentinel(root.resolve(&quot;target/..&quot;), root)),</span>
                 new InvalidDestinationCase(&quot;destination is a file&quot;, &quot;must be a directory&quot;, (temp, root) -&gt; {
-<span class="nc" id="L289">                    Path destination = root.resolve(&quot;dist-file&quot;);</span>
-<span class="nc" id="L290">                    Files.writeString(destination, &quot;sentinel&quot;);</span>
-<span class="nc" id="L291">                    return PreparedDestination.withoutSentinel(destination);</span>
+<span class="nc" id="L412">                    Path destination = root.resolve(&quot;dist-file&quot;);</span>
+<span class="nc" id="L413">                    Files.writeString(destination, &quot;sentinel&quot;);</span>
+<span class="nc" id="L414">                    return PreparedDestination.withoutSentinel(destination);</span>
                 }),
                 new InvalidDestinationCase(
                         &quot;existing non-empty unowned destination&quot;, &quot;contains files not managed&quot;, (temp, root) -&gt; {
-<span class="nc" id="L295">                            Path destination = root.resolve(&quot;dist/unowned&quot;);</span>
-<span class="nc" id="L296">                            Files.createDirectories(destination);</span>
-<span class="nc" id="L297">                            Files.writeString(destination.resolve(&quot;keep.txt&quot;), &quot;sentinel&quot;);</span>
-<span class="nc" id="L298">                            return PreparedDestination.withSentinel(destination, destination);</span>
+<span class="nc" id="L418">                            Path destination = root.resolve(&quot;dist/unowned&quot;);</span>
+<span class="nc" id="L419">                            Files.createDirectories(destination);</span>
+<span class="nc" id="L420">                            Files.writeString(destination.resolve(&quot;keep.txt&quot;), &quot;sentinel&quot;);</span>
+<span class="nc" id="L421">                            return PreparedDestination.withSentinel(destination, destination);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;existing custom destination with asset-like file&quot;,
                         &quot;contains files not managed&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L304">                            Path destination = root.resolve(&quot;custom&quot;);</span>
-<span class="nc" id="L305">                            Files.createDirectories(destination);</span>
-<span class="nc" id="L306">                            Files.writeString(destination.resolve(&quot;install.sh&quot;), &quot;sentinel&quot;);</span>
-<span class="nc" id="L307">                            return PreparedDestination.withSentinel(destination, destination);</span>
+<span class="nc" id="L427">                            Path destination = root.resolve(&quot;custom&quot;);</span>
+<span class="nc" id="L428">                            Files.createDirectories(destination);</span>
+<span class="nc" id="L429">                            Files.writeString(destination.resolve(&quot;install.sh&quot;), &quot;sentinel&quot;);</span>
+<span class="nc" id="L430">                            return PreparedDestination.withSentinel(destination, destination);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;invalid ownership marker directory&quot;, &quot;ownership marker is invalid&quot;, (temp, root) -&gt; {
-<span class="nc" id="L311">                            Path destination = root.resolve(&quot;dist/invalid-marker&quot;);</span>
-<span class="nc" id="L312">                            Files.createDirectories(destination.resolve(&quot;.symphony-trello-release-assets&quot;));</span>
-<span class="nc" id="L313">                            return PreparedDestination.withSentinel(destination, destination);</span>
+<span class="nc" id="L434">                            Path destination = root.resolve(&quot;dist/invalid-marker&quot;);</span>
+<span class="nc" id="L435">                            Files.createDirectories(destination.resolve(&quot;.symphony-trello-release-assets&quot;));</span>
+<span class="nc" id="L436">                            return PreparedDestination.withSentinel(destination, destination);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;destination symlink&quot;, &quot;Release asset destination must not be a symlink&quot;, (temp, root) -&gt; {
-<span class="nc" id="L317">                            assumeSymlinks();</span>
-<span class="nc" id="L318">                            Path outside = temp.resolve(&quot;outside-link-target&quot;);</span>
-<span class="nc" id="L319">                            Files.createDirectories(outside);</span>
-<span class="nc" id="L320">                            Path link = root.resolve(&quot;dist-link&quot;);</span>
-<span class="nc" id="L321">                            Files.createSymbolicLink(link, outside);</span>
-<span class="nc" id="L322">                            return PreparedDestination.withSymlinkSentinel(link, link, outside);</span>
+<span class="nc" id="L440">                            assumeSymlinks();</span>
+<span class="nc" id="L441">                            Path outside = temp.resolve(&quot;outside-link-target&quot;);</span>
+<span class="nc" id="L442">                            Files.createDirectories(outside);</span>
+<span class="nc" id="L443">                            Path link = root.resolve(&quot;dist-link&quot;);</span>
+<span class="nc" id="L444">                            Files.createSymbolicLink(link, outside);</span>
+<span class="nc" id="L445">                            return PreparedDestination.withSymlinkSentinel(link, link, outside);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;destination symlink with trailing slash&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L328">                            assumeSymlinks();</span>
-<span class="nc" id="L329">                            Path outside = temp.resolve(&quot;outside-link-target-slash&quot;);</span>
-<span class="nc" id="L330">                            Files.createDirectories(outside);</span>
-<span class="nc" id="L331">                            Path link = root.resolve(&quot;dist-link-slash&quot;);</span>
-<span class="nc" id="L332">                            Files.createSymbolicLink(link, outside);</span>
-<span class="nc" id="L333">                            return PreparedDestination.withSymlinkSentinel(Path.of(link + &quot;/&quot;), link, outside);</span>
+<span class="nc" id="L451">                            assumeSymlinks();</span>
+<span class="nc" id="L452">                            Path outside = temp.resolve(&quot;outside-link-target-slash&quot;);</span>
+<span class="nc" id="L453">                            Files.createDirectories(outside);</span>
+<span class="nc" id="L454">                            Path link = root.resolve(&quot;dist-link-slash&quot;);</span>
+<span class="nc" id="L455">                            Files.createSymbolicLink(link, outside);</span>
+<span class="nc" id="L456">                            return PreparedDestination.withSymlinkSentinel(Path.of(link + &quot;/&quot;), link, outside);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;inside-checkout destination symlink&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L339">                            assumeSymlinks();</span>
-<span class="nc" id="L340">                            Path target = root.resolve(&quot;dist/inside-link-target&quot;);</span>
-<span class="nc" id="L341">                            Files.createDirectories(target);</span>
-<span class="nc" id="L342">                            Path link = root.resolve(&quot;inside-link&quot;);</span>
-<span class="nc" id="L343">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L344">                            return PreparedDestination.withSymlinkSentinel(link, link, target);</span>
+<span class="nc" id="L462">                            assumeSymlinks();</span>
+<span class="nc" id="L463">                            Path target = root.resolve(&quot;dist/inside-link-target&quot;);</span>
+<span class="nc" id="L464">                            Files.createDirectories(target);</span>
+<span class="nc" id="L465">                            Path link = root.resolve(&quot;inside-link&quot;);</span>
+<span class="nc" id="L466">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L467">                            return PreparedDestination.withSymlinkSentinel(link, link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;inside-checkout destination symlink with trailing slash&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L350">                            assumeSymlinks();</span>
-<span class="nc" id="L351">                            Path target = root.resolve(&quot;dist/inside-link-target-slash&quot;);</span>
-<span class="nc" id="L352">                            Files.createDirectories(target);</span>
-<span class="nc" id="L353">                            Path link = root.resolve(&quot;inside-link-slash&quot;);</span>
-<span class="nc" id="L354">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L355">                            return PreparedDestination.withSymlinkSentinel(Path.of(link + &quot;/&quot;), link, target);</span>
+<span class="nc" id="L473">                            assumeSymlinks();</span>
+<span class="nc" id="L474">                            Path target = root.resolve(&quot;dist/inside-link-target-slash&quot;);</span>
+<span class="nc" id="L475">                            Files.createDirectories(target);</span>
+<span class="nc" id="L476">                            Path link = root.resolve(&quot;inside-link-slash&quot;);</span>
+<span class="nc" id="L477">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L478">                            return PreparedDestination.withSymlinkSentinel(Path.of(link + &quot;/&quot;), link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;inside-checkout destination symlink with dot alias&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L361">                            assumeSymlinks();</span>
-<span class="nc" id="L362">                            Path target = root.resolve(&quot;dist/inside-link-target-dot&quot;);</span>
-<span class="nc" id="L363">                            Files.createDirectories(target);</span>
-<span class="nc" id="L364">                            Path link = root.resolve(&quot;inside-link-dot&quot;);</span>
-<span class="nc" id="L365">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L366">                            return PreparedDestination.withSymlinkSentinel(Path.of(link + &quot;/.&quot;), link, target);</span>
+<span class="nc" id="L484">                            assumeSymlinks();</span>
+<span class="nc" id="L485">                            Path target = root.resolve(&quot;dist/inside-link-target-dot&quot;);</span>
+<span class="nc" id="L486">                            Files.createDirectories(target);</span>
+<span class="nc" id="L487">                            Path link = root.resolve(&quot;inside-link-dot&quot;);</span>
+<span class="nc" id="L488">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L489">                            return PreparedDestination.withSymlinkSentinel(Path.of(link + &quot;/.&quot;), link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;relative destination symlink&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L372">                            assumeSymlinks();</span>
-<span class="nc" id="L373">                            Path target = root.resolve(&quot;dist/relative-link-target&quot;);</span>
-<span class="nc" id="L374">                            Files.createDirectories(target);</span>
-<span class="nc" id="L375">                            Path link = root.resolve(&quot;relative-link&quot;);</span>
-<span class="nc" id="L376">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L377">                            return PreparedDestination.withSymlinkSentinel(root.relativize(link), link, target);</span>
+<span class="nc" id="L495">                            assumeSymlinks();</span>
+<span class="nc" id="L496">                            Path target = root.resolve(&quot;dist/relative-link-target&quot;);</span>
+<span class="nc" id="L497">                            Files.createDirectories(target);</span>
+<span class="nc" id="L498">                            Path link = root.resolve(&quot;relative-link&quot;);</span>
+<span class="nc" id="L499">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L500">                            return PreparedDestination.withSymlinkSentinel(root.relativize(link), link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;absolute destination symlink&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L383">                            assumeSymlinks();</span>
-<span class="nc" id="L384">                            Path target = root.resolve(&quot;dist/absolute-link-target&quot;);</span>
-<span class="nc" id="L385">                            Files.createDirectories(target);</span>
-<span class="nc" id="L386">                            Path link = root.resolve(&quot;absolute-link&quot;);</span>
-<span class="nc" id="L387">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L388">                            return PreparedDestination.withSymlinkSentinel(link.toAbsolutePath(), link, target);</span>
+<span class="nc" id="L506">                            assumeSymlinks();</span>
+<span class="nc" id="L507">                            Path target = root.resolve(&quot;dist/absolute-link-target&quot;);</span>
+<span class="nc" id="L508">                            Files.createDirectories(target);</span>
+<span class="nc" id="L509">                            Path link = root.resolve(&quot;absolute-link&quot;);</span>
+<span class="nc" id="L510">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L511">                            return PreparedDestination.withSymlinkSentinel(link.toAbsolutePath(), link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;empty target through destination symlink&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L394">                            assumeSymlinks();</span>
-<span class="nc" id="L395">                            Path target = root.resolve(&quot;dist/empty-link-target&quot;);</span>
-<span class="nc" id="L396">                            Files.createDirectories(target);</span>
-<span class="nc" id="L397">                            Path link = root.resolve(&quot;empty-link&quot;);</span>
-<span class="nc" id="L398">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L399">                            return PreparedDestination.withSymlink(link, link, target);</span>
+<span class="nc" id="L517">                            assumeSymlinks();</span>
+<span class="nc" id="L518">                            Path target = root.resolve(&quot;dist/empty-link-target&quot;);</span>
+<span class="nc" id="L519">                            Files.createDirectories(target);</span>
+<span class="nc" id="L520">                            Path link = root.resolve(&quot;empty-link&quot;);</span>
+<span class="nc" id="L521">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L522">                            return PreparedDestination.withSymlink(link, link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;owned-looking target through destination symlink&quot;,
                         &quot;Release asset destination must not be a symlink&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L405">                            assumeSymlinks();</span>
-<span class="nc" id="L406">                            Path target = root.resolve(&quot;dist/owned-looking-link-target&quot;);</span>
-<span class="nc" id="L407">                            Files.createDirectories(target);</span>
-<span class="nc" id="L408">                            writeOwnershipMarker(target);</span>
-<span class="nc" id="L409">                            Path link = root.resolve(&quot;owned-looking-link&quot;);</span>
-<span class="nc" id="L410">                            Files.createSymbolicLink(link, target);</span>
-<span class="nc" id="L411">                            return PreparedDestination.withSymlinkSentinel(link, link, target);</span>
+<span class="nc" id="L528">                            assumeSymlinks();</span>
+<span class="nc" id="L529">                            Path target = root.resolve(&quot;dist/owned-looking-link-target&quot;);</span>
+<span class="nc" id="L530">                            Files.createDirectories(target);</span>
+<span class="nc" id="L531">                            writeOwnershipMarker(target);</span>
+<span class="nc" id="L532">                            Path link = root.resolve(&quot;owned-looking-link&quot;);</span>
+<span class="nc" id="L533">                            Files.createSymbolicLink(link, target);</span>
+<span class="nc" id="L534">                            return PreparedDestination.withSymlinkSentinel(link, link, target);</span>
                         }),
                 new InvalidDestinationCase(
                         &quot;symlinked parent escapes checkout&quot;,
                         &quot;Release asset destination must be inside&quot;,
                         (temp, root) -&gt; {
-<span class="nc" id="L417">                            assumeSymlinks();</span>
-<span class="nc" id="L418">                            Path outside = temp.resolve(&quot;outside-parent-target&quot;);</span>
-<span class="nc" id="L419">                            Files.createDirectories(outside);</span>
-<span class="nc" id="L420">                            Path link = root.resolve(&quot;linked-parent&quot;);</span>
-<span class="nc" id="L421">                            Files.createSymbolicLink(link, outside);</span>
-<span class="nc" id="L422">                            Path requested = link.resolve(&quot;release-assets&quot;);</span>
-<span class="nc" id="L423">                            Path resolved = outside.resolve(&quot;release-assets&quot;);</span>
-<span class="nc" id="L424">                            Files.createDirectories(resolved);</span>
-<span class="nc" id="L425">                            return PreparedDestination.withSentinel(requested, resolved);</span>
+<span class="nc" id="L540">                            assumeSymlinks();</span>
+<span class="nc" id="L541">                            Path outside = temp.resolve(&quot;outside-parent-target&quot;);</span>
+<span class="nc" id="L542">                            Files.createDirectories(outside);</span>
+<span class="nc" id="L543">                            Path link = root.resolve(&quot;linked-parent&quot;);</span>
+<span class="nc" id="L544">                            Files.createSymbolicLink(link, outside);</span>
+<span class="nc" id="L545">                            Path requested = link.resolve(&quot;release-assets&quot;);</span>
+<span class="nc" id="L546">                            Path resolved = outside.resolve(&quot;release-assets&quot;);</span>
+<span class="nc" id="L547">                            Files.createDirectories(resolved);</span>
+<span class="nc" id="L548">                            return PreparedDestination.withSentinel(requested, resolved);</span>
                         }));
     }
 
     static Stream&lt;InvalidInstallerMarkerCase&gt; invalidInstallerMarkerCases() {
-<span class="nc" id="L430">        return Stream.of(</span>
+<span class="nc" id="L553">        return Stream.of(</span>
                 new InvalidInstallerMarkerCase(
                         &quot;missing POSIX DEFAULT_VERSION marker&quot;,
                         &quot;install.sh&quot;,
-<span class="nc" id="L434">                        content -&gt; content.replace(</span>
+<span class="nc" id="L557">                        content -&gt; content.replace(</span>
                                 &quot;DEFAULT_VERSION=\&quot;0.0.0\&quot; # x-release-please-version&quot;, &quot;DEFAULT_VERSION=\&quot;0.0.0\&quot;&quot;),
                         &quot;install.sh DEFAULT_VERSION must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;duplicate POSIX DEFAULT_VERSION marker&quot;,
                         &quot;install.sh&quot;,
-<span class="nc" id="L440">                        content -&gt; content + &quot;\nDEFAULT_VERSION=\&quot;0.0.0\&quot; # x-release-please-version\n&quot;,</span>
+<span class="nc" id="L563">                        content -&gt; content + &quot;\nDEFAULT_VERSION=\&quot;0.0.0\&quot; # x-release-please-version\n&quot;,</span>
                         &quot;install.sh DEFAULT_VERSION must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;missing PowerShell Version marker&quot;,
                         &quot;install.ps1&quot;,
-<span class="nc" id="L445">                        content -&gt; content.replace(</span>
+<span class="nc" id="L568">                        content -&gt; content.replace(</span>
                                 &quot;[string]$Version = $(if ($env:SYMPHONY_TRELLO_VERSION) { $env:SYMPHONY_TRELLO_VERSION } else { \&quot;0.0.0\&quot; }), # x-release-please-version&quot;,
                                 &quot;[string]$Version = $(if ($env:SYMPHONY_TRELLO_VERSION) { $env:SYMPHONY_TRELLO_VERSION } else { \&quot;0.0.0\&quot; }),&quot;),
                         &quot;install.ps1 Version parameter must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;duplicate PowerShell Version marker&quot;,
                         &quot;install.ps1&quot;,
-<span class="nc" id="L452">                        content -&gt; content</span>
+<span class="nc" id="L575">                        content -&gt; content</span>
                                 + &quot;\n[string]$Version = $(if ($env:SYMPHONY_TRELLO_VERSION) { $env:SYMPHONY_TRELLO_VERSION } else { \&quot;0.0.0\&quot; }), # x-release-please-version\n&quot;,
                         &quot;install.ps1 Version parameter must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;missing PowerShell Ref marker&quot;,
                         &quot;install.ps1&quot;,
-<span class="nc" id="L458">                        content -&gt; content.replace(</span>
+<span class="nc" id="L581">                        content -&gt; content.replace(</span>
                                 &quot;[string]$Ref = $(if ($env:SYMPHONY_TRELLO_REF) { $env:SYMPHONY_TRELLO_REF } else { \&quot;v0.0.0\&quot; }), # x-release-please-version&quot;,
                                 &quot;[string]$Ref = $(if ($env:SYMPHONY_TRELLO_REF) { $env:SYMPHONY_TRELLO_REF } else { \&quot;v0.0.0\&quot; }),&quot;),
                         &quot;install.ps1 Ref parameter must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;duplicate PowerShell Ref marker&quot;,
                         &quot;install.ps1&quot;,
-<span class="nc" id="L465">                        content -&gt; content</span>
+<span class="nc" id="L588">                        content -&gt; content</span>
                                 + &quot;\n[string]$Ref = $(if ($env:SYMPHONY_TRELLO_REF) { $env:SYMPHONY_TRELLO_REF } else { \&quot;v0.0.0\&quot; }), # x-release-please-version\n&quot;,
                         &quot;install.ps1 Ref parameter must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;missing PowerShell DefaultVersion marker&quot;,
                         &quot;install.ps1&quot;,
-<span class="nc" id="L471">                        content -&gt; content.replace(</span>
+<span class="nc" id="L594">                        content -&gt; content.replace(</span>
                                 &quot;$DefaultVersion = \&quot;0.0.0\&quot; # x-release-please-version&quot;,
                                 &quot;$DefaultVersion = \&quot;0.0.0\&quot;&quot;),
                         &quot;install.ps1 DefaultVersion must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;duplicate PowerShell DefaultVersion marker&quot;,
                         &quot;install.ps1&quot;,
-<span class="nc" id="L478">                        content -&gt; content + &quot;\n$DefaultVersion = \&quot;0.0.0\&quot; # x-release-please-version\n&quot;,</span>
+<span class="nc" id="L601">                        content -&gt; content + &quot;\n$DefaultVersion = \&quot;0.0.0\&quot; # x-release-please-version\n&quot;,</span>
                         &quot;install.ps1 DefaultVersion must contain exactly one supported release marker&quot;),
                 new InvalidInstallerMarkerCase(
                         &quot;malformed POSIX marker&quot;,
                         &quot;install.sh&quot;,
-<span class="nc" id="L483">                        content -&gt; content.replace(</span>
+<span class="nc" id="L606">                        content -&gt; content.replace(</span>
                                 &quot;DEFAULT_VERSION=\&quot;0.0.0\&quot; # x-release-please-version&quot;,
                                 &quot;DEFAULT_VERSION=0.0.0 # x-release-please-version&quot;),
                         &quot;install.sh DEFAULT_VERSION must contain exactly one supported release marker&quot;));
     }
 
     private static void assumeSymlinks() {
-<span class="nc" id="L490">        assumeFalse(System.getProperty(&quot;os.name&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;));</span>
-<span class="nc" id="L491">    }</span>
+<span class="nc" id="L613">        assumeFalse(System.getProperty(&quot;os.name&quot;).toLowerCase(Locale.ROOT).contains(&quot;win&quot;));</span>
+<span class="nc" id="L614">    }</span>
 
     private TestProject createProject() throws IOException {
-<span class="nc" id="L494">        Path root = tempDir.resolve(&quot;project&quot;);</span>
-<span class="nc" id="L495">        Files.createDirectories(root.resolve(&quot;scripts&quot;));</span>
-<span class="nc" id="L496">        Path testTools = root.resolve(&quot;test-tools&quot;);</span>
-<span class="nc" id="L497">        Files.createDirectories(testTools);</span>
-<span class="nc" id="L498">        Path zip = testTools.resolve(&quot;zip&quot;);</span>
-<span class="nc" id="L499">        Files.writeString(</span>
+<span class="nc" id="L617">        Path root = tempDir.resolve(&quot;project&quot;);</span>
+<span class="nc" id="L618">        Files.createDirectories(root.resolve(&quot;scripts&quot;));</span>
+<span class="nc" id="L619">        Path testTools = root.resolve(&quot;test-tools&quot;);</span>
+<span class="nc" id="L620">        Files.createDirectories(testTools);</span>
+<span class="nc" id="L621">        Path zip = testTools.resolve(&quot;zip&quot;);</span>
+<span class="nc" id="L622">        Files.writeString(</span>
                 zip,
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
@@ -506,19 +629,19 @@ import org.junit.jupiter.params.provider.MethodSource;
                 source=&quot;$3&quot;
                 exec jar --create --file &quot;$archive&quot; --no-manifest &quot;$source&quot;
                 &quot;&quot;&quot;);
-<span class="nc" id="L509">        assertThat(zip.toFile().setExecutable(true))</span>
-<span class="nc" id="L510">                .as(&quot;the fake zip command is executable&quot;)</span>
-<span class="nc" id="L511">                .isTrue();</span>
-<span class="nc" id="L512">        Files.copy(Path.of(&quot;scripts/package-release-assets.sh&quot;), root.resolve(&quot;scripts/package-release-assets.sh&quot;));</span>
-<span class="nc" id="L513">        Files.writeString(</span>
-<span class="nc" id="L514">                root.resolve(&quot;install.sh&quot;),</span>
+<span class="nc" id="L632">        assertThat(zip.toFile().setExecutable(true))</span>
+<span class="nc" id="L633">                .as(&quot;the fake zip command is executable&quot;)</span>
+<span class="nc" id="L634">                .isTrue();</span>
+<span class="nc" id="L635">        Files.copy(Path.of(&quot;scripts/package-release-assets.sh&quot;), root.resolve(&quot;scripts/package-release-assets.sh&quot;));</span>
+<span class="nc" id="L636">        Files.writeString(</span>
+<span class="nc" id="L637">                root.resolve(&quot;install.sh&quot;),</span>
                 &quot;&quot;&quot;
                 #!/usr/bin/env bash
                 DEFAULT_VERSION=&quot;0.0.0&quot; # x-release-please-version
                 echo install
                 &quot;&quot;&quot;);
-<span class="nc" id="L520">        Files.writeString(</span>
-<span class="nc" id="L521">                root.resolve(&quot;install.ps1&quot;),</span>
+<span class="nc" id="L643">        Files.writeString(</span>
+<span class="nc" id="L644">                root.resolve(&quot;install.ps1&quot;),</span>
                 &quot;&quot;&quot;
                 param(
                   [string]$Version = $(if ($env:SYMPHONY_TRELLO_VERSION) { $env:SYMPHONY_TRELLO_VERSION } else { &quot;0.0.0&quot; }), # x-release-please-version
@@ -527,92 +650,92 @@ import org.junit.jupiter.params.provider.MethodSource;
                 )
                 $DefaultVersion = &quot;0.0.0&quot; # x-release-please-version
                 &quot;&quot;&quot;);
-<span class="nc" id="L530">        Files.writeString(root.resolve(&quot;uninstall.sh&quot;), &quot;#!/usr/bin/env bash\necho uninstall\n&quot;);</span>
-<span class="nc" id="L531">        Files.writeString(root.resolve(&quot;uninstall.ps1&quot;), &quot;Write-Output uninstall\n&quot;);</span>
-<span class="nc" id="L532">        Files.writeString(root.resolve(&quot;README.md&quot;), &quot;readme\n&quot;);</span>
-<span class="nc" id="L533">        Path skill = root.resolve(&quot;.codex/skills/symphony-trello-board-cards/SKILL.md&quot;);</span>
-<span class="nc" id="L534">        Files.createDirectories(skill.getParent());</span>
-<span class="nc" id="L535">        Files.writeString(skill, &quot;skill\n&quot;);</span>
-<span class="nc" id="L536">        var project = new TestProject(root);</span>
-<span class="nc" id="L537">        project.writeSuccessfulMavenWrapper();</span>
-<span class="nc" id="L538">        return project;</span>
+<span class="nc" id="L653">        Files.writeString(root.resolve(&quot;uninstall.sh&quot;), &quot;#!/usr/bin/env bash\necho uninstall\n&quot;);</span>
+<span class="nc" id="L654">        Files.writeString(root.resolve(&quot;uninstall.ps1&quot;), &quot;Write-Output uninstall\n&quot;);</span>
+<span class="nc" id="L655">        Files.writeString(root.resolve(&quot;README.md&quot;), &quot;readme\n&quot;);</span>
+<span class="nc" id="L656">        Path skill = root.resolve(&quot;.codex/skills/symphony-trello-board-cards/SKILL.md&quot;);</span>
+<span class="nc" id="L657">        Files.createDirectories(skill.getParent());</span>
+<span class="nc" id="L658">        Files.writeString(skill, &quot;skill\n&quot;);</span>
+<span class="nc" id="L659">        var project = new TestProject(root);</span>
+<span class="nc" id="L660">        project.writeSuccessfulMavenWrapper();</span>
+<span class="nc" id="L661">        return project;</span>
     }
 
     private TestProject createProjectWithRepositoryInstallerTemplates() throws IOException {
-<span class="nc" id="L542">        TestProject project = createProject();</span>
-<span class="nc" id="L543">        Files.copy(Path.of(&quot;install.sh&quot;), project.root().resolve(&quot;install.sh&quot;), StandardCopyOption.REPLACE_EXISTING);</span>
-<span class="nc" id="L544">        Files.copy(Path.of(&quot;install.ps1&quot;), project.root().resolve(&quot;install.ps1&quot;), StandardCopyOption.REPLACE_EXISTING);</span>
-<span class="nc" id="L545">        return project;</span>
+<span class="nc" id="L665">        TestProject project = createProject();</span>
+<span class="nc" id="L666">        Files.copy(Path.of(&quot;install.sh&quot;), project.root().resolve(&quot;install.sh&quot;), StandardCopyOption.REPLACE_EXISTING);</span>
+<span class="nc" id="L667">        Files.copy(Path.of(&quot;install.ps1&quot;), project.root().resolve(&quot;install.ps1&quot;), StandardCopyOption.REPLACE_EXISTING);</span>
+<span class="nc" id="L668">        return project;</span>
     }
 
     private static void rewrite(Path file, UnaryOperator&lt;String&gt; replacement) throws IOException {
-<span class="nc" id="L549">        Files.writeString(file, replacement.apply(Files.readString(file)));</span>
-<span class="nc" id="L550">    }</span>
+<span class="nc" id="L672">        Files.writeString(file, replacement.apply(Files.readString(file)));</span>
+<span class="nc" id="L673">    }</span>
 
     private static void assertExpectedAssets(Path destination) throws IOException {
-<span class="nc" id="L553">        assertExpectedAssets(destination, VERSION);</span>
-<span class="nc" id="L554">    }</span>
+<span class="nc" id="L676">        assertExpectedAssets(destination, VERSION);</span>
+<span class="nc" id="L677">    }</span>
 
     private static void assertExpectedAssets(Path destination, String version) throws IOException {
-<span class="nc" id="L557">        try (Stream&lt;Path&gt; files = Files.list(destination)) {</span>
-<span class="nc" id="L558">            assertThat(files.map(path -&gt; path.getFileName().toString())</span>
-<span class="nc bnc" id="L559" title="All 2 branches missed.">                            .filter(name -&gt; !name.equals(&quot;.symphony-trello-release-assets&quot;))</span>
-<span class="nc" id="L560">                            .sorted()</span>
-<span class="nc" id="L561">                            .toList())</span>
-<span class="nc" id="L562">                    .containsExactlyElementsOf(expectedAssets(version));</span>
+<span class="nc" id="L680">        try (Stream&lt;Path&gt; files = Files.list(destination)) {</span>
+<span class="nc" id="L681">            assertThat(files.map(path -&gt; path.getFileName().toString())</span>
+<span class="nc bnc" id="L682" title="All 2 branches missed.">                            .filter(name -&gt; !name.equals(&quot;.symphony-trello-release-assets&quot;))</span>
+<span class="nc" id="L683">                            .sorted()</span>
+<span class="nc" id="L684">                            .toList())</span>
+<span class="nc" id="L685">                    .containsExactlyElementsOf(expectedAssets(version));</span>
         }
-<span class="nc" id="L564">        assertThat(destination.resolve(&quot;.symphony-trello-release-assets&quot;)).exists();</span>
-<span class="nc" id="L565">        assertThat(destination.resolve(&quot;checksums.txt&quot;))</span>
-<span class="nc" id="L566">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L567">                .contains(</span>
+<span class="nc" id="L687">        assertThat(destination.resolve(&quot;.symphony-trello-release-assets&quot;)).exists();</span>
+<span class="nc" id="L688">        assertThat(destination.resolve(&quot;checksums.txt&quot;))</span>
+<span class="nc" id="L689">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L690">                .contains(</span>
                         &quot;  install.sh&quot;,
                         &quot;  install.ps1&quot;,
                         &quot;  uninstall.sh&quot;,
                         &quot;  uninstall.ps1&quot;,
                         &quot;  symphony-trello-&quot; + version + &quot;.tar.gz&quot;,
                         &quot;  symphony-trello-&quot; + version + &quot;.zip&quot;)
-<span class="nc" id="L574">                .doesNotContain(&quot;checksums.txt&quot;, &quot;.symphony-trello-release-assets&quot;, &quot;\r&quot;);</span>
-<span class="nc" id="L575">        assertThat(destination.resolve(&quot;install.sh&quot;))</span>
-<span class="nc" id="L576">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L577">                .contains(&quot;DEFAULT_VERSION=\&quot;&quot; + version + &quot;\&quot;&quot;)</span>
-<span class="nc" id="L578">                .doesNotContain(&quot;DEFAULT_VERSION=\&quot;0.0.0\&quot;&quot;, &quot;v&quot; + version);</span>
-<span class="nc" id="L579">        assertThat(destination.resolve(&quot;install.ps1&quot;))</span>
-<span class="nc" id="L580">                .content(StandardCharsets.UTF_8)</span>
-<span class="nc" id="L581">                .contains(</span>
+<span class="nc" id="L697">                .doesNotContain(&quot;checksums.txt&quot;, &quot;.symphony-trello-release-assets&quot;, &quot;\r&quot;);</span>
+<span class="nc" id="L698">        assertThat(destination.resolve(&quot;install.sh&quot;))</span>
+<span class="nc" id="L699">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L700">                .contains(&quot;DEFAULT_VERSION=\&quot;&quot; + version + &quot;\&quot;&quot;)</span>
+<span class="nc" id="L701">                .doesNotContain(&quot;DEFAULT_VERSION=\&quot;0.0.0\&quot;&quot;, &quot;v&quot; + version);</span>
+<span class="nc" id="L702">        assertThat(destination.resolve(&quot;install.ps1&quot;))</span>
+<span class="nc" id="L703">                .content(StandardCharsets.UTF_8)</span>
+<span class="nc" id="L704">                .contains(</span>
                         &quot;else { \&quot;&quot; + version + &quot;\&quot; }&quot;,
                         &quot;else { \&quot;v&quot; + version + &quot;\&quot; }&quot;,
                         &quot;$DefaultVersion = \&quot;&quot; + version + &quot;\&quot;&quot;)
-<span class="nc" id="L585">                .doesNotContain(&quot;else { \&quot;0.0.0\&quot; }&quot;, &quot;else { \&quot;v0.0.0\&quot; }&quot;, &quot;$DefaultVersion = \&quot;0.0.0\&quot;&quot;);</span>
-<span class="nc" id="L586">        try (var archive = new ZipFile(</span>
-<span class="nc" id="L587">                destination.resolve(&quot;symphony-trello-&quot; + version + &quot;.zip&quot;).toFile())) {</span>
-<span class="nc" id="L588">            assertThat(Collections.list(archive.entries()))</span>
-<span class="nc" id="L589">                    .extracting(ZipEntry::getName)</span>
-<span class="nc" id="L590">                    .contains(</span>
+<span class="nc" id="L708">                .doesNotContain(&quot;else { \&quot;0.0.0\&quot; }&quot;, &quot;else { \&quot;v0.0.0\&quot; }&quot;, &quot;$DefaultVersion = \&quot;0.0.0\&quot;&quot;);</span>
+<span class="nc" id="L709">        try (var archive = new ZipFile(</span>
+<span class="nc" id="L710">                destination.resolve(&quot;symphony-trello-&quot; + version + &quot;.zip&quot;).toFile())) {</span>
+<span class="nc" id="L711">            assertThat(Collections.list(archive.entries()))</span>
+<span class="nc" id="L712">                    .extracting(ZipEntry::getName)</span>
+<span class="nc" id="L713">                    .contains(</span>
                             &quot;symphony-trello-&quot; + version + &quot;/&quot;,
                             &quot;symphony-trello-&quot; + version + &quot;/VERSION&quot;,
                             &quot;symphony-trello-&quot; + version + &quot;/README.md&quot;,
                             &quot;symphony-trello-&quot; + version + &quot;/.codex/skills/symphony-trello-board-cards/SKILL.md&quot;,
                             &quot;symphony-trello-&quot; + version + &quot;/target/quarkus-app/application.txt&quot;);
         }
-<span class="nc" id="L597">    }</span>
+<span class="nc" id="L720">    }</span>
 
     private static void assertNoPublicationAttempt(Path root) throws IOException {
-<span class="nc" id="L600">        try (Stream&lt;Path&gt; paths = Files.walk(root)) {</span>
-<span class="nc" id="L601">            assertThat(paths.map(path -&gt; path.getFileName().toString())</span>
-<span class="nc" id="L602">                            .filter(name -&gt; name.startsWith(&quot;.release-assets&quot;))</span>
-<span class="nc" id="L603">                            .toList())</span>
-<span class="nc" id="L604">                    .isEmpty();</span>
+<span class="nc" id="L723">        try (Stream&lt;Path&gt; paths = Files.walk(root)) {</span>
+<span class="nc" id="L724">            assertThat(paths.map(path -&gt; path.getFileName().toString())</span>
+<span class="nc" id="L725">                            .filter(name -&gt; name.startsWith(&quot;.release-assets&quot;))</span>
+<span class="nc" id="L726">                            .toList())</span>
+<span class="nc" id="L727">                    .isEmpty();</span>
         }
-<span class="nc" id="L606">    }</span>
+<span class="nc" id="L729">    }</span>
 
     private static void writeOwnershipMarker(Path destination) throws IOException {
-<span class="nc" id="L609">        Files.writeString(</span>
-<span class="nc" id="L610">                destination.resolve(&quot;.symphony-trello-release-assets&quot;),</span>
-<span class="nc" id="L611">                String.join(&quot;\n&quot;, expectedAssets(VERSION)) + &quot;\n&quot;);</span>
-<span class="nc" id="L612">    }</span>
+<span class="nc" id="L732">        Files.writeString(</span>
+<span class="nc" id="L733">                destination.resolve(&quot;.symphony-trello-release-assets&quot;),</span>
+<span class="nc" id="L734">                String.join(&quot;\n&quot;, expectedAssets(VERSION)) + &quot;\n&quot;);</span>
+<span class="nc" id="L735">    }</span>
 
     private static List&lt;String&gt; expectedAssets(String version) {
-<span class="nc" id="L615">        return List.of(</span>
+<span class="nc" id="L738">        return List.of(</span>
                 &quot;checksums.txt&quot;,
                 &quot;install.ps1&quot;,
                 &quot;install.sh&quot;,
@@ -622,9 +745,9 @@ import org.junit.jupiter.params.provider.MethodSource;
                 &quot;uninstall.sh&quot;);
     }
 
-<span class="nc" id="L625">    private record TestProject(Path root) {</span>
+<span class="nc" id="L748">    private record TestProject(Path root) {</span>
         void writeSuccessfulMavenWrapper() throws IOException {
-<span class="nc" id="L627">            writeMavenWrapper(</span>
+<span class="nc" id="L750">            writeMavenWrapper(</span>
                     &quot;&quot;&quot;
                     #!/usr/bin/env bash
                     set -euo pipefail
@@ -633,60 +756,90 @@ import org.junit.jupiter.params.provider.MethodSource;
                     mkdir -p target/quarkus-app
                     printf 'app' &gt; target/quarkus-app/application.txt
                     &quot;&quot;&quot;);
-<span class="nc" id="L636">        }</span>
+<span class="nc" id="L759">        }</span>
 
         void writeFailingMavenWrapper() throws IOException {
-<span class="nc" id="L639">            writeMavenWrapper(</span>
+<span class="nc" id="L762">            writeMavenWrapper(</span>
                     &quot;&quot;&quot;
                     #!/usr/bin/env bash
                     set -euo pipefail
                     echo &quot;$*&quot; &gt;&gt; mvnw.log
                     exit 42
                     &quot;&quot;&quot;);
-<span class="nc" id="L646">        }</span>
+<span class="nc" id="L769">        }</span>
+
+        Path writeTelemetryPropertiesSource() throws IOException {
+<span class="nc" id="L772">            Path properties = root.resolve(TELEMETRY_PROPERTIES);</span>
+<span class="nc" id="L773">            Files.createDirectories(properties.getParent());</span>
+<span class="nc" id="L774">            Files.writeString(properties, TELEMETRY_PROPERTIES_SOURCE);</span>
+<span class="nc" id="L775">            return properties;</span>
+        }
+
+        void writeProductionProject() throws IOException {
+<span class="nc" id="L779">            Path productionProject = root.resolve(PRODUCTION_PROJECT_FILE);</span>
+<span class="nc" id="L780">            Files.createDirectories(productionProject.getParent());</span>
+<span class="nc" id="L781">            Files.writeString(productionProject, SYNTHETIC_PRODUCTION_PROJECT + &quot;\n&quot;);</span>
+<span class="nc" id="L782">        }</span>
+
+        String packagedTelemetryProperties() throws IOException {
+<span class="nc" id="L785">            try (var jar = new JarFile(root.resolve(PACKAGED_JAR).toFile())) {</span>
+<span class="nc" id="L786">                return new String(</span>
+<span class="nc" id="L787">                        jar.getInputStream(jar.getEntry(TelemetryDistribution.RESOURCE))</span>
+<span class="nc" id="L788">                                .readAllBytes(),</span>
+                        StandardCharsets.UTF_8);
+            }
+        }
 
         void writeMavenWrapper(String content) throws IOException {
-<span class="nc" id="L649">            Path mvnw = root.resolve(&quot;mvnw&quot;);</span>
-<span class="nc" id="L650">            Files.writeString(mvnw, content);</span>
-<span class="nc" id="L651">            mvnw.toFile().setExecutable(true);</span>
-<span class="nc" id="L652">        }</span>
+<span class="nc" id="L794">            Path mvnw = root.resolve(&quot;mvnw&quot;);</span>
+<span class="nc" id="L795">            Files.writeString(mvnw, content);</span>
+<span class="nc" id="L796">            mvnw.toFile().setExecutable(true);</span>
+<span class="nc" id="L797">        }</span>
 
         ProcessResult run(String... arguments) throws IOException, InterruptedException {
-<span class="nc" id="L655">            String[] command = new String[arguments.length + 2];</span>
-<span class="nc" id="L656">            command[0] = &quot;bash&quot;;</span>
-<span class="nc" id="L657">            command[1] = root.resolve(&quot;scripts/package-release-assets.sh&quot;).toString();</span>
-<span class="nc" id="L658">            System.arraycopy(arguments, 0, command, 2, arguments.length);</span>
-<span class="nc" id="L659">            var processBuilder =</span>
-<span class="nc" id="L660">                    new ProcessBuilder(command).directory(root.toFile()).redirectErrorStream(true);</span>
-<span class="nc" id="L661">            processBuilder</span>
-<span class="nc" id="L662">                    .environment()</span>
-<span class="nc" id="L663">                    .put(</span>
+<span class="nc" id="L800">            return run(Map.of(), arguments);</span>
+        }
+
+        ProcessResult run(Map&lt;String, String&gt; environment, String... arguments)
+                throws IOException, InterruptedException {
+<span class="nc" id="L805">            String[] command = new String[arguments.length + 2];</span>
+<span class="nc" id="L806">            command[0] = &quot;bash&quot;;</span>
+<span class="nc" id="L807">            command[1] = root.resolve(&quot;scripts/package-release-assets.sh&quot;).toString();</span>
+<span class="nc" id="L808">            System.arraycopy(arguments, 0, command, 2, arguments.length);</span>
+<span class="nc" id="L809">            var processBuilder =</span>
+<span class="nc" id="L810">                    new ProcessBuilder(command).directory(root.toFile()).redirectErrorStream(true);</span>
+<span class="nc" id="L811">            processBuilder</span>
+<span class="nc" id="L812">                    .environment()</span>
+<span class="nc" id="L813">                    .put(</span>
                             &quot;PATH&quot;,
-<span class="nc" id="L665">                            root.resolve(&quot;test-tools&quot;) + System.getProperty(&quot;path.separator&quot;) + System.getenv(&quot;PATH&quot;));</span>
-<span class="nc" id="L666">            Process process = processBuilder.start();</span>
-<span class="nc" id="L667">            var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);</span>
-<span class="nc" id="L668">            return new ProcessResult(process.waitFor(), output);</span>
+<span class="nc" id="L815">                            root.resolve(&quot;test-tools&quot;) + System.getProperty(&quot;path.separator&quot;) + System.getenv(&quot;PATH&quot;));</span>
+            // The developer shell must not pick the branch under test: only the explicit map decides.
+<span class="nc" id="L817">            processBuilder.environment().keySet().removeAll(RELEASE_ASSET_VARIABLES);</span>
+<span class="nc" id="L818">            processBuilder.environment().putAll(environment);</span>
+<span class="nc" id="L819">            Process process = processBuilder.start();</span>
+<span class="nc" id="L820">            var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);</span>
+<span class="nc" id="L821">            return new ProcessResult(process.waitFor(), output);</span>
         }
 
         Path mvnwLogPath() {
-<span class="nc" id="L672">            return root.resolve(&quot;mvnw.log&quot;);</span>
+<span class="nc" id="L825">            return root.resolve(&quot;mvnw.log&quot;);</span>
         }
 
         String mvnwLog() throws IOException {
-<span class="nc" id="L676">            return Files.readString(mvnwLogPath());</span>
+<span class="nc" id="L829">            return Files.readString(mvnwLogPath());</span>
         }
     }
 
-<span class="nc" id="L680">    private record ProcessResult(int exitCode, String output) {}</span>
+<span class="nc" id="L833">    private record ProcessResult(int exitCode, String output) {}</span>
 
-<span class="nc" id="L682">    private record InvalidDestinationCase(String name, String expectedMessage, DestinationFactory destinationFactory) {</span>
+<span class="nc" id="L835">    private record InvalidDestinationCase(String name, String expectedMessage, DestinationFactory destinationFactory) {</span>
         PreparedDestination prepare(Path tempDir, Path root) throws IOException {
-<span class="nc" id="L684">            return destinationFactory.prepare(tempDir, root);</span>
+<span class="nc" id="L837">            return destinationFactory.prepare(tempDir, root);</span>
         }
 
         @Override
         public String toString() {
-<span class="nc" id="L689">            return name;</span>
+<span class="nc" id="L842">            return name;</span>
         }
     }
 
@@ -695,58 +848,58 @@ import org.junit.jupiter.params.provider.MethodSource;
         PreparedDestination prepare(Path tempDir, Path root) throws IOException;
     }
 
-<span class="nc" id="L698">    private record InvalidInstallerMarkerCase(</span>
+<span class="nc" id="L851">    private record InvalidInstallerMarkerCase(</span>
             String name, String fileName, UnaryOperator&lt;String&gt; replacement, String expectedMessage) {
         void apply(Path root) throws IOException {
-<span class="nc" id="L701">            rewrite(root.resolve(fileName), replacement);</span>
-<span class="nc" id="L702">        }</span>
+<span class="nc" id="L854">            rewrite(root.resolve(fileName), replacement);</span>
+<span class="nc" id="L855">        }</span>
 
         @Override
         public String toString() {
-<span class="nc" id="L706">            return name;</span>
+<span class="nc" id="L859">            return name;</span>
         }
     }
 
-<span class="nc" id="L710">    private record PreparedDestination(Path path, Path sentinel, Path symlink, Path symlinkTarget) {</span>
+<span class="nc" id="L863">    private record PreparedDestination(Path path, Path sentinel, Path symlink, Path symlinkTarget) {</span>
         static PreparedDestination withSentinel(Path requestedPath, Path actualDirectory) throws IOException {
-<span class="nc" id="L712">            Files.createDirectories(actualDirectory);</span>
-<span class="nc" id="L713">            Path sentinel = actualDirectory.resolve(&quot;sentinel.txt&quot;);</span>
-<span class="nc" id="L714">            Files.writeString(sentinel, &quot;sentinel&quot;);</span>
-<span class="nc" id="L715">            return new PreparedDestination(requestedPath, sentinel, null, null);</span>
+<span class="nc" id="L865">            Files.createDirectories(actualDirectory);</span>
+<span class="nc" id="L866">            Path sentinel = actualDirectory.resolve(&quot;sentinel.txt&quot;);</span>
+<span class="nc" id="L867">            Files.writeString(sentinel, &quot;sentinel&quot;);</span>
+<span class="nc" id="L868">            return new PreparedDestination(requestedPath, sentinel, null, null);</span>
         }
 
         static PreparedDestination withoutSentinel(Path requestedPath) {
-<span class="nc" id="L719">            return new PreparedDestination(requestedPath, null, null, null);</span>
+<span class="nc" id="L872">            return new PreparedDestination(requestedPath, null, null, null);</span>
         }
 
         static PreparedDestination withSymlink(Path requestedPath, Path symlink, Path target) {
-<span class="nc" id="L723">            return new PreparedDestination(requestedPath, null, symlink, target);</span>
+<span class="nc" id="L876">            return new PreparedDestination(requestedPath, null, symlink, target);</span>
         }
 
         static PreparedDestination withSymlinkSentinel(Path requestedPath, Path symlink, Path target)
                 throws IOException {
-<span class="nc" id="L728">            Files.createDirectories(target);</span>
-<span class="nc" id="L729">            Path sentinel = target.resolve(&quot;sentinel.txt&quot;);</span>
-<span class="nc" id="L730">            Files.writeString(sentinel, &quot;sentinel&quot;);</span>
-<span class="nc" id="L731">            return new PreparedDestination(requestedPath, sentinel, symlink, target);</span>
+<span class="nc" id="L881">            Files.createDirectories(target);</span>
+<span class="nc" id="L882">            Path sentinel = target.resolve(&quot;sentinel.txt&quot;);</span>
+<span class="nc" id="L883">            Files.writeString(sentinel, &quot;sentinel&quot;);</span>
+<span class="nc" id="L884">            return new PreparedDestination(requestedPath, sentinel, symlink, target);</span>
         }
 
         void assertPreconditions() {
-<span class="nc bnc" id="L735" title="All 2 branches missed.">            if (symlink != null) {</span>
-<span class="nc" id="L736">                assertThat(symlink).isSymbolicLink();</span>
-<span class="nc" id="L737">                assertThat(symlinkTarget).isDirectory();</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">            if (symlink != null) {</span>
+<span class="nc" id="L889">                assertThat(symlink).isSymbolicLink();</span>
+<span class="nc" id="L890">                assertThat(symlinkTarget).isDirectory();</span>
             }
-<span class="nc" id="L739">        }</span>
+<span class="nc" id="L892">        }</span>
 
         void assertSentinelSurvived() {
-<span class="nc bnc" id="L742" title="All 2 branches missed.">            if (sentinel != null) {</span>
-<span class="nc" id="L743">                assertThat(sentinel).exists();</span>
+<span class="nc bnc" id="L895" title="All 2 branches missed.">            if (sentinel != null) {</span>
+<span class="nc" id="L896">                assertThat(sentinel).exists();</span>
             }
-<span class="nc bnc" id="L745" title="All 2 branches missed.">            if (symlink != null) {</span>
-<span class="nc" id="L746">                assertThat(symlink).isSymbolicLink();</span>
-<span class="nc" id="L747">                assertThat(symlinkTarget).isDirectory();</span>
+<span class="nc bnc" id="L898" title="All 2 branches missed.">            if (symlink != null) {</span>
+<span class="nc" id="L899">                assertThat(symlink).isSymbolicLink();</span>
+<span class="nc" id="L900">                assertThat(symlinkTarget).isDirectory();</span>
             }
-<span class="nc" id="L749">        }</span>
+<span class="nc" id="L902">        }</span>
     }
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.16.202610240946</span></div></body></html>
